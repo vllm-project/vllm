@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-test-util = ["dep:tempfile"]
+test-util = []
 
 [dependencies]
 arc-swap.workspace = true
@@ -28,7 +28,7 @@ serde_repr.workspace = true
 serde_tuple.workspace = true
 serde_with.workspace = true
 task-local.workspace = true
-tempfile = { workspace = true, optional = true }
+tempfile.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
 tokio.workspace = true
@@ -42,7 +42,6 @@ anyhow.workspace = true
 clap.workspace = true
 expect-test.workspace = true
 hex.workspace = true
-tempfile.workspace = true
 tracing-subscriber.workspace = true
 
 [lints]

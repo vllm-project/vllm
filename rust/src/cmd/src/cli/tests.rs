@@ -86,6 +86,7 @@ fn serve_args_forward_python_flags_with_separator() {
                     host: "127.0.0.1",
                     port: 8000,
                     uds: None,
+                    engine_session: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 600,
@@ -1373,6 +1374,7 @@ fn serve_args_accept_handshake_aliases() {
                     host: "127.0.0.1",
                     port: 8000,
                     uds: None,
+                    engine_session: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 600,
@@ -1483,6 +1485,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
         ready_timeout,
         local_input_address,
         local_output_address,
+        session_path,
     } = &config.transport_mode
     else {
         panic!("expected handshake-owned transport");
@@ -1502,6 +1505,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             .is_some_and(|address| address.starts_with("ipc://"))
     );
     assert_ne!(local_input_address, local_output_address);
+    assert!(session_path.is_none());
 
     expect![[r#"
         Config {
@@ -1516,6 +1520,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 local_output_address: Some(
                     "<ipc output>",
                 ),
+                session_path: None,
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
@@ -1567,9 +1572,55 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             ready_timeout: *ready_timeout,
             local_input_address: Some("<ipc input>".to_string()),
             local_output_address: Some("<ipc output>".to_string()),
+            session_path: None,
         },
         ..config.clone()
     });
+}
+
+#[test]
+fn serve_engine_session_selects_handshake_then_reattach() {
+    let session_path = std::env::temp_dir().join(format!(
+        "vllm-rs-engine-session-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    let session_arg = session_path.to_string_lossy().into_owned();
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--engine-session",
+        &session_arg,
+        "--engine-ready-timeout-secs",
+        "42",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(args.uses_external_engine());
+    assert_eq!(args.managed_engine.data_parallel_size_local, None);
+    let initial = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
+    assert!(matches!(
+        initial.transport_mode,
+        TransportMode::HandshakeOwner {
+            session_path: Some(ref path),
+            ready_timeout,
+            ..
+        } if path == &session_path && ready_timeout == std::time::Duration::from_secs(42)
+    ));
+
+    std::fs::write(&session_path, b"{}").unwrap();
+    let reattach = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
+    assert_eq!(
+        reattach.transport_mode,
+        TransportMode::Reattach {
+            path: session_path.clone(),
+            ready_timeout: std::time::Duration::from_secs(42),
+        }
+    );
+    std::fs::remove_file(session_path).unwrap();
 }
 
 #[test]
@@ -1601,6 +1652,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 ready_timeout: 600s,
                 local_input_address: None,
                 local_output_address: None,
+                session_path: None,
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",

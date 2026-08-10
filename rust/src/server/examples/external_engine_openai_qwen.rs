@@ -57,6 +57,7 @@ async fn main() -> Result<()> {
             ready_timeout: Duration::from_secs(args.ready_timeout_secs),
             local_input_address: None,
             local_output_address: None,
+            session_path: None,
         },
         coordinator_mode: CoordinatorMode::MaybeInProc,
         model: args.model,

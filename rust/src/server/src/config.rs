@@ -246,6 +246,7 @@ impl Config {
         match &self.transport_mode {
             TransportMode::HandshakeOwner { engine_count, .. }
             | TransportMode::Bootstrapped { engine_count, .. } => *engine_count,
+            TransportMode::Reattach { .. } => 1,
         }
     }
 
