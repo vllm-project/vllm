@@ -24,6 +24,45 @@ def is_shared_expert_quant_fse_compatible(
         OnlineQuantizationConfig,
     )
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
+
+    if isinstance(quant_config, DeepseekV4FP8Config):
+        from vllm.config import get_current_vllm_config
+
+        if quant_config.expert_dtype != "fp4":
+            return False, "DeepSeek-V4 routed experts are not MXFP4"
+
+        quantization_config = getattr(
+            get_current_vllm_config().model_config.hf_config,
+            "quantization_config",
+            None,
+        )
+        if quantization_config is None:
+            return False, "DeepSeek-V4 has no quantization configuration"
+
+        shared_expert_prefix = shared_expert_prefix.removeprefix("model.")
+        if any(
+            entry.startswith(shared_expert_prefix)
+            for entry in quantization_config.get("exclude") or []
+            if isinstance(entry, str)
+        ):
+            return (
+                False,
+                f"DeepSeek-V4 excludes shared experts at {shared_expert_prefix}",
+            )
+
+        layer_config = (quantization_config.get("layer_quant_config") or {}).get(
+            f"{shared_expert_prefix}.w1"
+        )
+        shared_weight_config = (
+            layer_config or quantization_config.get("global_quant_config") or {}
+        ).get("weight") or {}
+        if shared_weight_config.get("dtype") == "fp4":
+            return True, None
+        return (
+            False,
+            f"DeepSeek-V4 shared experts at {shared_expert_prefix} are not MXFP4",
+        )
 
     if isinstance(quant_config, OnlineQuantizationConfig):
         from vllm.model_executor.layers.quantization.compressed_tensors.utils import (

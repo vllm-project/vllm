@@ -24,6 +24,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
@@ -44,7 +45,6 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    resolve_fused_shared_expert_fusion,
     resolve_model_fused_shared_expert_fusion,
 )
 from vllm.model_executor.layers.linear import (
@@ -55,6 +55,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    is_shared_expert_quant_fse_compatible,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -340,11 +343,26 @@ class MiniMaxM3MoE(nn.Module):
         # top-k kernel; otherwise it goes through the vLLM top-k bias router.
         # It is disabled under expert parallelism (the shared slot is appended to
         # the routed top-k, which the EP expert-mapping path does not handle).
-        self.is_fused_shared_expert_enabled = (
+        # TODO: Historically, only `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`
+        # is checked to enable FSE for MiniMax-M3, despite AITER not being used.
+        # This should be cleaned up and use `resolve_fused_shared_expert_fusion`.
+        fse_requested = (
             bool(getattr(config, "n_shared_experts", None))
             and not get_current_vllm_config().parallel_config.enable_expert_parallel
-            and resolve_fused_shared_expert_fusion(quant_config, prefix)
+            and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         )
+        if fse_requested:
+            fse_compatible, fse_reason = is_shared_expert_quant_fse_compatible(
+                quant_config,
+                f"{prefix}.experts",
+                f"{prefix}.shared_experts",
+            )
+            if not fse_compatible:
+                raise ValueError(
+                    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
+                    f"cannot be enabled: {fse_reason}."
+                )
+        self.is_fused_shared_expert_enabled = fse_requested
 
         # When additionally on gfx950 with an active aiter MoE backend, the shared
         # expert is appended inside aiter's an active aiter MoE backend, the shared
