@@ -6,14 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tokenizers import AddedToken, Tokenizer
-from tokenizers.models import WordLevel
-from transformers import TokenizersBackend
 
 from vllm.entrypoints.chat_utils import parse_chat_messages
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
-from vllm.tokenizers.deepseek_v32 import get_deepseek_v32_tokenizer
 from vllm.tokenizers.registry import TokenizerRegistry
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "deepseek_v4"
