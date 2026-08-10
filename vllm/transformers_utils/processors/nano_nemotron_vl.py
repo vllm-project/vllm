@@ -26,6 +26,7 @@ from vllm.model_executor.models.parakeet import ParakeetExtractor
 from vllm.multimodal.inputs import AudioItem
 from vllm.multimodal.processing.processor import PromptUpdateDetails
 from vllm.multimodal.video_prune.evs import compute_retained_tokens_count
+from vllm.platforms import current_platform
 from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import calculate_internvl_targets, get_internvl_target_ratios
@@ -56,7 +57,7 @@ def calculate_timestamps(
     return timestamps
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _bicubic_resize_and_normalize(
     tensor: torch.Tensor,
     size: tuple[int, int] | None = None,

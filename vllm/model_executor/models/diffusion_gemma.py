@@ -124,7 +124,7 @@ class DiffusionGemmaProcessingInfo(Gemma4ProcessingInfo):
         return super().get_mm_max_tokens_per_item(seq_len, mm_counts)
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _softcap_logits(logits: torch.Tensor, cap: float) -> torch.Tensor:
     # fp32 before tanh for numerical stability (matches HF DiffusionGemma).
     # Compiling fuses the cast/div/tanh/mul into one elementwise kernel over
@@ -450,7 +450,7 @@ class DiffusionGemmaForConditionalGeneration(
         raise ValueError(f"Unsupported modality: {modality}")
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _compute_num_rejected(
     num_logits: torch.Tensor,
     num_sampled: torch.Tensor,
@@ -462,7 +462,7 @@ def _compute_num_rejected(
     return torch.where(is_denoise, query_lens, num_rejected)
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _compiled_sample_step(
     # Logits from the model [num_decode * CL, vocab]
     logits: torch.Tensor,
