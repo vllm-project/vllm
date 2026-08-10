@@ -1551,7 +1551,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.ubatch_runner is not None
             assert block_tables is not None and slot_mappings is not None
             ubatch_state = self.ubatch_runner.prepare(
-                input_batch, block_tables, slot_mappings
+                input_batch, block_tables, slot_mappings, cg_mode=batch_desc.cg_mode
             )
         elif not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None

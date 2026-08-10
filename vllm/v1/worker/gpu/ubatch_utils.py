@@ -326,6 +326,14 @@ class UBatchRunner:
         ]
         self.decode_query_len = decode_query_len
         self.comm_stream = torch.cuda.Stream(device=device)
+        # Microbatches run on the caller's stream in eager mode, but a capture
+        # has to name the stream up front: `torch.cuda.graph()` opens its own
+        # side stream unless told otherwise, and work the microbatch threads
+        # launch elsewhere would not end up in the graph. So capture runs on a
+        # stream this runner owns, which `CudaGraphManager` also hands to
+        # `torch.cuda.graph(..., stream=...)`. V1 does the same thing in
+        # `gpu_ubatch_wrapper.py::_capture_ubatches`.
+        self.capture_stream = torch.cuda.Stream(device=device)
         # The microbatch threads plus the thread that starts them.
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
         self.sm_control = create_sm_control_context(vllm_config)
@@ -353,9 +361,15 @@ class UBatchRunner:
         input_batch: InputBatch,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
+        cg_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         for_capture: bool = False,
     ) -> UBatchState:
         """Split the batch into the microbatches the step will run on.
+
+        `cg_mode` is the mode the step will run in, and has to reach each
+        microbatch's attention metadata: FULL builds it against the padded
+        sizes, which is what keeps shapes and buffer addresses identical
+        between capture and replay.
 
         `for_capture` is set when this is building the dummy split used to
         capture a FULL cudagraph ahead of time (see `begin_capturable_run`)
@@ -382,7 +396,7 @@ class UBatchRunner:
             attn_metadata.append(
                 self.model_state.prepare_attn(
                     ubatch,
-                    CUDAGraphMode.NONE,
+                    cg_mode,
                     ubatch_block_tables,
                     ubatch_slot_mappings,
                     self.attn_groups,
@@ -474,6 +488,7 @@ class UBatchRunner:
         model: Any,
         model_inputs: dict[str, Any],
         ubatch_state: UBatchState,
+        for_capture: bool = False,
     ) -> Callable[[], Any]:
         """Start the microbatch threads and return a callback that finishes them.
 
@@ -490,15 +505,22 @@ class UBatchRunner:
         The returned callback must be invoked exactly once, and the caller is
         responsible for making sure both this call and the callback happen on
         the same thread as any cudagraph capture/replay context they wrap.
+
+        `for_capture` puts the microbatches on `self.capture_stream` -- the
+        stream the caller opens `torch.cuda.graph()` on -- and has each thread
+        initialize its CUDA and cuBLAS state before it parks, since cuBLAS
+        allocates its workspace on first use per stream and allocating inside
+        a capture is illegal.
         """
         ubatch_slices = ubatch_state.slices
         assert len(ubatch_slices) == len(ubatch_state.forward_contexts)
         assert len(ubatch_slices) == self.num_ubatches
 
+        compute_stream = self.capture_stream if for_capture else current_stream()
         ubatch_contexts = make_ubatch_contexts(
             num_micro_batches=self.num_ubatches,
             comm_stream=self.comm_stream,
-            compute_stream=current_stream(),
+            compute_stream=compute_stream,
             forward_contexts=ubatch_state.forward_contexts,
             ready_barrier=self.ready_barrier,
         )
@@ -509,6 +531,15 @@ class UBatchRunner:
         @torch.inference_mode()
         def run_ubatch(ubatch_context, inputs: dict[str, Any]) -> None:
             try:
+                # A fresh thread starts on the default device, not this
+                # worker's.
+                torch.accelerator.set_device_index(self.device.index)
+                if for_capture:
+                    # Force cuBLAS to allocate its per-stream workspace now,
+                    # before the caller opens the capture.
+                    for stream in (compute_stream, self.comm_stream):
+                        with torch.cuda.stream(stream):
+                            torch.cuda.current_blas_handle()
                 with ubatch_context:
                     outputs[ubatch_context.id] = model(**inputs)
             except BaseException as e:  # noqa: BLE001
