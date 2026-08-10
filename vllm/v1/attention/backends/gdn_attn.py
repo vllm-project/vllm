@@ -49,6 +49,7 @@ class GDNAttentionMetadata:
     num_actual_tokens: int
 
     has_initial_state: torch.Tensor | None = None
+    all_initial_states_fresh: bool = False
 
     spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
     non_spec_query_start_loc: torch.Tensor | None = (
@@ -330,6 +331,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         prefill_query_start_loc: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
+        all_initial_states_fresh = False
         if num_prefills > 0:
             from vllm.third_party.flash_linear_attention.ops.utils import (
                 FLA_CHUNK_SIZE,
@@ -390,9 +392,24 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
+            has_initial_state_cpu = m._num_computed_tokens_cpu
+            non_spec_query_lens_cpu = query_start_loc_cpu.diff()
             if spec_sequence_masks_cpu is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
+                if has_initial_state_cpu is not None:
+                    has_initial_state_cpu = has_initial_state_cpu[
+                        ~spec_sequence_masks_cpu
+                    ]
+                non_spec_query_lens_cpu = non_spec_query_lens_cpu[
+                    ~spec_sequence_masks_cpu
+                ]
                 assert non_spec_query_start_loc_cpu is not None
+            if has_initial_state_cpu is not None:
+                all_initial_states_fresh = bool(
+                    non_spec_query_lens_cpu.numel() > 0
+                    and (non_spec_query_lens_cpu > 0).all().item()
+                    and not has_initial_state_cpu.any().item()
+                )
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
                     non_spec_query_start_loc_cpu,
@@ -493,6 +510,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
             has_initial_state=has_initial_state,
+            all_initial_states_fresh=all_initial_states_fresh,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
             prefill_query_start_loc=prefill_query_start_loc,
