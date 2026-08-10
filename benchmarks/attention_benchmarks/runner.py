@@ -36,8 +36,10 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
+    initialize_kv_cache_layout,
     resolve_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import (
@@ -345,11 +347,15 @@ def _create_kv_cache(
     dtype: torch.dtype,
 ) -> list:
     """Create KV cache tensors for all layers using the standard allocator."""
+    if config.kv_cache_dtype.startswith("fp8"):
+        cache_dtype = current_platform.fp8_dtype()
+    else:
+        cache_dtype = dtype
     spec = FullAttentionSpec(
         block_size=config.block_size,
         num_kv_heads=config.num_kv_heads,
         head_size=config.head_dim,
-        dtype=dtype,
+        dtype=cache_dtype,
     )
     layout = resolve_kv_cache_layout()
     total_bytes = (
@@ -474,6 +480,9 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             backend_class, impl, layer = _create_backend_impl(
                 backend_cfg, config, device, dtype
             )
+            # Publish any backend-required layout (e.g. FlashInfer TRTLLM)
+            # before allocating the cache, mirroring selector-time resolution.
+            initialize_kv_cache_layout(backend_class, vllm_config.cache_config)
 
             common_metadata = _build_common_attn_metadata(
                 q_lens, kv_lens, config.block_size, device

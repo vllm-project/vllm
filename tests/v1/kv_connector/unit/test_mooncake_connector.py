@@ -1144,7 +1144,8 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
             num_kv_heads=4,
             head_size=64,
             dtype=torch.float16,
-            separate_kv_head_groups=separate_kv_head_groups,
+            num_head_slots=2 if separate_kv_head_groups else None,
+            state_content_bytes=4 * 64 * 2 if separate_kv_head_groups else None,
         )
         layer_names = [
             "model.layers.0.self_attn",

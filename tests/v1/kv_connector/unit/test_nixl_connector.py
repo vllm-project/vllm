@@ -1863,7 +1863,10 @@ def test_register_kv_caches(
             num_kv_heads=num_heads,
             head_size=head_size,
             dtype=torch.float16,
-            separate_kv_head_groups=separate_kv_head_groups,
+            num_head_slots=2 if separate_kv_head_groups else None,
+            state_content_bytes=num_heads * head_size * 2
+            if separate_kv_head_groups
+            else None,
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=num_blocks,

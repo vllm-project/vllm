@@ -202,9 +202,9 @@ def test_warmup_respects_available_block_count():
 @pytest.mark.parametrize("layout", list(KVCacheLayout))
 def test_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
     """The zeroer must zero every byte of the target block in every layer and
-    nothing else — per head-group plane under LHBNC, and only each layer's own
-    column of the shared block under block-major layouts (no out-of-bounds
-    writes past the allocation, no clobbering co-located slots)."""
+    nothing outside it — per head-group plane under LHBNC, and never past the
+    target block's tile under block-major layouts (no out-of-bounds writes,
+    no clobbering other blocks' data)."""
     device = torch.device("cuda")
     num_blocks, num_layers = 4, 2
     spec = FullAttentionSpec(

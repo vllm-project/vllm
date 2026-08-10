@@ -167,7 +167,11 @@ _FLASHINFER_LAYOUT_NAMES = {
 def get_flashinfer_layout_string() -> str:
     """Return the layout name in FlashInfer's convention (NHD/HND)."""
     name = resolve_kv_cache_layout().name
-    return _FLASHINFER_LAYOUT_NAMES.get(name, name)
+    assert name in _FLASHINFER_LAYOUT_NAMES, (
+        f"KV cache layout {name} has no FlashInfer equivalent; FlashInfer "
+        "rejects it in supports_kv_cache_layout"
+    )
+    return _FLASHINFER_LAYOUT_NAMES[name]
 
 
 def set_kv_cache_layout(cache_layout: "KVCacheLayoutType | None"):

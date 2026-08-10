@@ -103,6 +103,9 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             alignment=576 if uses_fp8_ds_mla_layout else 512,
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.cache_config.cache_dtype),
+            # DeepseekV4 fp8_ds_mla: 584B per token (448B NoPE + 128B RoPE
+            # + 8B fp8 scale).
+            state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
         )
 
     def forward(self): ...

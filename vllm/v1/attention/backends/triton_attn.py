@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """High-Performance Triton-only Attention layer."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -267,6 +267,20 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
 
 class TritonAttentionBackend(AttentionBackend):
+    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """Per-token-head modes pack inline fp32 scales after each head's
+        data, so the content is (data + one scale) per K/V side."""
+        mode = spec.kv_quant_mode
+        if spec.state_content_bytes is not None or not mode.is_per_token_head:
+            return spec
+        hs_k, hs_v = spec.head_size, spec.head_size_v
+        if mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            hs_k, hs_v = hs_k // 2, hs_v // 2
+        scale_bytes = get_dtype_size(torch.float32)
+        content = (hs_k + hs_v) * get_dtype_size(spec.dtype) + 2 * scale_bytes
+        return replace(spec, state_content_bytes=content)
+
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
         torch.bfloat16,

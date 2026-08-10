@@ -10,6 +10,7 @@ the end of each page are never addressed by the logical view.
 import pytest
 import torch
 
+from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
@@ -67,7 +68,11 @@ def test_reshape_separate_kv_head_groups_matches_aiter_block_interior():
         dtype=torch.float32,
     )
     packed = FullAttentionSpec(**common)
-    planes = FullAttentionSpec(**common, separate_kv_head_groups=True)
+    planes = FullAttentionSpec(
+        **common,
+        num_head_slots=2,
+        state_content_bytes=num_kv_heads * head_size * 4,
+    )
 
     # Pure repermutation: same bytes per page, K/V regrouped out of the content.
     assert planes.page_size_bytes == packed.page_size_bytes
@@ -123,14 +128,15 @@ def test_reshape_quantized_kv_cache_content_includes_inline_scales():
         kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
         page_size_padded=384,
     )
+    spec = TritonAttentionBackend.customize_spec(spec)
     # Per-token-head scales live inline in the content dim as
     # [K | K_scale | V | V_scale] per (head, slot), matching
     # TritonAttentionImpl._ensure_scale_caches. The view must address
     # every budgeted byte, including the scales; only alignment padding
     # past unpadded_page_size_bytes stays unaddressed.
-    assert spec.real_page_size_bytes == 128
     scale_bytes = 2 * spec.block_size * spec.num_kv_heads * 4
     assert spec.unpadded_page_size_bytes == 128 + scale_bytes
+    assert spec.real_page_size_bytes == spec.unpadded_page_size_bytes
     assert spec.page_size_bytes == 384
 
     raw = torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
@@ -237,7 +243,8 @@ def test_copy_kv_cache_blocks_separate_head_groups():
         num_kv_heads=2,
         head_size=2,
         dtype=torch.float32,
-        separate_kv_head_groups=True,
+        num_head_slots=2,
+        state_content_bytes=2 * 2 * 4,
     )
     raw = torch.zeros(
         num_blocks * num_layers * spec.page_size_bytes,

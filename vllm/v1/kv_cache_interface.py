@@ -8,14 +8,14 @@ from collections import Counter
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
 from typing_extensions import Self
 
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+_SpecT = TypeVar("_SpecT", bound="KVCacheSpec")
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +45,11 @@ class KVQuantMode(IntEnum):
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
     INT4_PER_TOKEN_HEAD = 4  # packed 2×int4/byte, RHT + asymmetric zp
     NVFP4 = 5  # packed fp4 data + fp8 block scales
-    TURBOQUANT = 6  # Hadamard-rotated Lloyd-Max quant, packed K+V per slot
+    # Hadamard-rotated Lloyd-Max quant, packed K+V per slot.
+    TURBOQUANT_K8V4 = 6
+    TURBOQUANT_4BIT_NC = 7
+    TURBOQUANT_K3V4_NC = 8
+    TURBOQUANT_3BIT_NC = 9
 
     @property
     def is_per_token_head(self) -> bool:
@@ -61,8 +67,13 @@ class KVQuantMode(IntEnum):
 
     @property
     def is_turboquant(self) -> bool:
-        """True for turboquant quantization mode."""
-        return self == KVQuantMode.TURBOQUANT
+        """True for any turboquant quantization mode."""
+        return self in (
+            KVQuantMode.TURBOQUANT_K8V4,
+            KVQuantMode.TURBOQUANT_4BIT_NC,
+            KVQuantMode.TURBOQUANT_K3V4_NC,
+            KVQuantMode.TURBOQUANT_3BIT_NC,
+        )
 
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
@@ -76,7 +87,7 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
-        return KVQuantMode.TURBOQUANT
+        return KVQuantMode[kv_cache_dtype.upper()]
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE
@@ -84,6 +95,18 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
+
+
+def replace_as(spec: KVCacheSpec, target_cls: type[_SpecT], **changes) -> _SpecT:
+    """``dataclasses.replace``, but rebuilding *spec* as *target_cls*
+      e.g. ``SlidingWindowSpec`` -> ``FullAttentionSpec``
+
+    Every field of *spec* must exist on *target_cls*; fields only *target_cls* has keep
+    their default values.
+    """
+    kwargs = {f.name: getattr(spec, f.name) for f in fields(spec) if f.init}
+    kwargs.update(changes)
+    return target_cls(**kwargs)
 
 
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
@@ -309,60 +332,47 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    head_size_v: int = None  # type: ignore[assignment]
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
-    separate_kv_head_groups: bool = False
-    """K and V occupy two separate head groups ``[B, 2, N, H*hs]`` rather than
-    being interleaved in the content dim, so each side is one contiguous region
-    per block. The layout then decides where those groups sit: LBHNC keeps them
-    inside the block (token-major per side, what the AITER fused
-    QK-norm+RoPE+cache kernel addresses), LHBNC hoists them outside it (separate
-    planes spanning all blocks, what AITER sparse PA wants). Backends opt in via
-    ``AttentionBackend.separate_kv_head_groups()``."""
+    num_head_slots: int | None = None
+    """H of the ``[B, H, N, C]`` page when the packing diverges from one slot
+    per KV head. None means one slot per KV head; NVFP4 uses
+    ``2 * num_kv_heads``; separate K/V head groups use 2 with the heads folded
+    into the content dim (each side one contiguous region per block — LBHNC
+    keeps the two groups inside the block, token-major per side, as the AITER
+    fused QK-norm+RoPE+cache kernel addresses them; LHBNC hoists them outside
+    it as planes spanning all blocks, as AITER sparse PA wants). Published by
+    the attention backend via ``customize_spec`` or at spec construction; the
+    content of a slot is opaque to everything but the backend."""
+    state_content_bytes: int | None = None
+    """C in bytes when packed (inline scales included); None means the dense
+    ``(hs_k + hs_v) * dtype`` content."""
     tokens_per_state: int = 1
 
-    # NVFP4: K and V are stored as separate head groups [L, B, 2*H, N, dim]
-    # rather than interleaved in content [L, B, H, N, 2*dim].
+    def __post_init__(self):
+        if self.head_size_v is None:
+            object.__setattr__(self, "head_size_v", self.head_size)
 
     @property
     def num_heads(self) -> int:
-        if self.separate_kv_head_groups:
-            # Two groups (K, V); the real heads fold into the content dim.
-            return 2
-        if self.kv_quant_mode.is_nvfp4:
-            return 2 * self.num_kv_heads
+        if self.num_head_slots is not None:
+            return self.num_head_slots
         return self.num_kv_heads
 
     @property
+    def num_states(self) -> int:
+        return num_states_for(self.block_size, self.tokens_per_state)
+
+    @property
     def state_content_size_bytes(self) -> int:
-        hs = self.head_size
-        if self.separate_kv_head_groups:
-            return self.num_kv_heads * hs * get_dtype_size(self.dtype)
-        if self.kv_quant_mode.is_nvfp4:
-            hs = nvfp4_kv_cache_full_dim(hs)
-            return hs * get_dtype_size(self.dtype)
-        if self.kv_quant_mode.is_per_token_head:
-            # Per-token-head scales live inline after each head's data, so the
-            # content is 2 * (data + one float32 scale). Keeps
-            # num_heads * num_states * content == page_size_bytes.
-            data_hs = (
-                hs // 2 if self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD else hs
-            )
-            scale_bytes = get_dtype_size(torch.float32)
-            return 2 * (data_hs * get_dtype_size(self.dtype) + scale_bytes)
-        return 2 * hs * get_dtype_size(self.dtype)
+        if self.state_content_bytes is not None:
+            return self.state_content_bytes
+        return (self.head_size + self.head_size_v) * get_dtype_size(self.dtype)
 
     @property
     def unpadded_page_size_bytes(self) -> int:
-        unpadded = self.real_page_size_bytes
-        # Per-token-head scales are stored in separate tensors managed
-        # by the attention backend, but the memory is carved from the
-        # raw KV cache allocation so it must be budgeted here.
-        if self.kv_quant_mode.is_per_token_head:
-            unpadded += (
-                2 * self.block_size * self.num_kv_heads * get_dtype_size(torch.float32)
-            )
-        return unpadded
+        return self.num_heads * self.num_states * self.state_content_size_bytes
 
     @property
     def page_size_bytes(self) -> int:
@@ -373,20 +383,10 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        if self.kv_quant_mode.is_nvfp4:
-            # Packed layout: fp4 data + fp8 block scales per head.
-            head_dim = nvfp4_kv_cache_full_dim(self.head_size)
-        elif self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-            head_dim = self.head_size // 2
-        else:
-            head_dim = self.head_size
-        return (
-            2
-            * self.block_size
-            * self.num_kv_heads
-            * head_dim
-            * get_dtype_size(self.dtype)
-        )
+        """Alias of ``unpadded_page_size_bytes``: with packing folded into
+        ``state_content_bytes`` there is no separate data-only page anymore.
+        TODO(lucas): migrate consumers and remove."""
+        return self.unpadded_page_size_bytes
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         parallel_config = vllm_config.parallel_config
@@ -405,8 +405,6 @@ class FullAttentionSpec(AttentionSpec):
     In this case, we use FullAttentionSpec and record the sliding window size.
     """
 
-    head_size_v: int = None  # type: ignore[assignment]
-
     sliding_window: int | None = None
     """
     Default to None for not using sliding window attention.
@@ -421,37 +419,6 @@ class FullAttentionSpec(AttentionSpec):
     caching) regardless of tensor-parallel layout. It does not affect the KV
     cache layout itself.
     """
-
-    def __post_init__(self):
-        if self.head_size_v is None:
-            object.__setattr__(self, "head_size_v", self.head_size)
-        assert not self.separate_kv_head_groups or self.head_size == self.head_size_v, (
-            "Separate K/V head groups require symmetric K/V head sizes."
-        )
-
-    @property
-    def state_content_size_bytes(self) -> int:
-        hs_k = self.head_size
-        hs_v = self.head_size_v
-        if self.separate_kv_head_groups:
-            return self.num_kv_heads * hs_k * get_dtype_size(self.dtype)
-        # TODO(lucas): make these dtype specific paths separate specs once we have it
-        # so the attention backend returns the spec
-        if self.kv_quant_mode.is_nvfp4:
-            hs_k = nvfp4_kv_cache_full_dim(hs_k)
-            hs_v = nvfp4_kv_cache_full_dim(hs_v)
-            assert hs_k == hs_v, (
-                "nvfp4 with asymmetric K/V head sizes not yet supported"
-            )
-            return hs_k * get_dtype_size(self.dtype)
-        if self.kv_quant_mode.is_per_token_head:
-            # Per-token-head scales live inline after each head's data
-            # so the content is (data + one float32 scale)
-            if self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-                hs_k, hs_v = hs_k // 2, hs_v // 2
-            scale_bytes = get_dtype_size(torch.float32)
-            return (hs_k + hs_v) * get_dtype_size(self.dtype) + 2 * scale_bytes
-        return (hs_k + hs_v) * get_dtype_size(self.dtype)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
@@ -501,7 +468,8 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
-            separate_kv_head_groups=specs[0].separate_kv_head_groups,
+            num_head_slots=specs[0].num_head_slots,
+            state_content_bytes=specs[0].state_content_bytes,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             # If any layer in the group is non-causal, treat the group as
@@ -522,23 +490,6 @@ class FullAttentionSpec(AttentionSpec):
         )
         return merged_spec
 
-    @property
-    def real_page_size_bytes(self) -> int:
-        if self.kv_quant_mode.is_nvfp4:
-            # Packed layout per head: fp4 data + fp8 block scales.
-            # fp4 data: head_size//2 bytes (2 fp4 values per byte)
-            # fp8 block scale: head_size//16 bytes (1 scale per 16 elements)
-            last_dim = nvfp4_kv_cache_full_dim(
-                self.head_size
-            ) + nvfp4_kv_cache_full_dim(self.head_size_v)
-        elif self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-            last_dim = self.head_size // 2 + self.head_size_v // 2
-        else:
-            last_dim = self.head_size + self.head_size_v
-        return (
-            self.block_size * self.num_kv_heads * last_dim * get_dtype_size(self.dtype)
-        )
-
 
 def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
     if spec.alignment is None:
@@ -547,38 +498,6 @@ def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
     padded_page_size = round_up(actual_page_size, spec.alignment)
     if padded_page_size != actual_page_size:
         object.__setattr__(spec, "page_size_padded", padded_page_size)
-
-
-@dataclass(frozen=True, kw_only=True)
-class TQFullAttentionSpec(FullAttentionSpec):
-    """FullAttentionSpec with TQ-aware page size.
-
-    Python equivalent of the C++ TQ4FullAttentionSpec. Overrides
-    real_page_size_bytes to use TQ slot bytes instead of the raw
-    head_size * dtype formula.
-    """
-
-    tq_slot_size: int = 0
-
-    @property
-    def state_content_size_bytes(self) -> int:
-        if self.tq_slot_size > 0:
-            return self.tq_slot_size
-        return super().state_content_size_bytes
-
-    @property
-    def real_page_size_bytes(self) -> int:
-        if self.tq_slot_size > 0:
-            return self.block_size * self.num_kv_heads * self.tq_slot_size
-        return super().real_page_size_bytes
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        merged = super().merge(specs)
-        assert all(s.tq_slot_size == specs[0].tq_slot_size for s in specs), (
-            "All TQ layers in the same KV cache group must use the same tq_slot_size."
-        )
-        return replace(merged, tq_slot_size=specs[0].tq_slot_size)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -591,41 +510,16 @@ class MLAAttentionSpec(FullAttentionSpec):
     model_version: str | None = None
     # Marks draft groups that flatten a non-causal query block into decode rows.
     non_causal_multi_token_decode: bool = False
+    # MLA stores a single latent vector per state; there is no separate V.
+    head_size_v: int = 0
 
     def __post_init__(self):
         super().__post_init__()
         _apply_alignment_padding(self)
 
     @property
-    def state_content_size_bytes(self) -> int:
-        if self.cache_dtype_str == "fp8_ds_mla":
-            return 584 if self.model_version == "deepseek_v4" else 656
-        return self.head_size * get_dtype_size(self.dtype)
-
-    @property
     def storage_block_size(self) -> int:
         return self.block_size // self.tokens_per_state
-
-    @property
-    def real_page_size_bytes(self) -> int:
-        if self.cache_dtype_str == "fp8_ds_mla":
-            if self.model_version == "deepseek_v4":
-                # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token.
-                # head_size stays semantic (512); bytes are determined here.
-                return self.storage_block_size * 584
-            # V3.2 main MLA: 656-byte custom layout (kv_lora_rank=512 +
-            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
-            return self.block_size * 656
-        if self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-            head_dim = self.head_size // 2
-        else:
-            head_dim = self.head_size
-        return (
-            self.storage_block_size
-            * self.num_kv_heads
-            * head_dim
-            * get_dtype_size(self.dtype)
-        )
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -755,31 +649,6 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 @dataclass(frozen=True, kw_only=True)
 class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
-    head_size_v: int = None  # type: ignore[assignment]
-
-    def __post_init__(self):
-        if self.head_size_v is None:
-            object.__setattr__(self, "head_size_v", self.head_size)
-
-    @property
-    def real_page_size_bytes(self) -> int:
-        # Mirror ``FullAttentionSpec.real_page_size_bytes`` for NVFP4 KV cache.
-        if self.kv_quant_mode.is_nvfp4:
-            last_dim = nvfp4_kv_cache_full_dim(
-                self.head_size
-            ) + nvfp4_kv_cache_full_dim(self.head_size_v)
-            return (
-                self.block_size
-                * self.num_kv_heads
-                * last_dim
-                * get_dtype_size(self.dtype)
-            )
-        return (
-            self.block_size
-            * self.num_kv_heads
-            * (self.head_size + self.head_size_v)
-            * get_dtype_size(self.dtype)
-        )
 
     def max_admission_blocks_per_request(
         self, max_in_flight_tokens: int, max_model_len: int
@@ -834,36 +703,19 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     tokens_per_state: int = 1
     model_version: str | None = None
 
+    # MLA stores a single latent vector per state; there is no separate V.
+    head_size_v: int = 0
+
     def __post_init__(self):
+        assert self.model_version in (None, "deepseek_v4"), (
+            f"Unsupported model version: {self.model_version}"
+        )
         super().__post_init__()
         _apply_alignment_padding(self)
 
     @property
-    def state_content_size_bytes(self) -> int:
-        if self.model_version == "deepseek_v4":
-            return 584
-        return self.head_size * get_dtype_size(self.dtype)
-
-    @property
     def storage_block_size(self) -> int:
         return self.block_size // self.tokens_per_state
-
-    @property
-    def real_page_size_bytes(self) -> int:
-        if self.model_version == "deepseek_v4" and self.cache_dtype_str == "fp8_ds_mla":
-            # DeepseekV4 FlashMLA: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B
-            # per token. FlashInfer's contiguous bf16/fp8 cache falls through to
-            # the element-size formula below.
-            return self.storage_block_size * 584
-        assert self.model_version in (None, "deepseek_v4"), (
-            f"Unsupported model version: {self.model_version}"
-        )
-        return (
-            self.storage_block_size
-            * self.num_kv_heads
-            * self.head_size
-            * get_dtype_size(self.dtype)
-        )
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -1023,7 +875,8 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
-            separate_kv_head_groups=specs[0].separate_kv_head_groups,
+            num_head_slots=specs[0].num_head_slots,
+            state_content_bytes=specs[0].state_content_bytes,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),

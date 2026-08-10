@@ -66,10 +66,10 @@ def _zero_kv_blocks_kernel(
 ):
     """Zero KV cache blocks across all segments in a single launch.
 
-    Each segment is a contiguous region of one block's data.  For backends
-    where blocks are outermost (block_dim=0) there is one segment per
-    buffer.  For backends where K/V is outermost (block_dim=1) there are
-    two segments per buffer (one for K, one for V).
+    Each segment is a contiguous region of one block's data.  Layer-compact
+    layouts have one segment per layer buffer; dimensions physically outside
+    the block dim (head-group planes under LHBNC) and virtual block splits
+    each get their own segment.
 
     Segments may have different block strides and page sizes (e.g. packed
     KV views or models with multiple KV cache groups like MLA + DSA
@@ -125,6 +125,14 @@ class KVBlockZeroer:
         Each entry is the absolute byte address of a segment start on the
         GPU, so segments in different CUDA allocations work correctly.
 
+        Per-layer views are standardized ``[B, H, N, C]`` with blocks at dim
+        0; dimensions physically outside B (head-group planes under LHBNC)
+        each get their own segment. A segment's page spans everything inside
+        its block, so under BHLNC (layers interleaved inside the block) it
+        also covers co-located slots of the block's other layers — safe,
+        since block IDs are global pool indices and a newly allocated block
+        owns its whole tile.
+
         Block IDs from the scheduler reference logical blocks whose size
         may differ from the kernel block size (virtual block splitting).
         Each virtual block is represented as an independent segment so its
@@ -166,23 +174,19 @@ class KVBlockZeroer:
                 seen_ptrs.add(dp)
 
                 el = kv.element_size()
-                # The block dim is always outermost in the standardized
-                # per-layer [B, H, N, C] view.
                 block_stride_bytes = kv.stride(0) * el
                 assert block_stride_bytes % 4 == 0
                 assert kv.shape[0] % ratio == 0
-                # Absorb densely-packed trailing dims into one contiguous
-                # run; every non-dense dim (head-group planes under LHBNC,
-                # the head dim under BHLNC where L interleaves) splits the
-                # block into independent segment planes.
-                kernel_page_bytes = el
-                outer_dims = []
-                for d in range(kv.ndim - 1, 0, -1):
-                    if kv.stride(d) * el == kernel_page_bytes:
-                        kernel_page_bytes *= kv.shape[d]
-                    elif kv.shape[d] > 1:
-                        outer_dims.append(d)
+                outer_dims = [
+                    d
+                    for d in range(1, kv.ndim)
+                    if kv.stride(d) * el > block_stride_bytes
+                ]
                 outer_strides = [kv.stride(d) * el for d in outer_dims]
+                inner_dims = [d for d in range(1, kv.ndim) if d not in outer_dims]
+                kernel_page_bytes = el + sum(
+                    (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
+                )
                 assert kernel_page_bytes % 4 == 0
                 logical_block_stride_bytes = block_stride_bytes * ratio
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):

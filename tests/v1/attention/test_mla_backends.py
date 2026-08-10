@@ -511,12 +511,17 @@ class MockSparseMLAAttentionLayer:
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
         fp8_attention = kv_cache_dtype.startswith("fp8")
 
+        # Impls receive the bind-time-squeezed [B, N, C] cache; mirror
+        # mla_attention.py's bind_kv_cache squeeze here.
+        if kv_cache.ndim == 4:
+            kv_cache = kv_cache.squeeze(1)
+
         # Write to KV cache
         if kv_cache.numel() > 0:
             ops.concat_and_cache_mla(
                 kv_c,
                 k_pe.squeeze(1),
-                kv_cache.squeeze(1),
+                kv_cache,
                 attn_metadata.slot_mapping.flatten(),
                 kv_cache_dtype=kv_cache_dtype,
                 scale=self._k_scale,
@@ -645,6 +650,11 @@ class MockMLAAttentionLayer(MLAAttention):
         output: torch.Tensor,
     ) -> torch.Tensor:
         """Replicates MLAAttention.forward_impl logic for testing."""
+        # Impls receive the bind-time-squeezed [B, N, C] cache; mirror
+        # mla_attention.py's bind_kv_cache squeeze here.
+        if kv_cache.ndim == 4:
+            kv_cache = kv_cache.squeeze(1)
+
         # Write to KV cache
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
         fp8_attention = kv_cache_dtype.startswith("fp8")
@@ -652,7 +662,7 @@ class MockMLAAttentionLayer(MLAAttention):
             ops.concat_and_cache_mla(
                 kv_c,
                 k_pe.squeeze(1),
-                kv_cache.squeeze(1),
+                kv_cache,
                 attn_metadata.slot_mapping.flatten(),
                 kv_cache_dtype=kv_cache_dtype,
                 scale=self._k_scale,

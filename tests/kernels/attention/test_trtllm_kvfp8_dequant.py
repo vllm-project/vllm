@@ -35,7 +35,12 @@ def to_float8(x, dtype=None):
 
 
 def make_random_kv_cache(
-    num_blocks, num_kv_heads, block_size, head_size, layout=KVCacheLayout.LBHNC
+    num_blocks,
+    num_kv_heads,
+    block_size,
+    head_size,
+    layout=KVCacheLayout.LBHNC,
+    num_layers=None,
 ):
     """Create a random fp8 KV cache in 5D ``(B, 2, H, N, hs)`` format.
 
@@ -44,7 +49,8 @@ def make_random_kv_cache(
     inter-layer stride gaps, matching the actual forward path.
     """
     logical_4d = (num_blocks, num_kv_heads, block_size, 2 * head_size)
-    num_layers = 1 if layout.is_layer_compact else 2
+    if num_layers is None:
+        num_layers = 1 if layout.is_layer_compact else 2
     logical_5d = (num_layers, *logical_4d)
     physical_5d = tuple(logical_5d[i] for i in layout.stride_order)
     inv_order = [layout.stride_order.index(i) for i in range(5)]
@@ -355,6 +361,49 @@ def test_large_block_size():
         1,
         NUM_BLOCKS,
         (2, 4),
+        dtype=torch.int32,
+        device="cuda",
+    )
+
+    mock_kv_cache, _ = trtllm_prefill_attn_kvfp8_dequant(
+        kv_cache,
+        block_tables,
+        k_scale,
+        v_scale,
+        torch.bfloat16,
+    )
+    ref = ref_dequant(kv_cache, block_tables, k_scale, v_scale, torch.bfloat16)
+
+    torch.testing.assert_close(mock_kv_cache[1:], ref[1:], atol=1e-3, rtol=1e-3)
+
+
+def test_cross_layer_many_layers():
+    """Non-contiguous with 36 layers -- matches real gpt-oss-120b.
+
+    Cross-layer (BLHNC) strides are far from contiguous (factor of 36 in the
+    inter-layer gaps).
+    """
+    from vllm.v1.attention.backends.flashinfer import (
+        trtllm_prefill_attn_kvfp8_dequant,
+    )
+
+    torch.set_default_device("cuda")
+    num_kv_heads, block_size, head_size = 8, 16, 64
+
+    kv_cache, scale = make_random_kv_cache(
+        NUM_BLOCKS,
+        num_kv_heads,
+        block_size,
+        head_size,
+        layout=KVCacheLayout.BLHNC,
+        num_layers=36,
+    )
+    k_scale = v_scale = scale.clone()
+
+    block_tables = torch.randint(
+        1,
+        NUM_BLOCKS,
+        (4, 6),
         dtype=torch.int32,
         device="cuda",
     )

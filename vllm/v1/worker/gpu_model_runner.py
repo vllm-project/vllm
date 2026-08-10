@@ -7656,6 +7656,8 @@ class GPUModelRunner(
                 continue
             # Skip modules that don't need KV cache (eg encoder-only attention)
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                if isinstance(spec, AttentionSpec):
+                    spec = attn_module.get_attn_backend().customize_spec(spec)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec

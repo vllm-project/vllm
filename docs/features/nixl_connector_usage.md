@@ -404,7 +404,7 @@ GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVC
 
 ### Heterogeneous KV Layout support
 
-Support use case: Prefill with 'HND' and decode with 'NHD' with experimental configuration
+Support use case: Prefill with `LBHNC` (head-major) and decode with `LBNHC` (token-major) with experimental configuration
 
 ```bash
 --kv-transfer-config '{..., "enable_permute_local_kv":"True"}'

@@ -171,15 +171,17 @@ def create_standard_kv_cache_spec(
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
         )
+    head_size = vllm_config.model_config.get_head_size()
+    quant_mode = get_kv_quant_mode(vllm_config.cache_config.cache_dtype)
     return FullAttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(
             vllm_config.parallel_config
         ),
-        head_size=vllm_config.model_config.get_head_size(),
+        head_size=head_size,
         dtype=vllm_config.model_config.dtype,
         sliding_window=vllm_config.model_config.get_sliding_window(),
-        kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
+        kv_quant_mode=quant_mode,
     )
 
 

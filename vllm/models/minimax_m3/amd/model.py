@@ -697,6 +697,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Main GQA K/V cache. Block size may change after load, refresh it.
+        # AITER sparse PA wants K and V as two separate head groups
+        # (H folded into the content dim).
+        sparse_pa = self.use_aiter_sparse_pa
+        kv_bytes = (
+            self.num_kv_heads * self.head_dim * self.kv_cache_torch_dtype.itemsize
+        )
         return FullAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
@@ -704,7 +710,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             head_size_v=self.head_dim,
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
-            separate_kv_head_groups=self.use_aiter_sparse_pa,
+            num_head_slots=2 if sparse_pa else None,
+            state_content_bytes=kv_bytes if sparse_pa else None,
         )
 
     def _ensure_aiter_sparse_pa_kv_cache(self) -> None:

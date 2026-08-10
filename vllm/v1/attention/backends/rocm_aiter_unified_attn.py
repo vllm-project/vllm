@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
+from dataclasses import replace
 from typing import ClassVar
 
 import torch
@@ -14,19 +15,46 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
+from vllm.v1.attention.backends.rocm_aiter_fa import _use_separate_kv_head_groups
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
     RocmAttentionImpl,
     RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import KVCacheLayoutType
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """K and V as two head groups ``[B, 2, N, H*hs]`` so each side is one
+        contiguous token-major region per block, as the AITER fused
+        QK-norm+RoPE+cache kernel addresses them."""
+        if spec.state_content_bytes is not None or not _use_separate_kv_head_groups():
+            return spec
+        assert spec.head_size == spec.head_size_v, (
+            "Separate K/V head groups require symmetric K/V head sizes."
+        )
+        return replace(
+            spec,
+            num_head_slots=2,
+            state_content_bytes=spec.num_kv_heads
+            * spec.head_size
+            * get_dtype_size(spec.dtype),
+        )
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
+        # Separate K/V head groups need H inside the block and L outermost so
+        # each side is a token-major, block-contiguous [B, N, H*hs] region.
+        return "LBHNC" if _use_separate_kv_head_groups() else None
+
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -134,6 +162,22 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         self.unified_attention = unified_attention
         self.supports_quant_query_input = True
+        self.separate_kv_head_groups = _use_separate_kv_head_groups()
+
+    def _split_kv_cache(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split the per-layer cache into K/V views shaped [B, N, H, hs].
+
+        With separate planes the cache is [B, 2, N, H*hs] and each side is a
+        contiguous, token-major block region. Otherwise K/V are packed in the
+        content dim of [B, H, N, 2*hs] and the split is a strided view.
+        """
+        if self.separate_kv_head_groups:
+            key_cache, value_cache = kv_cache.unbind(1)
+            shape = (*key_cache.shape[:-1], self.num_kv_heads, self.head_size)
+            return key_cache.view(shape), value_cache.view(shape)
+        return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
     def forward(
         self,
@@ -195,8 +239,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 layer,
             )
 
-        kv_cache = kv_cache.transpose(1, 2)
-        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         softmax_scale = self.scale
         if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -276,8 +319,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
-        kv_cache = kv_cache.transpose(1, 2)
-        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         # Reshape the input keys and values and store them in the cache.
         ops.reshape_and_cache_flash(
@@ -295,9 +337,49 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         return rocm_aiter_ops.is_enabled()
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        # AITER requires K/V to be contiguous within each cache block, but
-        # standardized caches pack K/V in the content dimension.
-        return False
+        # The fused kernel needs K and V as separate block-contiguous caches,
+        # which only the separate-planes allocation provides.
+        return self.separate_kv_head_groups
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
+        rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=self.num_heads,
+            num_heads_k=self.num_kv_heads,
+            head_dim=self.head_size,
+            is_neox=is_neox,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_out=k_out,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=layer_slot_mapping,
+            k_scale=layer._k_scale_cpu,
+            v_scale=layer._v_scale_cpu,
+            kv_cache_dtype=self.kv_cache_dtype,
+            # Separate planes and the shuffle layout are mutually exclusive
+            # (see _use_separate_kv_head_groups), so this path is never shuffled.
+            use_shuffle_layout=False,
+        )
 
     def do_rope_and_kv_cache_update(
         self,
@@ -315,8 +397,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
-        kv_cache = kv_cache.transpose(1, 2)
-        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

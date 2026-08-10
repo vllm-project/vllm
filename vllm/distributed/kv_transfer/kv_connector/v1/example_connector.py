@@ -129,18 +129,16 @@ class ExampleConnector(KVConnectorBase_V1):
 
             Args:
                 dst_kv_cache_layer (torch.Tensor): the destination KV cache
-                    layer. In shape [num_pages, page_size, xxx] for MLA,
-                    [num_pages, 2, page_size, xxx] otherwise.
+                    layer, a standardized [B, H, N, C] per-layer view
+                    (H == 1 for MLA).
                 src_kv_cache (torch.Tensor): the source KV cache.
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
             if isinstance(attn_metadata, MLACommonMetadata):
-                dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
-                num_pages = dst_kv_cache_layer_shape[0]
-                page_size = dst_kv_cache_layer_shape[1]
+                # [B, 1, N, C] -> [B * N, C]; slot_mapping indexes B * N slots.
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
-                    num_pages * page_size, -1
+                    -1, dst_kv_cache_layer.shape[-1]
                 )
                 dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
             else:
@@ -224,12 +222,12 @@ class ExampleConnector(KVConnectorBase_V1):
         ) -> torch.Tensor:
             """Extract the KV cache from the layer.
 
-            Assume the shape of the layer is (num_pages, page_size, xxx)
-            for MLA, and (num_pages, 2, page_size, xxx) otherwise.
+            The layer is a standardized [B, H, N, C] per-layer view
+            (H == 1 for MLA).
             """
             if isinstance(attn_metadata, MLACommonMetadata):
-                num_pages, page_size = layer.shape[0], layer.shape[1]
-                return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
+                # [B, 1, N, C] -> [B * N, C]; slot_mapping indexes B * N slots.
+                return layer.reshape(-1, layer.shape[-1])[slot_mapping, ...]
             block_idxs = slot_mapping // self._block_size
             offsets = slot_mapping % self._block_size
             return layer[block_idxs, :, offsets]

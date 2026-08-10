@@ -128,11 +128,15 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             self.attn._k_scale = self.attn._k_scale.to(device)
             self.attn._v_scale = self.attn._v_scale.to(device)
 
-        self.kv_cache_spec = AttentionSpec(
-            block_size=self.block_size,
-            num_kv_heads=self.num_kv_heads,
-            head_size=head_size,
-            dtype=self.kv_cache_dtype,
+        # Mirror the worker spec-collection loop: the backend publishes its
+        # packing (separate K/V head groups when the fused kernel is usable).
+        self.kv_cache_spec = self.attn.attn_backend.customize_spec(
+            AttentionSpec(
+                block_size=self.block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=head_size,
+                dtype=self.kv_cache_dtype,
+            )
         )
         self.builder = self.attn.attn_backend.get_builder_cls()(
             kv_cache_spec=self.kv_cache_spec,
@@ -151,6 +155,12 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
 
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
+
+        # A backend-required layout wins over the parametrized one, mirroring
+        # selector-time resolution (separate K/V head groups force LBHNC).
+        required = self.attn.attn_backend.get_required_kv_cache_layout()
+        if required is not None:
+            layout = KVCacheLayout[required]
 
         raw_tensor = torch.zeros(
             num_blocks * self.kv_cache_spec.page_size_bytes,
@@ -426,7 +436,6 @@ _FUSION_CONFIGS = [
     not is_aiter_found_and_supported(),
     reason="Only test on ROCm with AITER installed and supported",
 )
-@pytest.mark.skip(reason="AITER fusion does not support packed standardized K/V caches")
 def test_qk_norm_rope_kvcache_fusion(
     num_tokens: int,
     num_heads: int,

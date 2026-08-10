@@ -258,7 +258,8 @@ def test_register_separate_kv_head_groups(monkeypatch):
         num_kv_heads=2,
         head_size=2,
         dtype=torch.float16,
-        separate_kv_head_groups=True,
+        num_head_slots=2,
+        state_content_bytes=2 * 2 * 2,
     )
     raw = torch.zeros(
         num_blocks * num_layers * spec.page_size_bytes,

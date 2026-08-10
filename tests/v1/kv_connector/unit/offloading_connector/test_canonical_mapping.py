@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping i
     _verify_tiling,
     derive_canonical_mappings,
 )
+from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -37,12 +38,14 @@ def _ctx(rank, tp=1, dcp=1, pcp=1, interleave=1, total=None, heads=2):
 
 def _full_spec(num_kv_heads: int = 2, **kwargs) -> FullAttentionSpec:
     # block_size=4, head_dim=64, int8
-    return FullAttentionSpec(
-        block_size=4,
-        num_kv_heads=num_kv_heads,
-        head_size=64,
-        dtype=torch.int8,
-        **kwargs,
+    return TritonAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=4,
+            num_kv_heads=num_kv_heads,
+            head_size=64,
+            dtype=torch.int8,
+            **kwargs,
+        )
     )
 
 

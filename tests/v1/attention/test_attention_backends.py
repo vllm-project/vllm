@@ -30,9 +30,10 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends import utils as attn_utils
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
-    initialize_kv_cache_layout,
+    _layout_from_name,
     resolve_kv_cache_layout,
     set_kv_cache_layout,
 )
@@ -43,7 +44,16 @@ BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASHINFER,
     AttentionBackendEnum.FLEX_ATTENTION,
     AttentionBackendEnum.TRITON_ATTN,
+    "FLEX_ATTENTION_SLOW",
 ]
+
+
+def _actual_backend(backend) -> AttentionBackendEnum:
+    """Resolve pseudo-backends (FLEX_ATTENTION_SLOW) to their real enum."""
+    if backend == "FLEX_ATTENTION_SLOW":
+        return AttentionBackendEnum.FLEX_ATTENTION
+    return backend
+
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -169,11 +179,13 @@ def create_and_prepopulate_kv_cache(
     start_block_idx = 1  # block 0 is the null block
     for i in range(batch_size):
         k_context, v_context = k_contexts[i], v_contexts[i]
-        for t in range(k_context.shape[0]):
-            blk = start_block_idx + t // block_size
-            off = t % block_size
-            kv_cache[blk, :, off, :head_size] = k_context[t]
-            kv_cache[blk, :, off, head_size:] = v_context[t]
+        t = torch.arange(k_context.shape[0], device=device)
+        blk = start_block_idx + t // block_size
+        off = t % block_size
+        # Advanced indexing on (blk, off) yields [T, H, hs] destinations.
+        # index_put is dtype-strict; cast like the scalar path would.
+        kv_cache[blk, :, off, :head_size] = k_context.to(kv_cache.dtype)
+        kv_cache[blk, :, off, head_size:] = v_context.to(kv_cache.dtype)
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
 
     blocks_end = start_block_idx
@@ -248,6 +260,9 @@ def run_attention_backend(
     use_direct_block_mask = not current_platform.is_rocm() and is_torch_equal_or_newer(
         "2.9.0.dev0"
     )
+    if backend == "FLEX_ATTENTION_SLOW":
+        use_direct_block_mask = False
+    backend = _actual_backend(backend)
 
     builder_cls, impl_cls = try_get_attention_backend(backend)
 
@@ -493,10 +508,19 @@ def _test_backend_correctness(
     common_attn_metadata.causal = causal
 
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
-    attn_backends = tuple(backend.get_class() for backend in backend_to_test)
-    for attn_backend in attn_backends:
-        initialize_kv_cache_layout(attn_backend, vllm_config.cache_config)
+    # Mirror selector-time resolution locally (test override, then any
+    # backend-required layout, then the default chain) without publishing
+    # process-global state that would leak between tests.
+    required_layouts = {
+        name
+        for backend in backend_to_test
+        if (name := _actual_backend(backend).get_class().get_required_kv_cache_layout())
+        is not None
+    }
+    assert len(required_layouts) <= 1, "conflicting required layouts under test"
     layout = resolve_kv_cache_layout()
+    if required_layouts and attn_utils._KV_CACHE_LAYOUT_OVERRIDE is None:
+        layout = _layout_from_name(required_layouts.pop())
     kv_cache = create_and_prepopulate_kv_cache(
         k_contexts=k_contexts,
         v_contexts=v_contexts,
@@ -516,7 +540,7 @@ def _test_backend_correctness(
     # Note: flex_attention has known Triton kernel compatibility issues
     # with test infrastructures
     for backend_name in backend_to_test:
-        backend_cls = backend_name.get_class()
+        backend_cls = _actual_backend(backend_name).get_class()
 
         if is_quantized_kv_cache(kv_cache_dtype) and (
             not backend_cls.supports_kv_cache_dtype(kv_cache_dtype)

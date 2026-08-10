@@ -1952,9 +1952,11 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.side_effect = (
-        lambda keys, addrs, sizes, *_args: [256] * len(keys)
-    )
+
+    def _put_ok(keys, addrs, sizes, *_args):
+        return [256] * len(keys)
+
+    store.batch_put_from_multi_buffers.side_effect = _put_ok
 
     full_spec = FullAttentionSpec(
         block_size=32, num_kv_heads=8, head_size=64, dtype=None
@@ -2790,7 +2792,8 @@ def test_register_kv_caches_separate_head_groups():
         num_kv_heads=2,
         head_size=8,
         dtype=torch.float16,
-        separate_kv_head_groups=True,
+        num_head_slots=2,
+        state_content_bytes=2 * 8 * 2,
     )
     layer_names = ["layer0", "__cross_layer__"]
     worker._kv_cache_groups = [KVCacheGroupSpec(layer_names, spec)]

@@ -22,6 +22,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -125,15 +126,17 @@ def new_kv_cache_spec(
     attention_chunk_size=None,
     kv_quant_mode=KVQuantMode.NONE,
 ):
-    return FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=num_kv_heads,
-        head_size=head_size,
-        dtype=dtype,
-        page_size_padded=page_size_padded,
-        sliding_window=sliding_window,
-        attention_chunk_size=attention_chunk_size,
-        kv_quant_mode=kv_quant_mode,
+    return TritonAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=dtype,
+            page_size_padded=page_size_padded,
+            sliding_window=sliding_window,
+            attention_chunk_size=attention_chunk_size,
+            kv_quant_mode=kv_quant_mode,
+        )
     )
 
 
@@ -2596,11 +2599,12 @@ def test_unpadded_page_size_without_quant_matches_real_page():
 def test_unpadded_page_size_includes_per_token_head_scales():
     # Per-token-head quant carries inline fp32 scales that are carved from the
     # raw KV allocation, so they must be budgeted into the offload width.
+    dense = new_kv_cache_spec(dtype=torch.uint8)
     spec = new_kv_cache_spec(
         dtype=torch.uint8, kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD
     )
     scales = 2 * spec.block_size * spec.num_kv_heads * 4
-    assert spec.unpadded_page_size_bytes == spec.real_page_size_bytes + scales
+    assert spec.unpadded_page_size_bytes == dense.unpadded_page_size_bytes + scales
     assert spec.page_size_bytes == spec.unpadded_page_size_bytes
 
 
