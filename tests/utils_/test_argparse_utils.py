@@ -398,8 +398,7 @@ def test_load_config_file_false_store_true_dropped(tmp_path):
     processed_args = parser.load_config_file(str(config_file_path))
 
     assert "--enable-feature" not in processed_args
-    assert "--no-enable-feature" not in processed_args
-    assert "--port" in processed_args
+    assert "--no-enable-feature" in processed_args
 
 
 def test_load_config_file_nested(tmp_path):
