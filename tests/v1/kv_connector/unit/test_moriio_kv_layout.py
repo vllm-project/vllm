@@ -670,14 +670,23 @@ def test_moriio_wrapper_rejects_invalid_messages(role, payload, match):
         wrapper._handle_message(payload)
 
 
-def test_block_id_length_mismatch_raises_value_error():
+def test_local_block_ids_longer_than_remote_raises_value_error():
     cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
-    with pytest.raises(ValueError, match="must have the same length"):
+    with pytest.raises(ValueError, match="longer than remote_block_ids"):
         moriio_layout.compute_block_transfer_offsets(
             "layer", cache, worker.layer_to_spec, [1, 3], [4], _remote_meta().num_blocks
         )
+
+
+def test_empty_local_block_ids_is_free_only_noop():
+    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [], [4, 5], _remote_meta().num_blocks
+    ) == ([], [], [])
 
 
 def test_registration_regions_do_not_split_interleaved_or_mla_cache():

@@ -43,6 +43,7 @@ class KVQuantMode(IntEnum):
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
     INT4_PER_TOKEN_HEAD = 4  # packed 2×int4/byte, RHT + asymmetric zp
     NVFP4 = 5  # packed fp4 data + fp8 block scales
+    TURBOQUANT = 6  # Hadamard-rotated Lloyd-Max quant, packed K+V per slot
 
     @property
     def is_per_token_head(self) -> bool:
@@ -58,6 +59,11 @@ class KVQuantMode(IntEnum):
         """True for NVFP4 packed quantization mode."""
         return self == KVQuantMode.NVFP4
 
+    @property
+    def is_turboquant(self) -> bool:
+        """True for turboquant quantization mode."""
+        return self == KVQuantMode.TURBOQUANT
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
@@ -67,8 +73,10 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
         return KVQuantMode.FP8_PER_TOKEN_HEAD
-    if kv_cache_dtype == "nvfp4":
+    if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
+    if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
+        return KVQuantMode.TURBOQUANT
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE
@@ -128,6 +136,18 @@ class KVCacheSpec:
         """
         raise NotImplementedError
 
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        """
+        The number of block table entries needed per request, i.e. the row
+        length of the worker-side block table for this cache group.
+
+        Args:
+            vllm_config: The vllm config.
+            max_len: The maximum sequence length to size for, including the
+                encoder length for encoder-decoder models.
+        """
+        return cdiv(max_len, self.block_size)
+
     def copy_with_new_block_size(self, block_size: int) -> Self:
         """
         Create a new KVCacheSpec from self but replacing the block size.
@@ -170,19 +190,23 @@ class AttentionSpec(KVCacheSpec):
     indexes_kv_by_block_stride: bool = False
 
     @property
-    def page_size_bytes(self) -> int:
-        real_page_size = self.real_page_size_bytes
+    def unpadded_page_size_bytes(self) -> int:
+        unpadded = self.real_page_size_bytes
         # Per-token-head scales are stored in separate tensors managed
         # by the attention backend, but the memory is carved from the
         # raw KV cache allocation so it must be budgeted here.
         if self.kv_quant_mode.is_per_token_head:
-            real_page_size += (
+            unpadded += (
                 2 * self.block_size * self.num_kv_heads * get_dtype_size(torch.float32)
             )
+        return unpadded
+
+    @property
+    def page_size_bytes(self) -> int:
         if self.page_size_padded is not None:
-            assert self.page_size_padded >= real_page_size
+            assert self.page_size_padded >= self.unpadded_page_size_bytes
             return self.page_size_padded
-        return real_page_size
+        return self.unpadded_page_size_bytes
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -200,6 +224,11 @@ class AttentionSpec(KVCacheSpec):
             * head_dim
             * get_dtype_size(self.dtype)
         )
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        parallel_config = vllm_config.parallel_config
+        kv_shard_count = parallel_config.decode_context_parallel_size
+        return cdiv(max_len, self.block_size * kv_shard_count)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -237,11 +266,8 @@ class FullAttentionSpec(AttentionSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
-        # Note(hc): each dcp rank only need save
-        # (max_model_len//dcp_world_size) tokens locally.
-        if dcp_world_size * pcp_world_size > 1:
-            max_model_len = cdiv(max_model_len, dcp_world_size * pcp_world_size)
+        if dcp_world_size > 1:
+            max_model_len = cdiv(max_model_len, dcp_world_size)
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
     @classmethod
@@ -367,6 +393,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     alignment: int | None = None  # Default to None for no padding.
     compress_ratio: int = 1  # Default to 1 for no compression.
     model_version: str | None = None
+    # Marks draft groups that flatten a non-causal query block into decode rows.
+    non_causal_multi_token_decode: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -416,7 +444,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             "quantization method, compress ratio, model version, and KV block "
             "stride indexing."
         )
-        return cls(
+        merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
@@ -427,7 +455,17 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            non_causal_multi_token_decode=any(
+                spec.non_causal_multi_token_decode for spec in specs
+            ),
         )
+        for spec in specs:
+            for f in fields(AttentionSpec):
+                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
+                    "All attention layers in the same KV cache group must have "
+                    "the same attention spec."
+                )
+        return merged_spec
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -482,25 +520,28 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
     attention_chunk_size: int
 
     def max_admission_blocks_per_request(
-        self, max_num_batched_tokens: int, max_model_len: int
+        self, max_in_flight_tokens: int, max_model_len: int
     ) -> int:
         """Per-request admission cap, in blocks.
 
         Single source of truth for both startup pool sizing
         (`max_memory_usage_bytes`) and the runtime admission gate, so requests
         admitted by startup can also be admitted at runtime.
+
+        `max_in_flight_tokens` is the max tokens scheduled but not yet settled
+        (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`.
         """
-        # During chunked prefill, we hold KV for at most one chunk window.
+        # During chunked prefill, we hold KV for at most one chunk window plus
+        # the in-flight tokens, since frees happen on the processed-token basis.
         num_tokens = min(
-            self.attention_chunk_size + max_num_batched_tokens, max_model_len
+            self.attention_chunk_size + max_in_flight_tokens, max_model_len
         )
         return cdiv(num_tokens, self.block_size)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_model_len = vllm_config.model_config.max_model_len
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         max_blocks = self.max_admission_blocks_per_request(
-            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_model_len=vllm_config.model_config.max_model_len,
         )
         return max_blocks * self.page_size_bytes
 
@@ -544,7 +585,7 @@ class SlidingWindowSpec(AttentionSpec):
         )
 
     def max_admission_blocks_per_request(
-        self, max_num_batched_tokens: int, max_model_len: int
+        self, max_in_flight_tokens: int, max_model_len: int
     ) -> int:
         """Per-request admission cap, in blocks.
 
@@ -553,13 +594,14 @@ class SlidingWindowSpec(AttentionSpec):
         real-held blocks plateau at this bound because
         `SlidingWindowManager.remove_skipped_blocks` runs from `allocate_slots`
         before each chunk's `get_num_blocks_to_allocate`.
+
+        `max_in_flight_tokens` is the max tokens scheduled but not yet settled
+        (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`.
         """
         # During chunked prefill, we hold KV for the last `sliding_window-1`
-        # computed tokens plus the newly scheduled tokens, and never more
-        # than `max_model_len`.
-        num_tokens = min(
-            self.sliding_window - 1 + max_num_batched_tokens, max_model_len
-        )
+        # computed tokens plus the in-flight tokens (frees happen on the
+        # processed-token basis); never more than `max_model_len`.
+        num_tokens = min(self.sliding_window - 1 + max_in_flight_tokens, max_model_len)
         # +1 because the sliding window may not start from the beginning of
         # the block. E.g. block size 4 and num_token 4 needs two blocks
         # [XXCD][EF] to store the 6-token window [CDEF].
@@ -569,10 +611,9 @@ class SlidingWindowSpec(AttentionSpec):
         assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
             "DCP not support sliding window."
         )
-        max_model_len = vllm_config.model_config.max_model_len
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         max_blocks = self.max_admission_blocks_per_request(
-            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_model_len=vllm_config.model_config.max_model_len,
         )
         return max_blocks * self.page_size_bytes
 
@@ -696,6 +737,18 @@ class MambaSpec(KVCacheSpec):
         else:
             return self.page_size_bytes * (1 + self.num_speculative_blocks)
 
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        # Mamba state is replicated across DCP/PCP ranks, never sharded, so
+        # no CP scaling applies.
+        if vllm_config.cache_config.mamba_cache_mode == "align":
+            # Block table rows are position-indexed over the full sequence
+            # even though only 2 + num_speculative_blocks state blocks are
+            # resident at a time (earlier states are nulled out by
+            # remove_skipped_blocks), so the row length must cover max_len
+            # rather than max_memory_usage_bytes.
+            return cdiv(max_len, self.block_size) + self.num_speculative_blocks
+        return cdiv(self.max_memory_usage_bytes(vllm_config), self.page_size_bytes)
+
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]
     ) -> bool:
@@ -801,6 +854,20 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             for spec in self.kv_cache_specs.values()
         )
         return max_num_pages * self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        # Metadata builders are constructed from the per-layer spec, so the base
+        # cdiv(max_len, block_size) would drop its DCP sharding and size the
+        # block table wider than those builders expect.
+        widths = {
+            spec.max_num_blocks_per_req(vllm_config, max_len)
+            for spec in self.kv_cache_specs.values()
+        }
+        assert len(widths) == 1, (
+            "All layers in the same KV cache group must need the same number "
+            f"of block table entries, got {sorted(widths)}."
+        )
+        return next(iter(widths))
 
     @classmethod
     def is_uniform_type(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
@@ -940,5 +1007,30 @@ class KVCacheConfig:
         return any(isinstance(g.kv_cache_spec, MambaSpec) for g in self.kv_cache_groups)
 
     @property
+    def has_mixed_precision_kv_cache(self) -> bool:
+        """Whether attention groups store their KV cache at more than one precision."""
+        kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()
+        for group in self.kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            group_specs = (
+                list(group_spec.kv_cache_specs.values())
+                if isinstance(group_spec, UniformTypeKVCacheSpecs)
+                else [group_spec]
+            )
+            kv_cache_precisions.update(
+                (spec.dtype, spec.kv_quant_mode)
+                for spec in group_specs
+                if isinstance(spec, AttentionSpec)
+            )
+        return len(kv_cache_precisions) > 1
+
+    @property
     def needs_kv_cache_zeroing(self) -> bool:
-        return self.has_mamba_layers
+        """Whether newly allocated KV cache blocks must be zeroed before use.
+
+        Required for Mamba layers, whose state is read before it is fully written
+        (#35219), and for mixed-precision caches, where a block reused across
+        groups can be reinterpreted under a different precision and decode stale
+        bytes to NaN/Inf. Uniform-precision caches skip zeroing.
+        """
+        return self.has_mamba_layers or self.has_mixed_precision_kv_cache

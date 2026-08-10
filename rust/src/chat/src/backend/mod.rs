@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -5,7 +8,7 @@ use serde_json::Value;
 use vllm_text::{DynTextBackend, TextBackend};
 
 use crate::error::Result;
-use crate::multimodal::MultimodalModelInfo;
+use crate::multimodal::{MmLimitPerPrompt, MultimodalModelInfo};
 use crate::output::DynChatOutputProcessor;
 use crate::renderer::DynChatRenderer;
 use crate::request::ChatRequest;
@@ -71,6 +74,9 @@ pub struct LoadModelBackendsOptions {
     /// Optional server-default keyword arguments merged into every
     /// chat-template render before request-level `chat_template_kwargs`.
     pub default_chat_template_kwargs: HashMap<String, Value>,
+    /// Maximum number of input items allowed per prompt for each modality.
+    /// Unspecified modalities are unlimited.
+    pub limit_mm_per_prompt: MmLimitPerPrompt,
 }
 
 /// Shared backends loaded from a model id.
