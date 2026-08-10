@@ -52,6 +52,7 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
         "vllm.v1.attention.backends.mla.prefill.aiter_flash_attn."
         "AiterFlashAttnPrefillBackend"
     )
+    CPU = "vllm.v1.attention.backends.mla.prefill.cpu_sdpa.CPUSDPAMLAPrefillBackend"
     CPU_NATIVE = (
         "vllm.v1.attention.backends.mla.prefill.cpu_native.CPUNativeMLAPrefillBackend"
     )
