@@ -134,6 +134,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
+    AttentionImplBase,
     AttentionMetadata,
     AttentionMetadataBuilder,
     AttentionType,
@@ -910,6 +911,7 @@ class GPUModelRunner(
         )
 
         self.reorder_batch_threshold: int | None = None
+        self.has_distinct_decode_attn_backend = False
 
         # Attention layers that are only in the KVCacheConfig of the runner
         # (e.g., KV sharing, encoder-only attention), but not in the
@@ -3962,6 +3964,7 @@ class GPUModelRunner(
         uniform_decode_query_len: int,
         num_tokens: int,
         num_reqs: int,
+        has_prefill: bool = False,
         force_uniform_decode: bool | None = None,
     ) -> bool:
         """
@@ -3972,6 +3975,7 @@ class GPUModelRunner(
             (
                 (max_num_scheduled_tokens == uniform_decode_query_len)
                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
+                and not has_prefill
             )
             if force_uniform_decode is None
             else force_uniform_decode
@@ -4044,11 +4048,20 @@ class GPUModelRunner(
         torch.Tensor | None,
         CUDAGraphStat | None,
     ]:
+        has_prefill = bool(
+            self.has_distinct_decode_attn_backend
+            and force_uniform_decode is None
+            and np.any(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                < self.input_batch.num_prompt_tokens[:num_reqs]
+            )
+        )
         uniform_decode = self._is_uniform_decode(
             max_num_scheduled_tokens=max_num_scheduled_tokens,
             uniform_decode_query_len=self.uniform_decode_query_len,
             num_tokens=num_tokens,
             num_reqs=num_reqs,
+            has_prefill=has_prefill,
             force_uniform_decode=force_uniform_decode,
         )
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
@@ -6669,11 +6682,9 @@ class GPUModelRunner(
                 )
             # Clean up quantized KV cache scale views
             # (int8_per_token_head, fp8_per_token_head)
-            if hasattr(layer, "impl"):
-                if hasattr(layer.impl, "_k_scale_cache"):
-                    layer.impl._k_scale_cache = None
-                if hasattr(layer.impl, "_v_scale_cache"):
-                    layer.impl._v_scale_cache = None
+            impl = getattr(layer, "impl", None)
+            if isinstance(impl, AttentionImplBase):
+                impl.reset_kv_cache_views()
 
         gc.collect()
         torch.accelerator.empty_cache()
@@ -7198,6 +7209,11 @@ class GPUModelRunner(
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
+
+        self.has_distinct_decode_attn_backend = any(
+            group.backend.has_distinct_decode_backend()
+            for group in self._attn_group_iterator()
+        )
 
     def initialize_metadata_builders(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]

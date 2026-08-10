@@ -150,6 +150,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self.has_distinct_decode_attn_backend = False
 
         self.device = device
         self.dtype = self.model_config.dtype
@@ -498,6 +499,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
+        self.has_distinct_decode_attn_backend = any(
+            group.backend.has_distinct_decode_backend()
+            for groups in self.attn_groups
+            for group in groups
+        )
         attn_cg_support = attn_cg_support.narrow(
             *self.model_state.get_additional_cg_support()
         )
@@ -646,6 +652,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dummy_run=True,
                 skip_attn_for_dummy_run=skip_attn,
                 is_profile=is_profile,
+                has_prefill=(
+                    self.has_distinct_decode_attn_backend and not uniform_decode
+                ),
             )
         self.kv_connector.set_disabled(False)
 
@@ -1252,6 +1261,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
+        has_prefill: bool | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
@@ -1271,7 +1281,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
-
+        if has_prefill is None:
+            has_prefill = self.has_distinct_decode_attn_backend and (
+                self.req_states.any_prefilling(
+                    scheduler_output.num_scheduled_tokens, num_reqs
+                )
+            )
         num_active_loras = 0
         if self.lora_config:
             req_ids = list(scheduler_output.num_scheduled_tokens.keys())
@@ -1295,6 +1310,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_rank,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
+            has_prefill=has_prefill,
         )
 
         if batch_desc.num_tokens == 0:
@@ -1332,6 +1348,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_desc.num_reqs or num_reqs,
                 batch_desc.num_tokens,
                 self.input_buffers,
+                is_prefilling=has_prefill,
             )
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)

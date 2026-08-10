@@ -1639,6 +1639,130 @@ def _render_table(
     return lines
 
 
+def generate_markdown_table(
+    backends: list[dict[str, Any]], title: str, is_mla_table: bool = False
+) -> str:
+    """Generate a titled markdown table from backend info."""
+    if not backends:
+        return f"## {title}\n\nNo backends found.\n"
+    has_versions = any(b.get("version") for b in backends)
+    columns = _build_columns(is_mla_table, has_versions)
+    lines = [f"## {title}", ""]
+    lines.extend(_render_table(columns, backends))
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Markdown section generators (usage, priority, legend, MLA)
+# ---------------------------------------------------------------------------
+
+
+def generate_usage_section() -> str:
+    """Generate the usage documentation section."""
+    return """## Setting the Attention Backend
+
+### Command Line
+
+There are two ways to specify the backend from the command line:
+
+#### Option 1: Using `--attention-backend` (simple)
+
+```bash
+vllm serve <model> --attention-backend FLASH_ATTN
+```
+
+This legacy option forces the same backend for both prefill and decode. Use
+`--attention-prefill-backend` or `--attention-decode-backend` to configure one
+role while leaving the other automatically selected.
+
+For standard attention, routing is batch-level: each batch runs entirely on
+one backend — pure-decode batches on the decode backend, batches containing
+any prefill on the prefill backend.
+
+MLA models instead split every batch into prefill and decode portions that
+run on separate kernels: `--attention-prefill-backend` selects the MLA
+prefill backend (e.g. `FLASH_ATTN` or `TRTLLM_RAGGED`) for the prefill
+portion, and `--attention-decode-backend` selects the MLA decode backend
+(e.g. `FLASHMLA`) for the decode portion.
+
+#### Option 2: Using role-specific fields (structured config)
+
+```bash
+# Dot notation
+vllm serve <model> --attention-config.prefill_backend FLASH_ATTN
+vllm serve <model> -ac.decode_backend FLASHINFER
+
+# JSON format
+vllm serve <model> --attention-config '{"prefill_backend": "FLASH_ATTN"}'
+vllm serve <model> -ac '{"decode_backend": "FLASHINFER"}'
+```
+
+`prefill_backend` configures prefill-containing and mixed batches;
+`decode_backend` configures pure-decode batches; whole batches are routed to
+one or the other. The legacy `backend` alias sets both fields. On MLA models —
+which split each batch rather than routing it whole — `decode_backend` is
+folded into `prefill_backend`, which selects the MLA decode backend;
+`mla_prefill_backend` selects the MLA prefill backend.
+
+> **Note:** `--attention-backend` is mutually exclusive with the role-specific
+> options and their corresponding structured config fields.
+
+### Python API
+
+Use `AttentionConfig` with the `LLM` class:
+
+```python
+from vllm import LLM
+from vllm.config import AttentionConfig
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+# Method 1: Using AttentionConfig with enum
+llm = LLM(
+    model="Qwen/Qwen3-0.6B",
+    attention_config=AttentionConfig(
+        prefill_backend=AttentionBackendEnum.FLASH_ATTN,
+    ),
+)
+
+# Method 2: Using attention_backend parameter with string
+llm = LLM(
+    model="Qwen/Qwen3-0.6B",
+    attention_backend="FLASH_ATTN",
+)
+```
+
+## Backend Selection Behavior
+
+### Manual Selection
+
+When you explicitly set a backend via `--attention-backend` or `AttentionConfig`:
+
+1. The backend is **validated** against your configuration (model dtype, head
+   size, compute capability, etc.)
+2. If the backend **doesn't support** your configuration, an error is raised
+   with the specific reason
+3. If valid, the backend is used
+
+Example error when selecting an incompatible backend:
+
+```text
+ValueError: Selected backend FLASHMLA is not valid for this configuration.
+Reason: ['compute capability not supported']
+```
+
+### Automatic Selection
+
+When no backend is specified (the default):
+
+1. vLLM iterates through backends in **priority order** (see tables below)
+2. Each backend is validated against your configuration
+3. The **first compatible backend** is selected
+4. If no backend is compatible, an error is raised listing all backends and
+   their incompatibility reasons
+"""
+
+
 def _priority_table(
     title: str,
     backends: list[str],

@@ -41,6 +41,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+        self.has_distinct_decode_attn_backend = False
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -65,6 +66,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         return True
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        self.has_distinct_decode_attn_backend = any(
+            group.backend.has_distinct_decode_backend()
+            for groups in self.target_attn_groups
+            for group in groups
+        )
         # Initialize cudagraph manager for draft prefill (draft position 0).
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
@@ -166,7 +172,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.draft_max_seq_len = min(
             max_seq_len + self.num_speculative_steps, self.max_model_len
         )
-
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of input_ids and
         # hidden_states the same as the target model's. This means, we pad each
@@ -211,6 +216,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             input_batch.num_tokens,
             max_query_len,
         )
+        has_prefill = bool(
+            self.has_distinct_decode_attn_backend and input_batch.is_prefilling_np.any()
+        )
         prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,
@@ -219,6 +227,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            has_prefill=has_prefill,
         )
 
         self._prepare_eplb_forward(input_batch.num_tokens)

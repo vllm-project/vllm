@@ -119,6 +119,7 @@ from vllm.utils.argparse_utils import (
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
+from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
@@ -696,7 +697,13 @@ class EngineArgs:
     )
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str | None = ModelConfig.override_attention_dtype
-    attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
+    attention_backend: AttentionBackendEnum | None = AttentionConfig.prefill_backend
+    attention_prefill_backend: AttentionBackendEnum | None = (
+        AttentionConfig.prefill_backend
+    )
+    attention_decode_backend: AttentionBackendEnum | None = (
+        AttentionConfig.decode_backend
+    )
 
     kv_cache_dtype_skip_layers: list[str] = get_field(
         CacheConfig, "kv_cache_dtype_skip_layers"
@@ -955,7 +962,13 @@ class EngineArgs:
             description=AttentionConfig.__doc__,
         )
         attention_group.add_argument(
-            "--attention-backend", **attention_kwargs["backend"]
+            "--attention-backend", **attention_kwargs["prefill_backend"]
+        )
+        attention_group.add_argument(
+            "--attention-prefill-backend", **attention_kwargs["prefill_backend"]
+        )
+        attention_group.add_argument(
+            "--attention-decode-backend", **attention_kwargs["decode_backend"]
         )
 
         # Mamba arguments
@@ -2359,15 +2372,77 @@ class EngineArgs:
 
         # Attention config overrides
         attention_config = copy.deepcopy(self.attention_config)
-        if self.attention_backend is not None:
-            if attention_config.backend is not None:
+        if self.attention_backend is not None and (
+            self.attention_prefill_backend is not None
+            or self.attention_decode_backend is not None
+        ):
+            raise ValueError(
+                "attention_backend is mutually exclusive with "
+                "attention_prefill_backend and attention_decode_backend"
+            )
+
+        def apply_attention_override(
+            arg_name: str,
+            value: AttentionBackendEnum | None,
+            config_name: str,
+        ) -> None:
+            if value is None:
+                return
+            if getattr(attention_config, config_name) is not None:
                 raise ValueError(
-                    "attention_backend and attention_config.backend "
+                    f"{arg_name} and attention_config.{config_name} "
                     "are mutually exclusive"
                 )
-            # Reuse the validator to handle "auto" and string-to-enum conversion
-            attention_config.backend = AttentionConfig.validate_backend_before(
-                self.attention_backend
+            setattr(
+                attention_config,
+                config_name,
+                AttentionConfig.validate_backend_before(value),
+            )
+
+        if self.attention_backend is not None:
+            apply_attention_override(
+                "attention_backend", self.attention_backend, "prefill_backend"
+            )
+            # For MLA models, `prefill_backend` selects the MLA decode backend
+            # and prefill is delegated to the MLA prefill backend, so there is
+            # no decode_backend to set.
+            if not model_config.use_mla:
+                apply_attention_override(
+                    "attention_backend", self.attention_backend, "decode_backend"
+                )
+        else:
+            if model_config.use_mla:
+                # For MLA models the prefill role maps onto the separate MLA
+                # prefill backend; the decode role flows through
+                # decode_backend, which VllmConfig folds into
+                # `prefill_backend` (the MLA decode backend).
+                if self.attention_prefill_backend is not None:
+                    if attention_config.mla_prefill_backend is not None:
+                        raise ValueError(
+                            "attention_prefill_backend and "
+                            "attention_config.mla_prefill_backend are "
+                            "mutually exclusive"
+                        )
+                    prefill_backend = self.attention_prefill_backend
+                    prefill_backend_name = (
+                        prefill_backend
+                        if isinstance(prefill_backend, str)
+                        else prefill_backend.name
+                    )
+                    if prefill_backend_name.lower() != "auto":
+                        attention_config.mla_prefill_backend = MLAPrefillBackendEnum[
+                            prefill_backend_name.upper()
+                        ]
+            else:
+                apply_attention_override(
+                    "attention_prefill_backend",
+                    self.attention_prefill_backend,
+                    "prefill_backend",
+                )
+            apply_attention_override(
+                "attention_decode_backend",
+                self.attention_decode_backend,
+                "decode_backend",
             )
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert

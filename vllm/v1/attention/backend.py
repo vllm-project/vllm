@@ -152,6 +152,23 @@ class AttentionBackend(ABC):
         return (cls.__module__, cls.__qualname__)
 
     @classmethod
+    def has_distinct_decode_backend(cls) -> bool:
+        """Whether pure-decode batches are routed to a different backend."""
+        return False
+
+    @classmethod
+    def supports_decode_backend_routing(cls) -> bool:
+        """Whether this backend may be paired with a distinct decode backend."""
+        return True
+
+    @classmethod
+    def get_cudagraph_support_backend_name(
+        cls, vllm_config: "VllmConfig", kv_cache_spec: "KVCacheSpec"
+    ) -> str:
+        """Name of the backend that determines this backend's cudagraph support."""
+        return cls.__name__
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return []
 
@@ -457,7 +474,7 @@ class CommonAttentionMetadata:
     sparse metadata for DeepSeek V4 C128A layers."""
 
     is_prefilling: torch.Tensor | None = None
-    """(batch_size,) bool tensor: True if request is still in prefill phase
+    """(batch_size,) CPU bool tensor: True if request is still in prefill phase
     (num_computed_tokens < num_prompt_tokens). Used by some backends to
     distinguish actual decodes from short extends."""
 
@@ -891,6 +908,17 @@ class AttentionImplBase(ABC, Generic[T]):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
 
+    def get_impl_for_metadata(
+        self, attn_metadata: AttentionMetadata
+    ) -> "AttentionImplBase":
+        return self
+
+    def get_impl_variants(self) -> tuple["AttentionImplBase", ...]:
+        return (self,)
+
+    def reset_kv_cache_views(self) -> None:
+        """Drop tensors that alias the KV cache so it can be freed."""
+
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""
@@ -1109,7 +1137,12 @@ def subclass_attention_backend(
     name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
 
     return type(
-        name, (attention_backend_cls,), {"get_builder_cls": lambda: builder_cls}
+        name,
+        (attention_backend_cls,),
+        {
+            "get_builder_cls": lambda: builder_cls,
+            "supports_decode_backend_routing": classmethod(lambda cls: False),
+        },
     )
 
 

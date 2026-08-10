@@ -172,7 +172,9 @@ def init_attn_backend(
             )
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
-                min_cg_attn_backend = group.backend.__name__
+                min_cg_attn_backend = group.backend.get_cudagraph_support_backend_name(
+                    vllm_config, group.kv_cache_spec
+                )
 
     attn_cg_support_info = AttentionCGSupportInfo(
         min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterable
+
 import numpy as np
 import torch
 
@@ -87,6 +89,17 @@ class RequestState:
     @property
     def num_reqs(self) -> int:
         return len(self.req_id_to_index)
+
+    def any_prefilling(self, req_ids: Iterable[str], num_reqs: int) -> bool:
+        idx_mapping_np = np.fromiter(
+            map(self.req_id_to_index.get, req_ids), dtype=np.int32, count=num_reqs
+        )
+        return bool(
+            (
+                self.num_computed_prefill_tokens[idx_mapping_np]
+                < self.prefill_len.np[idx_mapping_np]
+            ).any()
+        )
 
     def add_request(
         self,
