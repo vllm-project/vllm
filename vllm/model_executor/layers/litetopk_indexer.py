@@ -42,8 +42,8 @@ Env knobs:
   VLLM_LITETOPK_HEADROOM     bucket-scale headroom (default 0)
   VLLM_LITETOPK_OVF_LOG=1    log new candidate-count maxima
   VLLM_LITETOPK_PROBE_EVERY  overflow telemetry cadence (default 8); probed
-                              chunks synchronously validate selector status;
-                              other chunks device-trap before winner mapping
+                              chunks asynchronously validate selector status;
+                              every chunk device-traps before winner mapping
   VLLM_LITETOPK_OVF_WATERMARK
                               count row-chunks whose candidate count exceeds
                               this (default 65536); accumulated on device
@@ -134,7 +134,7 @@ if MERGE_CAP < 16384:
 # OVF_LOG: print the running max of sampled per-row candidate counts (from
 # the existing deferred 1-in-8 probe; sync-free). Sizes MERGE_CAP.
 OVF_LOG = os.environ.get("VLLM_LITETOPK_OVF_LOG", "0") == "1"
-_HOT_STREAM = {}
+_HOT_STREAM: dict = {}
 PROBE_EVERY = int(os.environ.get("VLLM_LITETOPK_PROBE_EVERY", "8"))
 if PROBE_EVERY < 1:
     raise ValueError("VLLM_LITETOPK_PROBE_EVERY must be >= 1")
@@ -159,14 +159,14 @@ CARRY_RECENT_ROWS = 1536
 # consumes both in one exact-once call, so the second wait can be elided when
 # it is provably the exact same Event object.
 DEDUP_CARRY_WAIT = os.environ.get("VLLM_LITETOPK_DEDUP_CARRY_WAIT", "1") == "1"
-_HOT_CARRY = {}
+_HOT_CARRY: dict = {}
 # GATE4 writes BUCKET-SPACE high24 candidates (affine order-preserving).
 # Both seed-prefix emission and the suffix producer use the same packed score
 # contract, so the mapped postpass can process their concatenation directly.
 
 _EXT = None
 _FAILED = False
-_AUX_CACHE = {}  # (device, head) -> (zeros[Qmax], full_head[Qmax]) int32
+_AUX_CACHE: dict = {}  # (device, head) -> (zeros[Qmax], full_head[Qmax]) int32
 _DENSE_SELECT_LOGGED = False
 _DENSE_DECLINE_LOGGED = False
 
@@ -515,7 +515,8 @@ def try_dense_topk(
 
 
 _HINTS_VALIDATED = False
-_PENDING_TELEMETRY = None  # (cuda event, pinned int32 tensor)
+# (cuda event, pinned int32 tensor, cap, K, watermark)
+_PENDING_TELEMETRY = None
 # VLLM_LITETOPK_PATH_TIMING=1: CUDA-event sub-segment timing of the fused
 # exact-once chain (seed | scan | select | map+vote+probe), keyed by 64K band
 # of S. Lazy readback of completed pairs only — sync-free.
@@ -553,7 +554,8 @@ def _seg_commit(seq_len, evs):
 _CAND_ACC = None  # (device running max[1], device over-watermark count[1]):
 # accumulated unconditionally every call so the sampled
 # probe readback still reports the complete running max
-_PROBE_RES = None  # cached (device stats, pinned buffer, event): allocating
+# Cached (device stats, device status max, pinned buffer, event): allocating
+_PROBE_RES = None
 # these per arm blocked the CPU ~17ms inside
 # cudaHostAlloc-class calls (nsys), starving the GPU
 # stream for ~3.4ms/call at 256K/Q=512 when throttled
@@ -569,8 +571,9 @@ def _check_selector_status(
     cap,
     layer,
 ):
-    # The item() is intentional: sampled calls must observe this selector's
-    # result before winner mapping and attention consume its output.
+    # Synchronous per-stage diagnostics are intentionally restricted to
+    # CUDA_LAUNCH_BLOCKING=1. Production probes use the deferred event+pinned
+    # readback below, while the map kernel checks every row device-side.
     selector_status = int(status.amax().item())
     if selector_status == 0:
         return
@@ -596,14 +599,22 @@ def _check_selector_status(
 
 
 def _poll_candidate_telemetry():
-    """Non-blocking read of the previous chunk's candidate telemetry."""
+    """Non-blocking read of the previous chunk's status and telemetry."""
     global _PENDING_TELEMETRY
     if _PENDING_TELEMETRY is not None:
-        ev, pinned, kk, watermark = _PENDING_TELEMETRY
+        ev, pinned, capv, kk, watermark = _PENDING_TELEMETRY
         if ev.query():  # finished long ago; no sync
             mx = int(pinned[0])
-            run_max = int(pinned[2])
-            over = int(pinned[3])
+            selector_status = int(pinned[2])
+            run_max = int(pinned[3])
+            over = int(pinned[4])
+            if selector_status != 0:
+                raise RuntimeError(
+                    f"[litetopk] selector status={selector_status} on a "
+                    f"probed chunk (candidate max {mx}, cap {capv}); the "
+                    "emitted top-k indices are unreliable — raise "
+                    "VLLM_LITETOPK_MERGE_CAP"
+                )
             if OVF_LOG and run_max > _TELEMETRY["candidate_max"]:
                 # run_max/over are device-accumulated over EVERY call; only
                 # the readback is sampled, so the printed max is the true
@@ -619,9 +630,9 @@ def _poll_candidate_telemetry():
             _PENDING_TELEMETRY = None
 
 
-_PREP_BUFS = {}  # (dev, NB) -> dict of caller-owned seed_prep buffers
-_SLOG_SLABS = {}  # dev -> persistent seed-GEMM logits slab (out= reuse)
-_OPS_VERIFIED = None  # required-ops hasattr walk, done once per ext load
+_PREP_BUFS: dict = {}  # (dev, NB) -> dict of caller-owned seed_prep buffers
+_SLOG_SLABS: dict = {}  # dev -> persistent seed-GEMM logits slab (out= reuse)
+_OPS_VERIFIED: dict | None = None  # required-ops hasattr walk, done once per ext load
 
 
 def _slog_slab(Q, seq_len_kv, dev):
@@ -637,16 +648,16 @@ def _slog_slab(Q, seq_len_kv, dev):
     return slab
 
 
-_CAND_BUFS = {}  # dev -> opaque U16 slab carrying delayed-high24 codes
-_VOTE_BUF_HOT = {}  # dev -> persistent stash-carry vote histogram
-_CARRY_VOTE_BUFS = {}  # (dev, layer) -> selector-fused vote slab + free event
-_CARRY_TOPK_WORKSPACE = {}  # dev -> single-side-stream partial/state workspace
+_CAND_BUFS: dict = {}  # dev -> opaque U16 slab carrying delayed-high24 codes
+_VOTE_BUF_HOT: dict = {}  # dev -> persistent stash-carry vote histogram
+_CARRY_VOTE_BUFS: dict = {}  # (dev, layer) -> selector-fused vote slab + free event
+_CARRY_TOPK_WORKSPACE: dict = {}  # dev -> side-stream partial/state workspace
 _CARRY_TOPK_MAX_BLOCKS = 128
 _CARRY_TOPK_STATE_INTS = 136
 # One pair-swap workspace is owned by each main CUDA stream.  Planning and the
 # paged gather are submitted together through the production extension; no
 # side-stream plan, prepared ticket, or per-layer permutation cache exists.
-_PAIR_PLAN_BUFS = {}
+_PAIR_PLAN_BUFS: dict = {}
 _PAIR_PLAN_EPOCH = {}
 
 
@@ -688,7 +699,9 @@ def _pair_plan_bufs(sequence_length, dev):
 
 def _retire_request_state(dev):
     """Retire all state after a confirmed per-layer carry-extent rollback."""
-    device_index = dev.index if dev.index is not None else torch.cuda.current_device()
+    device_index = (
+        dev.index if dev.index is not None else torch.accelerator.current_device_index()
+    )
     dev_key = str(torch.device("cuda", device_index))
 
     request_state = (
@@ -837,7 +850,7 @@ _CARRY_TIMING = os.environ.get("VLLM_LITETOPK_CARRY_TIMING", "0") == "1"
 _CARRY_EVERY = max(1, int(os.environ.get("VLLM_LITETOPK_CARRY_EVERY", "1")))
 _CARRY_SKIP_COUNTS: dict = {}
 _CARRY_IO_ENV = os.environ.get("VLLM_LITETOPK_CARRY_IO", "1") == "1"
-_CARRY_TIME_STATS = {"pend": [], "tot": 0.0, "n": 0}
+_CARRY_TIME_STATS: dict = {"pend": [], "tot": 0.0, "n": 0}
 
 
 def _carry_time_commit(ev0, ev1):
@@ -1009,6 +1022,7 @@ def prepare_permuted_gather(
         if ext is None or not hasattr(ext, "plan_and_permuted_paged_gather_out"):
             return None
         if carry_valid:
+            assert carry is not None
             hot = carry[0][:HOT_PREFIX]
             carry_event = carry[2]
         else:
@@ -1298,7 +1312,7 @@ def try_large_exact_once_chunk(
             if use_fp4
             else "mqa_logits_dsa_static_hot_nohist_litetopk_"
         )
-        required_ops = (
+        required_ops: tuple[str, ...] = (
             "seed_prep_litetopk_",
             scan_op,
             "map_topk_indices_and_accumulate_votes_litetopk_",
@@ -1362,7 +1376,7 @@ def try_large_exact_once_chunk(
         probe_due = call_number == 1 or call_number % PROBE_EVERY == 0
 
         def _check_static_stage(stage):
-            if not (diagnostic_stages or probe_due):
+            if not diagnostic_stages:
                 return
             _check_selector_status(
                 status,
@@ -1550,21 +1564,32 @@ def try_large_exact_once_chunk(
             torch.maximum(run_max, candidate_count.amax(0, keepdim=True), out=run_max)
             over_events.add_((candidate_count > OVF_WATERMARK).sum(dtype=torch.int32))
         if _PENDING_TELEMETRY is None and probe_due:
-            # Candidate telemetry remains asynchronous. Selector correctness
-            # was synchronously checked before the winner-map launch above.
+            # Arm one deferred event+pinned probe after the selector. The map
+            # kernel checks every status row device-side, so bad output cannot
+            # reach attention. Healthy probes are reported without a
+            # stream-wide .item() synchronization.
             if _PROBE_RES is None or _PROBE_RES[0].device != q.device:
                 _PROBE_RES = (
                     torch.empty(2, dtype=torch.int32, device=q.device),
-                    torch.empty(4, dtype=torch.int32, pin_memory=True),
+                    torch.empty(1, dtype=torch.int32, device=q.device),
+                    torch.empty(5, dtype=torch.int32, pin_memory=True),
                     torch.cuda.Event(),
                 )
-            stats, pinned, event = _PROBE_RES
+            stats, status_max, pinned, event = _PROBE_RES
             ext.cand_count_stats_litetopk_(candidate_count, stats)
+            torch.amax(status, dim=0, keepdim=True, out=status_max)
             pinned[:2].copy_(stats, non_blocking=True)
-            pinned[2:3].copy_(run_max, non_blocking=True)
-            pinned[3:4].copy_(over_events, non_blocking=True)
+            pinned[2:3].copy_(status_max, non_blocking=True)
+            pinned[3:4].copy_(run_max, non_blocking=True)
+            pinned[4:5].copy_(over_events, non_blocking=True)
             event.record()
-            _PENDING_TELEMETRY = (event, pinned, topk, OVF_WATERMARK)
+            _PENDING_TELEMETRY = (
+                event,
+                pinned,
+                cap_eff,
+                topk,
+                OVF_WATERMARK,
+            )
         if _SEG_ON and use_h2048_safe:
             _seg_commit(S, [_seg0, _seg1, _seg2, _seg3, _seg_mark()])
         if CHECK:
