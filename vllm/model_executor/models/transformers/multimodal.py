@@ -27,7 +27,11 @@ from vllm.compilation.decorators import should_torch_compile_mm_encoder
 from vllm.config.utils import getattr_iter
 from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMRoPE,
+    SupportsMultiModal,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
@@ -691,14 +695,14 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         return list(torch.split(embeddings, token_split_sizes, dim=0))
 
-    def _embed_audio(self, **kwargs) -> list[torch.Tensor] | None:
-        self.check_version("5.13.0", "audio models support")
+    def _process_audio_input(self, **kwargs) -> list[torch.Tensor] | None:
         input_features: torch.Tensor | None = kwargs.pop("input_features", None)
         if input_features is None:
             input_features = kwargs.pop("input_values", None)
         if input_features is None:
             return None
 
+        self.check_version("5.13.0", "audio models support")
         num_audio_tokens = kwargs.pop("num_audio_tokens")
         kwargs.pop("token_type_ids", None)
         kwargs.pop("mm_token_type_ids", None)
@@ -717,7 +721,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         split_sizes = num_audio_tokens.flatten().tolist()
         return self._split_embeddings(audio_embeddings, split_sizes)
 
-    def _embed_vision(self, **kwargs) -> list[torch.Tensor] | torch.Tensor | None:
+    def _process_image_input(self, **kwargs) -> list[torch.Tensor] | None:
         pixel_values: torch.Tensor | None = kwargs.pop("pixel_values", None)
         image_embeds: torch.Tensor | None = kwargs.pop("image_embeds", None)
         # Model might use `image_patches` instead of `pixel_values`
@@ -725,7 +729,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             pixel_values = kwargs.pop("image_patches", None)
 
         if image_embeds is not None:
-            return image_embeds
+            return [image_embeds]
 
         if pixel_values is None:
             return None
@@ -763,25 +767,14 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             split_sizes = num_image_patches.flatten().tolist()
             return self._split_embeddings(vision_embeddings, split_sizes)
 
-        return vision_embeddings
+        return list(vision_embeddings)
 
-    def embed_multimodal(self, **kwargs):
-        embeddings: tuple[torch.Tensor, ...] = ()
-        if "input_features" in kwargs or "input_values" in kwargs:
-            audio_embeddings = self._embed_audio(**kwargs)
-            if audio_embeddings is not None:
-                embeddings += tuple(audio_embeddings)
-        if (
-            "pixel_values" in kwargs
-            or "image_embeds" in kwargs
-            or "image_patches" in kwargs
-        ):
-            vision_embeddings = self._embed_vision(**kwargs)
-            if vision_embeddings is not None:
-                if isinstance(vision_embeddings, torch.Tensor):
-                    embeddings += (vision_embeddings,)
-                else:
-                    embeddings += tuple(vision_embeddings)
+    def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
+        # Each helper detects its own inputs. We are called once per modality, so the
+        # leftovers a helper forwards to the HF model can't belong to the other one.
+        embeddings: list[torch.Tensor] = []
+        for process_input in (self._process_audio_input, self._process_image_input):
+            embeddings.extend(process_input(**kwargs) or [])
         return embeddings
 
     def get_mrope_input_positions(
