@@ -590,7 +590,7 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
                 last_emitted_samples = audio_samples
                 if segment_traces is not None:
                     segment_traces.append(trace)
-                logger.info(
+                logger.debug(
                     "QWEN3_ASR_RT_SEGMENT_INPUT request_id=%s segment_id=%d "
                     "emit_reason=%s audio_samples=%d audio_duration_s=%.6f "
                     "new_audio_samples=%d new_audio_range_samples=[%d,%d) "
@@ -608,7 +608,7 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
                     trace["prefix_tokens"], trace["prefix_chars"], full_prompt,
                     prompt_token_ids,
                 )
-                logger.info(
+                logger.debug(
                     "QWEN3_ASR_RT_AB_INPUT request_id=%s segment_id=%d "
                     "stream_mode=%s cumulative_audio_samples=%d "
                     "llm_audio_samples=%d prompt_text=%r",
@@ -729,7 +729,7 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
             }
             if segment_traces is not None:
                 segment_traces.append(trace)
-            logger.info(
+            logger.debug(
                 "QWEN3_ASR_RT_SEGMENT_INPUT request_id=%s segment_id=%d "
                 "emit_reason=%s audio_samples=%d audio_duration_s=%.6f "
                 "new_audio_samples=%d new_audio_range_samples=[%d,%d) "
@@ -747,7 +747,7 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
                 trace["prefix_tokens"], trace["prefix_chars"], full_prompt,
                 prompt_token_ids,
             )
-            logger.info(
+            logger.debug(
                 "QWEN3_ASR_RT_AB_INPUT request_id=%s segment_id=%d "
                 "stream_mode=%s cumulative_audio_samples=%d "
                 "llm_audio_samples=%d prompt_text=%r",
@@ -806,9 +806,6 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         logger.debug(
             "QWEN3_ASR_RT_SEGMENT_LLM_OUTPUT request_id=%s segment_id=%s "
             "generated_tokens=%d token_ids=%s generated_text=%r",
-            request_id or "-", segment_id if segment_id is not None else "-",
-            len(all_ids), all_ids, text,
-        )
             request_id or "-", segment_id if segment_id is not None else "-",
             len(all_ids), all_ids, text,
         )

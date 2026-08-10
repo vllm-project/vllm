@@ -719,7 +719,7 @@ class RealtimeConnection:
                 if handshake_tokens:
                     input_stream.put_nowait(handshake_tokens)
                 input_stream.put_nowait([])
-                logger.info(
+                logger.debug(
                     "QWEN3_ASR_RT_FRESH_SEGMENT_OUTPUT request_id=%s "
                     "segment_request_id=%s segment_id=%d prompt_tokens=%d "
                     "generated_tokens=%d finish_reason=%r has_eos=%s "
@@ -749,13 +749,6 @@ class RealtimeConnection:
                 "QWEN3_ASR_RT_FRESH_REQUEST_DONE request_id=%s segments_started=%d "
                 "prompt_tokens=%d completion_tokens=%d rejected_candidates=%d "
                 "final_text=%r",
-                request_id or "-",
-                segments_started,
-                prompt_tokens_total,
-                completion_tokens_total,
-                transcript.rejected_candidates,
-                final_text,
-            )
                 request_id or "-",
                 segments_started,
                 prompt_tokens_total,
@@ -1035,10 +1028,6 @@ class RealtimeConnection:
                         invalid_reason, transcript.latest_valid_text, stable,
                         delta, confirmed_text,
                     )
-                        segment_gen_text, candidate, invalid_reason is None,
-                        invalid_reason, transcript.latest_valid_text, stable,
-                        delta, confirmed_text,
-                    )
                     logger.info(
                         "QWEN3_ASR_RT_PHASE_TIMING request_id=%s segment_id=%s "
                         "ttft_s=%.6f segment_total_s=%.6f generated_tokens=%d "
@@ -1135,7 +1124,7 @@ class RealtimeConnection:
             if not segment_signalled:
                 input_stream.put_nowait([])
 
-            logger.info(
+            logger.debug(
                 "QWEN3_ASR_RT_REQUEST_DONE request_id=%s segments_started=%d "
                 "completion_tokens=%d total_elapsed_s=%.6f final_text=%r",
                 request_id or "-", segments_started, completion_tokens_len,
