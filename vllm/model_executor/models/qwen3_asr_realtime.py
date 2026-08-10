@@ -803,9 +803,12 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
                 break
             all_ids.extend(token_ids)
         text = tokenizer.decode(all_ids, skip_special_tokens=True) if all_ids else ""
-        logger.info(
+        logger.debug(
             "QWEN3_ASR_RT_SEGMENT_LLM_OUTPUT request_id=%s segment_id=%s "
             "generated_tokens=%d token_ids=%s generated_text=%r",
+            request_id or "-", segment_id if segment_id is not None else "-",
+            len(all_ids), all_ids, text,
+        )
             request_id or "-", segment_id if segment_id is not None else "-",
             len(all_ids), all_ids, text,
         )
