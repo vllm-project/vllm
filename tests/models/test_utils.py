@@ -165,6 +165,48 @@ def test_module_skip_substr():
     assert new_mod.nested_mod.bn.num_batches_tracked.item() == 1
 
 
+class ModuleWithTiedWeights(torch.nn.Module):
+    """Mimics how models tie `lm_head` to the input embeddings."""
+
+    def __init__(self, tie: bool):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.embed_tokens = torch.nn.Linear(2, 2, bias=False)
+        self.lm_head = torch.nn.Linear(2, 2, bias=False)
+        if tie:
+            self.lm_head.weight = self.model.embed_tokens.weight
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("tie", [True, False])
+def test_module_skip_tied_weights(tie: bool):
+    """Tied weights must be loaded once, under the first of their names."""
+    mod = ModuleWithTiedWeights(tie)
+
+    weights = [
+        ("model.embed_tokens.weight", torch.Tensor([[1, 2], [3, 4]])),
+        ("lm_head.weight", torch.Tensor([[5, 6], [7, 8]])),
+    ]
+    loaded = AutoWeightsLoader(mod).load_weights(iter(weights))
+
+    if tie:
+        assert loaded == {"model.embed_tokens.weight"}
+        assert torch.all(mod.lm_head.weight == torch.Tensor([[1, 2], [3, 4]]))
+    else:
+        assert loaded == {"model.embed_tokens.weight", "lm_head.weight"}
+        assert torch.all(mod.lm_head.weight == torch.Tensor([[5, 6], [7, 8]]))
+
+
+@pytest.mark.cpu_test
+def test_module_skip_tied_weights_without_canonical():
+    """Skipping a tied weight must not leave the shared weight uninitialized."""
+    mod = ModuleWithTiedWeights(tie=True)
+
+    weights = [("lm_head.weight", torch.Tensor([[5, 6], [7, 8]]))]
+    with pytest.raises(ValueError, match="model.embed_tokens.weight"):
+        AutoWeightsLoader(mod).load_weights(iter(weights))
+
+
 class raise_if_cuda_sync:
     def __enter__(self):
         self.previous_debug_mode = torch.cuda.get_sync_debug_mode()

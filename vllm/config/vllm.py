@@ -1075,6 +1075,10 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
 
+        # "dummy" never reads the checkpoint, so there is nothing to compare to.
+        if self.model_config is not None and self.load_config.load_format != "dummy":
+            self.model_config.maybe_untie_word_embeddings()
+
         if (
             self.quant_config is not None
             and self.model_config is not None

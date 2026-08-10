@@ -214,6 +214,5 @@ class ErnieMTP(nn.Module):
                 if any(k in name for k in ("mtp", "embed_tokens", "lm_head")):
                     yield name, weight
 
-        skip_prefixes = ["lm_head"] if self.config.tie_word_embeddings else []
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)

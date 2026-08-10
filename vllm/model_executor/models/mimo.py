@@ -120,10 +120,8 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else []
         # MTP layers are loaded by the draft model, not the main model.
-        skip_prefixes.append("model.mtp_layers.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self, skip_prefixes=["model.mtp_layers."])
         return loader.load_weights(weights)
 
     def compute_logits(

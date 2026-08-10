@@ -364,6 +364,45 @@ def test_with_hf_config_leaves_unknown_model_type_without_architectures(
     assert updated.model_config.hf_config.architectures is None
 
 
+@pytest.mark.parametrize(
+    "checkpoint_tensors,tied",
+    [
+        # The checkpoint has an lm_head of its own, so it must win over the config
+        (["model.embed_tokens.weight", "lm_head.weight"], False),
+        (["model.embed_tokens.weight"], True),
+        # Contents unknown (not safetensors), so the config must be left alone
+        ([], True),
+    ],
+)
+def test_maybe_untie_word_embeddings(tmp_path, checkpoint_tensors, tied):
+    import torch
+    from safetensors.torch import save_file
+
+    if checkpoint_tensors:
+        save_file(
+            {name: torch.zeros(2, 2) for name in checkpoint_tensors},
+            tmp_path / "model.safetensors",
+        )
+
+    text_config = SimpleNamespace(tie_word_embeddings=True)
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        revision=None,
+        hf_config=SimpleNamespace(
+            tie_word_embeddings=True,
+            get_text_config=lambda: text_config,
+        ),
+        word_embeddings_untied_by_checkpoint=False,
+    )
+
+    ModelConfig.maybe_untie_word_embeddings(model_config)
+
+    # Both levels must agree, since different callers read different ones
+    assert model_config.hf_config.tie_word_embeddings is tied
+    assert text_config.tie_word_embeddings is tied
+    assert model_config.word_embeddings_untied_by_checkpoint is not tied
+
+
 def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     cfg = VllmConfig(
         scheduler_config=SchedulerConfig(

@@ -1211,6 +1211,24 @@ def get_safetensors_params_metadata(
     return _read_safetensors_metadata_in_dir(Path(local_dir))
 
 
+@cache
+def checkpoint_has_lm_head(model: str, *, revision: str | None = None) -> bool | None:
+    """Whether the checkpoint contains an `lm_head` tensor of its own.
+
+    Args:
+        model: Name or path of the model repository.
+        revision: The specific model version to use.
+
+    Returns:
+        `None` if the checkpoint contents could not be determined, for example
+        because it is not stored as safetensors.
+    """
+    metadata = get_safetensors_params_metadata(model, revision=revision)
+    if not metadata:
+        return None
+    return any(name.endswith("lm_head.weight") for name in metadata)
+
+
 def _download_mistral_config_file(model, revision) -> dict:
     config_file_name = "params.json"
     config_dict = get_hf_file_to_dict(config_file_name, model, revision)

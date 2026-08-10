@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
 )
+from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import format_gib
@@ -62,6 +63,7 @@ class BaseModelLoader(ABC):
 
             logger.debug("Loading weights on %s ...", load_device)
             self.load_weights(model, model_config)
+            maybe_retie_word_embeddings(model, model_config)
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
