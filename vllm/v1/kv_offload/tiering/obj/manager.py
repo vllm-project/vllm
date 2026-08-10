@@ -22,11 +22,11 @@ from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
-    JobMetadata,
     JobResult,
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 
@@ -267,7 +267,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._pending_results.append(JobResult(job_id=job_id, success=False))
             return
 
-        self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
+        self._transfers[job_id] = TransferEntry(
+            xfer_handle=xfer_handle,
+            files_desc=files_desc,
+            obj_handle=obj_handle,
+        )
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         result = self._lookup_manager.lookup(key, req_context)
@@ -275,7 +279,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             return LookupResult.RETRY
         return LookupResult.HIT if result else LookupResult.MISS
 
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
@@ -283,7 +287,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE
         )
 
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
@@ -317,6 +321,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                     success = False
                     logger.warning("transfer failed job=%d state=%s", job_id, state)
 
+            transfer_time = None
+            if success:
+                telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
+                transfer_time = telemetry.xferDuration / 1e6
+
             try:
                 self._agent.release_xfer_handle(entry.xfer_handle)
             except Exception as exc:
@@ -341,7 +350,13 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
 
             del self._transfers[job_id]
-            self._pending_results.append(JobResult(job_id=job_id, success=success))
+            self._pending_results.append(
+                JobResult(
+                    job_id=job_id,
+                    success=success,
+                    transfer_time=transfer_time,
+                )
+            )
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Poll transfers; a failed promotion marks its cached verdicts False

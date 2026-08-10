@@ -28,9 +28,9 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
-    JobMetadata,
     JobResult,
     SecondaryTierManager,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
@@ -411,7 +411,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return
 
     @override
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
         block_ids = job_metadata.block_ids
@@ -470,7 +470,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         )
 
     @override
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
         block_ids = job_metadata.block_ids

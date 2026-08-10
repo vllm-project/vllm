@@ -24,7 +24,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
 )
-from vllm.v1.kv_offload.tiering.base import JobMetadata
+from vllm.v1.kv_offload.tiering.base import TransferJob
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
     P2PSession,
@@ -256,13 +256,13 @@ class FakeParent:
         self,
         keys: Sequence[OffloadKey],
         ctx: ReqContext,
-    ) -> JobMetadata:
+    ) -> TransferJob:
         keys_list = list(keys)
         self.calls.append(("create_store_job", tuple(keys_list), ctx.req_id))
         block_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
         job_id = self._next_job_id
         self._next_job_id += 1
-        return JobMetadata(
+        return TransferJob(
             job_id=job_id,
             keys=keys_list,
             block_ids=block_ids,
