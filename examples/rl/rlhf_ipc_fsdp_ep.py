@@ -4,96 +4,101 @@
 RLHF with FSDP2 training and vLLM expert-parallel inference using **CUDA IPC**
 weight transfer and **packed** tensors.
 
-Layout (4 GPUs, TP=1, DP=4, EP):
-  * One Ray placement group per GPU.
-  * Each PG holds one FSDP training worker and one vLLM ``LLM`` instance
-    (sync API) using fractional GPUs so both fit on the same device.
-  * The 4 ``LLM`` instances form a DP group via env-var-based SPMD
-    coordination (``VLLM_DP_RANK``, ``VLLM_DP_SIZE``, etc.), the same
-    mechanism used by ``examples/offline_inference/data_parallel.py``.
-  * A ``DataParallelInferenceEngine`` actor spawns all 4 LLM actors,
-    waits for initialization, and orchestrates generation / weight-sync.
+Multi-rank version of `rlhf_http_ipc.py`: the inference side is a single
+`vllm serve` process with data parallelism (DP=4, TP=1, expert parallel), and
+the trainer is 4 FSDP2 Ray actors colocated on the same 4 physical GPUs.
+
+4-GPU layout (single node), all colocated:
+  Training  — 4 GPUs, PyTorch FSDP2 (fully_shard), as Ray actors
+  Inference — the same 4 GPUs, `vllm serve --data-parallel-size 4 -tp 1
+              --enable-expert-parallel` (EP_SIZE = TP x DP = 4)
+
+Ray is used only to place and drive the *training* ranks. The inference side is
+an ordinary server, so `--data-parallel-size 4` replaces what would otherwise be
+four hand-managed `LLM` actors coordinating through `VLLM_DP_*` env vars, and a
+single `HTTPVLLMWeightSyncClient` replaces a four-handle fan-out: the API
+server's DP client already broadcasts each weight-transfer RPC to every engine
+core.
+
+**Colocation.** IPC pairs the two sides by physical GPU *UUID*, not by rank
+index: every trainer rank contributes `{gpu_uuid: handle}`, rank 0 merges them,
+and each worker looks up its own UUID. So the requirement is that the set of
+trainer GPUs matches the set of server GPUs — the ordering is irrelevant. This
+script reserves the training GPUs through Ray first, asks Ray which physical
+GPUs it got, and pins the server to exactly those with `--device-ids`. That is
+robust on a node with more GPUs than this example uses.
+
+**Memory.** Both sides share each GPU, so the server is capped with
+`--gpu-memory-utilization` and the weights are moved out of the way for the
+transfer itself:
+
+  1. `/sleep?level=1`             — offload server weights to CPU, drop KV cache
+  2. `/wake_up?tags=weights`      — weights back on GPU, KV cache still free
+  3. packed IPC transfer          — overwrite weights with room to spare
+  4. `/wake_up?tags=kv_cache&tags=scheduling` — re-allocate KV cache, resume
 
 Every FSDP rank builds an ``IPCTrainerWeightTransferEngine`` (via ``trainer_init``)
 and calls ``send_weights()``; all ranks join the IPC handle all-gather, and only
-rank 0 (the sender) ships the merged handles and drives the DP LLM actors through
-its ``RayVLLMWeightSyncClient``.
+rank 0 (the sender) ships the merged handles and drives the server.
 
 This example was run on 4xH100.
+
+Run:
+    $ python examples/rl/rlhf_ipc_fsdp_ep.py
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+import time
 
 import ray
+import requests
 import torch
 import torch.distributed as dist
 from huggingface_hub import snapshot_download
-from ray.util.placement_group import placement_group
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from openai import OpenAI
 from torch.distributed.fsdp import fully_shard
 from transformers import AutoModelForCausalLM
 
-from vllm import LLM, SamplingParams
-from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
+    HTTPVLLMWeightSyncClient,
     ModuleSource,
-    RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 from vllm.utils.network_utils import get_ip, get_open_port
 
-# The inference side only needs the backend; the packed wire params are
-# trainer-side and get propagated to the workers at the init handshake.
-WEIGHT_TRANSFER_CONFIG = WeightTransferConfig(backend="ipc")
-# Packed IPC transfer with a 1 GB buffer (matches the per-chunk buffer size).
-PACKED = True
-PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024
-
-TRAIN_GPU_FRACTION = float(os.environ.get("RLHF_IPC_TRAIN_GPU_FRACTION", "0.42"))
-VLLM_GPU_FRACTION = float(os.environ.get("RLHF_IPC_VLLM_GPU_FRACTION", "0.42"))
-
 MODEL_NAME = "Qwen/Qwen3-30B-A3B"
+SERVED_MODEL_NAME = "policy"
 
 FSDP_WORLD_SIZE = 4
 INFERENCE_TP_SIZE = 1
 INFERENCE_DP_SIZE = 4
 
+# Packed IPC transfer with a 1 GB chunk buffer.
+PACKED = True
+PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024
 
-class MyLLM(LLM):
-    """LLM subclass that configures DP env vars for SPMD coordination."""
+# The server shares each GPU with a training rank, so cap what it reserves.
+SERVER_GPU_MEMORY_UTILIZATION = 0.35
 
-    def __init__(
-        self,
-        *args,
-        dp_rank: int = 0,
-        dp_size: int = 1,
-        dp_master_ip: str = "127.0.0.1",
-        dp_master_port: int = 0,
-        **kwargs,
-    ):
-        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-        os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(VLLM_GPU_FRACTION)
-        os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0"
-        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+SERVER_PORT = 8000
+BASE_URL = f"http://localhost:{SERVER_PORT}"
 
-        os.environ["VLLM_DP_RANK"] = str(dp_rank)
-        os.environ["VLLM_DP_RANK_LOCAL"] = str(dp_rank)
-        os.environ["VLLM_DP_SIZE"] = str(dp_size)
-        os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
-        os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
-
-        super().__init__(*args, **kwargs)
-
-    def ready(self):
-        return True
+PROMPTS = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
 
 
-@ray.remote(num_cpus=0, num_gpus=TRAIN_GPU_FRACTION)
+@ray.remote(num_gpus=1)
 class FSDPTrainWorker:
-    """One FSDP2 worker per GPU; colocated with vLLM DP rank via placement group."""
+    """One FSDP2 worker per GPU; colocated with one vLLM DP rank."""
 
     def __init__(
         self,
@@ -115,12 +120,6 @@ class FSDPTrainWorker:
             model_name, torch_dtype=torch.bfloat16
         )
 
-        self.weight_names = [n for n, _ in model.named_parameters()]
-        self.weight_dtype_names = [
-            str(p.dtype).split(".")[-1] for _, p in model.named_parameters()
-        ]
-        self.weight_shapes = [list(p.shape) for _, p in model.named_parameters()]
-
         for layer in model.model.layers:
             fully_shard(layer)
         fully_shard(model)
@@ -130,16 +129,21 @@ class FSDPTrainWorker:
     def get_rank(self):
         return self.rank
 
-    def get_weight_metadata(self):
-        return self.weight_names, self.weight_dtype_names, self.weight_shapes
+    def get_gpu_ids(self):
+        """Physical GPU id(s) Ray assigned to this worker.
 
-    def setup_engine(self, llm_handles):
+        The server is pinned to exactly these GPUs, which is what makes the
+        IPC handles resolvable on both sides.
+        """
+        return ray.get_gpu_ids()
+
+    def setup_engine(self, base_url: str):
         """Build the trainer IPC engine on every FSDP rank.
 
-        Called on all ranks: rank 0 becomes the sender (drives the inference
-        side and performs the no-op IPC init handshake against all DP LLM
-        actors); the other ranks hold a null-client engine and only join the
-        IPC handle all-gather during send_weights.
+        Called on all ranks: rank 0 becomes the sender (it drives the server and
+        performs the IPC init handshake, which ships the `packed` wire param);
+        the other ranks only join the IPC handle all-gather during
+        `send_weights`.
         """
         self.engine = WeightTransferTrainerFactory.trainer_init(
             init_info=IPCTrainerInitInfo(
@@ -147,7 +151,7 @@ class FSDPTrainWorker:
                 packed=PACKED,
                 packed_buffer_size_bytes=PACKED_BUFFER_SIZE_BYTES,
             ),
-            client=RayVLLMWeightSyncClient(llm_handles),
+            client=HTTPVLLMWeightSyncClient(base_url),
             source=ModuleSource(self.model),
         )
 
@@ -156,105 +160,118 @@ class FSDPTrainWorker:
 
         Called on all ranks concurrently. `send_weights` gathers each param and
         contributes to the IPC handle all-gather on every rank; only rank 0 (the
-        sender) drives start/update/finish on the inference side (the other
-        ranks' client RPCs no-op).
+        sender) drives start/update/finish on the inference side.
         """
         self.engine.send_weights()
 
 
-@ray.remote(num_cpus=1)
-class DataParallelInferenceEngine:
-    """Manages a pool of DP-sharded vLLM LLM actors.
+def start_vllm_server(model_path: str, device_ids: str) -> subprocess.Popen:
+    """Spawn a `vllm serve` HTTP server (DP+EP) pinned to `device_ids`."""
+    serve_args = [
+        "vllm",
+        "serve",
+        model_path,
+        "--served-model-name",
+        SERVED_MODEL_NAME,
+        "--tensor-parallel-size",
+        str(INFERENCE_TP_SIZE),
+        "--data-parallel-size",
+        str(INFERENCE_DP_SIZE),
+        "--enable-expert-parallel",
+        # Pins the server to the same physical GPUs as the training ranks. DP
+        # rank i takes device_ids[i * TP : (i + 1) * TP].
+        "--device-ids",
+        device_ids,
+        "--enable-sleep-mode",
+        "--enforce-eager",
+        "--load-format",
+        "dummy",
+        "--gpu-memory-utilization",
+        str(SERVER_GPU_MEMORY_UTILIZATION),
+        "--port",
+        str(SERVER_PORT),
+        "--weight-transfer-config",
+        '{"backend": "ipc"}',
+    ]
+    env = os.environ.copy()
+    env["VLLM_SERVER_DEV_MODE"] = "1"  # exposes weight-transfer + sleep endpoints
+    env["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"  # IPC handles over HTTP
+    env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    print(f"[server] Launching: {' '.join(serve_args)} (GPUs {device_ids})")
+    proc = subprocess.Popen(
+        serve_args,
+        env=env,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        start_new_session=True,
+    )
 
-    Spawns one MyLLM actor per placement group, waits for all engines to
-    finish initializing, and exposes generation / weight-sync helpers.
+    # Wait for the server to come up (model load can take a while).
+    deadline = time.monotonic() + 1800
+    while True:
+        if proc.poll() is not None:
+            raise RuntimeError("vLLM server exited before becoming ready.")
+        try:
+            if requests.get(f"{BASE_URL}/health", timeout=5).status_code == 200:
+                break
+        except requests.RequestException:
+            pass
+        if time.monotonic() > deadline:
+            raise RuntimeError("vLLM server failed to start in time.")
+        time.sleep(2)
+    print("[server] Ready.")
+    return proc
+
+
+def generate_completions(client: OpenAI, prompts: list[str]) -> list[str]:
+    """Generate completions via the OpenAI HTTP API.
+
+    The server load-balances across its DP ranks, so the caller does not shard
+    the prompt list itself.
     """
+    results = []
+    for prompt in prompts:
+        response = client.completions.create(
+            model=SERVED_MODEL_NAME,
+            prompt=prompt,
+            max_tokens=32,
+            temperature=0,
+        )
+        results.append(response.choices[0].text)
+    return results
 
-    def __init__(
-        self,
-        model: str,
-        pgs: list,
-        dp_master_ip: str,
-        dp_master_port: int,
-    ):
-        dp_size = len(pgs)
-        self.llm_actors = []
-        for r in range(dp_size):
-            sched = PlacementGroupSchedulingStrategy(
-                placement_group=pgs[r],
-                placement_group_capture_child_tasks=True,
-            )
-            actor = (
-                ray.remote(num_cpus=0, num_gpus=0)(MyLLM)
-                .options(scheduling_strategy=sched)
-                .remote(
-                    model=model,
-                    enforce_eager=True,
-                    tensor_parallel_size=INFERENCE_TP_SIZE,
-                    distributed_executor_backend="ray",
-                    enable_expert_parallel=True,
-                    gpu_memory_utilization=0.35,
-                    weight_transfer_config=WEIGHT_TRANSFER_CONFIG,
-                    enable_sleep_mode=True,
-                    load_format="dummy",
-                    dp_rank=r,
-                    dp_size=dp_size,
-                    dp_master_ip=dp_master_ip,
-                    dp_master_port=dp_master_port,
-                )
-            )
-            self.llm_actors.append(actor)
 
-        ray.get([actor.ready.remote() for actor in self.llm_actors])
+def sleep_engine(base_url: str, level: int) -> None:
+    """Put the engine to sleep (level 1 offloads weights, drops KV cache)."""
+    response = requests.post(f"{base_url}/sleep", params={"level": level}, timeout=600)
+    response.raise_for_status()
 
-    def get_llm_actors(self):
-        return self.llm_actors
 
-    def generate(self, prompts: list[str], sampling_params):
-        """Distribute prompts round-robin across DP ranks and collect results."""
-        dp_size = len(self.llm_actors)
-        per_rank: list[list[str]] = [[] for _ in range(dp_size)]
-        indices: list[list[int]] = [[] for _ in range(dp_size)]
+def wake_up_engine(base_url: str, tags: list[str] | None = None) -> None:
+    """Wake the engine, optionally only for specific memory tags."""
+    params = [("tags", tag) for tag in tags] if tags else None
+    response = requests.post(f"{base_url}/wake_up", params=params, timeout=600)
+    response.raise_for_status()
 
-        for i, prompt in enumerate(prompts):
-            rank = i % dp_size
-            per_rank[rank].append(prompt)
-            indices[rank].append(i)
 
-        refs = [
-            actor.generate.remote(per_rank[r], sampling_params)
-            for r, actor in enumerate(self.llm_actors)
-            if per_rank[r]
-        ]
-        all_outputs = ray.get(refs)
-
-        ordered = [None] * len(prompts)
-        rank_idx = 0
-        for r in range(dp_size):
-            if per_rank[r]:
-                for local_i, orig_i in enumerate(indices[r]):
-                    ordered[orig_i] = all_outputs[rank_idx][local_i]
-                rank_idx += 1
-        return ordered
-
-    def sleep(self, level: int = 0):
-        ray.get([actor.sleep.remote(level=level) for actor in self.llm_actors])
-
-    def wake_up(self, tags: list[str] | None = None):
-        ray.get([actor.wake_up.remote(tags=tags) for actor in self.llm_actors])
+def print_generations(label: str, prompts: list[str], outputs: list[str]) -> None:
+    print("-" * 60)
+    print(label)
+    print("-" * 60)
+    for prompt, text in zip(prompts, outputs):
+        print(f"Prompt: {prompt!r}")
+        print(f"Generated: {text!r}")
+        print("-" * 60)
 
 
 def main():
     ray.init(
         runtime_env={
             "env_vars": {
+                # The trainer pickles IPC handles for the HTTP client.
                 "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             }
         }
-    )
-
-    assert TRAIN_GPU_FRACTION + VLLM_GPU_FRACTION <= 1.0, (
-        "Train + vLLM GPU fractions must sum to at most 1.0 per bundle."
     )
 
     local_model_path = snapshot_download(MODEL_NAME)
@@ -262,105 +279,75 @@ def main():
 
     fsdp_master_addr = get_ip()
     fsdp_master_port = get_open_port()
-    dp_master_port = get_open_port()
-    dp_master_ip = get_ip()
 
-    # Create one placement group per DP rank (one GPU each).
-    pgs = []
-    for _ in range(INFERENCE_DP_SIZE):
-        pg = placement_group([{"GPU": 1, "CPU": 1}])
-        pgs.append(pg)
-    ray.get([pg.ready() for pg in pgs])
-    print(f"[init] {len(pgs)} placement groups ready.")
-
-    # Launch FSDP training workers, one per PG.
-    scheduling = [
-        PlacementGroupSchedulingStrategy(
-            placement_group=pgs[r],
-            placement_group_capture_child_tasks=True,
-        )
-        for r in range(FSDP_WORLD_SIZE)
-    ]
-
+    # Launch the FSDP training workers first so Ray reserves their GPUs, then
+    # pin the server to those same physical GPUs. IPC needs the two sets to
+    # match; letting Ray choose first works on any node size.
     fsdp_workers = [
-        FSDPTrainWorker.options(scheduling_strategy=scheduling[r]).remote(
+        FSDPTrainWorker.remote(
             local_model_path,
-            r,
+            rank,
             FSDP_WORLD_SIZE,
             fsdp_master_addr,
             fsdp_master_port,
         )
-        for r in range(FSDP_WORLD_SIZE)
+        for rank in range(FSDP_WORLD_SIZE)
     ]
     ray.get([w.get_rank.remote() for w in fsdp_workers])
-    print(f"[init] {FSDP_WORLD_SIZE} FSDP workers ready.")
+    print(f"[init] {FSDP_WORLD_SIZE} FSDP training workers ready.")
 
-    # Launch DP inference engine (spawns and initializes all LLM actors).
-    inference_engine = DataParallelInferenceEngine.remote(
-        model=local_model_path,
-        pgs=pgs,
-        dp_master_ip=dp_master_ip,
-        dp_master_port=dp_master_port,
+    training_gpus = sorted(
+        int(g)
+        for ids in ray.get([w.get_gpu_ids.remote() for w in fsdp_workers])
+        for g in ids
     )
-    llm_actors = ray.get(inference_engine.get_llm_actors.remote())
-    print(f"[init] {INFERENCE_DP_SIZE} LLM actors ready.")
+    if len(training_gpus) != INFERENCE_TP_SIZE * INFERENCE_DP_SIZE:
+        raise RuntimeError(
+            f"Need {INFERENCE_TP_SIZE * INFERENCE_DP_SIZE} colocated GPUs but "
+            f"Ray assigned training to {training_gpus}."
+        )
+    device_ids = ",".join(str(g) for g in training_gpus)
+    print(f"[init] Colocating training and inference on GPUs [{device_ids}].")
 
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-    sampling_params = SamplingParams(temperature=0)
+    server_proc = start_vllm_server(local_model_path, device_ids)
+    try:
+        client = OpenAI(base_url=f"{BASE_URL}/v1", api_key="EMPTY")
 
-    print("[generate] Generating with dummy weights...")
-    outputs = ray.get(inference_engine.generate.remote(prompts, sampling_params))
-    print("-" * 60)
-    print("BEFORE weight sync (dummy weights):")
-    print("-" * 60)
-    for output in outputs:
-        print(f"Prompt: {output.prompt!r}")
-        print(f"Generated: {output.outputs[0].text!r}")
-        print("-" * 60)
+        print("[generate] Generating with dummy weights...")
+        outputs = generate_completions(client, PROMPTS)
+        print_generations("BEFORE weight sync (dummy weights):", PROMPTS, outputs)
 
-    # --- Weight transfer ---
-    # The rank-0 FSDP worker owns the trainer engine and drives the inference
-    # side (init/start/update/finish) for all DP actors via the Ray client.
-    print("[transfer] Initializing IPC weight transfer (all FSDP ranks)...")
-    ray.get([w.setup_engine.remote(llm_actors) for w in fsdp_workers])
+        # --- Weight transfer ---
+        # Every FSDP rank builds an engine; rank 0 drives the server for all DP
+        # ranks through one HTTP client.
+        print("[transfer] Initializing IPC weight transfer (all FSDP ranks)...")
+        ray.get([w.setup_engine.remote(BASE_URL) for w in fsdp_workers])
 
-    # Two-phase sleep/wake pattern:
-    # 1. sleep(level=1) — offload weights to CPU, discard KV cache
-    # 2. wake_up(tags=["weights"]) — bring weights back to GPU (KV cache still free)
-    # 3. IPC weight transfer — overwrite weights, plenty of room without KV cache
-    # 4. wake_up(tags=["kv_cache"]) — re-allocate KV cache for inference
-    print("[sync] Sleeping engines (offload weights + free KV cache)...")
-    ray.get(inference_engine.sleep.remote(level=1))
+        print("[sync] Sleeping engine (offload weights + free KV cache)...")
+        sleep_engine(BASE_URL, level=1)
 
-    print("[sync] Waking weights (KV cache stays free)...")
-    ray.get(inference_engine.wake_up.remote(tags=["weights"]))
+        print("[sync] Waking weights (KV cache stays free)...")
+        wake_up_engine(BASE_URL, tags=["weights"])
 
-    # All FSDP ranks participate in the IPC handle all-gather; rank 0's engine
-    # additionally drives start_weight_update / update_weights /
-    # finish_weight_update on the inference side.
-    print("[sync] Packed IPC transfer FSDP → vLLM...")
-    ray.get([w.gather_and_broadcast_weights_ipc.remote() for w in fsdp_workers])
-    print("[sync] Weight transfer complete.")
+        # All FSDP ranks participate in the IPC handle all-gather; rank 0's
+        # engine additionally drives start/update/finish on the server.
+        print("[sync] Packed IPC transfer FSDP -> vLLM...")
+        ray.get([w.gather_and_broadcast_weights_ipc.remote() for w in fsdp_workers])
+        print("[sync] Weight transfer complete.")
 
-    print("[sync] Waking KV cache + scheduling...")
-    ray.get(inference_engine.wake_up.remote(tags=["kv_cache", "scheduling"]))
+        print("[sync] Waking KV cache + scheduling...")
+        wake_up_engine(BASE_URL, tags=["kv_cache", "scheduling"])
 
-    print("[generate] Generating with synced weights...")
-    outputs_updated = ray.get(
-        inference_engine.generate.remote(prompts, sampling_params)
-    )
-    print("-" * 60)
-    print("AFTER weight sync (real weights):")
-    print("-" * 60)
-    for output in outputs_updated:
-        print(f"Prompt: {output.prompt!r}")
-        print(f"Generated: {output.outputs[0].text!r}")
-        print("-" * 60)
+        print("[generate] Generating with synced weights...")
+        outputs_updated = generate_completions(client, PROMPTS)
+        print_generations("AFTER weight sync (real weights):", PROMPTS, outputs_updated)
+    finally:
+        print("[server] Shutting down...")
+        server_proc.terminate()
+        try:
+            server_proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            server_proc.kill()
 
 
 if __name__ == "__main__":

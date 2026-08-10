@@ -342,32 +342,6 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         raise NotImplementedError
 
-    @staticmethod
-    @abstractmethod
-    def trainer_send_weights(
-        iterator: Iterator[Any],
-        trainer_args: dict[str, Any] | Any,
-    ) -> None:
-        """
-        Send weights from trainer to inference workers.
-
-        This is a static method that can be called from the trainer process
-        to send weights to all inference workers.
-
-        Args:
-            iterator: Iterator of backend-specific items to send.
-            trainer_args: Dictionary containing backend-specific arguments needed
-                         to send weights. The structure depends on the backend:
-                         - NCCL: Contains 'group', 'src', 'packed', etc.
-                         - IPC: Contains 'mode' ('http' or 'ray'),
-                                'llm_handle' (for Ray), 'url' (for HTTP), etc.
-
-        Example:
-            >>> param_iter = ((n, p) for n, p in model.named_parameters())
-            >>> engine.trainer_send_weights(param_iter, trainer_args)
-        """
-        raise NotImplementedError
-
 
 @runtime_checkable
 class VLLMWeightSyncClient(Protocol):
