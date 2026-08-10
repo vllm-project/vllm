@@ -760,10 +760,8 @@ class EngineCore:
         self._pending_notifications = []
 
     def gather_worker_notifications(self) -> None:
-        """Collect notifications from every worker rank and publish them.
-
-        An rpc round trip; callers own the cadence.
-        """
+        """Collect and publish every rank's notifications; an rpc round trip,
+        so callers own the cadence."""
         try:
             per_rank = self.model_executor.collective_rpc("take_notifications")
         except Exception:
@@ -1428,11 +1426,8 @@ class EngineCoreProc(EngineCore):
         raise SystemExit
 
     def _maybe_gather_worker_notifications(self) -> None:
-        """Poll workers for spontaneously published notifications.
-
-        Between steps, not inside one: the rpc queues behind any in-flight
-        execute_model and would otherwise stall on a rank mid-forward.
-        """
+        """Poll workers on an interval, between steps so the rpc cannot
+        stall a rank mid-forward."""
         interval = envs.VLLM_WORKER_NOTIFICATION_POLL_INTERVAL
         if not interval:
             return
@@ -1929,11 +1924,8 @@ class EngineCoreProc(EngineCore):
         return tracker
 
     def _publish_notifications(self, notifications: list[EngineNotification]) -> None:
-        """Broadcast to every frontend.
-
-        Attaching to one client's step outputs would leave the others stale,
-        and an idle engine has no step outputs at all.
-        """
+        """Broadcast to every frontend; attaching to one client's step
+        outputs would leave the others stale."""
         for client_index in range(len(self.addresses.outputs)):
             self.output_queue.put_nowait(
                 (client_index, EngineCoreOutputs(engine_notifications=notifications))
@@ -2214,13 +2206,15 @@ class DPEngineCoreProc(EngineCoreProc):
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
-
+        # Load-time producers have already run; nothing else will gather them.
+        self.gather_worker_notifications()
         # Loop until process is sent a SIGINT or SIGTERM
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # Publish request counts before and after GPU step to ensure freshness.
             self._maybe_publish_request_counts()
+            self._maybe_gather_worker_notifications()
 
             if self.eep_scaling_state is not None:
                 state = self.eep_scaling_state
