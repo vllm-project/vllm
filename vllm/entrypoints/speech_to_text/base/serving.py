@@ -179,6 +179,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 y, sr = load_audio(
                     buf,
                     sr=self.asr_config.sample_rate,
+                    mono=True,
                     max_duration_s=self.max_audio_decode_duration_s,
                     max_decode_bytes=self.max_audio_decode_bytes,
                 )

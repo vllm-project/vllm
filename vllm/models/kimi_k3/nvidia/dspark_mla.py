@@ -6,12 +6,14 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
@@ -20,29 +22,33 @@ from vllm.model_executor.models.utils import (
     get_draft_quant_config,
     maybe_prefix,
 )
+from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
 from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.worker.workspace import current_workspace_manager
 
 
-class ReplicatedDSparkMarkovHead(DSparkMarkovHead):
-    """DSpark Markov head with full weights on every TP rank."""
-
-    def __init__(
-        self,
-        vocab_size: int,
-        draft_vocab_size: int,
-        markov_rank: int,
-        prefix: str,
-    ) -> None:
-        # TODO: Remove this mypy workaround once the K3 PR is fully merged.
-        super().__init__(  # type: ignore[call-arg]
-            vocab_size,
-            draft_vocab_size,
-            markov_rank,
-            prefix,
-            replicated=True,
+def _duplicate_context_kv_weights(
+    weights: Iterable[tuple[str, torch.Tensor]], num_layers: int
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Load each layer's KV projection into the cross-layer linear."""
+    for name, weight in weights:
+        yield name, weight
+        layer_prefix, marker, param_name = name.partition(
+            ".self_attn.kv_a_proj_with_mqa."
         )
+        if not marker:
+            continue
+        layer_idx_str = layer_prefix.rsplit(".", 1)[-1]
+        if not layer_idx_str.isdecimal():
+            continue
+        layer_idx = int(layer_idx_str)
+        if layer_idx >= num_layers:
+            continue
+        fused_weight = weight.detach()
+        fused_weight.shard_id = layer_idx
+        yield f"context_kv_proj.{param_name}", fused_weight
 
 
 class K3DSparkDecoderLayer(nn.Module):
@@ -74,11 +80,15 @@ class K3DSparkDecoderLayer(nn.Module):
             use_rope=True,
             non_causal_multi_token_decode=True,
         )
+        # Both row-parallel outputs stay un-reduced; their all-reduces are fused
+        # into the RMSNorm that follows via fused_allreduce_rms_norm.
+        self.self_attn.o_proj.reduce_results = False
         self.mlp = KimiMLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
+            reduce_results=False,
             prefix=maybe_prefix(prefix, f"layers.{start_layer_id + layer_idx}.mlp"),
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -93,16 +103,23 @@ class K3DSparkDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
+            # First layer: hidden_states is the (already reduced) embedding.
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = fused_allreduce_rms_norm(
+                hidden_states, residual, self.input_layernorm
+            )
 
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = fused_allreduce_rms_norm(
+            hidden_states, residual, self.post_attention_layernorm
+        )
+        # The MLP output is reduced by the next layer's input_layernorm (or by
+        # the model's final_norm).
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -147,14 +164,26 @@ class K3DSparkModel(nn.Module):
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
         )
+        kv_width = self.config.kv_lora_rank + self.config.qk_rope_head_dim
+        self.context_kv_proj = MergedColumnParallelLinear(
+            self.config.hidden_size,
+            [kv_width] * self.config.num_hidden_layers,
+            bias=False,
+            return_bias=False,
+            quant_config=self.quant_config,
+            prefix=maybe_prefix(
+                prefix,
+                f"layers.{start_layer_id}.self_attn.fused_qkv_a_proj",
+            ),
+            disable_tp=True,
+        )
         self.final_norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-        self.markov_head = ReplicatedDSparkMarkovHead(
+        self.markov_head = DSparkMarkovHead(
             self.config.vocab_size,
             self.config.draft_vocab_size,
             self.config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
-        self._context_kv_fusion_available: bool | None = None
         self._max_num_context_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
@@ -174,76 +203,19 @@ class K3DSparkModel(nn.Module):
         context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
         """Project target-derived context into each draft layer's latent cache."""
-        if self._context_kv_fusion_available is None:
-            self._build_fused_context_kv_buffers()
-        if self._context_kv_fusion_available:
-            self._precompute_fused_context_kv(
-                context_states, context_positions, context_slot_mapping
-            )
-            return
+        if not hasattr(self, "_num_context_layers"):
+            self._build_fused_context_kv_metadata()
+        self._precompute_fused_context_kv(
+            context_states, context_positions, context_slot_mapping
+        )
 
-        # Quantized fallback. Directly invoking the projection modules preserves
-        # their quantization methods, at the cost of also computing unused Q rows.
-        for layer_idx, layer in enumerate(self.layers):
-            attn = layer.self_attn
-            assert attn.fused_qkv_a_proj is not None
-            assert attn.q_lora_rank is not None
-            assert attn.rotary_emb is not None
-            qkv_lora = attn.fused_qkv_a_proj(context_states)[0]
-            kv_lora = qkv_lora[..., attn.q_lora_rank :]
-            kv_c, k_pe = kv_lora.split(
-                [attn.kv_lora_rank, attn.qk_rope_head_dim], dim=-1
-            )
-            kv_c = attn.kv_a_layernorm(kv_c)
-            k_pe = k_pe.unsqueeze(1)
-            # DeepSeek YaRN's FlashInfer path requires paired Q/K tensors.
-            # The vLLM CUDA op supports rotating one tensor in place and
-            # consumes the same (possibly scaled fp32) cos/sin cache.
-            rotary_emb = attn.rotary_emb
-            ops.rotary_embedding(
-                context_positions,
-                k_pe,
-                None,
-                rotary_emb.head_size,
-                rotary_emb.cos_sin_cache,
-                rotary_emb.is_neox_style,
-            )
-
-            slot_mapping = (
-                context_slot_mapping[layer_idx]
-                if isinstance(context_slot_mapping, (list, tuple))
-                else context_slot_mapping
-            )
-            if slot_mapping is None:
-                continue
-            attn.impl.do_kv_cache_update(
-                kv_c,
-                k_pe,
-                attn.kv_cache,
-                slot_mapping,
-                attn.kv_cache_dtype,
-                attn._k_scale,
-            )
-
-    def _build_fused_context_kv_buffers(self) -> None:
-        """Build a cross-layer KV-only A projection after checkpoint loading."""
-        if self.quant_config is not None:
-            self._context_kv_fusion_available = False
-            return
-
+    def _build_fused_context_kv_metadata(self) -> None:
+        """Build cross-layer metadata after checkpoint loading."""
         attentions = [layer.self_attn for layer in self.layers]
-        if not attentions or any(
-            attn.fused_qkv_a_proj is None
-            or not hasattr(attn.fused_qkv_a_proj, "weight")
-            for attn in attentions
-        ):
-            self._context_kv_fusion_available = False
-            return
-
+        assert attentions
         attn0 = attentions[0]
         assert attn0.q_lora_rank is not None
         kv_width = attn0.kv_lora_rank + attn0.qk_rope_head_dim
-        kv_weights = []
         for attn in attentions:
             assert attn.q_lora_rank is not None
             assert (
@@ -253,16 +225,6 @@ class K3DSparkModel(nn.Module):
                 and attn.kv_a_layernorm.variance_epsilon
                 == attn0.kv_a_layernorm.variance_epsilon
             ), "All MLA DSpark layers must share their latent KV geometry."
-            kv_weights.append(
-                attn.fused_qkv_a_proj.weight.detach().narrow(
-                    0, attn.q_lora_rank, kv_width
-                )
-            )
-
-        # [L * (kv_lora_rank + rope_dim), hidden_size]. The underlying fused
-        # A weights are replicated (`disable_tp=True`), so this is valid on
-        # every TP rank without communication.
-        self._fused_context_kv_weight = torch.cat(kv_weights, dim=0)
         self._context_kv_norm_weights = torch.stack(
             [attn.kv_a_layernorm.weight.detach() for attn in attentions], dim=0
         ).contiguous()
@@ -271,12 +233,6 @@ class K3DSparkModel(nn.Module):
         self._context_kv_lora_rank = attn0.kv_lora_rank
         self._context_rope_dim = attn0.qk_rope_head_dim
         self._context_rms_norm_eps = attn0.kv_a_layernorm.variance_epsilon
-        self._context_positions_repeated = torch.empty(
-            self._num_context_layers * self._max_num_context_tokens,
-            dtype=torch.int64,
-            device=self._fused_context_kv_weight.device,
-        )
-        self._context_kv_fusion_available = True
 
     def _precompute_fused_context_kv(
         self,
@@ -289,7 +245,7 @@ class K3DSparkModel(nn.Module):
 
         # One KV-only GEMM replaces five full Q+KV GEMMs. For K3 this projects
         # 5*576 rows rather than 5*2112 rows (72.7% fewer A-projection FLOPs).
-        all_kv = F.linear(context_states, self._fused_context_kv_weight)
+        all_kv = self.context_kv_proj(context_states)
         all_kv = all_kv.view(num_ctx, num_layers, self._context_kv_width)
         all_kv_c = all_kv[..., : self._context_kv_lora_rank]
         all_k_pe = all_kv[..., self._context_kv_lora_rank :]
@@ -307,7 +263,10 @@ class K3DSparkModel(nn.Module):
 
         all_k_pe = all_k_pe.permute(1, 0, 2).contiguous()
         all_k_pe_flat = all_k_pe.view(num_layers * num_ctx, 1, self._context_rope_dim)
-        repeated_positions = self._context_positions_repeated[: num_layers * num_ctx]
+        (repeated_positions,) = current_workspace_manager().get_simultaneous(
+            ((num_layers * self._max_num_context_tokens,), torch.int64),
+        )
+        repeated_positions = repeated_positions[: num_layers * num_ctx]
         repeated_positions.view(num_layers, num_ctx).copy_(context_positions)
         # Keep the single-tensor context RoPE on vLLM's optimized CUDA op;
         # DeepSeek YaRN's FlashInfer wrapper assumes a non-null key tensor.
@@ -430,7 +389,9 @@ class K3DSparkModel(nn.Module):
                 hidden_states=hidden_states,
                 residual=residual,
             )
-        hidden_states, _ = self.final_norm(hidden_states, residual)
+        hidden_states, _ = fused_allreduce_rms_norm(
+            hidden_states, residual, self.final_norm
+        )
         return hidden_states
 
 
@@ -522,6 +483,8 @@ class K3DSparkForCausalLM(nn.Module):
             self,
             skip_substrs=list(self.checkpoint_skip_substrs),
         )
+        # read: 1. all weights. 2. context kv weights
+        weights = _duplicate_context_kv_weights(weights, len(self.model.layers))
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self.model._build_fused_context_kv_buffers()
+        self.model._build_fused_context_kv_metadata()
         return loaded_weights

@@ -48,9 +48,11 @@ MTPModelTypes = Literal[
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
+    "bailing_hybrid_v3_mtp",
     "minimax_m3_mtp",
     "bailing_hybrid_mtp",
     "mtp",
+    "kimi_k3_mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
     "hy_v3_mtp",
@@ -288,6 +290,10 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
+    dspark_draft_topk: int | None = Field(default=None, ge=1)
+    """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
+    top-k base-logit candidates. Requires draft tensor parallel size 1."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -353,6 +359,16 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["OpenPanguMTPModel"]}
+            )
+
+        if hf_config.model_type == "kimi_k3":
+            # Kimi-K3 keeps the text-model fields (incl. the MTP layer count)
+            # nested under ``text_config`` (a KimiLinearConfig).
+            text_config = getattr(hf_config, "text_config", hf_config)
+            n_predict = getattr(text_config, "num_nextn_predict_layers", None)
+            hf_config.model_type = "kimi_k3_mtp"
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["KimiK3MTPModel"]}
             )
 
         if hf_config.architectures[0] == "MiMoForCausalLM":
@@ -474,7 +490,9 @@ class SpeculativeConfig:
             )
 
         architectures = getattr(hf_config, "architectures", []) or []
-        if (
+        if initial_architecture == "BailingMoeV3ForCausalLM":
+            hf_config.model_type = "bailing_hybrid_v3_mtp"
+        elif (
             hf_config.model_type == "bailing_hybrid"
             or "BailingMoeV2_5ForCausalLM" in architectures
         ):
@@ -485,6 +503,14 @@ class SpeculativeConfig:
                 {
                     "n_predict": n_predict,
                     "architectures": ["BailingMoeV25MTPModel"],
+                }
+            )
+        if hf_config.model_type == "bailing_hybrid_v3_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["BailingMoeV3MTPModel"],
                 }
             )
 
@@ -502,8 +528,16 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
             )
-        if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
-            is_moe = hf_config.model_type == "qwen3_5_moe"
+        if hf_config.model_type in (
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+        ):
+            # Checkpoints that ship only the text config resolve to the
+            # `qwen3_5_text` / `qwen3_5_moe_text` model types and carry the
+            # same `mtp_num_hidden_layers` field as the multimodal ones.
+            is_moe = hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text")
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
             hf_config.update(
@@ -512,15 +546,28 @@ class SpeculativeConfig:
                     "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
                 }
             )
-        if hf_config.model_type == "intern_s2_preview":
+        if hf_config.model_type in ("intern_s2_preview", "interns2_mobius"):
+            is_mobius = hf_config.model_type == "interns2_mobius"
             text_config = getattr(hf_config, "text_config", None)
-            is_moe = getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            is_moe = is_mobius or (
+                getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            )
+            if is_mobius:
+                assert text_config is not None
+                text_config.model_type = "qwen3_5_moe_text"
+                text_config.num_experts = text_config.mtp_num_experts
+                text_config.num_experts_per_tok = text_config.mtp_num_experts_per_tok
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
+            architecture = (
+                "InternS2MobiusMTP"
+                if is_mobius
+                else ("Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP")
+            )
             hf_config.update(
                 {
                     "n_predict": n_predict,
-                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                    "architectures": [architecture],
                 }
             )
         if hf_config.model_type in ("longcat_flash", "longcat_flash_ngram"):
@@ -943,6 +990,7 @@ class SpeculativeConfig:
                 if self.method == "dspark" and (
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
+                    and "K3DSparkModel" not in self.draft_model_config.architectures
                 ):
                     # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
                     # and its weights ship in the target checkpoint.
@@ -971,6 +1019,16 @@ class SpeculativeConfig:
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
+
+                if (
+                    self.method == "dspark"
+                    and "K3DSparkModel" in self.draft_model_config.architectures
+                    and self.target_parallel_config.decode_context_parallel_size > 1
+                ):
+                    raise ValueError(
+                        "MLA DSpark does not currently support decode context "
+                        "parallelism; set decode_context_parallel_size=1."
+                    )
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
@@ -1010,6 +1068,10 @@ class SpeculativeConfig:
                         "Inkling MTP currently supports exactly one speculative token"
                     )
 
+                if self.dspark_draft_topk is not None and self.method != "dspark":
+                    raise ValueError("dspark_draft_topk is only supported by DSpark")
+
+                dspark_draft_topk = None
                 if self.method == "dspark":
                     # DSpark is a semi-autoregressive *block* drafter. A
                     # speculative length smaller than the checkpoint's block
@@ -1035,6 +1097,32 @@ class SpeculativeConfig:
                             "larger (e.g. 7)."
                         )
 
+                    hf_config = self.draft_model_config.hf_config
+                    dspark_draft_topk = self.dspark_draft_topk
+                    if dspark_draft_topk is None:
+                        dspark_draft_topk = getattr(
+                            hf_config, "dspark_draft_topk", None
+                        )
+                    if dspark_draft_topk is not None:
+                        draft_vocab_size = (
+                            getattr(hf_config, "draft_vocab_size", None)
+                            or hf_config.vocab_size
+                        )
+                        if not 1 <= dspark_draft_topk <= draft_vocab_size:
+                            raise ValueError(
+                                "dspark_draft_topk must be between 1 and the "
+                                f"draft vocabulary size ({draft_vocab_size})"
+                            )
+                        if (
+                            "Qwen3DSparkModel"
+                            not in self.draft_model_config.architectures
+                        ):
+                            raise ValueError(
+                                "dspark_draft_topk is only supported by "
+                                "Qwen3DSparkModel"
+                            )
+                        hf_config.dspark_draft_topk = dspark_draft_topk
+
                 self.draft_tensor_parallel_size = (
                     SpeculativeConfig._verify_and_get_draft_tp(
                         self.target_parallel_config,
@@ -1042,7 +1130,6 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config,
                     )
                 )
-
                 self.draft_model_config.max_model_len = (
                     SpeculativeConfig._maybe_override_draft_max_model_len(
                         self.max_model_len,
@@ -1387,6 +1474,14 @@ class SpeculativeConfig:
 
     def use_ngram_gpu(self) -> bool:
         return self.method == "ngram_gpu"
+
+    def use_multi_module_mtp(self) -> bool:
+        if self.method != "mtp" or self.draft_model_config is None:
+            return False
+        num_mtp_layers = getattr(
+            self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
+        )
+        return min(num_mtp_layers, self.num_speculative_tokens) > 1
 
     def __repr__(self) -> str:
         method = self.method

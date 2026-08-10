@@ -1022,7 +1022,7 @@ def cutlass_fp4_moe_mm(
     An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs
     the gemms for each combination based on the specified problem sizes.
 
-    This is used as the MoE gemm during NVFP4 Quantized FusedMoE forward.
+    This is used as the MoE gemm during NVFP4 Quantized MoERunner forward.
     - a/b_tensors: the NVFP4 a_ptrs and b_ptrs tensors which are quantized
                      input and expert weights.
     - a_/b_scales: The blockscales in FP8-E4M3 precision
@@ -2003,6 +2003,23 @@ def scaled_int8_quant(
     Returns:
       tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] : Output int8 tensor, scales, and optionally azp.
     """
+    if current_platform.is_xpu():
+        # XPU has no _C int8 quant op; use the torch.compile reference.
+        if not symmetric:
+            raise NotImplementedError(
+                "asymmetric int8 activation quantization is unsupported on XPU"
+            )
+        if scale is not None:
+            q = (input.to(torch.float32) / scale).round().clamp(-128, 127)
+            return q.to(torch.int8), scale, None
+
+        from vllm._xpu_ops import xpu_ops
+
+        q, scales, _ = xpu_ops.dynamic_per_token_int8_quant_ref(
+            input.contiguous(), True, 8
+        )
+        return q, scales.reshape(-1, 1).to(torch.float32), None
+
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
         # static-per-tensor quantization.
@@ -2655,6 +2672,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     index_q_out: torch.Tensor | None = None,
     kv_cache_dtype: str = "auto",
     skip_index_branch: bool = False,
+    q_fp8_out: torch.Tensor | None = None,
+    q_fp8_scale: float = 1.0,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2676,6 +2695,9 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     instead of in place — folding the de-interleave into this kernel's store so
     callers skip a separate ``.contiguous()`` copy before the SM100 sparse
     attention's flat TMA descriptor.
+
+    If ``q_fp8_out`` is given, the same normalized q is also written in FP8
+    E4M3 using ``q_fp8_scale`` as its dequantization scale.
 
     When ``skip_index_branch`` is true, sparse rows still keep their packed
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
@@ -2704,6 +2726,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         index_q_out,
         kv_cache_dtype,
         skip_index_branch,
+        q_fp8_out,
+        q_fp8_scale,
     )
 
 
@@ -3491,6 +3515,7 @@ def chunk_gated_delta_rule_cpu(
     cu_seqlens: torch.Tensor,
     head_first: bool,
     use_qk_l2norm_in_kernel: bool,
+    initial_state_indices: torch.Tensor,
     eps: float = 1e-5,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._C.chunk_gated_delta_rule_cpu(
@@ -3504,6 +3529,7 @@ def chunk_gated_delta_rule_cpu(
         cu_seqlens,
         head_first,
         use_qk_l2norm_in_kernel,
+        initial_state_indices,
         eps,
     )
 
