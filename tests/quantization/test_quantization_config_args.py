@@ -83,7 +83,7 @@ def test_args_accepts_dict_form():
 
 def test_targets_reject_non_string_keys():
     with pytest.raises(ValueError, match="targets keys must be strings"):
-        QuantizationConfigArgs.model_validate({"targets": {123: "mxfp8"}})
+        QuantizationConfigArgs._validate_targets({123: "mxfp8"})
 
 
 # ---- resolve_quantization_config -----------------------------------------
