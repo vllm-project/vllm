@@ -145,6 +145,8 @@ class MiniMAXGemmaRMSNorm(nn.Module):
 
         from vllm.models.minimax_m3.common.ops.gemma_rmsnorm import (
             gemma_fused_add_rmsnorm as _fused,
+        )
+        from vllm.models.minimax_m3.common.ops.gemma_rmsnorm import (
             gemma_rmsnorm as _norm,
         )
 
