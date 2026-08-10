@@ -5,6 +5,7 @@
 on partial hits, and same-step deferral."""
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -29,6 +30,41 @@ from vllm.v1.kv_cache_interface import (
 @pytest.fixture(autouse=True)
 def _auto_init_hash_fn():
     init_none_hash(sha256)
+
+
+def test_connector_without_divergent_hit_support_uses_common_lookup():
+    common_blocks = MagicMock()
+    manager = MagicMock()
+    manager.get_computed_blocks.return_value = (common_blocks, 0, 0)
+    scheduler = SimpleNamespace(
+        connector=SimpleNamespace(supports_divergent_local_hybrid_hits=False),
+        kv_cache_manager=manager,
+    )
+
+    result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
+
+    assert result == (common_blocks, 0, 0, False)
+    manager.get_computed_blocks_for_connector.assert_not_called()
+
+
+def test_capable_connector_uses_divergent_partial_hit_lookup():
+    per_group_blocks = MagicMock()
+    manager = MagicMock()
+    manager.get_computed_blocks_for_connector.return_value = (
+        per_group_blocks,
+        6,
+        0,
+        True,
+    )
+    scheduler = SimpleNamespace(
+        connector=SimpleNamespace(supports_divergent_local_hybrid_hits=True),
+        kv_cache_manager=manager,
+    )
+
+    result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
+
+    assert result == (per_group_blocks, 6, 0, True)
+    manager.get_computed_blocks.assert_not_called()
 
 
 def test_mamba_align_split_partial_tail_schedule():
