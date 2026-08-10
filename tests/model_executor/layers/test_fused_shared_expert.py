@@ -145,19 +145,24 @@ def test_non_quark_shared_expert_fse_is_incompatible() -> None:
 
 
 @pytest.mark.parametrize(
-    ("linear", "moe", "expected"),
+    ("linear", "moe", "ignore", "expected"),
     [
-        ("mxfp4", "mxfp4", True),
-        ("mxfp4", "fp8_per_tensor", False),
-        (None, "mxfp4", False),
-        ("mxfp4", None, False),
+        ("mxfp4", "mxfp4", [], True),
+        ("mxfp4", "fp8_per_tensor", [], False),
+        (None, "mxfp4", [], False),
+        ("mxfp4", None, [], False),
+        ("mxfp4", "mxfp4", ["re:.*\\.experts"], False),
+        ("mxfp4", "mxfp4", ["re:.*shared_expert\\.gate_up_proj"], False),
     ],
 )
 def test_online_shared_expert_fse_requires_matching_linear_and_moe_configs(
-    linear: str | None, moe: str | None, expected: bool
+    linear: str | None,
+    moe: str | None,
+    ignore: list[str],
+    expected: bool,
 ) -> None:
     quant_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear=linear, moe=moe)
+        QuantizationConfigArgs(linear=linear, moe=moe, ignore=ignore)
     )
 
     compatible, reason = is_shared_expert_quant_fse_compatible(

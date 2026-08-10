@@ -26,6 +26,33 @@ def is_shared_expert_quant_fse_compatible(
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
     if isinstance(quant_config, OnlineQuantizationConfig):
+        from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+            should_ignore_layer,
+        )
+
+        ignored_layers = quant_config.args.ignore
+        expert_is_ignored = should_ignore_layer(
+            expert_prefix,
+            ignore=ignored_layers,
+            fused_mapping=quant_config.packed_modules_mapping,
+        )
+        shared_expert_is_ignored = any(
+            should_ignore_layer(
+                f"{shared_expert_prefix}.{projection}",
+                ignore=ignored_layers,
+                fused_mapping=quant_config.packed_modules_mapping,
+            )
+            for projection in ("gate_up_proj", "down_proj")
+        )
+        if expert_is_ignored or shared_expert_is_ignored:
+            ignored_prefix = (
+                expert_prefix if expert_is_ignored else shared_expert_prefix
+            )
+            return (
+                False,
+                f"online quantization excludes FSE weights at {ignored_prefix}",
+            )
+
         if (
             quant_config.args.moe is not None
             and quant_config.args.linear is not None

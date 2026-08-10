@@ -158,9 +158,13 @@ class AXK1MoE(nn.Module):
         )
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
-            quant_config, prefix
-        )
+
+        self.is_fused_shared_expert_enabled = False
+        if config.n_shared_experts is not None:
+            self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
+                quant_config, prefix
+            )
+
         if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
         else:
