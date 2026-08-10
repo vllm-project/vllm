@@ -3,7 +3,9 @@
 """OpenShift harness for the CPU EC connector e2e test.
 
 Manages two vllm Deployments (producer + consumer) in an OpenShift namespace,
-drives HTTP via oc port-forward, and streams logs via oc logs -f.
+each fronted by a Service and a Route. HTTP goes through the Route; assertions
+read the structured event file out of the pod with `oc exec`. Pod logs are also
+streamed to local files with `oc logs -f`, for humans reading a failure only.
 """
 
 from __future__ import annotations
@@ -24,6 +26,9 @@ if TYPE_CHECKING:
 
 _K8S_DIR = Path(__file__).resolve().parent / "k8s"
 _SITECUSTOMIZE = Path(__file__).resolve().parent / "sitecustomize.py"
+
+# Where sitecustomize.py writes its structured events inside each pod.
+EVENT_FILE = "/tmp/ec_events.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +66,7 @@ def _set_env(container: dict, name: str, value: str) -> None:
     container.setdefault("env", []).append({"name": name, "value": value})
 
 
-def patch_deployment_yaml(
+def patch_manifests(
     template_path: Path,
     *,
     run_id: str,
@@ -76,21 +81,34 @@ def patch_deployment_yaml(
     side_channel_port: int,
     producer: bool,
     different_nodes: bool,
-) -> dict:
-    """Load a deployment YAML template and patch dynamic fields.
+) -> list[dict]:
+    """Load a role's Deployment/Service/Route template and patch dynamic fields.
 
-    Returns the patched document as a dict (ready for yaml.dump + oc apply).
+    Returns the patched documents (ready for yaml.dump_all + oc apply).
     """
     with template_path.open() as f:
-        doc = yaml.safe_load(f)
+        docs = list(yaml.safe_load_all(f))
 
     role = "producer" if producer else "consumer"
+    name = f"vllm-ec-{role}-{run_id}"
     run_label = {"run-id": run_id}
 
-    doc["metadata"]["name"] = f"vllm-ec-{role}-{run_id}"
-    doc["metadata"]["namespace"] = namespace
+    for d in docs:
+        d["metadata"]["name"] = name
+        d["metadata"]["namespace"] = namespace
+        # Label the objects themselves, not just the pod template, so a run that
+        # dies before teardown can be swept with
+        # `oc delete deployment,service,route -l app=vllm-ec-test`.
+        d["metadata"].setdefault("labels", {}).update(
+            {"app": "vllm-ec-test", "role": role, "run-id": run_id}
+        )
+
+    by_kind = {d["kind"]: d for d in docs}
+    doc = by_kind["Deployment"]
     doc["spec"]["selector"]["matchLabels"].update(run_label)
     doc["spec"]["template"]["metadata"]["labels"].update(run_label)
+    by_kind["Service"]["spec"]["selector"].update(run_label)
+    by_kind["Route"]["spec"]["to"]["name"] = name
 
     container = doc["spec"]["template"]["spec"]["containers"][0]
     container["image"] = image
@@ -100,6 +118,7 @@ def patch_deployment_yaml(
             "ec_connector": "ECCPUConnector",
             "ec_role": ec_role,
             "engine_id": engine_id,
+            "ec_enable_nixl": True,
             "ec_connector_extra_config": {"ec_cpu_bytes": ec_cpu_bytes},
         }
     )
@@ -109,6 +128,7 @@ def patch_deployment_yaml(
     _set_env(container, "GPU_MEMORY_UTILIZATION", str(gpu_memory_utilization))
     _set_env(container, "EC_TRANSFER_CONFIG", ec_config)
     _set_env(container, "VLLM_EC_SIDE_CHANNEL_PORT", str(side_channel_port))
+    _set_env(container, "EC_TEST_EVENT_FILE", EVENT_FILE)
 
     for vol in doc["spec"]["template"]["spec"]["volumes"]:
         if vol["name"] == "sitecustomize":
@@ -134,7 +154,7 @@ def patch_deployment_yaml(
     else:
         pod_spec.pop("affinity", None)
 
-    return doc
+    return docs
 
 
 # ---------------------------------------------------------------------------
@@ -145,10 +165,10 @@ def patch_deployment_yaml(
 class K8sHarness:
     """Context manager that manages producer+consumer vllm Deployments in OpenShift.
 
-    Interface mirrors LocalHarness: exposes .producer, .consumer, .model,
-    and restart_producer(). HTTP is accessed via oc port-forward; logs are
-    streamed via oc logs -f to local files so log_slice/assert_in_log work
-    unchanged.
+    Interface mirrors LocalHarness: exposes .producer, .consumer, .model, and
+    restart_producer(), and fills in each spec's base_url (its Route) and
+    events (its in-pod event file) so the shared test functions are agnostic
+    about where the servers run.
     """
 
     def __init__(
@@ -161,7 +181,6 @@ class K8sHarness:
         image: str,
         k8s_dir: Path = _K8S_DIR,
         different_nodes: bool = False,
-        log_delay: float = 0.5,
         keep_on_exit: bool = False,
     ):
         self.producer = producer
@@ -171,29 +190,54 @@ class K8sHarness:
         self._image = image
         self._k8s_dir = k8s_dir
         self._different_nodes = different_nodes
-        self._log_delay = log_delay
         self.keep_on_exit = keep_on_exit
         self._run_id = time.strftime("%Y%m%d-%H%M%S")
 
-        self._producer_pf: subprocess.Popen | None = None
-        self._consumer_pf: subprocess.Popen | None = None
         self._producer_logs: subprocess.Popen | None = None
         self._consumer_logs: subprocess.Popen | None = None
-        self._pf_watchdog_stop = threading.Event()
-        self._pf_watchdog_t: threading.Thread | None = None
+        self._log_watchdog_stop = threading.Event()
+        self._log_watchdog_t: threading.Thread | None = None
+
+        from shared import OcExecEventLog, disable_tls_verify
+
+        # Routes are served with the cluster's default wildcard certificate.
+        disable_tls_verify()
+        for spec in (self.producer, self.consumer):
+            spec.events = OcExecEventLog(
+                namespace, self._deployment_name(spec.role), EVENT_FILE
+            )
 
     # ------------------------------------------------------------------
     # Context manager
     # ------------------------------------------------------------------
 
     def __enter__(self) -> K8sHarness:
+        # Python skips __exit__ when __enter__ raises, so anything already
+        # applied has to be torn down here or it leaks — and a leaked pod holds
+        # its GPU, which makes the *next* run fail to schedule for an unrelated-
+        # looking reason.
+        try:
+            return self._setup()
+        except BaseException:
+            print(
+                "\n[k8s-setup] setup failed; tearing down partial state",
+                file=sys.stderr,
+            )
+            try:
+                self._teardown()
+            except Exception:
+                print("[k8s-setup] teardown after failure also failed", file=sys.stderr)
+            raise
+
+    def _setup(self) -> K8sHarness:
         for spec in (self.producer, self.consumer):
             spec.log_path.parent.mkdir(parents=True, exist_ok=True)
 
+        self._preflight()
         print(f"[k8s-setup] run_id={self._run_id}, namespace={self._namespace}")
         self._create_configmap()
-        self._apply_deployment("producer")
-        self._apply_deployment("consumer")
+        self._apply_role("producer")
+        self._apply_role("consumer")
         print("[k8s-setup] waiting for deployments to roll out…")
         with ThreadPoolExecutor(max_workers=2) as ex:
             futs = {
@@ -209,6 +253,10 @@ class K8sHarness:
 
         from shared import HEALTH_TIMEOUT_S
 
+        for spec in (self.producer, self.consumer):
+            spec.base_url = self._route_url(spec.role)
+            print(f"[k8s-setup] {spec.role} route: {spec.base_url}")
+
         print("[k8s-setup] waiting on /health for both (via oc exec)…")
         with ThreadPoolExecutor(max_workers=2) as ex:
             futs2 = {
@@ -218,25 +266,35 @@ class K8sHarness:
             for fut in futs2:
                 fut.result()
                 role = futs2[fut]
-                port = getattr(self, role).http_port
-                print(f"  ✓ {role} healthy on port {port}")
+                print(f"  ✓ {role} healthy in-pod")
 
-        self._start_port_forward("producer")
-        self._start_port_forward("consumer")
-        self._start_pf_watchdog()
+        # The pods are up, but the router needs a moment to pick up the Routes.
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futs3 = {
+                ex.submit(self._wait_route_ready, spec): spec.role
+                for spec in (self.producer, self.consumer)
+            }
+            for fut in futs3:
+                fut.result()
+                print(f"  ✓ {futs3[fut]} reachable via route")
+
+        self._start_log_watchdog()
         return self
 
     def __exit__(self, *_exc) -> None:
         if self.keep_on_exit:
             print("\n[k8s-teardown] --keep-servers set; leaving deployments running.")
             return
-        self._pf_watchdog_stop.set()
-        if self._pf_watchdog_t is not None:
-            self._pf_watchdog_t.join(timeout=6)
+        self._teardown()
+
+    def _teardown(self) -> None:
+        self._log_watchdog_stop.set()
+        if self._log_watchdog_t is not None:
+            self._log_watchdog_t.join(timeout=6)
         self._stop_background_procs()
-        print("\n[k8s-teardown] deleting deployments and configmap…")
-        self._delete_deployment("producer")
-        self._delete_deployment("consumer")
+        print("\n[k8s-teardown] deleting deployments, services, routes, configmap…")
+        self._delete_role("producer")
+        self._delete_role("consumer")
         self._delete_configmap()
 
     # ------------------------------------------------------------------
@@ -245,9 +303,9 @@ class K8sHarness:
 
     def restart_producer(self) -> None:
         print("\n[k8s-restart] restarting producer deployment…")
-        for attr in ("_producer_pf", "_producer_logs"):
-            proc = getattr(self, attr)
-            if proc is not None and proc.poll() is None:
+        proc = self._producer_logs
+        if proc is not None:
+            if proc.poll() is None:
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)
@@ -273,9 +331,10 @@ class K8sHarness:
         from shared import HEALTH_TIMEOUT_S
 
         self._wait_vllm_ready(self.producer, HEALTH_TIMEOUT_S)
-        self._start_port_forward("producer")
-        self._wait_port_forward_ready(self.producer.http_port)
-        print(f"  ✓ producer healthy on {self.producer.http_port}")
+        # The Route and Service survive a rollout untouched (the Service selects
+        # on labels, which the new pod carries), so base_url still holds.
+        self._wait_route_ready(self.producer)
+        print(f"  ✓ producer healthy at {self.producer.base_url}")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -302,10 +361,10 @@ class K8sHarness:
         cm_name = f"ec-test-sitecustomize-{self._run_id}"
         _oc(["delete", "configmap", cm_name, "-n", self._namespace], check=False)
 
-    def _apply_deployment(self, role: str) -> None:
+    def _apply_role(self, role: str) -> None:
         spec = self.producer if role == "producer" else self.consumer
         template_path = self._k8s_dir / f"{role}-deployment.yaml"
-        patched = patch_deployment_yaml(
+        patched = patch_manifests(
             template_path,
             run_id=self._run_id,
             namespace=self._namespace,
@@ -321,13 +380,13 @@ class K8sHarness:
             different_nodes=self._different_nodes,
         )
         print(f"[k8s-setup] applying {self._deployment_name(role)}")
-        _oc_stdin(["apply", "-f", "-", "-n", self._namespace], yaml.dump(patched))
+        _oc_stdin(["apply", "-f", "-", "-n", self._namespace], yaml.dump_all(patched))
 
-    def _delete_deployment(self, role: str) -> None:
+    def _delete_role(self, role: str) -> None:
         _oc(
             [
                 "delete",
-                "deployment",
+                "deployment,service,route",
                 self._deployment_name(role),
                 "-n",
                 self._namespace,
@@ -351,15 +410,22 @@ class K8sHarness:
     def _start_log_stream(self, role: str, *, truncate: bool = True) -> None:
         spec = self.producer if role == "producer" else self.consumer
         log_fh = spec.log_path.open("wb" if truncate else "ab", buffering=0)
+        cmd = [
+            "oc",
+            "logs",
+            "-f",
+            f"deployment/{self._deployment_name(role)}",
+            "-n",
+            self._namespace,
+        ]
+        if not truncate:
+            # Reattaching to an existing file: without this, oc would replay the
+            # pod's whole history and the file would contain the same events
+            # twice. Lines emitted while the stream was down are lost instead,
+            # which is fine — the event file, not this log, is what tests read.
+            cmd.append("--tail=0")
         proc = subprocess.Popen(
-            [
-                "oc",
-                "logs",
-                "-f",
-                f"deployment/{self._deployment_name(role)}",
-                "-n",
-                self._namespace,
-            ],
+            cmd,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
         )
@@ -369,40 +435,97 @@ class K8sHarness:
         else:
             self._consumer_logs = proc
 
-    def _start_port_forward(self, role: str) -> None:
-        spec = self.producer if role == "producer" else self.consumer
-        proc = subprocess.Popen(
+    def _preflight(self) -> None:
+        """Fail fast on an expired login, before spending minutes on a rollout.
+
+        An expired token otherwise surfaces much later and much less obviously:
+        `oc exec` starts failing while an already-established `oc logs -f`
+        stream keeps working, which reads as a hung server rather than an auth
+        problem.
+        """
+        who = _oc(["whoami"], check=False)
+        if who.returncode != 0:
+            raise RuntimeError(
+                "oc is not authenticated (`oc whoami` failed): "
+                f"{who.stderr.strip()[:200]}\nRun `oc login` and retry."
+            )
+        ns = _oc(
+            ["auth", "can-i", "create", "pods/exec", "-n", self._namespace], check=False
+        )
+        if ns.returncode != 0:
+            print(
+                f"[k8s-setup] warning: cannot create pods/exec in "
+                f"{self._namespace} — event reads and health probes will fail "
+                f"({ns.stdout.strip() or ns.stderr.strip()})",
+                file=sys.stderr,
+            )
+        print(f"[k8s-setup] authenticated as {who.stdout.strip()}")
+
+        # Deployments left over from an earlier run still hold their GPUs, which
+        # shows up here as a pod that never schedules rather than as a leak.
+        stale = _oc(
             [
-                "oc",
-                "port-forward",
-                f"deployment/{self._deployment_name(role)}",
-                f"{spec.http_port}:{spec.http_port}",
+                "get",
+                "deployment",
+                "-l",
+                "app=vllm-ec-test",
                 "-n",
                 self._namespace,
+                "-o",
+                "jsonpath={.items[*].metadata.name}",
             ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            check=False,
         )
-        if role == "producer":
-            self._producer_pf = proc
-        else:
-            self._consumer_pf = proc
+        leftovers = stale.stdout.split()
+        if leftovers:
+            print(
+                f"[k8s-setup] warning: {len(leftovers)} leftover EC test "
+                f"deployment(s) still running and holding GPUs: "
+                f"{', '.join(leftovers)}\n"
+                f"  sweep with: oc delete deployment,service,route "
+                f"-l app=vllm-ec-test -n {self._namespace}",
+                file=sys.stderr,
+            )
 
-    def _start_pf_watchdog(self) -> None:
+    def _route_url(self, role: str, timeout_s: int = 60) -> str:
+        """Return the Route's external base URL, waiting for the host to be set."""
+        name = self._deployment_name(role)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            result = _oc(
+                [
+                    "get",
+                    "route",
+                    name,
+                    "-n",
+                    self._namespace,
+                    "-o",
+                    "jsonpath={.spec.host}",
+                ],
+                check=False,
+            )
+            host = result.stdout.strip()
+            if host:
+                return f"https://{host}"
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"route {name} had no host assigned within {timeout_s}s"
+                )
+            time.sleep(1.0)
+
+    def _wait_route_ready(self, spec: ServerSpec, timeout_s: int = 120) -> None:
+        """Wait until /health answers through the Route.
+
+        The pod is already known healthy via `oc exec` at this point; this only
+        covers the router noticing the Route.
+        """
+        from shared import wait_for_health
+
+        wait_for_health(spec.base_url, None, timeout_s)
+
+    def _start_log_watchdog(self) -> None:
         def _watchdog() -> None:
-            while not self._pf_watchdog_stop.wait(1.0):
-                for role, attr in (
-                    ("producer", "_producer_pf"),
-                    ("consumer", "_consumer_pf"),
-                ):
-                    proc = getattr(self, attr)
-                    if proc is not None and proc.poll() is not None:
-                        print(
-                            f"[watchdog] port-forward for {role} died; restarting",
-                            file=sys.stderr,
-                        )
-                        self._start_port_forward(role)
-
+            while not self._log_watchdog_stop.wait(1.0):
                 for role, attr in (
                     ("producer", "_producer_logs"),
                     ("consumer", "_consumer_logs"),
@@ -415,55 +538,57 @@ class K8sHarness:
                         )
                         self._start_log_stream(role, truncate=False)
 
-        self._pf_watchdog_t = threading.Thread(
-            target=_watchdog, daemon=True, name="pf-watchdog"
+        self._log_watchdog_t = threading.Thread(
+            target=_watchdog, daemon=True, name="log-watchdog"
         )
-        self._pf_watchdog_t.start()
+        self._log_watchdog_t.start()
 
     def _wait_vllm_ready(self, spec: ServerSpec, timeout_s: int) -> None:
-        """Poll the health endpoint via `oc exec` — no port-forward needed."""
+        """Poll the health endpoint from inside the pod, before the Route exists."""
         deployment = self._deployment_name(spec.role)
         deadline = time.monotonic() + timeout_s
+        argv = [
+            "oc",
+            "exec",
+            "-n",
+            self._namespace,
+            f"deployment/{deployment}",
+            "--",
+            "curl",
+            "-sf",
+            f"http://localhost:{spec.http_port}/health",
+        ]
+        attempts = 0
+        last = "never ran"
         while time.monotonic() < deadline:
-            result = subprocess.run(
-                [
-                    "oc",
-                    "exec",
-                    "-n",
-                    self._namespace,
-                    f"deployment/{deployment}",
-                    "--",
-                    "curl",
-                    "-sf",
-                    f"http://localhost:{spec.http_port}/health",
-                ],
-                capture_output=True,
-                timeout=15,
-            )
-            if result.returncode == 0:
-                return
-            time.sleep(5)
-        raise TimeoutError(f"{spec.role} did not become healthy within {timeout_s}s")
-
-    def _wait_port_forward_ready(self, port: int, timeout_s: int = 30) -> None:
-        """Poll localhost:port/health until the oc port-forward tunnel is up."""
-        import urllib.request
-
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
+            attempts += 1
             try:
-                urllib.request.urlopen(f"http://localhost:{port}/health", timeout=2)
-                return
-            except Exception:
-                time.sleep(0.5)
+                result = subprocess.run(
+                    argv, capture_output=True, text=True, timeout=15
+                )
+            except subprocess.TimeoutExpired:
+                # `oc exec` itself wedged — a stuck attempt is a symptom worth
+                # reporting, not an error to abort the whole wait on.
+                last = "oc exec timed out after 15s"
+            else:
+                if result.returncode == 0:
+                    return
+                last = (
+                    f"rc={result.returncode} "
+                    f"stderr={result.stderr.strip()[:400]!r} "
+                    f"stdout={result.stdout.strip()[:200]!r}"
+                )
+            time.sleep(5)
+        # Report why it never succeeded. Without this the probe discards every
+        # failure and a timeout says nothing about whether the server was down,
+        # curl was missing, or `oc exec` could not reach the pod at all.
         raise TimeoutError(
-            f"port-forward on localhost:{port} did not become ready within {timeout_s}s"
+            f"{spec.role} did not become healthy within {timeout_s}s "
+            f"({attempts} attempts)\n  probe: {' '.join(argv)}\n  last failure: {last}"
         )
 
     def _stop_background_procs(self) -> None:
         procs = [
-            self._consumer_pf,
-            self._producer_pf,
             self._consumer_logs,
             self._producer_logs,
         ]

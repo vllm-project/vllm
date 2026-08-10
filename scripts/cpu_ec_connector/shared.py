@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import concurrent.futures
 import io
+import json
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -53,6 +55,11 @@ class ServerSpec:
     engine_id: str
     gpu_memory_utilization: float
     log_path: Path
+    # Base URL the driver talks to, and the structured event channel to assert
+    # on. Both are filled in by whichever harness owns the server: loopback and
+    # a local file for LocalHarness, a Route and `oc exec` for K8sHarness.
+    base_url: str = ""
+    events: EventLog = None  # type: ignore[assignment]
     # Byte budget for the shared EC region. The connector derives
     # num_blocks = ec_cpu_bytes // block_size_bytes at startup, so this is a
     # generous default sized to never evict during the default-harness tests.
@@ -64,98 +71,227 @@ class ServerSpec:
 # ---------------------------------------------------------------------------
 
 
-def wait_for_health(port: int, proc, timeout_s: int) -> None:
+def wait_for_health(base_url: str, proc, timeout_s: int) -> None:
     """Poll /health until the server responds, the process dies, or timeout.
 
     `proc` may be None (K8s mode — no local process to death-check).
     """
     deadline = time.monotonic() + timeout_s
-    url = f"http://127.0.0.1:{port}/health"
+    url = f"{base_url}/health"
     while time.monotonic() < deadline:
         if proc is not None and proc.poll() is not None:
             raise RuntimeError(
-                f"server on port {port} exited with code {proc.returncode} "
+                f"server at {base_url} exited with code {proc.returncode} "
                 f"before becoming healthy"
             )
         try:
-            r = requests.get(url, timeout=2)
+            r = SESSION.get(url, timeout=5)
             if r.status_code == 200:
                 return
         except requests.RequestException:
             pass
         time.sleep(1.0)
     raise TimeoutError(
-        f"server on port {port} did not become healthy within {timeout_s}s"
+        f"server at {base_url} did not become healthy within {timeout_s}s"
     )
 
 
 # ---------------------------------------------------------------------------
-# Log windowing
+# Event log (pull-based assertion channel)
 # ---------------------------------------------------------------------------
+#
+# sitecustomize.py appends one JSON object per EC test event to a file inside
+# the server's own filesystem. The driver pulls that file synchronously, so an
+# assertion sees the true state at the moment it asks. Streamed pod logs
+# (`oc logs -f`) are kept for humans only: they lag, they die, and the watchdog
+# restarting them can replay history, none of which a test can reason about.
+#
+# Marks are event indices rather than byte offsets, so a mark stays meaningful
+# even if the file is recreated, and a read never returns a half-written line.
 
 
-def log_size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except FileNotFoundError:
-        return 0
+class EventLog:
+    """Pull-based view of one server's structured EC test events."""
+
+    def read(self, start: int = 0) -> list[str]:
+        """Return event messages from index *start* onward."""
+        raise NotImplementedError
+
+    def mark(self) -> int:
+        """Index one past the last event currently recorded."""
+        return len(self.read())
+
+    def wait_all(
+        self,
+        start: int,
+        needles: list[str],
+        *,
+        timeout_s: float = 20.0,
+        poll_s: float = 0.5,
+    ) -> list[str]:
+        """Poll until every needle appears in events[start:], or timeout.
+
+        Returns the events as of the last read either way, so the caller's
+        assertions produce a useful message on timeout.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            events = self.read(start)
+            if all(any(n in e for e in events) for n in needles):
+                return events
+            if time.monotonic() >= deadline:
+                return events
+            time.sleep(poll_s)
+
+    def wait_count(
+        self,
+        start: int,
+        needle: str,
+        count: int,
+        *,
+        timeout_s: float = 20.0,
+        poll_s: float = 0.5,
+    ) -> list[str]:
+        """Poll until *needle* has occurred at least *count* times, or timeout."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            events = self.read(start)
+            if count_events(events, needle) >= count:
+                return events
+            if time.monotonic() >= deadline:
+                return events
+            time.sleep(poll_s)
 
 
-def log_slice(path: Path, start: int) -> str:
-    if not path.exists():
-        return ""
-    with path.open("rb") as f:
-        f.seek(start)
-        return f.read().decode("utf-8", errors="replace")
+class LocalEventLog(EventLog):
+    """Event log backed by a file the driver can read directly."""
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def read(self, start: int = 0) -> list[str]:
+        try:
+            raw = self.path.read_text(errors="replace")
+        except FileNotFoundError:
+            return []
+        return _decode_events(raw)[start:]
 
 
-def assert_in_log(haystack: str, needle: str, *, where: str) -> None:
-    if needle not in haystack:
+class OcExecEventLog(EventLog):
+    """Event log read out of a pod with `oc exec`.
+
+    Synchronous by construction: each call is a fresh round trip that returns
+    what the pod has written as of now.
+    """
+
+    def __init__(self, namespace: str, deployment: str, path: str):
+        self._namespace = namespace
+        self._deployment = deployment
+        self._path = path
+
+    def _exec(self, script: str) -> str:
+        """Run *script* in the pod. Raises if `oc exec` itself fails.
+
+        The script is responsible for tolerating a missing event file (no events
+        yet is normal). Anything else — an expired token, an unreachable pod —
+        must surface: returning "" for those would show up as a puzzling
+        "expected event ... not found" instead of the real cause.
+        """
+        result = subprocess.run(
+            [
+                "oc",
+                "exec",
+                f"deployment/{self._deployment}",
+                "-n",
+                self._namespace,
+                "--",
+                "sh",
+                "-c",
+                script,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"oc exec on deployment/{self._deployment} failed "
+                f"(rc={result.returncode}): {result.stderr.strip()[:400]}"
+            )
+        return result.stdout
+
+    def read(self, start: int = 0) -> list[str]:
+        # `tail -n +N` ships only the new lines instead of the whole file, and
+        # returns nothing if the file is shorter than N — so a pod restart that
+        # truncates the file can never produce a stale match.
+        return _decode_events(
+            self._exec(f"tail -n +{start + 1} {self._path} 2>/dev/null || true")
+        )
+
+    def mark(self) -> int:
+        out = self._exec(f"wc -l < {self._path} 2>/dev/null || echo 0")
+        try:
+            return int(out.strip() or 0)
+        except ValueError:
+            return 0
+
+
+def _decode_events(raw: str) -> list[str]:
+    events = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line)["msg"])
+        except (ValueError, KeyError):
+            # Ignore anything that isn't one of our records.
+            continue
+    return events
+
+
+def count_events(events: list[str], needle: str) -> int:
+    return sum(needle in e for e in events)
+
+
+def _render_events(events: list[str]) -> str:
+    return "\n".join(events) if events else "<no events recorded>"
+
+
+def assert_event(events: list[str], needle: str, *, where: str) -> None:
+    if not any(needle in e for e in events):
         raise AssertionError(
-            f"expected log line {needle!r} in {where} but did not find it.\n"
-            f"--- log slice ---\n{haystack}\n--- end slice ---"
+            f"expected event {needle!r} in {where} but did not find it.\n"
+            f"--- events ---\n{_render_events(events)}\n--- end events ---"
         )
     print(f"  ✓ found {needle!r} in {where}")
 
 
-def assert_not_in_log(haystack: str, needle: str, *, where: str) -> None:
-    if needle in haystack:
+def assert_no_event(events: list[str], needle: str, *, where: str) -> None:
+    if any(needle in e for e in events):
         raise AssertionError(
-            f"did not expect log line {needle!r} in {where} but found it.\n"
-            f"--- log slice ---\n{haystack}\n--- end slice ---"
+            f"did not expect event {needle!r} in {where} but found it.\n"
+            f"--- events ---\n{_render_events(events)}\n--- end events ---"
         )
     print(f"  ✓ absent {needle!r} from {where}")
-
-
-def wait_for_in_log(
-    path: Path,
-    start: int,
-    needle: str,
-    *,
-    timeout_s: float = 10.0,
-    poll_s: float = 0.5,
-) -> str:
-    """Poll the log file until *needle* appears in the slice [start:], or timeout.
-
-    Returns the slice as of the last read — caller should still assert_in_log on
-    the result so the error message shows what was actually present.
-    The watchdog may restart a dead ``oc logs -f`` stream and replay the full pod
-    log in append mode; this retry loop rides out that recovery window.
-    """
-    deadline = time.monotonic() + timeout_s
-    sl = ""
-    while True:
-        sl = log_slice(path, start)
-        if needle in sl:
-            return sl
-        if time.monotonic() >= deadline:
-            return sl
-        time.sleep(poll_s)
 
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
+
+
+# One session for every request the driver makes. Routes are served with the
+# cluster's default wildcard certificate, which won't validate locally, so the
+# K8s harness turns verification off for its own base URLs.
+SESSION = requests.Session()
+
+
+def disable_tls_verify() -> None:
+    import urllib3
+
+    SESSION.verify = False
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def image_data_url(path: Path) -> str:
@@ -184,7 +320,7 @@ def synth_image_data_url(seed: int, size: tuple[int, int] = (224, 224)) -> str:
 
 
 def render(
-    consumer_port: int, model: str, image_urls: str | list[str], prompt: str
+    consumer_url: str, model: str, image_urls: str | list[str], prompt: str
 ) -> dict:
     if isinstance(image_urls, str):
         image_urls = [image_urls]
@@ -196,8 +332,8 @@ def render(
         "model": model,
         "messages": [{"role": "user", "content": content}],
     }
-    r = requests.post(
-        f"http://127.0.0.1:{consumer_port}/v1/chat/completions/render",
+    r = SESSION.post(
+        f"{consumer_url}/v1/chat/completions/render",
         json=payload,
         timeout=REQUEST_TIMEOUT_S,
     )
@@ -206,7 +342,7 @@ def render(
 
 
 def generate(
-    port: int,
+    base_url: str,
     rendered: dict,
     *,
     max_tokens: int,
@@ -220,8 +356,8 @@ def generate(
         "features": rendered.get("features"),
         "sampling_params": sampling_params,
     }
-    r = requests.post(
-        f"http://127.0.0.1:{port}/inference/v1/generate",
+    r = SESSION.post(
+        f"{base_url}/inference/v1/generate",
         json=body,
         timeout=REQUEST_TIMEOUT_S,
     )
@@ -229,14 +365,12 @@ def generate(
     return r.json()
 
 
-def reset_mm_cache(port: int) -> None:
-    r = requests.post(
-        f"http://127.0.0.1:{port}/reset_mm_cache", timeout=REQUEST_TIMEOUT_S
-    )
+def reset_mm_cache(base_url: str) -> None:
+    r = SESSION.post(f"{base_url}/reset_mm_cache", timeout=REQUEST_TIMEOUT_S)
     r.raise_for_status()
 
 
-def reset_encoder_cache(port: int) -> None:
+def reset_encoder_cache(base_url: str) -> None:
     """Evict cached encoder outputs (the scheduler's EncoderCacheManager and
     the GPU model runner's encoder_cache dict).
 
@@ -245,17 +379,20 @@ def reset_encoder_cache(port: int) -> None:
     mm_hash gets a free local cache hit and never reaches the EC connector's
     has_cache_item/NIXL-fetch path at all.
     """
-    r = requests.post(
-        f"http://127.0.0.1:{port}/reset_encoder_cache", timeout=REQUEST_TIMEOUT_S
-    )
+    r = SESSION.post(f"{base_url}/reset_encoder_cache", timeout=REQUEST_TIMEOUT_S)
     r.raise_for_status()
 
 
-def reset_prefix_cache(port: int) -> None:
-    r = requests.post(
-        f"http://127.0.0.1:{port}/reset_prefix_cache", timeout=REQUEST_TIMEOUT_S
-    )
+def reset_prefix_cache(base_url: str) -> None:
+    r = SESSION.post(f"{base_url}/reset_prefix_cache", timeout=REQUEST_TIMEOUT_S)
     r.raise_for_status()
+    # 200 with success=false means the reset was refused (blocks still held by a
+    # just-finished request). Silently ignoring that leaves a populated prefix
+    # cache behind, which makes later cache-miss assertions meaningless.
+    if r.json().get("success") is False:
+        raise AssertionError(
+            f"reset_prefix_cache refused at {base_url}: blocks still held"
+        )
 
 
 def decode_tokens(model: str, token_ids: list[int]) -> str:
@@ -272,17 +409,16 @@ def decode_tokens(model: str, token_ids: list[int]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _producer_encode(h, rendered: dict) -> tuple[dict, str]:
-    """Drive a producer encode on `rendered`, return (ec_transfer_params, log_slice)."""
-    mark = log_size(h.producer.log_path)
-    resp = generate(h.producer.http_port, rendered, max_tokens=1)
-    # The producer's oc logs -f stream may be silently dead (process alive but
-    # not streaming).  Wait until the request_finished line appears so the
-    # watchdog has time to restart the stream and replay the pod log.
-    sl = wait_for_in_log(
-        h.producer.log_path, mark, "producer request_finished", timeout_s=10.0
+def _producer_encode(h, rendered: dict) -> tuple[dict, list[str]]:
+    """Drive a producer encode on `rendered`, return (ec_transfer_params, events)."""
+    mark = h.producer.events.mark()
+    resp = generate(h.producer.base_url, rendered, max_tokens=1)
+    # The save's GPU->mmap copy is confirmed a step or two after the response,
+    # so wait for request_finished rather than reading straight through.
+    events = h.producer.events.wait_all(
+        mark, ["producer request_finished"], timeout_s=10.0
     )
-    return resp.get("ec_transfer_params") or {}, sl
+    return resp.get("ec_transfer_params") or {}, events
 
 
 # ---------------------------------------------------------------------------
@@ -292,31 +428,37 @@ def _producer_encode(h, rendered: dict) -> tuple[dict, str]:
 
 def test_baseline(h, image: Path, prompt: str) -> None:
     print("\n=== test_baseline ===")
-    data_url = image_data_url(image)
-    rendered = render(h.consumer.http_port, h.model, data_url, prompt)
+    # DIAGNOSTIC: swapped from image_data_url(image) (hato.jpg, ~100MB
+    # base64 tensor payload) to a small synthetic image to isolate whether
+    # the multinode oc port-forward stall is payload-size-dependent. Revert
+    # to `image_data_url(image)` once diagnosed.
+    data_url = synth_image_data_url(seed=999)
+    rendered = render(h.consumer.base_url, h.model, data_url, prompt)
     target_hash = rendered["features"]["mm_hashes"]["image"][0]
     print(f"  rendered: token_ids={len(rendered['token_ids'])}, mm_hash={target_hash}")
 
-    cmark = log_size(h.consumer.log_path)
-    ctrl = generate(h.consumer.http_port, rendered, max_tokens=80)
-    assert_in_log(
-        log_slice(h.consumer.log_path, cmark),
+    cmark = h.consumer.events.mark()
+    ctrl = generate(h.consumer.base_url, rendered, max_tokens=80)
+    assert_event(
+        h.consumer.events.read(cmark),
         "consumer ENCODER FORWARD",
-        where="consumer.log [control]",
+        where="consumer events [control]",
     )
     print(
         f"  control: {decode_tokens(h.model, ctrl['choices'][0]['token_ids'] or [])!r}"
     )
 
-    reset_mm_cache(h.consumer.http_port)
+    reset_mm_cache(h.consumer.base_url)
 
-    reset_encoder_cache(h.consumer.http_port)
-    reset_prefix_cache(h.consumer.http_port)
+    reset_encoder_cache(h.consumer.base_url)
+    reset_prefix_cache(h.consumer.base_url)
 
     ec_params, prod_sl = _producer_encode(h, rendered)
-    assert_in_log(prod_sl, "producer ENCODER FORWARD", where="producer.log [encode]")
-    assert_in_log(
-        prod_sl, f"producer save mm_hash={target_hash}", where="producer.log [encode]"
+    assert_event(prod_sl, "producer ENCODER FORWARD", where="producer events [encode]")
+    assert_event(
+        prod_sl,
+        f"producer save mm_hash={target_hash}",
+        where="producer events [encode]",
     )
     if target_hash not in ec_params:
         raise AssertionError(
@@ -328,25 +470,36 @@ def test_baseline(h, image: Path, prompt: str) -> None:
         if key not in info:
             raise AssertionError(f"ec_transfer_params[{target_hash}] missing {key!r}")
 
-    pmark, cmark = log_size(h.producer.log_path), log_size(h.consumer.log_path)
+    pmark, cmark = h.producer.events.mark(), h.consumer.events.mark()
     resp = generate(
-        h.consumer.http_port, rendered, max_tokens=80, ec_transfer_params=ec_params
+        h.consumer.base_url, rendered, max_tokens=80, ec_transfer_params=ec_params
     )
-    psl = log_slice(h.producer.log_path, pmark)
-    csl = log_slice(h.consumer.log_path, cmark)
-    assert_in_log(
-        psl, f"producer XferReq mm_hash={target_hash}", where="producer.log [ec]"
+    psl = h.producer.events.wait_all(
+        pmark,
+        [
+            f"producer XferReq mm_hash={target_hash}",
+            f"producer read granted mm_hash={target_hash}",
+        ],
     )
-    assert_in_log(
-        psl, f"producer read granted mm_hash={target_hash}", where="producer.log [ec]"
+    csl = h.consumer.events.wait_all(
+        cmark,
+        [f"consumer read ok mm_hash={target_hash}", "consumer load mm_hashes="],
     )
-    assert_in_log(
+    assert_event(
+        psl, f"producer XferReq mm_hash={target_hash}", where="producer events [ec]"
+    )
+    assert_event(
+        psl,
+        f"producer read granted mm_hash={target_hash}",
+        where="producer events [ec]",
+    )
+    assert_event(
         csl,
         f"consumer read ok mm_hash={target_hash}",
-        where="consumer.log [ec]",
+        where="consumer events [ec]",
     )
-    assert_in_log(csl, "consumer load mm_hashes=", where="consumer.log [ec]")
-    assert_not_in_log(csl, "consumer ENCODER FORWARD", where="consumer.log [ec]")
+    assert_event(csl, "consumer load mm_hashes=", where="consumer events [ec]")
+    assert_no_event(csl, "consumer ENCODER FORWARD", where="consumer events [ec]")
     print(f"  EC: {decode_tokens(h.model, resp['choices'][0]['token_ids'] or [])!r}")
     print("  ✓ test_baseline")
 
@@ -354,17 +507,17 @@ def test_baseline(h, image: Path, prompt: str) -> None:
 def test_cache_reuse(h, prompt: str, n_repeat: int = 5) -> None:
     print(f"\n=== test_cache_reuse (n_repeat={n_repeat}) ===")
     rendered = render(
-        h.consumer.http_port, h.model, synth_image_data_url(seed=50), prompt
+        h.consumer.base_url, h.model, synth_image_data_url(seed=50), prompt
     )
     target_hash = rendered["features"]["mm_hashes"]["image"][0]
-    reset_mm_cache(h.consumer.http_port)
-    reset_encoder_cache(h.consumer.http_port)
-    reset_prefix_cache(h.consumer.http_port)
+    reset_mm_cache(h.consumer.base_url)
+    reset_encoder_cache(h.consumer.base_url)
+    reset_prefix_cache(h.consumer.base_url)
     ec_params, _ = _producer_encode(h, rendered)
     if target_hash not in ec_params:
         raise AssertionError(f"producer did not announce {target_hash}")
 
-    pmark, cmark = log_size(h.producer.log_path), log_size(h.consumer.log_path)
+    pmark, cmark = h.producer.events.mark(), h.consumer.events.mark()
     for i in range(n_repeat):
         # Evict the GPU-resident encoder cache each iteration too, not just
         # the KV prefix cache. Otherwise EncoderCacheManager keeps serving
@@ -372,20 +525,23 @@ def test_cache_reuse(h, prompt: str, n_repeat: int = 5) -> None:
         # competes for its slot), short-circuiting past has_cache_item /
         # start_load_caches on every repeat after the first — the CPU-side
         # cache reuse this test exists to exercise never gets touched again.
-        reset_encoder_cache(h.consumer.http_port)
-        reset_prefix_cache(h.consumer.http_port)
+        reset_encoder_cache(h.consumer.base_url)
+        reset_prefix_cache(h.consumer.base_url)
         resp = generate(
-            h.consumer.http_port, rendered, max_tokens=8, ec_transfer_params=ec_params
+            h.consumer.base_url, rendered, max_tokens=8, ec_transfer_params=ec_params
         )
         if not (resp["choices"][0]["token_ids"] or []):
             raise AssertionError(f"empty response on iter {i}")
 
-    psl = log_slice(h.producer.log_path, pmark)
-    csl = log_slice(h.consumer.log_path, cmark)
-    n_xfer_req = psl.count(f"producer XferReq mm_hash={target_hash}")
-    n_read_granted = psl.count("producer read granted")
-    n_load = csl.count("consumer load mm_hashes=")
-    n_encoder = csl.count("consumer ENCODER FORWARD")
+    # Wait for the consumer side to reach its expected load count before
+    # counting anything. Every XferReq necessarily precedes the load it serves,
+    # so once the loads are all in, the producer's counts have settled too.
+    csl = h.consumer.events.wait_count(cmark, "consumer load mm_hashes=", n_repeat)
+    psl = h.producer.events.read(pmark)
+    n_xfer_req = count_events(psl, f"producer XferReq mm_hash={target_hash}")
+    n_read_granted = count_events(psl, "producer read granted")
+    n_load = count_events(csl, "consumer load mm_hashes=")
+    n_encoder = count_events(csl, "consumer ENCODER FORWARD")
     print(
         f"  XferReqs={n_xfer_req}, read grants={n_read_granted}, "
         f"loads={n_load}, encoder forwards={n_encoder}"
@@ -411,50 +567,58 @@ def test_cache_reuse(h, prompt: str, n_repeat: int = 5) -> None:
 def test_multi_image(h, prompt: str, n_images: int = 3) -> None:
     print(f"\n=== test_multi_image (n_images={n_images}) ===")
     urls = [synth_image_data_url(seed=100 + i) for i in range(n_images)]
-    rendered = render(h.consumer.http_port, h.model, urls, prompt)
+    rendered = render(h.consumer.base_url, h.model, urls, prompt)
     hashes = rendered["features"]["mm_hashes"]["image"]
     if len(hashes) != n_images:
         raise AssertionError(f"expected {n_images} mm_hashes, got {len(hashes)}")
     print(f"  mm_hashes: {hashes}")
-    reset_mm_cache(h.consumer.http_port)
-    reset_encoder_cache(h.consumer.http_port)
-    reset_prefix_cache(h.consumer.http_port)
+    reset_mm_cache(h.consumer.base_url)
+    reset_encoder_cache(h.consumer.base_url)
+    reset_prefix_cache(h.consumer.base_url)
 
     ec_params, prod_sl = _producer_encode(h, rendered)
     for hh in hashes:
         if hh not in ec_params:
             raise AssertionError(f"producer omitted ec_transfer_params for {hh}")
-        assert_in_log(
+        assert_event(
             prod_sl,
             f"producer save mm_hash={hh}",
-            where="producer.log [multi-image encode]",
+            where="producer events [multi-image encode]",
         )
 
-    pmark, cmark = log_size(h.producer.log_path), log_size(h.consumer.log_path)
-    generate(
-        h.consumer.http_port, rendered, max_tokens=20, ec_transfer_params=ec_params
+    pmark, cmark = h.producer.events.mark(), h.consumer.events.mark()
+    generate(h.consumer.base_url, rendered, max_tokens=20, ec_transfer_params=ec_params)
+    psl = h.producer.events.wait_all(
+        pmark,
+        [f"producer XferReq mm_hash={hh}" for hh in hashes]
+        + [f"producer read granted mm_hash={hh}" for hh in hashes],
     )
-    psl = log_slice(h.producer.log_path, pmark)
-    csl = log_slice(h.consumer.log_path, cmark)
+    csl = h.consumer.events.wait_all(
+        cmark,
+        [f"consumer read ok mm_hash={hh}" for hh in hashes]
+        + ["consumer load mm_hashes="],
+    )
     for hh in hashes:
-        assert_in_log(
-            psl, f"producer XferReq mm_hash={hh}", where="producer.log [multi-image ec]"
+        assert_event(
+            psl,
+            f"producer XferReq mm_hash={hh}",
+            where="producer events [multi-image ec]",
         )
-        assert_in_log(
+        assert_event(
             psl,
             f"producer read granted mm_hash={hh}",
-            where="producer.log [multi-image ec]",
+            where="producer events [multi-image ec]",
         )
-        assert_in_log(
+        assert_event(
             csl,
             f"consumer read ok mm_hash={hh}",
-            where="consumer.log [multi-image ec]",
+            where="consumer events [multi-image ec]",
         )
-    assert_in_log(
-        csl, "consumer load mm_hashes=", where="consumer.log [multi-image ec]"
+    assert_event(
+        csl, "consumer load mm_hashes=", where="consumer events [multi-image ec]"
     )
-    assert_not_in_log(
-        csl, "consumer ENCODER FORWARD", where="consumer.log [multi-image ec]"
+    assert_no_event(
+        csl, "consumer ENCODER FORWARD", where="consumer events [multi-image ec]"
     )
     print(f"  ✓ test_multi_image — all {n_images} fetched, none re-encoded")
 
@@ -464,7 +628,7 @@ def test_concurrent_ec(h, prompt: str, k: int = 4) -> None:
     encoded: list[tuple[dict, dict, str]] = []
     for i in range(k):
         url = synth_image_data_url(seed=200 + i)
-        rendered = render(h.consumer.http_port, h.model, url, prompt)
+        rendered = render(h.consumer.base_url, h.model, url, prompt)
         target_hash = rendered["features"]["mm_hashes"]["image"][0]
         ec_params, _ = _producer_encode(h, rendered)
         if target_hash not in ec_params:
@@ -472,18 +636,18 @@ def test_concurrent_ec(h, prompt: str, k: int = 4) -> None:
         encoded.append((rendered, ec_params, target_hash))
     print(f"  pre-encoded {k} images on producer")
 
-    reset_mm_cache(h.consumer.http_port)
+    reset_mm_cache(h.consumer.base_url)
 
-    reset_encoder_cache(h.consumer.http_port)
-    reset_prefix_cache(h.consumer.http_port)
+    reset_encoder_cache(h.consumer.base_url)
+    reset_prefix_cache(h.consumer.base_url)
 
-    pmark, cmark = log_size(h.producer.log_path), log_size(h.consumer.log_path)
+    pmark, cmark = h.producer.events.mark(), h.consumer.events.mark()
     t0 = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=k) as ex:
         futs = [
             ex.submit(
                 generate,
-                h.consumer.http_port,
+                h.consumer.base_url,
                 rendered,
                 max_tokens=8,
                 ec_transfer_params=ec_params,
@@ -495,25 +659,37 @@ def test_concurrent_ec(h, prompt: str, k: int = 4) -> None:
             if not (resp["choices"][0]["token_ids"] or []):
                 raise AssertionError("empty response in concurrent batch")
     elapsed = time.monotonic() - t0
-    psl = log_slice(h.producer.log_path, pmark)
-    csl = log_slice(h.consumer.log_path, cmark)
+    # The k fetches are served one at a time, seconds apart, so the last one's
+    # lines reach the log stream well after the final generate() returns.
+    psl = h.producer.events.wait_all(
+        pmark,
+        [f"producer XferReq mm_hash={hh}" for _, _, hh in encoded]
+        + [f"producer read granted mm_hash={hh}" for _, _, hh in encoded],
+        timeout_s=30.0,
+    )
+    csl = h.consumer.events.wait_all(
+        cmark,
+        [f"consumer read ok mm_hash={hh}" for _, _, hh in encoded]
+        + ["consumer load mm_hashes="],
+        timeout_s=30.0,
+    )
     for _, _, hh in encoded:
-        assert_in_log(
-            psl, f"producer XferReq mm_hash={hh}", where="producer.log [concurrent]"
+        assert_event(
+            psl, f"producer XferReq mm_hash={hh}", where="producer events [concurrent]"
         )
-        assert_in_log(
+        assert_event(
             psl,
             f"producer read granted mm_hash={hh}",
-            where="producer.log [concurrent]",
+            where="producer events [concurrent]",
         )
-        assert_in_log(
+        assert_event(
             csl,
             f"consumer read ok mm_hash={hh}",
-            where="consumer.log [concurrent]",
+            where="consumer events [concurrent]",
         )
-    assert_in_log(csl, "consumer load mm_hashes=", where="consumer.log [concurrent]")
-    assert_not_in_log(
-        csl, "consumer ENCODER FORWARD", where="consumer.log [concurrent]"
+    assert_event(csl, "consumer load mm_hashes=", where="consumer events [concurrent]")
+    assert_no_event(
+        csl, "consumer ENCODER FORWARD", where="consumer events [concurrent]"
     )
     print(f"  ✓ test_concurrent_ec — k={k} parallel fetches in {elapsed:.2f}s")
 
@@ -540,16 +716,21 @@ def test_pool_exhaustion(
     producer, consumer = make_specs_fn(log_dir, producer_ec_cpu_bytes=pool_size)
     with make_harness(producer, consumer, model) as h:
         rendered_a = render(
-            h.consumer.http_port, h.model, synth_image_data_url(seed=300), prompt
+            h.consumer.base_url, h.model, synth_image_data_url(seed=300), prompt
         )
         hash_a = rendered_a["features"]["mm_hashes"]["image"][0]
         a_params, sl_a = _producer_encode(h, rendered_a)
         if hash_a not in a_params:
             raise AssertionError("producer did not announce A's encoding")
-        m = re.search(rf"producer save mm_hash={hash_a} n_blocks=(\d+)", sl_a)
+        m = re.search(
+            rf"producer save mm_hash={hash_a} n_blocks=(\d+)", "\n".join(sl_a)
+        )
         if not m:
+            saves = [e for e in sl_a if "producer save" in e]
             raise AssertionError(
-                f"could not parse n_blocks from producer save log; slice={sl_a!r}"
+                "could not parse n_blocks from the producer's save event.\n"
+                f"  save events seen: {saves or '<none>'}\n"
+                f"  all events: {sl_a!r}"
             )
         per_image_blocks = int(m.group(1))
         # `pool_size` is a byte budget but `per_image_blocks` is a block
@@ -566,43 +747,51 @@ def test_pool_exhaustion(
         )
         for i in range(n_extra):
             rendered = render(
-                h.consumer.http_port,
+                h.consumer.base_url,
                 h.model,
                 synth_image_data_url(seed=301 + i),
                 prompt,
             )
             _producer_encode(h, rendered)
 
-        reset_mm_cache(h.consumer.http_port)
+        reset_mm_cache(h.consumer.base_url)
 
-        reset_encoder_cache(h.consumer.http_port)
-        reset_prefix_cache(h.consumer.http_port)
-        pmark, cmark = log_size(h.producer.log_path), log_size(h.consumer.log_path)
+        reset_encoder_cache(h.consumer.base_url)
+        reset_prefix_cache(h.consumer.base_url)
+        pmark, cmark = h.producer.events.mark(), h.consumer.events.mark()
         resp = generate(
-            h.consumer.http_port, rendered_a, max_tokens=8, ec_transfer_params=a_params
+            h.consumer.base_url, rendered_a, max_tokens=8, ec_transfer_params=a_params
         )
         if not (resp["choices"][0]["token_ids"] or []):
             raise AssertionError("evicted-fallback request returned empty body")
-        psl = log_slice(h.producer.log_path, pmark)
-        csl = log_slice(h.consumer.log_path, cmark)
+        # Waiting for the XferReq also gives a (wrongly) granted read time to
+        # show up, which makes the absence check below stricter, not weaker.
+        psl = h.producer.events.wait_all(pmark, [f"producer XferReq mm_hash={hash_a}"])
+        csl = h.consumer.events.wait_all(
+            cmark,
+            [f"consumer read failed mm_hash={hash_a}", "consumer ENCODER FORWARD"],
+        )
 
-        assert_in_log(
+        assert_event(
             psl,
             f"producer XferReq mm_hash={hash_a}",
-            where="producer.log [evicted-fetch]",
+            where="producer events [evicted-fetch]",
         )
-        if f"producer read granted mm_hash={hash_a}" in psl:
+        # Substring match per event, not `needle in psl`: against a list that
+        # would silently degrade to exact equality, so any change to the event's
+        # wording would turn this absence check into an unconditional pass.
+        if any(f"producer read granted mm_hash={hash_a}" in e for e in psl):
             raise AssertionError(
                 "expected no read granted for evicted hash; A may not have been "
                 "evicted (try lowering pool_size or raising n_extra)"
             )
-        assert_in_log(
+        assert_event(
             csl,
             f"consumer read failed mm_hash={hash_a}",
-            where="consumer.log [evicted-fetch]",
+            where="consumer events [evicted-fetch]",
         )
-        assert_in_log(
-            csl, "consumer ENCODER FORWARD", where="consumer.log [evicted-fetch]"
+        assert_event(
+            csl, "consumer ENCODER FORWARD", where="consumer events [evicted-fetch]"
         )
         print("  ✓ test_pool_exhaustion — evicted hash NACK'd and locally re-encoded")
 
@@ -624,17 +813,17 @@ def test_producer_restart(
     producer, consumer = make_specs_fn(log_dir)
     with make_harness(producer, consumer, model) as h:
         rendered_a = render(
-            h.consumer.http_port, h.model, synth_image_data_url(seed=400), prompt
+            h.consumer.base_url, h.model, synth_image_data_url(seed=400), prompt
         )
         hash_a = rendered_a["features"]["mm_hashes"]["image"][0]
-        reset_mm_cache(h.consumer.http_port)
-        reset_encoder_cache(h.consumer.http_port)
-        reset_prefix_cache(h.consumer.http_port)
+        reset_mm_cache(h.consumer.base_url)
+        reset_encoder_cache(h.consumer.base_url)
+        reset_prefix_cache(h.consumer.base_url)
         ec_params_a, _ = _producer_encode(h, rendered_a)
         if hash_a not in ec_params_a:
             raise AssertionError("producer did not announce hash A on first encode")
         resp_a = generate(
-            h.consumer.http_port,
+            h.consumer.base_url,
             rendered_a,
             max_tokens=8,
             ec_transfer_params=ec_params_a,
@@ -646,68 +835,69 @@ def test_producer_restart(
         h.restart_producer()
 
         rendered_b = render(
-            h.consumer.http_port, h.model, synth_image_data_url(seed=401), prompt
+            h.consumer.base_url, h.model, synth_image_data_url(seed=401), prompt
         )
         hash_b = rendered_b["features"]["mm_hashes"]["image"][0]
-        reset_mm_cache(h.consumer.http_port)
-        reset_encoder_cache(h.consumer.http_port)
-        reset_prefix_cache(h.consumer.http_port)
+        reset_mm_cache(h.consumer.base_url)
+        reset_encoder_cache(h.consumer.base_url)
+        reset_prefix_cache(h.consumer.base_url)
         ec_params_b, _ = _producer_encode(h, rendered_b)
         if hash_b not in ec_params_b:
             raise AssertionError("producer did not announce hash B on second encode")
 
-        pmark, cmark = log_size(h.producer.log_path), log_size(h.consumer.log_path)
+        pmark, cmark = h.producer.events.mark(), h.consumer.events.mark()
         resp_b = generate(
-            h.consumer.http_port,
+            h.consumer.base_url,
             rendered_b,
             max_tokens=8,
             ec_transfer_params=ec_params_b,
         )
         if not (resp_b["choices"][0]["token_ids"] or []):
             raise AssertionError("post-restart EC request returned empty body")
-        psl = log_slice(h.producer.log_path, pmark)
-        # The consumer's oc logs -f stream may die briefly during the
-        # peer eviction triggered by the producer restart.  Use wait_for_in_log
-        # so the watchdog (1s interval) has time to restart the stream and
-        # replay the pod log before we assert. Wait for "consumer load" (the
-        # later of the two events) rather than "consumer read ok": its
-        # presence guarantees "read ok" already landed too, so one poll loop
-        # covers both assertions below without racing the log stream.
-        csl = wait_for_in_log(
-            h.consumer.log_path,
-            cmark,
-            "consumer load mm_hashes=",
+        psl = h.producer.events.wait_all(
+            pmark,
+            [
+                f"producer XferReq mm_hash={hash_b}",
+                f"producer read granted mm_hash={hash_b}",
+            ],
             timeout_s=12.0,
         )
-        assert_in_log(
+        # "consumer load" is the last of the three events asserted below, so
+        # waiting on it settles "read ok" and "peer_pool" as well.
+        csl = h.consumer.events.wait_all(
+            cmark,
+            ["consumer load mm_hashes="],
+            timeout_s=12.0,
+        )
+        assert_event(
             psl,
             f"producer XferReq mm_hash={hash_b}",
-            where="producer.log [post-restart ec]",
+            where="producer events [post-restart ec]",
         )
-        assert_in_log(
+        assert_event(
             psl,
             f"producer read granted mm_hash={hash_b}",
-            where="producer.log [post-restart ec]",
+            where="producer events [post-restart ec]",
         )
-        assert_in_log(
+        assert_event(
             csl,
             f"consumer read ok mm_hash={hash_b}",
-            where="consumer.log [post-restart ec]",
+            where="consumer events [post-restart ec]",
         )
-        assert_in_log(
-            csl, "consumer load mm_hashes=", where="consumer.log [post-restart ec]"
+        assert_event(
+            csl, "consumer load mm_hashes=", where="consumer events [post-restart ec]"
         )
         # After restart the old peer may have been evicted by poll_dead_peers
         # before the EC request fires (logs "ADD") or still be present when the
         # fresh XferAck arrives with different metadata (logs "REPLACE"). Either
         # way "consumer peer_pool" appears, confirming a fresh NIXL registration.
-        assert_in_log(
+        assert_event(
             csl,
             "consumer peer_pool",
-            where="consumer.log [post-restart ec]",
+            where="consumer events [post-restart ec]",
         )
-        assert_not_in_log(
-            csl, "consumer ENCODER FORWARD", where="consumer.log [post-restart ec]"
+        assert_no_event(
+            csl, "consumer ENCODER FORWARD", where="consumer events [post-restart ec]"
         )
         print(
             "  ✓ test_producer_restart — post-restart EC fetch OK with fresh metadata"

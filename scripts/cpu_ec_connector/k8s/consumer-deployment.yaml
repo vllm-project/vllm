@@ -55,7 +55,7 @@ spec:
             cd /vllm-workspace
             git clone https://github.com/omerpaz95/vllm.git
             cd vllm
-            git checkout cpu_nixl_ec_connector
+            git checkout p2p_nixl_ec_connector
 
             echo "[setup] install uv"
             cd /vllm-workspace
@@ -89,13 +89,15 @@ spec:
         - name: GPU_MEMORY_UTILIZATION
           value: "0.5"                              # CONFIGURE: set by driver
         - name: EC_TRANSFER_CONFIG
-          value: '{"ec_connector":"ECCPUConnector","ec_role":"ec_consumer","engine_id":"ec-consumer-0","ec_connector_extra_config":{"ec_cpu_bytes":4294967296}}'  # CONFIGURE: set by driver
+          value: '{"ec_connector":"ECCPUConnector","ec_role":"ec_consumer", "ec_enable_nixl": "True", "engine_id":"ec-consumer-0","ec_connector_extra_config":{"ec_cpu_bytes":4294967296}}'  # CONFIGURE: set by driver
         - name: EC_TEST_ROLE
           value: consumer
         - name: PYTHONPATH
           value: /sitecustomize
         - name: VLLM_SERVER_DEV_MODE
           value: "1"
+        - name: VLLM_LOGGING_LEVEL
+          value: DEBUG
         - name: HF_TOKEN
           valueFrom:
             secretKeyRef:
@@ -144,3 +146,37 @@ spec:
       - name: sitecustomize
         configMap:
           name: ec-test-sitecustomize              # CONFIGURE: run_id suffix added by driver
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-ec-consumer          # CONFIGURE: run_id suffix added by driver
+  namespace: default             # CONFIGURE: set to your namespace
+spec:
+  selector:
+    app: vllm-ec-test
+    role: consumer
+    run-id: ec-test-placeholder  # CONFIGURE: set by driver per run
+  ports:
+  - name: http
+    port: 8002                     # CONFIGURE: matches VLLM_PORT
+    targetPort: 8002
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: vllm-ec-consumer          # CONFIGURE: run_id suffix added by driver
+  namespace: default             # CONFIGURE: set to your namespace
+  annotations:
+    # Requests carry large base64 image payloads and the encode itself is slow;
+    # the router's 30s default would cut them off mid-transfer.
+    haproxy.router.openshift.io/timeout: 600s
+spec:
+  to:
+    kind: Service
+    name: vllm-ec-consumer        # CONFIGURE: run_id suffix added by driver
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

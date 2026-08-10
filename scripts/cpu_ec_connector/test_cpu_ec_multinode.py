@@ -3,9 +3,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Multi-node CPU EC connector e2e test for OpenShift.
 
-Producer and consumer run as OpenShift Deployments in separate pods.
-The driver (this script) runs outside the cluster and communicates with
-both pods via `oc port-forward`. Pod-to-pod NIXL and ZMQ traffic flows
+Producer and consumer run as OpenShift Deployments in separate pods, each
+fronted by a Service and a Route. The driver (this script) runs outside the
+cluster and drives HTTP through those Routes, and reads each pod's structured
+event file with `oc exec` to assert on. Pod-to-pod NIXL and ZMQ traffic flows
 directly over the cluster network.
 
 Run from the repo root::
@@ -99,7 +100,6 @@ def _make_harness(args):
             image=args.image,
             k8s_dir=K8S_DIR,
             different_nodes=args.different_nodes,
-            log_delay=args.log_delay,
             keep_on_exit=keep_on_exit,
         )
 
@@ -135,26 +135,19 @@ def main() -> int:
         "--producer-port",
         type=int,
         default=DEFAULT_PRODUCER_PORT,
-        help="Local port forwarded to producer's HTTP server",
+        help="Port the producer's HTTP server listens on in-pod",
     )
     parser.add_argument(
         "--consumer-port",
         type=int,
         default=DEFAULT_CONSUMER_PORT,
-        help="Local port forwarded to consumer's HTTP server",
+        help="Port the consumer's HTTP server listens on in-pod",
     )
     parser.add_argument(
         "--different-nodes",
         action="store_true",
         help="Add podAntiAffinity to force producer+consumer on "
         "different Kubernetes nodes",
-    )
-    parser.add_argument(
-        "--log-delay",
-        type=float,
-        default=0.5,
-        help="Seconds to wait after each generate() call before "
-        "reading the log window (oc logs has streaming latency)",
     )
     parser.add_argument(
         "--keep-servers",

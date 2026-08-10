@@ -8,12 +8,50 @@ processes). With `EC_TEST_ROLE` unset this module is a no-op, so an
 accidental PYTHONPATH leak into an unrelated shell does nothing.
 
 The patches install INFO log lines around the EC connector and the
-multimodal encoder forward so the driver can assert on log slices.
+multimodal encoder forward. Those records go to two sinks: stderr (for a
+human reading the pod log) and, when ``EC_TEST_EVENT_FILE`` is set, a JSONL
+file the driver pulls synchronously. The driver asserts on the JSONL file —
+never on the streamed log — so assertions don't race a log transport.
 """
 
+import json
 import logging
 import os
 import sys
+
+
+class _JsonlEventHandler(logging.Handler):
+    """Append one JSON object per record to a local event file.
+
+    One ``O_APPEND`` write per record: writes this small are atomic on Linux,
+    so vLLM's several processes (API server, EngineCore, workers) can share a
+    single file without locking or interleaved lines.
+    """
+
+    def __init__(self, path):
+        super().__init__()
+        self._path = path
+
+    def emit(self, record):
+        try:
+            line = (
+                json.dumps(
+                    {
+                        "ts": record.created,
+                        "pid": record.process,
+                        "msg": record.getMessage(),
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, line.encode())
+            finally:
+                os.close(fd)
+        except Exception:
+            self.handleError(record)
 
 
 def _install_ec_test_patches(role, log):
@@ -127,6 +165,11 @@ def _install_ec_test_patches(role, log):
     # ------------------------------------------------------------------
 
     def _on_request_finished(orig, self, request):
+        log.info(
+            "producer request_finished DIAGNOSTIC req_id=%s mm_features=%s",
+            request.request_id,
+            [f.identifier for f in (request.mm_features or [])],
+        )
         skip, params = orig(self, request)
         if params:
             first = next(iter(params.values()))
@@ -196,6 +239,9 @@ if _ROLE:
     )
     _ec_log = logging.getLogger("ec-test")
     _ec_log.addHandler(_h)
+    _EVENT_FILE = os.environ.get("EC_TEST_EVENT_FILE")
+    if _EVENT_FILE:
+        _ec_log.addHandler(_JsonlEventHandler(_EVENT_FILE))
     _ec_log.setLevel(logging.INFO)
     _ec_log.propagate = False
     try:

@@ -35,6 +35,7 @@ from shared import (
     HEALTH_TIMEOUT_S,
     TESTS_REQUIRING_CUSTOM_HARNESS,
     TESTS_REQUIRING_DEFAULT_HARNESS,
+    LocalEventLog,
     ServerSpec,
     test_baseline,
     test_cache_reuse,
@@ -79,7 +80,10 @@ def build_vllm_argv(spec: ServerSpec, model: str) -> list[str]:
         "ec_role": ec_role,
         "engine_id": spec.engine_id,
         "ec_enable_nixl": True,
-        "ec_connector_extra_config": {"ec_cpu_bytes": spec.ec_cpu_bytes},
+        "ec_connector_extra_config": {
+            "ec_enable_nixl": "True",
+            "ec_cpu_bytes": spec.ec_cpu_bytes,
+        },
     }
     argv = [
         "vllm",
@@ -112,8 +116,11 @@ def spawn_server(spec: ServerSpec, model: str) -> subprocess.Popen:
     EngineCore, and any helper subprocess.
     """
     spec.log_path.parent.mkdir(parents=True, exist_ok=True)
+    event_path = spec.log_path.with_suffix(".events.jsonl")
+    event_path.unlink(missing_ok=True)
     env = {
         **os.environ,
+        "EC_TEST_EVENT_FILE": str(event_path),
         "CUDA_VISIBLE_DEVICES": str(spec.gpu),
         "VLLM_EC_SIDE_CHANNEL_HOST": "127.0.0.1",
         "VLLM_EC_SIDE_CHANNEL_PORT": str(spec.side_channel_port),
@@ -231,6 +238,9 @@ class LocalHarness:
         self.keep_on_exit = keep_on_exit
         self.producer_proc: subprocess.Popen | None = None
         self.consumer_proc: subprocess.Popen | None = None
+        for spec in (producer, consumer):
+            spec.base_url = f"http://127.0.0.1:{spec.http_port}"
+            spec.events = LocalEventLog(spec.log_path.with_suffix(".events.jsonl"))
 
     def __enter__(self) -> LocalHarness:
         print(
@@ -272,17 +282,17 @@ class LocalHarness:
         ]
         with ThreadPoolExecutor(max_workers=2) as ex:
             futs = {
-                ex.submit(wait_for_health, s.http_port, p, HEALTH_TIMEOUT_S): (
+                ex.submit(wait_for_health, s.base_url, p, HEALTH_TIMEOUT_S): (
                     s.role,
-                    s.http_port,
+                    s.base_url,
                 )
                 for s, p in pairs
                 if p is not None
             }
             for fut in as_completed(futs):
                 fut.result()
-                name, port = futs[fut]
-                print(f"  ✓ {name} healthy on {port}")
+                name, url = futs[fut]
+                print(f"  ✓ {name} healthy at {url}")
 
     def restart_producer(self) -> None:
         assert self.producer_proc is not None
