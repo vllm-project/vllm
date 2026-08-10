@@ -2006,10 +2006,11 @@ class GPUModelRunner(
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
+        int,
     ]:
         """
         Returns:
-            tuple[logits_indices, spec_decode_metadata]
+            tuple[logits_indices, spec_decode_metadata, max_num_sampled_tokens]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -2321,6 +2322,7 @@ class GPUModelRunner(
         return (
             logits_indices,
             spec_decode_metadata,
+            int(num_sampled_tokens.max()),
         )
 
     def _build_attention_metadata(
@@ -2332,6 +2334,7 @@ class GPUModelRunner(
         num_reqs_padded: int | None = None,
         ubatch_slices: UBatchSlices | None = None,
         logits_indices: torch.Tensor | None = None,
+        max_num_sampled_tokens: int | None = None,
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
@@ -2506,6 +2509,7 @@ class GPUModelRunner(
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
+            cm_base.max_logits_per_req = max_num_sampled_tokens
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
                 logits_indices
             )
@@ -4340,9 +4344,8 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            logits_indices, spec_decode_metadata = self._prepare_inputs(
-                scheduler_output,
-                num_scheduled_tokens_np,
+            logits_indices, spec_decode_metadata, max_num_sampled_tokens = (
+                self._prepare_inputs(scheduler_output, num_scheduled_tokens_np)
             )
 
             cascade_attn_prefix_lens = None
@@ -4480,6 +4483,7 @@ class GPUModelRunner(
                     max_query_len=max_num_scheduled_tokens,
                     ubatch_slices=ubatch_slices_attn,
                     logits_indices=logits_indices,
+                    max_num_sampled_tokens=max_num_sampled_tokens,
                     use_spec_decode=use_spec_decode,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
