@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 
@@ -416,6 +417,31 @@ def test_per_token_head_packed_rows_certify():
     assert mapping.local_page_size_bytes == spec.unpadded_page_size_bytes
     assert mapping.canonical_page_size_bytes == 2 * spec.unpadded_page_size_bytes
     _verify_tiling("quant", per_rank)
+
+
+def test_streams_packed_into_head_size_certify():
+    """Short-conv state caches (Inkling) pack several streams into head_size
+    with head_size_v=0, head-major [num_blocks, H, N, D]: a head shard is one
+    contiguous run, so the canonical page is global head order."""
+    spec = SlidingWindowSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=256,
+        head_size_v=0,
+        dtype=torch.int8,
+        sliding_window=4,
+    )
+    cache = torch.zeros(
+        NUM_BLOCKS, spec.num_kv_heads, spec.block_size, spec.head_size, dtype=torch.int8
+    )
+    per_rank = [_mapping(spec, cache, _ctx(rank=r, tp=2, heads=2)) for r in range(2)]
+    _verify_tiling("sconv", per_rank)
+    page = spec.unpadded_page_size_bytes
+    assert [_triples(m.runs) for m in per_rank] == [
+        [(0, 0, page)],
+        [(0, page, page)],
+    ]
+    assert all(m.parallelism_agnostic for m in per_rank)
 
 
 def test_opaque_fallback_places_page_whole():
