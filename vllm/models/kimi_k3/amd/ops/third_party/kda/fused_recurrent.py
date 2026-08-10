@@ -561,7 +561,13 @@ def fused_recurrent_kda_packed_decode(
     if initial_state.stride()[1:] != (V * K, K, 1):
         raise ValueError("`initial_state` must be contiguous within each cache slot.")
     if state_indices.ndim != 1 or state_indices.stride(0) != 1:
-        raise ValueError("`state_indices` must be contiguous and one-dimensional.")
+        # A piecewise CUDA graph can hand this kernel a non-contiguous / [B, 1]
+        # ``state_indices`` (full-graph capture modes prepare a 1-D contiguous
+        # one). The packed decode kernel only indexes ``state_indices[i_n]`` once
+        # per sequence, so flattening to a contiguous 1-D tensor is equivalent to
+        # the full-graph input and lets piecewise capture / eager warmup proceed
+        # instead of raising.
+        state_indices = state_indices.reshape(-1).contiguous()
     if A_log.ndim != 1 or not A_log.is_contiguous():
         raise ValueError("`A_log` must be contiguous and one-dimensional.")
     if not dt_bias.is_contiguous():
