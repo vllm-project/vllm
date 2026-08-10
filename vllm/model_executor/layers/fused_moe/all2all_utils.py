@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    BatchedPrepareAndFinalize,
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
 )
@@ -122,23 +123,19 @@ def maybe_make_prepare_finalize(
     use_monolithic: bool = False,
     eep_stage: bool = False,
 ) -> FusedMoEPrepareAndFinalize | None:
-    # NOTE(rob): we are migrating each quant_method to hold the MK
-    # in all cases. The allow_new_interface=False flag allow us to fall
-    # back to the old method for methods that have not yet been migrated.
-    #
-    # In old method:
-    #   * maybe_init_modular_kernel() calls this function. If we are
-    #     using no Dp/Ep or naive all2all, we return None this function
-    #     returns None and no ModularKernelMethod is created. If non-naive
-    #     all2all is used, this returns a PrepareAndFinalize object and
-    #     a ModularKernelMethod is created.
-    # In new method:
-    #   * maybe_make_prepare_finalize() is called from the oracle. We
-    #     always return a PrepareAndFinalize object and the quant method
-    #     holds the ModularKernel.
     if not moe.moe_parallel_config.use_all2all_kernels:
         if not allow_new_interface:
             return None
+
+        # Opt-in XPU batched path: reorganize tokens into E x T x K locally
+        # (no all-to-all) so BatchedTritonExperts (moe_mmk TD) can run.
+        if current_platform.is_xpu() and moe.moe_backend == "batched_triton":
+            return BatchedPrepareAndFinalize(
+                max_num_tokens=moe.max_num_tokens,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=1,
+                rank=moe.moe_parallel_config.ep_rank,
+            )
 
         # For DP/TP case, fall back to naive P/F.
         if moe.moe_parallel_config.dp_size > 1:

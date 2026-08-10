@@ -19,7 +19,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
+from vllm.distributed.kv_events import (
+    MEDIUM_CPU,
+    MEDIUM_STORAGE,
+    BlockRemoved,
+    BlockStored,
+    KVCacheEvent,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
@@ -28,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.kv_offload.base import (
+    Medium,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -42,6 +49,11 @@ if TYPE_CHECKING:
     )
 
 logger = init_logger(__name__)
+
+_MEDIUM_TO_EVENT_STR: dict[Medium, str] = {
+    Medium.CPU: MEDIUM_CPU,
+    Medium.STORAGE: MEDIUM_STORAGE,
+}
 
 
 class OffloadingEventGroupSpec(NamedTuple):
@@ -61,9 +73,9 @@ def get_offloading_event_group_spec(
 
 @dataclass(slots=True)
 class _OffloadEventMetadata:
-    """BlockStored payload snapshot for one OffloadKey, captured at store
-    time and kept until the matching eviction event. ``medium`` is forwarded
-    from the OffloadingEvent."""
+    """BlockStored payload snapshot for one OffloadKey, captured while the
+    Request is available and kept until the matching eviction event. ``medium``
+    is forwarded from the OffloadingEvent."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -81,10 +93,11 @@ class _OffloadEventMetadata:
 class OffloadingEventsTracker:
     """Tracks offloaded chunks' KV event payloads from store to eviction.
 
-    The scheduler calls :meth:`record_store` from ``_build_store_jobs``
-    while the ``Request`` is available, and routes the manager's raw
-    :class:`OffloadingEvent` stream through :meth:`take_events`. All state
-    is bounded by the CPU pool capacity and cleared by :meth:`reset`.
+    The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
+    :meth:`record_lookup` for ready primary-tier hits while the ``Request`` is
+    available. Deferred and missing lookups add no state. Under the connector's
+    supported success-only transfer model, entries follow primary allocations
+    until CPU removal translation or :meth:`reset`.
     """
 
     def __init__(self, config: OffloadingKVEventsConfig):
@@ -93,8 +106,7 @@ class OffloadingEventsTracker:
             config.enable_kv_cache_events and config.self_describing_kv_events
         )
 
-        # OffloadKey -> payload snapshot, kept until the eviction event so
-        # BlockRemoved can fan out. Bounded: one entry per offloaded chunk.
+        # OffloadKey -> payload snapshot, kept until CPU removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
 
     def record_store(
@@ -115,6 +127,102 @@ class OffloadingEventsTracker:
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
         self._pending_event_metadata[offload_key] = meta
+
+    def record_lookup(
+        self,
+        req: Request,
+        group_config: "GroupOffloadConfig",
+        chunk_idx: int,
+        offload_key: OffloadKey,
+    ) -> None:
+        """Snapshot metadata for a ready primary-tier lookup hit."""
+        if not self.self_describing_enabled:
+            return
+        if group_config.sliding_window_size_in_chunks is not None:
+            return
+        if offload_key not in self._pending_event_metadata:
+            self._pending_event_metadata[offload_key] = self._build_event_metadata(
+                req, group_config, chunk_idx
+            )
+
+    def record_partial_store(
+        self,
+        req: Request,
+        group_config: "GroupOffloadConfig",
+        boundary_tokens: int,
+        offload_key: OffloadKey,
+    ) -> None:
+        """Snapshot metadata for a newly stored partial recurrent tail."""
+        if group_config.sliding_window_size_in_chunks is not None:
+            return
+        self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
+
+    def record_partial_lookup(
+        self,
+        req: Request,
+        group_config: "GroupOffloadConfig",
+        boundary_tokens: int,
+        offload_key: OffloadKey,
+    ) -> None:
+        """Backfill metadata for a partial recurrent tail lookup hit."""
+        if group_config.sliding_window_size_in_chunks is not None:
+            return
+        if offload_key not in self._pending_event_metadata:
+            self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
+
+    def _record_partial_tail(
+        self,
+        req: Request,
+        group_config: "GroupOffloadConfig",
+        boundary_tokens: int,
+        offload_key: OffloadKey,
+    ) -> None:
+        """Build metadata for the valid prefix of one physical cache block.
+
+        A partial recurrent tail ends on a hash boundary but before its
+        physical cache block is full. The event describes only the valid
+        hashes and tokens, not the unused remainder of that physical block.
+        """
+        if not self.self_describing_enabled:
+            return
+
+        tokens_per_hash = group_config.tokens_per_chunk // group_config.hashes_per_chunk
+        # Subtract one so the boundary token itself cannot select the next
+        # physical block when the boundary lies exactly on a block edge.
+        chunk_start = (
+            (boundary_tokens - 1) // group_config.tokens_per_chunk
+        ) * group_config.tokens_per_chunk
+        first_hash_idx = chunk_start // tokens_per_hash
+        last_hash_idx = boundary_tokens // tokens_per_hash
+        assert chunk_start < boundary_tokens
+        assert boundary_tokens % tokens_per_hash == 0
+        assert last_hash_idx <= len(req.block_hashes)
+
+        # Unlike a complete chunk, a partial tail contains only the hashes
+        # between its physical block start and its valid token boundary.
+        maybe_block_hashes = req.block_hashes[first_hash_idx:last_hash_idx]
+        block_hashes = tuple(
+            block_hash for block_hash in maybe_block_hashes if block_hash is not None
+        )
+        assert block_hashes and len(block_hashes) == len(maybe_block_hashes)
+        parent_block_hash = (
+            req.block_hashes[first_hash_idx - 1] if first_hash_idx > 0 else None
+        )
+        assert first_hash_idx == 0 or parent_block_hash is not None
+
+        lora_id = req.lora_request.adapter_id if req.lora_request is not None else None
+        lora_name = req.lora_request.name if req.lora_request is not None else None
+        self._pending_event_metadata[offload_key] = _OffloadEventMetadata(
+            block_hashes=block_hashes,
+            parent_block_hash=parent_block_hash,
+            token_ids=tuple(req.all_token_ids[chunk_start:boundary_tokens]),
+            block_size=tokens_per_hash,
+            lora_id=lora_id,
+            lora_name=lora_name,
+            extra_keys=None,
+            group_idx=group_config.group_idx,
+            kv_cache_spec=group_config.kv_event_group_spec,
+        )
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
@@ -165,7 +273,7 @@ class OffloadingEventsTracker:
         assert len(chunk_hashes) == hbf
 
         if group_config.sliding_window_size_in_chunks is not None:
-            # record_store filters these out before calling this helper.
+            # The recording methods filter these out before calling this helper.
             raise AssertionError("self-describing events only support full attention")
 
         parent_block_hash: BlockHash | None
@@ -198,7 +306,12 @@ class OffloadingEventsTracker:
             kv_cache_spec=group_config.kv_event_group_spec,
         )
 
-    def _placeholder_stored(self, key: OffloadKey, medium: str) -> BlockStored:
+    def _placeholder_stored(
+        self,
+        key: OffloadKey,
+        medium: Medium,
+        locality: str | None,
+    ) -> BlockStored:
         return BlockStored(
             block_hashes=[
                 maybe_convert_block_hash(BlockHash(get_offload_block_hash(key)))
@@ -207,15 +320,17 @@ class OffloadingEventsTracker:
             token_ids=[],
             lora_id=None,
             block_size=0,
-            medium=medium,
+            medium=_MEDIUM_TO_EVENT_STR[medium],
             lora_name=None,
             group_idx=get_offload_group_idx(key),
+            locality=locality,
         )
 
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
         # Metadata is read, NOT popped: the entry must survive until the
         # eviction event so BlockRemoved can fan out to the same hashes.
         # Events are self-contained (own parent), so key order is free.
+        locality = event.locality.value if event.locality is not None else None
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
             if meta is None:
@@ -225,9 +340,10 @@ class OffloadingEventsTracker:
                         "OffloadingEventsTracker: no event metadata for "
                         "offload key during BlockStored emission; emitting a "
                         "placeholder payload. Expected for non-full-attention "
-                        "groups; otherwise indicates a missing populate path."
+                        "groups and promotions not observed as a primary-tier "
+                        "hit before translation."
                     )
-                yield self._placeholder_stored(key, event.medium)
+                yield self._placeholder_stored(key, event.medium, locality)
                 continue
 
             yield BlockStored(
@@ -242,7 +358,7 @@ class OffloadingEventsTracker:
                 token_ids=list(meta.token_ids),
                 block_size=meta.block_size,
                 lora_id=meta.lora_id,
-                medium=event.medium,
+                medium=_MEDIUM_TO_EVENT_STR[event.medium],
                 lora_name=meta.lora_name,
                 extra_keys=(
                     list(meta.extra_keys) if meta.extra_keys is not None else None
@@ -252,10 +368,12 @@ class OffloadingEventsTracker:
                 kv_cache_spec_sliding_window=(
                     meta.kv_cache_spec.kv_cache_spec_sliding_window
                 ),
+                locality=locality,
             )
 
     def _take_removed_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
         # Keep group_idx unambiguous if a manager batch spans groups.
+        locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
         for key in event.keys:
             meta = self._pending_event_metadata.pop(key, None)
@@ -281,6 +399,7 @@ class OffloadingEventsTracker:
         for group_idx, hashes in by_group.items():
             yield BlockRemoved(
                 block_hashes=hashes,
-                medium=event.medium,
+                medium=_MEDIUM_TO_EVENT_STR[event.medium],
                 group_idx=group_idx,
+                locality=locality,
             )

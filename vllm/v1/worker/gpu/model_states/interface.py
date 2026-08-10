@@ -9,6 +9,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.tasks import GenerationTask
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -95,6 +96,15 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
+        """Cudagraph support of attention groups this ModelState builds outside
+        ``init_attn_backend`` (e.g. encoder-only layers).
+
+        Returns the minimum support level and its backend name. The default of
+        ``ALWAYS`` imposes no extra constraint on the runner's cudagraph mode.
+        """
+        return AttentionCGSupport.ALWAYS, None
+
     def preprocess_state(
         self,
         input_batch: InputBatch,
@@ -127,6 +137,21 @@ class ModelState(ABC):
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
         """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
         return None
+
+    def execute_mm_encoder(
+        self, scheduled_encoder_inputs: dict[str, list[int]]
+    ) -> None:
+        """Run the multi-modal encoder and cache its outputs by `mm_hash`.
+
+        The encode half of `get_mm_embeddings`, without the gather, for callers
+        that run no language model.
+        """
+        mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
+            scheduled_encoder_inputs
+        )
+        if mm_kwargs:
+            encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
     def gather_mm_embeddings(
         self, input_batch: InputBatch, draft_lookahead: int = 0

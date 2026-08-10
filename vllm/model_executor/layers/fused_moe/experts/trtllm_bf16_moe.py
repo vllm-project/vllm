@@ -34,6 +34,31 @@ class TrtLlmBf16ExpertsBase:
     monolithic interfaces.
     """
 
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        supported, reason = mk.FusedMoEExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+        if not supported or moe_config.num_experts <= 2048:
+            return supported, reason
+        return False, (
+            "FlashInfer TRTLLM routing supports at most 2048 experts, "
+            f"but got {moe_config.num_experts}"
+        )
+
+    def supports_routing_replay_capture(self) -> bool:
+        return True
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -246,7 +271,11 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
 
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
-        return flashinfer.fused_moe.trtllm_bf16_moe(
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
+        out = flashinfer.fused_moe.trtllm_bf16_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
@@ -263,4 +292,9 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             routing_method_type=self.routing_method_type,
             activation_type=activation_to_flashinfer_int(activation),
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            routing_replay_out=routing_replay_out,
         )
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
+        )
+        return out
