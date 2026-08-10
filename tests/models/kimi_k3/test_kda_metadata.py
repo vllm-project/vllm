@@ -42,6 +42,9 @@ PRUNED_METADATA_FIELDS = {
     "prefill_has_initial_state",
     "spec_sequence_masks",
 }
+# Only the KDA chunk kernels consume these, so the shared GDN builder
+# leaves them unset.
+KDA_ONLY_METADATA_FIELDS = {"non_spec_chunk_indices"}
 
 
 def _assert_matches_shared_gdn(reference, actual: KimiK3KDAMetadata):
@@ -50,6 +53,10 @@ def _assert_matches_shared_gdn(reference, actual: KimiK3KDAMetadata):
         expected_value = getattr(reference, field.name)
         if field.name in PRUNED_METADATA_FIELDS:
             assert actual_value is None
+            continue
+        if field.name in KDA_ONLY_METADATA_FIELDS:
+            assert expected_value is None
+            assert (actual_value is not None) == (actual.num_prefills > 0)
             continue
         if (
             field.name in {"spec_token_indx", "non_spec_token_indx"}

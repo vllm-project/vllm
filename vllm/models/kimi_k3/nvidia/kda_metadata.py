@@ -411,17 +411,16 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             has_initial_state = m.compute_num_computed_tokens() > 0
             if spec_sequence_masks_cpu is not None:
                 has_initial_state = has_initial_state[active_non_spec_mask_cpu]
-                assert non_spec_query_start_loc_cpu is not None
+            assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
                     non_spec_query_start_loc_cpu, device=query_start_loc.device
                 )
             )
-            if non_spec_query_start_loc_cpu is not None:
-                non_spec_chunk_indices = async_tensor_h2d(
-                    prepare_chunk_indices(non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE),
-                    device=query_start_loc.device,
-                )
+            non_spec_chunk_indices = async_tensor_h2d(
+                prepare_chunk_indices(non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE),
+                device=query_start_loc.device,
+            )
         else:
             has_initial_state = None
 
