@@ -52,6 +52,7 @@ class RequestSchedulingState:
     token_ids: list[int] = field(default_factory=list)
     allocated_block_ids: list[int] = field(default_factory=list)
     num_saved_blocks: int = 0
+    cache_salt: str = ""
 
     # Load operation info
     load_op: LoadBlockInfo | None = None
@@ -94,6 +95,7 @@ class HF3FSRequestMetadata:
     request_id: str
     token_ids: list[int]
     block_ids: list[int]
+    cache_salt: str = ""
     load_block_op: LoadBlockInfo | None = None
     save_block_op: SaveBlockInfo | None = None
 
@@ -123,6 +125,7 @@ class HF3FSRequestMetadata:
             request_id=state.request_id,
             token_ids=state.token_ids,
             block_ids=state.allocated_block_ids,
+            cache_salt=state.cache_salt,
             load_block_op=load_op,
             save_block_op=SaveBlockInfo(skip_leading_blocks=skip_blocks),
         )

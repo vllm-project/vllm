@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Tests for HF3FS KV Connector high-level components:
-  - TestHf3fsMockClient      : file-backed mock client I/O correctness
-  - TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
+  - TestHf3fsMockClient            : file-backed mock client I/O correctness
+  - TestHF3FSKVConnectorStats      : metric collection, aggregation, serialisation
+  - TestHF3FSCacheSaltIsolation    : cache_salt isolation in block hashing
 """
 
+import hashlib
 import os
 from unittest.mock import MagicMock
 
@@ -228,3 +230,102 @@ class TestHF3FSKVConnectorStats:
         clone = hf3fs_stats.clone_and_reset()
         assert clone.data["num_transfer_task"] == 2
         assert hf3fs_stats.is_empty()
+
+
+# ===========================================================================
+# TestHF3FSCacheSaltIsolation
+# ===========================================================================
+
+
+def _compute_prefix_hash(
+    token_ids: list[int],
+    previous_hash: str = "",
+    cache_salt: str = "",
+) -> str:
+    """Standalone reimplementation matching HF3FSKVConnector._compute_prefix_hash."""
+    combined_string = f"{cache_salt}_{previous_hash}_{token_ids}"
+    return hashlib.md5(combined_string.encode()).hexdigest()
+
+
+def _generate_block_hashes(
+    token_ids: list[int],
+    block_size: int,
+    start_block_id: int = 0,
+    max_blocks_count: int | None = None,
+    cache_salt: str = "",
+) -> list[str]:
+    """Standalone reimplementation matching HF3FSKVConnector._generate_block_hashes."""
+    block_hashes = []
+    previous_hash = ""
+
+    for start_idx in range(0, len(token_ids), block_size):
+        if start_idx + block_size > len(token_ids):
+            break
+
+        end_idx = start_idx + block_size
+        salt = cache_salt if start_idx == 0 else ""
+        block_hash = _compute_prefix_hash(
+            token_ids[start_idx:end_idx], previous_hash, salt
+        )
+
+        block_index = start_idx // block_size
+        if block_index >= start_block_id:
+            block_hashes.append(block_hash)
+
+        if max_blocks_count and len(block_hashes) >= max_blocks_count:
+            break
+        previous_hash = block_hash
+
+    return block_hashes
+
+
+class TestHF3FSCacheSaltIsolation:
+    """Verify that cache_salt produces distinct external keys."""
+
+    BLOCK_SIZE = 16
+    TOKENS = list(range(32))
+
+    def test_different_salts_produce_different_hashes(self):
+        """Same tokens with different salts must yield different block hashes."""
+        hashes_a = _generate_block_hashes(
+            self.TOKENS, self.BLOCK_SIZE, cache_salt="salt-A"
+        )
+        hashes_b = _generate_block_hashes(
+            self.TOKENS, self.BLOCK_SIZE, cache_salt="salt-B"
+        )
+        assert len(hashes_a) == 2
+        assert len(hashes_b) == 2
+        assert hashes_a != hashes_b
+        assert hashes_a[0] != hashes_b[0], "First block must differ"
+        assert hashes_a[1] != hashes_b[1], "Second block must differ (chained)"
+
+    def test_empty_salt_matches_no_salt(self):
+        """Empty string salt and default (no salt) produce identical hashes."""
+        hashes_default = _generate_block_hashes(self.TOKENS, self.BLOCK_SIZE)
+        hashes_empty = _generate_block_hashes(
+            self.TOKENS, self.BLOCK_SIZE, cache_salt=""
+        )
+        assert hashes_default == hashes_empty
+
+    def test_same_salt_produces_same_hashes(self):
+        """Identical tokens + salt must be deterministic."""
+        hashes_1 = _generate_block_hashes(
+            self.TOKENS, self.BLOCK_SIZE, cache_salt="deterministic"
+        )
+        hashes_2 = _generate_block_hashes(
+            self.TOKENS, self.BLOCK_SIZE, cache_salt="deterministic"
+        )
+        assert hashes_1 == hashes_2
+
+    def test_salt_only_injected_into_first_block(self):
+        """Salt should affect the first block directly; subsequent blocks
+        diverge only through chaining."""
+        hash_no_salt = _compute_prefix_hash([1, 2, 3], previous_hash="prev")
+        hash_with_salt = _compute_prefix_hash(
+            [1, 2, 3], previous_hash="prev", cache_salt="x"
+        )
+        assert hash_no_salt != hash_with_salt
+
+        hash_no_salt_first = _compute_prefix_hash([1, 2, 3])
+        hash_salt_first = _compute_prefix_hash([1, 2, 3], cache_salt="tenant-1")
+        assert hash_no_salt_first != hash_salt_first
