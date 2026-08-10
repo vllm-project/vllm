@@ -631,6 +631,10 @@ _SWA_MLA_SPEC = SlidingWindowMLASpec(
 )
 
 
+def _groups(*specs: KVCacheSpec) -> list[KVCacheGroupSpec]:
+    return [KVCacheGroupSpec([f"l{i}"], spec) for i, spec in enumerate(specs)]
+
+
 def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
     """GLM-5.2/DSv3.2-style wrapper: same-type specs, differing page sizes."""
     names = [f"l{i}" for i in range(len(specs))]
@@ -643,24 +647,11 @@ def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
 @pytest.mark.parametrize(
     ("kv_cache_groups", "certified"),
     [
+        pytest.param(_groups(_mla_spec(head_size=576)), True, id="mla-latent"),
         pytest.param(
-            [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))],
-            True,
-            id="mla-latent",
+            _groups(_full_attention_spec(), _SWA_SPEC), True, id="attention-hybrid"
         ),
-        pytest.param(
-            [
-                KVCacheGroupSpec(["l0"], _full_attention_spec()),
-                KVCacheGroupSpec(["l1"], _SWA_SPEC),
-            ],
-            True,
-            id="attention-hybrid",
-        ),
-        pytest.param(
-            [KVCacheGroupSpec(["l0"], _SWA_MLA_SPEC)],
-            False,
-            id="swa-mla",
-        ),
+        pytest.param(_groups(_SWA_MLA_SPEC), False, id="swa-mla"),
         pytest.param(
             list(_make_mamba_hybrid_kv_cache_config().kv_cache_groups),
             False,
