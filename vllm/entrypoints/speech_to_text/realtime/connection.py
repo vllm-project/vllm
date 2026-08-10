@@ -766,7 +766,7 @@ class RealtimeConnection:
                 self.audio_queue.get_nowait()
         except Exception as exc:
             logger.exception("Error in fresh-segment generation: %s", exc)
-            await self.send_error(str(exc), "processing_error")
+            await self.send_error(sanitize_message(str(exc)), "processing_error")
 
     async def _run_generation_legacy(
         self,
