@@ -52,15 +52,6 @@ def blip2_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutp
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def fuyu_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
-    """Sanitize vllm output [fuyu models] to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
-
-    hf_output_str = output_str.lstrip() + "|ENDOFTEXT|"
-
-    return output_ids, hf_output_str, out_logprobs
-
-
 def qwen_vllm_to_hf_output(
     vllm_output: RunnerOutput, model: str
 ) -> tuple[list[int], str, SampleLogprobs | None]:
@@ -931,6 +922,22 @@ def _internvl_generate(
     return outputs
 
 
+def _restore_resampler_pos_cache(hf_model: HfRunner) -> None:
+    """Recompute the resampler's 2D sin/cos position cache after loading.
+
+    `from_pretrained` materializes non-persistent buffers as uninitialized
+    memory, leaving `pos_embed` as zeros or NaN instead of the values computed
+    in `__init__`.
+    """
+    restored = 0
+    for module in hf_model.model.modules():
+        if not hasattr(module, "_set_2d_pos_cache"):
+            continue
+        module._set_2d_pos_cache(module.max_size, module.pos_embed.device)
+        restored += 1
+    assert restored, "no resampler pos cache found to restore"
+
+
 def minicpmv_25_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     orig_generate = hf_model.model.generate
 
@@ -974,6 +981,8 @@ def minicpmo_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 
 def minicpmv_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    _restore_resampler_pos_cache(hf_model)
+
     orig_generate = hf_model.model.generate
 
     def _generate(self, *args, image_sizes=None, **kwargs):

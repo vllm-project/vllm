@@ -96,8 +96,7 @@ def determine_expert_counts(
     return global_num_experts, logical_num_experts, num_fused_shared_experts
 
 
-# TODO: rename this
-def FusedMoE(
+def FusedMoEFactory(
     num_experts: int,  # Global number of experts
     top_k: int,
     hidden_size: int,
@@ -120,6 +119,8 @@ def FusedMoE(
     swiglu_limit: float | None = None,
     swiglu_alpha: float | None = None,
     swiglu_beta: float | None = None,
+    activation_situ_beta: float | None = None,
+    activation_situ_linear_beta: float | None = None,
     e_score_correction_bias: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     activation: str = "silu",
@@ -178,6 +179,8 @@ def FusedMoE(
         scoring_func: Scoring function for routing ("softmax" or others)
         routed_scaling_factor: Scaling factor applied to topk_weights or output
         swiglu_limit: SwiGLU activation limit
+        activation_situ_beta: SituGLU activation beta
+        activation_situ_linear_beta: SituGLU linear beta
         e_score_correction_bias: Expert score correction bias tensor
         apply_router_weight_on_input: Whether to apply router weights on input
         activation: Activation function name ("silu", "gelu", etc.)
@@ -186,9 +189,10 @@ def FusedMoE(
         has_bias: Whether expert layers have bias terms
         is_sequence_parallel: Whether sequence parallelism is enabled
         reduce_results: Whether to all-reduce the final output. Setting this
-        to False (to fuse the all-reduce downstream) is only honored on the
-        late-AR path.
-        expert_mapping: Expert parameter mapping for weight loading
+            to False (to fuse the all-reduce downstream) is only honored on
+            the late-AR path.
+        ckpt_names: Checkpoint parameter name tuple (gate_proj, down_proj,
+            up_proj) used for weight loading
         n_shared_experts: Number of shared experts to fuse into the routed
             grouped GEMM (ROCm; requires aiter FSE or the router-append path)
         router_logits_dtype: Data type for router logits buffers
@@ -351,6 +355,8 @@ def FusedMoE(
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
+        activation_situ_beta=activation_situ_beta,
+        activation_situ_linear_beta=activation_situ_linear_beta,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
         skip_final_all_reduce=skip_final_all_reduce,
     )

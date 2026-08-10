@@ -83,10 +83,12 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
+        # Logical (blocks-first, head-major) layout: K and V (with their
+        # different head sizes) packed in the content dim.
         return (
             num_blocks,
-            block_size,
             num_kv_heads,
+            block_size,
             head_size + FlashAttentionDiffKVBackend.head_size_v,
         )
 
@@ -94,21 +96,22 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets
-        # us from `get_kv_cache_shape` to the actual memory layout we want.
+        # `stride_order` indicates the permutation that gets us from
+        # `get_kv_cache_shape` (logical (B, H, N, C_k+C_v)) to the actual
+        # memory layout we want.
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, block_size,
-            # num_kv_heads, head_size + head_size_v)
-            return (1, 0, 2, 3, 4)
+            # (num_blocks, num_layers, block_size, num_kv_heads, C_k+C_v)
+            return (1, 0, 3, 2, 4)
         elif cache_layout == "NHD":
-            stride_order = (0, 1, 2, 3)
-        elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers,
-            # block_size, head_size + head_size_v)
-            return (1, 3, 0, 2, 4)
-        elif cache_layout == "HND":
+            # (num_blocks, block_size, num_kv_heads, C_k+C_v)
             stride_order = (0, 2, 1, 3)
+        elif cache_layout == "HND" and include_num_layers_dimension:
+            # (num_blocks, num_kv_heads, num_layers, block_size, C_k+C_v)
+            return (1, 2, 0, 3, 4)
+        elif cache_layout == "HND":
+            # (num_blocks, num_kv_heads, block_size, C_k+C_v)
+            stride_order = (0, 1, 2, 3)
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
@@ -142,21 +145,14 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
 
-        # Unlike standard FlashAttn which splits kv_cache via unbind(0),
         # DiffKV packs K and V into a single tensor along the last dim:
         #   kv_cache shape: [num_blocks, block_size, num_kv_heads,
         #                    head_size_k + head_size_v]
-        # The triton kernel handles this combined layout directly.
-        #
-        # NOTE(woosuk): key and value are padded while slot_mapping is
-        # not padded. However, we don't need to do key[:num_actual_tokens]
-        # and value[:num_actual_tokens] because the reshape_and_cache_flash
-        # op uses the slot_mapping's shape to determine the number of
-        # actual tokens.
+        # (B, H, N, C) -> (B, N, H, C) for kernel compatibility.
         triton_reshape_and_cache_flash_diffkv(
             key,
             value,
-            kv_cache,
+            kv_cache.transpose(1, 2),
             slot_mapping,
             self.kv_cache_dtype,
             layer._k_scale,
@@ -229,10 +225,8 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 layer,
             )
 
-        # For decoder and cross-attention, use KV cache as before
-        # Different head_size for K and V
-        key_cache = kv_cache[..., : self.head_size]
-        value_cache = kv_cache[..., self.head_size :]
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
         # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.

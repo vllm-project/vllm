@@ -75,6 +75,77 @@ def compute_mm_prefix_range_tensor(
     return padded.view(num_seqs, max_ranges, 2)
 
 
+def fill_mm_prefix_query_ranges(
+    out: np.ndarray,
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
+    query_start_loc_cpu: torch.Tensor,
+    seq_lens_cpu: torch.Tensor,
+) -> int:
+    """Map each scheduled query token to the mm_prefix range containing it.
+
+    Writes into ``out``, a caller-owned ``(max_num_batched_tokens, 2)`` int32
+    staging buffer, and returns the number of rows written (0 if no range
+    covers any scheduled query token, in which case ``out`` is untouched and
+    the caller should skip the mask_mod entirely). Row ``i`` holds the absolute
+    ``[start, end]`` bounds of the bidirectional range that query token ``i``
+    belongs to, or ``(-1, -1)`` when it is outside every range.
+
+    mm_prefix ranges never overlap, so "query and key share a range" is
+    equivalent to "the key lies inside the query's own range". The kernel
+    therefore needs no key-side lookup, and this metadata is sized by scheduled
+    query tokens rather than by context length -- bounded by
+    ``max_num_batched_tokens`` instead of ``num_seqs * max_seq_len``.
+
+    Ranges are absolute prompt positions and may extend past the tokens
+    scheduled so far under chunked prefill; the portion outside the current
+    chunk is simply not recorded. Degenerate ranges (``start >= end``) are
+    skipped to match the Triton path's ``start < end`` validity check.
+
+    ``seq_lens_cpu`` only needs to be exact for prefill rows, since mm_prefix
+    ranges cover prompt tokens: an over-estimate on a decode row shifts that
+    row's query position further past every range, which still matches nothing.
+    """
+    if mm_prefix_range is None:
+        return 0
+
+    query_start_loc = query_start_loc_cpu.numpy()
+    num_actual_tokens = int(query_start_loc[-1])
+    if num_actual_tokens <= 0:
+        return 0
+    assert num_actual_tokens <= out.shape[0], (
+        f"mm_prefix staging buffer holds {out.shape[0]} tokens, got {num_actual_tokens}"
+    )
+
+    # Resolve every span before touching `out`, so batches whose ranges all
+    # fall outside the scheduled tokens skip the fill entirely.
+    spans: list[tuple[int, int, int, int]] = []
+    for req_idx, req_ranges in mm_prefix_range.items():
+        if not req_ranges:
+            continue
+        token_start = int(query_start_loc[req_idx])
+        query_len = int(query_start_loc[req_idx + 1]) - token_start
+        if query_len <= 0:
+            continue
+        # Absolute position of this request's first scheduled query token.
+        context_len = int(seq_lens_cpu[req_idx]) - query_len
+        for start, end in req_ranges:
+            if start >= end:
+                continue
+            first = max(start - context_len, 0)
+            last = min(end - context_len, query_len - 1)
+            if first > last:
+                continue
+            spans.append((token_start + first, token_start + last + 1, start, end))
+
+    if not spans:
+        return 0
+
+    out[:num_actual_tokens] = -1
+    for row_start, row_end, start, end in spans:
+        out[row_start:row_end] = (start, end)
+    return num_actual_tokens
+
+
 def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
 
@@ -87,7 +158,7 @@ def get_kv_cache_layout():
     cache_layout: Literal["NHD", "HND"] | None = None
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
-        logger.info_once(
+        logger.debug_once(
             "`_KV_CACHE_LAYOUT_OVERRIDE` variable detected. "
             "Setting KV cache layout to %s.",
             cache_layout,
@@ -612,7 +683,9 @@ def split_decodes_and_prefills(
         # check if we are in a padded uniform batch; this is used for full-CGs, some
         # requests may have a query length of 0 but since they are padding its fine
         # to treat them as decodes (ensures num_decodes matches the captured size)
-        if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
+        if treat_short_extends_as_decodes and torch.all(
+            (query_lens == query_lens[0]) | (query_lens == 0)
+        ):
             return num_reqs, 0, num_tokens, 0  # all decodes
         is_prefill = query_lens != query_lens[0]
     else:
@@ -950,10 +1023,8 @@ def mamba_get_block_table_tensor(
         assert isinstance(kv_cache_spec, MambaSpec)
         # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
         # to handle the invalid block table.
-        start_indices = torch.clamp(
-            (seq_lens - 1) // kv_cache_spec.block_size,
-            min=0,
-        )
+        start_indices = (seq_lens - 1) // kv_cache_spec.block_size
+        start_indices.clamp_(min=0)
         # Use int32 for arithmetic to avoid dtype promotion overhead,
         # then convert to int64 for gather (which requires Long indices)
         offsets = torch.arange(
