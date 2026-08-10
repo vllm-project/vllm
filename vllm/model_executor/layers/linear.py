@@ -16,6 +16,8 @@ from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    sequence_parallel_all_gather,
+    sequence_parallel_reduce_scatter,
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
@@ -438,6 +440,8 @@ class ColumnParallelLinear(LinearBase):
                         (e.g. model.layers.0.qkv_proj)
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
+        sequence_parallel: If true, gather token shards before the matrix
+            multiplication.
         tp_rank: Override the tensor-parallel rank used for sharding. Defaults to
             the global TP rank. Used to shard at a coarser granularity than one
             shard per rank (see ``DCPGroupColumnParallelLinear``).
@@ -460,6 +464,7 @@ class ColumnParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        sequence_parallel: bool = False,
         tp_rank: int | None = None,
         tp_size: int | None = None,
     ):
@@ -500,6 +505,7 @@ class ColumnParallelLinear(LinearBase):
 
         self._maybe_allow_fp8_block_shape_mismatch()
         self.gather_output = gather_output
+        self.sequence_parallel = sequence_parallel
 
         self.quant_method.create_weights(
             layer=self,
@@ -592,6 +598,7 @@ class ColumnParallelLinear(LinearBase):
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        input_ = self.prepare_input(input_)
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
@@ -608,12 +615,18 @@ class ColumnParallelLinear(LinearBase):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+    def prepare_input(self, input_: torch.Tensor) -> torch.Tensor:
+        if self.sequence_parallel and self.tp_size > 1:
+            return sequence_parallel_all_gather(input_)
+        return input_
+
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size_per_partition}"
         s += f", bias={self.bias is not None}"
         s += f", tp_size={self.tp_size}"
         s += f", gather_output={self.gather_output}"
+        s += f", sequence_parallel={self.sequence_parallel}"
         return s
 
 
@@ -682,6 +695,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, all weights matrix won't be sharded, this layer
                     will be treated as a "Replicated" MergedLinear.
+        sequence_parallel: If true, gather token shards before the matrix
+            multiplication.
     """
 
     def __init__(
@@ -697,6 +712,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        sequence_parallel: bool = False,
     ):
         self.output_sizes = output_sizes
         self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
@@ -714,6 +730,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             prefix=prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            sequence_parallel=sequence_parallel,
         )
 
     def validate_shard_id(self, shard_id: Any) -> TypeIs[int | tuple[int, ...] | None]:
@@ -1045,6 +1062,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                         (e.g. model.layers.0.qkv_proj)
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
+        sequence_parallel: If true, gather token shards before the matrix
+            multiplication.
     """
 
     def __init__(
@@ -1062,6 +1081,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
         v_head_size: int | None = None,
+        sequence_parallel: bool = False,
     ):
         self.hidden_size = hidden_size
         self.head_size = head_size
@@ -1098,6 +1118,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             prefix=prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            sequence_parallel=sequence_parallel,
         )
 
     def validate_shard_id(self, shard_id: Any) -> TypeIs[str | None]:
@@ -1641,6 +1662,8 @@ class RowParallelLinear(LinearBase):
                         (e.g. model.layers.0.down_proj)
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
+        sequence_parallel: If true, reduce-scatter partial outputs along the
+            token dimension instead of all-reducing them.
     """
 
     # --8<-- [end:row_parallel_linear]
@@ -1659,6 +1682,7 @@ class RowParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        sequence_parallel: bool = False,
     ):
         # Divide the weight matrix along the first dimension.
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
@@ -1681,6 +1705,7 @@ class RowParallelLinear(LinearBase):
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
+        self.sequence_parallel = sequence_parallel
 
         self.quant_method.create_weights(
             layer=self,
@@ -1763,15 +1788,19 @@ class RowParallelLinear(LinearBase):
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
 
-        if self.reduce_results and self.tp_size > 1:
-            output = tensor_model_parallel_all_reduce(output_parallel)
-        else:
-            output = output_parallel
+        output = self.reduce_output(output_parallel)
 
         if not self.return_bias:
             return output
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
+
+    def reduce_output(self, output_parallel: torch.Tensor) -> torch.Tensor:
+        if not self.reduce_results or self.tp_size == 1:
+            return output_parallel
+        if self.sequence_parallel:
+            return sequence_parallel_reduce_scatter(output_parallel)
+        return tensor_model_parallel_all_reduce(output_parallel)
 
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size_per_partition}"
@@ -1779,4 +1808,5 @@ class RowParallelLinear(LinearBase):
         s += f", bias={self.bias is not None}"
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
+        s += f", sequence_parallel={self.sequence_parallel}"
         return s

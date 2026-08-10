@@ -28,6 +28,32 @@ def tensor_model_parallel_reduce_scatter(
     return get_tp_group().reduce_scatter(input_, dim)
 
 
+def _custom_sequence_parallel_collective(
+    name: str, input_: torch.Tensor
+) -> torch.Tensor | None:
+    device_communicator = get_tp_group().device_communicator
+    if device_communicator is None:
+        return None
+    collective = getattr(device_communicator, name, None)
+    return None if collective is None else collective(input_)
+
+
+def sequence_parallel_all_gather(input_: torch.Tensor) -> torch.Tensor:
+    """Gather token shards across the tensor-parallel group."""
+    output = _custom_sequence_parallel_collective("custom_all_gather", input_)
+    if output is None:
+        output = tensor_model_parallel_all_gather(input_, dim=0)
+    return output
+
+
+def sequence_parallel_reduce_scatter(input_: torch.Tensor) -> torch.Tensor:
+    """Sum partial results and scatter them along the token dimension."""
+    output = _custom_sequence_parallel_collective("custom_reduce_scatter", input_)
+    if output is not None:
+        return output
+    return tensor_model_parallel_reduce_scatter(input_, dim=0)
+
+
 def tensor_model_parallel_gather(
     input_: torch.Tensor, dst: int = 0, dim: int = -1
 ) -> torch.Tensor | None:

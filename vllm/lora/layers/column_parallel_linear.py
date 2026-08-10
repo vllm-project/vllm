@@ -141,6 +141,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             - output
             - bias
         """
+        input_ = self.base_layer.prepare_input(input_)
         bias = self.base_layer.bias if not self.base_layer.skip_bias_add else None
 
         # Matrix multiply.
