@@ -1026,40 +1026,60 @@ def extract_types_from_schema(schema: Any) -> list[str]:
     if schema is None or not isinstance(schema, dict):
         return ["string"]
 
-    types: set[str] = set()
+    constraints: list[set[str]] = []
 
     if "type" in schema:
         type_value = schema["type"]
         if isinstance(type_value, str):
-            types.add(type_value)
+            constraints.append({type_value})
         elif isinstance(type_value, list):
+            types: set[str] = set()
             for t in type_value:
                 if isinstance(t, str):
                     types.add(t)
+            if types:
+                constraints.append(types)
 
     if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
+        enum_types: set[str] = set()
         for value in schema["enum"]:
             if value is None:
-                types.add("null")
+                enum_types.add("null")
             elif isinstance(value, bool):
-                types.add("boolean")
+                enum_types.add("boolean")
             elif isinstance(value, int):
-                types.add("integer")
+                enum_types.add("integer")
             elif isinstance(value, float):
-                types.add("number")
+                enum_types.add("number")
             elif isinstance(value, str):
-                types.add("string")
+                enum_types.add("string")
             elif isinstance(value, list):
-                types.add("array")
+                enum_types.add("array")
             elif isinstance(value, dict):
-                types.add("object")
+                enum_types.add("object")
+        if enum_types:
+            constraints.append(enum_types)
 
-    for choice_field in ("anyOf", "oneOf", "allOf"):
+    for choice_field in ("anyOf", "oneOf"):
         if choice_field in schema and isinstance(schema[choice_field], list):
-            for choice in schema[choice_field]:
-                types.update(extract_types_from_schema(choice))
+            choice_types = {
+                schema_type
+                for choice in schema[choice_field]
+                for schema_type in extract_types_from_schema(choice)
+            }
+            if choice_types:
+                constraints.append(choice_types)
 
-    return list(types) if types else list(_ANY_JSON_SCHEMA_TYPES)
+    if "allOf" in schema and isinstance(schema["allOf"], list):
+        all_of_types = [
+            set(extract_types_from_schema(choice)) for choice in schema["allOf"]
+        ]
+        if all_of_types:
+            constraints.append(set.intersection(*all_of_types))
+
+    if not constraints:
+        return list(_ANY_JSON_SCHEMA_TYPES)
+    return list(set.intersection(*constraints))
 
 
 _TYPE_ALIASES: dict[str, str] = {

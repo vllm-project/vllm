@@ -265,6 +265,28 @@ class TestExtractTypesFromSchema:
         schema = {"allOf": [{"type": "object"}]}
         assert extract_types_from_schema(schema) == ["object"]
 
+    def test_untyped_allof_branch_is_neutral(self):
+        schema = {
+            "allOf": [
+                {"type": "string"},
+                {"description": "A string annotation"},
+            ]
+        }
+        assert extract_types_from_schema(schema) == ["string"]
+
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {"anyOf": [{"type": "string"}, {}]},
+            {"anyOf": [{}, {"type": "string"}]},
+            {"oneOf": [{"type": "string"}, {}]},
+            {"oneOf": [{}, {"type": "string"}]},
+        ],
+    )
+    def test_untyped_union_branch_allows_any_json_type(self, schema):
+        schema_types = extract_types_from_schema(schema)
+        assert coerce_to_schema_type("5", schema_types) == 5
+
     def test_enum_infers_types(self):
         schema = {"enum": [1, "a", None]}
         result = set(extract_types_from_schema(schema))

@@ -277,7 +277,9 @@ impl JsonParamType {
 
     /// Collapse a candidate type list into one normalized type.
     fn one_of(mut types: Vec<Self>) -> Self {
-        if types.len() == 1 {
+        if types.contains(&Self::Any) {
+            Self::Any
+        } else if types.len() == 1 {
             types.remove(0)
         } else {
             Self::OneOf(types)
@@ -678,6 +680,25 @@ mod tests {
         );
         assert_eq!(params.convert("empty", text("")), json!(""));
         assert_eq!(params.convert("description_only", text("5")), json!(5));
+    }
+
+    #[test]
+    fn untyped_union_branch_accepts_any_json_value_regardless_of_order() {
+        for variants in [
+            json!([{ "type": "string" }, {}]),
+            json!([{}, { "type": "string" }]),
+        ] {
+            for keyword in ["anyOf", "oneOf"] {
+                let params = ToolSchema::from_schema(&json!({
+                    "type": "object",
+                    "properties": {
+                        "value": { (keyword): variants.clone() }
+                    }
+                }));
+
+                assert_eq!(params.convert("value", text("5")), json!(5));
+            }
+        }
     }
 
     #[test]
