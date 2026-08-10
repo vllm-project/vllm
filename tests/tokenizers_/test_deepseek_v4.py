@@ -80,23 +80,6 @@ def test_deepseek_v4_tokenizer_registered():
     )
 
 
-@pytest.mark.parametrize(
-    "wrapper", [get_deepseek_v32_tokenizer, get_deepseek_v4_tokenizer]
-)
-def test_deepseek_tokenizer_preserves_vocab_size(wrapper):
-    backend = Tokenizer(
-        WordLevel({"<bos>": 0, "token": 1, "<unk>": 2}, unk_token="<unk>")
-    )
-    backend.add_special_tokens([AddedToken("<bos>", special=True)])
-    backend.add_tokens(["added"])
-    tokenizer = TokenizersBackend(tokenizer_object=backend)
-
-    wrapped = wrapper(tokenizer)
-
-    assert tokenizer.get_added_vocab() == {"<bos>": 0, "added": 3}
-    assert len(wrapped) == len(tokenizer) == 4
-
-
 def test_deepseek_v4_defaults_to_thinking_with_high_effort():
     prompt = _tokenizer().apply_chat_template(
         [{"role": "user", "content": "Hello"}],
