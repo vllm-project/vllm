@@ -527,7 +527,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if backend is not None:
                 raise ValueError(
                     "Adaptive verification trims verification requests on device, which"
-                    f" the {backend} attention backend does not support. support. Pass "
+                    f" the {backend} attention backend does not support. Pass "
                     "enable_adaptive_verification=false in the speculative config, or "
                     "use a backend that does."
                 )

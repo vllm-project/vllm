@@ -12,11 +12,11 @@ The practical effect is that one configuration holds up across the whole load ra
 
 ## Support
 
-Adaptive verification needs per-position acceptance estimates, so today its currently only supported for DSpark with a **confidence head**.
+Adaptive verification needs per-position acceptance estimates, so today it is only supported for DSpark with a **confidence head**.
 
 ## Usage
 
-It is enabled by default for DSpark:
+It is off by default. Enable it in the speculative config:
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-V4-Flash-DSpark \
