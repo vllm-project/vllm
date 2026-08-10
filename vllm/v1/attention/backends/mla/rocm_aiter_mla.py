@@ -1189,9 +1189,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
 
         if _pad16:
-            out.view(total_q, _real_nhead, v_head_dim).copy_(
-                out_3d[:, :_real_nhead, :]
-            )
+            out.view(total_q, _real_nhead, v_head_dim).copy_(out_3d[:, :_real_nhead, :])
 
     def forward_mha(
         self,
