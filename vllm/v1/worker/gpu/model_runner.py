@@ -1481,7 +1481,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_query_len,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
-            ubatch_runner=None if dummy_run else self.ubatch_runner,
+            ubatch_runner=None if skip_attn_for_dummy_run else self.ubatch_runner,
         )
 
         if batch_desc.num_tokens == 0:
