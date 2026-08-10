@@ -3,11 +3,13 @@
 
 import os
 import shlex
+import stat
 import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
+CI_BAKE_ROCM = REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh"
 
 
 def run_helper(
@@ -38,6 +40,60 @@ def build_args(args: list[str]) -> dict[str, str]:
         key, arg_value = value.split("=", 1)
         values[key] = arg_value
     return values
+
+
+def init_mode_test_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    regular = repo / "regular file.txt"
+    executable = repo / "executable.sh"
+    regular.write_text("regular\n")
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", regular.name, executable.name], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "update-index", "--chmod=-x", regular.name],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "update-index", "--chmod=+x", executable.name],
+        cwd=repo,
+        check=True,
+    )
+    regular.chmod(0o664)
+    executable.chmod(0o775)
+    return repo, regular, executable
+
+
+def run_mode_normalization(
+    repo: Path,
+    script_tmp: Path,
+    *,
+    setup: str = "",
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    script_tmp.mkdir()
+    command = f"""
+set -euo pipefail
+source {shlex.quote(str(CI_BAKE_ROCM))}
+SCRIPT_TMP_DIR={shlex.quote(str(script_tmp))}
+BUILDKITE=true
+REMOTE_VLLM=0
+{setup}
+normalize_ci_worktree_modes
+printf 'CONTENT_HASH=%s\n' "$(compute_content_hash .)"
+printf 'AFTER_NORMALIZE=1\n'
+"""
+    return subprocess.run(
+        ["bash", "-c", command],
+        cwd=repo,
+        check=False,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_release_metadata_args_prefer_pipeline_id() -> None:
@@ -174,3 +230,79 @@ def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
         "docker/Dockerfile.rocm",
     ):
         assert expected in ci_bake
+
+
+def test_rocm_worktree_modes_are_normalized_for_owned_files(tmp_path: Path) -> None:
+    repo, regular, executable = init_mode_test_repo(tmp_path)
+
+    result = run_mode_normalization(repo, tmp_path / "script-tmp")
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(regular.stat().st_mode) == 0o644
+    assert stat.S_IMODE(executable.stat().st_mode) == 0o755
+    assert "Normalized Git file modes" in result.stdout
+    assert "AFTER_NORMALIZE=1" in result.stdout
+
+
+def test_rocm_worktree_modes_keep_unowned_files(tmp_path: Path) -> None:
+    repo, regular, executable = init_mode_test_repo(tmp_path)
+
+    result = run_mode_normalization(
+        repo,
+        tmp_path / "script-tmp",
+        setup=('can_normalize_worktree_mode() { [[ "$1" == "regular file.txt" ]]; }'),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(regular.stat().st_mode) == 0o644
+    assert stat.S_IMODE(executable.stat().st_mode) == 0o775
+    assert "Skipped mode normalization for 1 file" in result.stderr
+    assert "Using filesystem modes" in result.stdout
+    assert "Normalized Git file modes" not in result.stdout
+    assert "AFTER_NORMALIZE=1" in result.stdout
+
+
+def test_rocm_worktree_modes_tolerate_chmod_failure(tmp_path: Path) -> None:
+    repo, regular, executable = init_mode_test_repo(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    chmod_calls = tmp_path / "chmod-calls"
+    fake_chmod = fake_bin / "chmod"
+    fake_chmod.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CHMOD_CALLS"\n'
+        'echo "simulated EPERM" >&2\nexit 1\n'
+    )
+    fake_chmod.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["CHMOD_CALLS"] = str(chmod_calls)
+
+    result = run_mode_normalization(repo, tmp_path / "script-tmp", env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(regular.stat().st_mode) == 0o664
+    assert stat.S_IMODE(executable.stat().st_mode) == 0o775
+    assert "Could not normalize all 1 worktree files to 0644" in result.stderr
+    assert "Could not normalize all 1 worktree files to 0755" in result.stderr
+    assert result.stderr.count("simulated EPERM") == 2
+    assert "Using filesystem modes" in result.stdout
+    assert "Normalized Git file modes" not in result.stdout
+    assert "AFTER_NORMALIZE=1" in result.stdout
+    assert chmod_calls.read_text().splitlines() == [
+        "0644 -- regular file.txt",
+        "0755 -- executable.sh",
+    ]
+    fallback_hash = next(
+        line.removeprefix("CONTENT_HASH=")
+        for line in result.stdout.splitlines()
+        if line.startswith("CONTENT_HASH=")
+    )
+
+    canonical_result = run_mode_normalization(repo, tmp_path / "canonical-script-tmp")
+    assert canonical_result.returncode == 0, canonical_result.stderr
+    canonical_hash = next(
+        line.removeprefix("CONTENT_HASH=")
+        for line in canonical_result.stdout.splitlines()
+        if line.startswith("CONTENT_HASH=")
+    )
+    assert fallback_hash != canonical_hash

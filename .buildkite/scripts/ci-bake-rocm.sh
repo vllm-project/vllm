@@ -251,12 +251,40 @@ compute_content_hash() {
     done | sha256sum | cut -d' ' -f1
 }
 
+can_normalize_worktree_mode() {
+    local path="$1"
+
+    ((EUID == 0)) || [[ -O "${path}" ]]
+}
+
+try_normalize_worktree_modes() {
+    local mode="$1"
+    local error_log="$2"
+    local first_error=""
+    shift 2
+
+    (($# > 0)) || return 0
+    if chmod "${mode}" -- "$@" 2> "${error_log}"; then
+        return 0
+    fi
+
+    if IFS= read -r first_error < "${error_log}"; then
+        echo "Could not normalize all $# worktree files to ${mode}: ${first_error}" >&2
+    else
+        echo "Could not normalize all $# worktree files to ${mode}" >&2
+    fi
+    return 1
+}
+
 normalize_ci_worktree_modes() {
     local entry=""
     local metadata=""
     local mode=""
     local stage=""
     local path=""
+    local skipped_files=0
+    local skipped_noun="files"
+    local normalization_incomplete=0
     local index_modes_file="${SCRIPT_TMP_DIR}/git-index-modes"
     local -a regular_files=()
     local -a executable_files=()
@@ -281,10 +309,18 @@ normalize_ci_worktree_modes() {
         fi
         case "${mode}" in
             100644)
-                regular_files+=("${path}")
+                if can_normalize_worktree_mode "${path}"; then
+                    regular_files+=("${path}")
+                else
+                    ((skipped_files += 1))
+                fi
                 ;;
             100755)
-                executable_files+=("${path}")
+                if can_normalize_worktree_mode "${path}"; then
+                    executable_files+=("${path}")
+                else
+                    ((skipped_files += 1))
+                fi
                 ;;
             120000|160000)
                 ;;
@@ -295,9 +331,27 @@ normalize_ci_worktree_modes() {
         esac
     done < "${index_modes_file}"
 
-    ((${#regular_files[@]} == 0)) || chmod 0644 -- "${regular_files[@]}"
-    ((${#executable_files[@]} == 0)) || chmod 0755 -- "${executable_files[@]}"
-    echo "Normalized Git file modes for the CI Docker context"
+    if ((skipped_files > 0)); then
+        normalization_incomplete=1
+        if ((skipped_files == 1)); then
+            skipped_noun="file"
+        fi
+        echo "Skipped mode normalization for ${skipped_files} ${skipped_noun} not owned by UID ${EUID}" >&2
+    fi
+    if ! try_normalize_worktree_modes \
+        0644 "${SCRIPT_TMP_DIR}/chmod-0644-errors" "${regular_files[@]}"; then
+        normalization_incomplete=1
+    fi
+    if ! try_normalize_worktree_modes \
+        0755 "${SCRIPT_TMP_DIR}/chmod-0755-errors" "${executable_files[@]}"; then
+        normalization_incomplete=1
+    fi
+
+    if ((normalization_incomplete)); then
+        echo "Using filesystem modes for the CI Docker context and cache identities"
+    else
+        echo "Normalized Git file modes for the CI Docker context"
+    fi
 }
 
 compose_dependency_cache_key() {
