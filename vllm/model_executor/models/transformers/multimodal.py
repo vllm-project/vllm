@@ -16,12 +16,12 @@
 # limitations under the License.
 """Transformers modeling backend mixin for multi-modal models."""
 
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 import torch
-from transformers import AutoModel
 
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
 from vllm.config.utils import getattr_iter
@@ -29,7 +29,7 @@ from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MultiModalKwargsItems
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
@@ -503,65 +503,109 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
-    def _get_encoder_cls(
-        self, modality: str = "image", **kwargs: dict
-    ) -> type["PreTrainedModel"]:
-        """
-        Get the encoder class from the model.
+    def _find_encoder_classes(
+        self, model: "PreTrainedModel"
+    ) -> dict[str, type["PreTrainedModel"]]:
+        """Modalities whose encoder cannot be told apart from the model itself are
+        omitted, as are those `get_encoder` rejects."""
+        encoder_classes: dict[str, type[PreTrainedModel]] = {}
+        for modality in _MODALITY_TO_TOKEN_TYPE_ID:
+            try:
+                encoder_cls = type(model.get_encoder(modality=modality))
+            except (TypeError, ValueError):
+                continue
+            if encoder_cls is not type(model):
+                encoder_classes[modality] = encoder_cls
+        return encoder_classes
 
-        Args:
-            kwargs: The kwargs to create the model.
+    @contextmanager
+    def _mark_model_components(self, vllm_config: "VllmConfig"):
+        model_config = vllm_config.model_config
+        encoder_classes = self._pre_trained_model_classes.encoders
+        if not encoder_classes:
+            logger.debug("No encoders identified, so no components will be marked")
+            yield
+            return
 
-        Returns:
-            The encoder class.
-        """
-        with torch.device("meta"):
-            model: PreTrainedModel = AutoModel.from_config(**kwargs)
-        encoder_cls = type(model.get_encoder(modality=modality))
-        logger.debug("Identified encoder class as: %s", encoder_cls)
-        if type(model) is encoder_cls:
-            raise ValueError(
-                "Unable to infer vision encoder class from the model. "
-                "You must either: update the model so that "
-                "https://huggingface.co/docs/transformers/en/main_classes/model#transformers.PreTrainedModel.get_encoder"
-                " can detect the vision encoder correctly, or remove "
-                "'compile_mm_encoder'."
+        if model_config.skip_tokenizer_init:
+            # Determining the supported modalities needs the HF processor, which in
+            # turn needs a tokenizer
+            mm_config = model_config.multimodal_config
+            if mm_config.mm_encoder_only or any(
+                mm_config.get_limit_per_prompt(modality) == 0
+                for modality in encoder_classes
+            ):
+                logger.warning_once(
+                    "Unable to determine the supported modalities without a "
+                    "tokenizer, so no model components will be skipped."
+                )
+            yield
+            return
+
+        # Modalities we don't serve report a limit of 999, which would stop their
+        # encoder ever being skipped
+        supported_modalities = MULTIMODAL_REGISTRY.get_processing_info(
+            model_config
+        ).supported_mm_limits
+
+        # One encoder often serves several modalities, and may only be skipped when
+        # all of them are disabled, so mark it once for the whole set
+        modalities_by_encoder = defaultdict(set)
+        for modality, encoder_cls in encoder_classes.items():
+            if modality in supported_modalities:
+                modalities_by_encoder[encoder_cls].add(modality)
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                self._mark_language_model(
+                    vllm_config, targets=self._pre_trained_model_classes.decoder
+                )
             )
-        del model
-        return encoder_cls
+            for encoder_cls, modalities in modalities_by_encoder.items():
+                stack.enter_context(
+                    self._mark_tower_model(vllm_config, modalities, targets=encoder_cls)
+                )
+            yield
 
-    def _decorate_for_torch_compile(self, **kwargs: dict):
+    def _decorate_for_torch_compile(self):
         """
         Decorate the model's decoder and encoder classes to indicate to vLLM that they
         support torch compile if `can_enable_torch_compile` and
         `should_torch_compile_mm_encoder` are True respectively.
-
-        Args:
-            kwargs: The kwargs to create the model, which are needed to get the decoder
-                and encoder classes.
         """
-        super()._decorate_for_torch_compile(**kwargs)
-        # Decorate the vision encoder model class to support torch compile if needed
+        super()._decorate_for_torch_compile()
+        # Decorate the encoder model classes to support torch compile if needed
         if self.compilation_config.compile_mm_encoder:
             self.check_version("5.0.0", "multimodal encoder compilation support")
+            encoder_classes = self._pre_trained_model_classes.encoders
+            if not encoder_classes:
+                raise ValueError(
+                    "Unable to infer any encoder classes from the model. "
+                    "You must either: update the model so that "
+                    "https://huggingface.co/docs/transformers/en/main_classes/model#transformers.PreTrainedModel.get_encoder"
+                    " can detect the encoders correctly, or remove "
+                    "'compile_mm_encoder'."
+                )
             logger.warning_once(
                 "Multimodal encoder compilation with the Transformers modeling backend "
                 "is an experimental feature. It relies on:\n"
-                "- The vision encoder being torch compilable.\n"
-                "- All vision encoder tensor inputs must be type hinted as either "
+                "- The encoder being torch compilable.\n"
+                "- All encoder tensor inputs must be type hinted as either "
                 "`torch.Tensor` or `torch.FloatTensor`.\n"
-                "- The 0-th dimension of all tensor inputs to the vision encoder being "
-                "the dynamic dimension (i.e., sequence length or number of patches).\n"
+                "- The 0-th dimension of all tensor inputs to the encoder being the "
+                "dynamic dimension (e.g. sequence length, number of patches).\n"
                 "Please report any issues you encounter to help us improve it."
             )
-            self._decorate_cls_for_torch_compile(
-                cls=self._get_encoder_cls(**kwargs),
-                # TODO: properly infer dynamic_arg_dims based on the encoder's forward
-                # method signature. Currently we assume dim 0 for all tensor inputs.
-                dynamic_arg_dims=None,
-                enable_if=should_torch_compile_mm_encoder,
-                is_encoder=True,
-            )
+            # One encoder can serve several modalities, and must only be decorated once
+            for encoder_cls in dict.fromkeys(encoder_classes.values()):
+                self._decorate_cls_for_torch_compile(
+                    cls=encoder_cls,
+                    # TODO: properly infer dynamic_arg_dims based on the encoder's
+                    # forward method signature. We assume dim 0 for all tensor inputs.
+                    dynamic_arg_dims=None,
+                    enable_if=should_torch_compile_mm_encoder,
+                    is_encoder=True,
+                )
 
     def forward(
         self,
