@@ -2,6 +2,23 @@ suite: test deployment
 templates:
   - deployment.yaml
 tests:
+  - it: should use configured labels for the deployment selector and pods
+    set:
+      labels:
+        environment: production
+        release: qwen-serving
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            environment: production
+            release: qwen-serving
+      - equal:
+          path: spec.template.metadata.labels
+          value:
+            environment: production
+            release: qwen-serving
+
   - it: should create wait-download-model init container when modelDownload is enabled
     set:
       extraInit:
