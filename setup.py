@@ -78,6 +78,10 @@ def has_precompiled_rust_extensions() -> bool:
     return not get_missing_precompiled_rust_extension_modules()
 
 
+def is_metadata_only_build() -> bool:
+    return bool({"egg_info", "dist_info"}.intersection(sys.argv[1:]))
+
+
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
     VLLM_TARGET_DEVICE = "cpu"
@@ -127,7 +131,7 @@ def should_bundle_tcmalloc() -> bool:
     return (
         VLLM_TARGET_DEVICE == "cpu"
         and sys.platform.startswith("linux")
-        and platform.machine() in ("aarch64", "x86_64")
+        and platform.machine() in ("aarch64", "x86_64", "s390x")
     )
 
 
@@ -1218,8 +1222,8 @@ def add_vllm_package_data(filename: str) -> None:
         vllm_files.append(filename)
 
 
-# If using precompiled artifacts, extract and patch package_data in advance.
-if USE_PRECOMPILED_RUST_FRONTEND:
+# PEP 517 invokes setup.py for metadata before invoking the actual build.
+if USE_PRECOMPILED_RUST_FRONTEND and not is_metadata_only_build():
     wheel_url, download_filename = precompiled_wheel_utils.determine_wheel_url()
     patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
         wheel_url,
@@ -1272,7 +1276,7 @@ setup(
         "zen": ["zentorch==2.11.0.0"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.3.2"],
+        "fastsafetensors": ["fastsafetensors >= 0.3.3"],
         "instanttensor": ["instanttensor >= 0.1.9"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
