@@ -307,7 +307,8 @@ def test_raise_on_logit_nans(
 
             def compute_nan_logits(self, *args, **kwargs):
                 logits = original_compute_logits(self, *args, **kwargs)
-                logits[0, 0] = float("nan")
+                # `logits[0, 0] = ...` copies the scalar H2D and blocks.
+                logits[0, 0].fill_(float("nan"))
                 return logits
 
             monkeypatch.setattr(model_cls, "compute_logits", compute_nan_logits)
