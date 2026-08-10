@@ -100,11 +100,20 @@ QWEN3_AUTOROUND_MODELS = [
         ),
         id="auto_round:mxfp4:qwen3-30b-a3b",
     ),
+    pytest.param(
+        "INCModel/Qwen3-30B-A3B-12L-MXFP8-test",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_cuda() or current_platform.is_xpu()),
+            reason="Qwen3-30B-A3B MXFP8 AutoRound model requires CUDA/XPU.",
+        ),
+        id="auto_round:mxfp8:qwen3-30b-a3b",
+    ),
 ]
 
 MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     "INCModel/Qwen3-1.7B-AutoRound-MXFP4-W4A4": {"enforce_eager": True},
     "INCModel/Qwen3-30B-A3B-12L-MXFP4-test": {"enforce_eager": True},
+    "INCModel/Qwen3-30B-A3B-12L-MXFP8-test": {"enforce_eager": True},
     "Intel/Qwen3-8B-w2g64-for-ut": {
         "block_size": 64,
         "gpu_memory_utilization": 0.8,
