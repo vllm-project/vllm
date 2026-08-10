@@ -24,6 +24,9 @@ def _convert_req_index_to_global_index_kernel(
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
     COUNT_VALID: tl.constexpr,  # whether to count valid indices
+    # BLOCK_N == NUM_TOPK_TOKENS: one program owns the row, so the valid count
+    # is an in-register reduction and needs no atomic.
+    SINGLE_TILE: tl.constexpr,
     # When set, scatter valid slots to a contiguous prefix [0, valid_count) using
     # valid_count_ptr as an atomic slot allocator (DCP filtering leaves interior
     # -1 gaps; the trtllm-gen sparse kernel reads the first valid_count entries).
@@ -100,10 +103,15 @@ def _convert_req_index_to_global_index_kernel(
         # sum gives each valid lane a distinct local offset; one atomic add of the
         # tile's valid count reserves a contiguous base across racing tiles. The
         # out buffer is pre-filled with -1, so unwritten tail slots stay -1.
+        # With no racing tiles the base is 0 and the allocator becomes a store.
         is_valid = (~is_invalid_tok).to(tl.int32)
         local_offset = tl.cumsum(is_valid) - is_valid
         tile_valid_count = tl.sum(is_valid)
-        base = tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
+        if SINGLE_TILE:
+            base = 0
+            tl.store(valid_count_ptr + token_id, tile_valid_count)
+        else:
+            base = tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
         dest = base + local_offset
         out_ptr_dest = out_ptr + token_id * out_stride0 + dest * out_stride1
         tl.store(out_ptr_dest, out_val, mask=is_valid == 1)
@@ -112,10 +120,36 @@ def _convert_req_index_to_global_index_kernel(
         out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
         tl.store(out_ptr_ij, out_val)
 
-        # Count valid indices in this tile and atomically add to row total
+        # Accumulate the tile's valid count into the row total; a single tile's
+        # reduction *is* the total.
         if COUNT_VALID:
             tile_valid_count = tl.sum((~is_invalid_tok).to(tl.int32))
-            tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
+            if SINGLE_TILE:
+                tl.store(valid_count_ptr + token_id, tile_valid_count)
+            else:
+                tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
+
+
+def _remap_tiling(
+    NUM_TOPK_TOKENS: int, BLOCK_N: int, count_valid: bool
+) -> tuple[bool, int, int, int]:
+    """Pick the column tiling for the index remap kernel.
+
+    Counting the valid slots per row is the only reason the column tiles have to
+    talk to each other, so when counting give one program the whole row: the
+    count becomes an in-register reduction plus a plain store, needing neither
+    atomics nor a zero-initialized counter. The row is one ``tl.arange``, so this
+    needs a power-of-two width; other top-k sizes stay tiled and atomic.
+
+    Returns:
+        (single_tile, block_n, tiles_per_row, num_warps)
+    """
+    single_tile = (
+        count_valid and triton.next_power_of_2(NUM_TOPK_TOKENS) == NUM_TOPK_TOKENS
+    )
+    if single_tile:
+        return True, NUM_TOPK_TOKENS, 1, 8
+    return False, BLOCK_N, NUM_TOPK_TOKENS // BLOCK_N, 4
 
 
 def triton_convert_req_index_to_global_index(
@@ -176,7 +210,10 @@ def triton_convert_req_index_to_global_index(
     if PHYSICAL_BLOCK_STRIDE is None:
         PHYSICAL_BLOCK_STRIDE = BLOCK_SIZE
     max_num_blocks_per_req = block_table.shape[1]
-    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
+
+    single_tile, block_n, tiles_per_row, num_warps = _remap_tiling(
+        NUM_TOPK_TOKENS, BLOCK_N, return_valid_counts
+    )
 
     # Ensure contiguous tensors on the same device
     req_id_c = req_id.contiguous()
@@ -184,12 +221,11 @@ def triton_convert_req_index_to_global_index(
     token_indices_c = token_indices.contiguous()
     out = torch.empty_like(token_indices_c)
 
-    # Allocate valid count buffer if needed (must be zero-initialized for atomics)
     valid_counts: torch.Tensor | None = None
     if return_valid_counts:
-        valid_counts = torch.zeros(
-            num_tokens, dtype=torch.int32, device=token_indices.device
-        )
+        # Zero-init only matters for the atomic accumulation path.
+        alloc = torch.empty if single_tile else torch.zeros
+        valid_counts = alloc(num_tokens, dtype=torch.int32, device=token_indices.device)
 
     # Strides in elements
     bt_stride0, bt_stride1 = block_table_c.stride()
@@ -218,9 +254,10 @@ def triton_convert_req_index_to_global_index(
         max_num_blocks_per_req,
         BLOCK_SIZE,
         PHYSICAL_BLOCK_STRIDE,
-        BLOCK_N,
+        block_n,
         HAS_PREFILL_WORKSPACE,
         return_valid_counts,
+        single_tile,
         False,  # COMPACT_TO_FRONT: keep input column == output column
         # DCP disabled (no-op de-interleave)
         1,
@@ -233,6 +270,7 @@ def triton_convert_req_index_to_global_index(
         ti_stride1,
         out_stride0,
         out_stride1,
+        num_warps=num_warps,
     )
 
     if return_valid_counts:
@@ -292,15 +330,20 @@ def triton_filter_and_convert_dcp_index(
 
     num_tokens = req_id.shape[0]
     max_num_blocks_per_req = block_table.shape[1]
-    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
 
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
 
-    # The compaction uses the valid-count buffer as an atomic slot allocator, so
-    # it requires counting. Pre-fill out with -1 so the unwritten tail stays -1.
+    # The compaction uses the valid-count buffer as a slot allocator, so it
+    # requires counting. Pre-fill out with -1 so the unwritten tail stays -1.
     count_valid = return_valid_counts or compact_valid_to_front
+
+    # The compaction builds on the counting, so it shares the tiling.
+    single_tile, block_n, tiles_per_row, num_warps = _remap_tiling(
+        NUM_TOPK_TOKENS, BLOCK_N, count_valid
+    )
+
     if compact_valid_to_front:
         out = torch.full_like(token_indices_c, -1)
     else:
@@ -308,9 +351,9 @@ def triton_filter_and_convert_dcp_index(
 
     valid_counts: torch.Tensor | None = None
     if count_valid:
-        valid_counts = torch.zeros(
-            num_tokens, dtype=torch.int32, device=token_indices.device
-        )
+        # Zero-init only matters for the atomic accumulation path.
+        alloc = torch.empty if single_tile else torch.zeros
+        valid_counts = alloc(num_tokens, dtype=torch.int32, device=token_indices.device)
 
     bt_stride0, bt_stride1 = block_table_c.stride()
     ti_stride0, ti_stride1 = token_indices_c.stride()
@@ -328,9 +371,10 @@ def triton_filter_and_convert_dcp_index(
         max_num_blocks_per_req,
         BLOCK_SIZE,
         BLOCK_SIZE,
-        BLOCK_N,
+        block_n,
         False,  # HAS_PREFILL
         count_valid,
+        single_tile,
         compact_valid_to_front,
         dcp_size,
         dcp_rank,
@@ -341,6 +385,7 @@ def triton_filter_and_convert_dcp_index(
         ti_stride1,
         out_stride0,
         out_stride1,
+        num_warps=num_warps,
     )
 
     if return_valid_counts:

@@ -1339,32 +1339,36 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     assert out == expected
 
 
-def test_triton_convert_returns_valid_counts():
+# 384 is not a power of two, so it counts via the tiled atomic accumulation
+# rather than the single-tile path 128 takes.
+@pytest.mark.parametrize("num_topk_tokens", [128, 384])
+def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
     """Test that return_valid_counts correctly counts non-negative indices."""
     device = torch.device(DEVICE_TYPE)
     num_tokens = 8
     num_requests = 2
     max_blocks_per_req = 10
     block_size = 64
-    num_topk_tokens = 128
 
     req_id = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.int32, device=device)
     block_table = torch.arange(
         num_requests * max_blocks_per_req, dtype=torch.int32, device=device
     ).view(num_requests, max_blocks_per_req)
 
-    # Create token indices with varying numbers of valid entries
-    # Token 0: 64 valid, 64 invalid (-1)
-    # Token 1: 32 valid, 96 invalid
-    # Token 2: 128 valid (all)
-    # Token 3: 1 valid, 127 invalid
-    # etc.
+    # Create token indices with varying numbers of valid entries: half the row,
+    # a quarter of it, the whole row, then a single valid entry -- twice over.
     token_indices = torch.full(
         (num_tokens, num_topk_tokens), -1, dtype=torch.int32, device=device
     )
+    valid_counts_per_token = [
+        num_topk_tokens // 2,
+        num_topk_tokens // 4,
+        num_topk_tokens,
+        1,
+    ] * 2
     expected_valid = []
     for i in range(num_tokens):
-        num_valid = [64, 32, 128, 1, 64, 32, 128, 1][i]
+        num_valid = valid_counts_per_token[i]
         token_indices[i, :num_valid] = torch.arange(
             num_valid, dtype=torch.int32, device=device
         ) % (block_size * max_blocks_per_req)

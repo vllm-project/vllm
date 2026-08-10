@@ -79,6 +79,10 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
 
     @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return True
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         if self.kv_cache_config.has_mamba_layers:
             # Hybrid SSM models do not yet support cross-layer layout

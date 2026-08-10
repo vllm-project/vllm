@@ -32,6 +32,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.kv_offload.sparse.hisparse_runtime import get_indexer_source
 
@@ -260,6 +261,15 @@ class DeepseekV32Attention(MLAAttention):
         self.topk_indices_buffer = topk_indices_buffer
 
         self.skip_topk = False
+        enable_short_prefill_scoring_skip = (
+            not is_mtp_layer
+            and not skip_topk
+            and not self.use_pcp
+            and current_platform.is_cuda()
+        )
+        self._dense_mha_metadata_layer_name = (
+            self.layer_name if enable_short_prefill_scoring_skip else ""
+        )
 
         if self.require_fp8_kv_cache:
             assert is_quantized_kv_cache(self.kv_cache_dtype), (
@@ -344,22 +354,6 @@ class DeepseekV32Attention(MLAAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        self._fused_attention(
-            positions, q_c, kv_c, k_pe, index_k, index_weights, output
-        )
-        return self.o_proj(output)[0]
-
-    @eager_break_during_capture
-    def _fused_attention(
-        self,
-        positions: torch.Tensor,
-        q_c: torch.Tensor,
-        kv_c: torch.Tensor,
-        k_pe: torch.Tensor,
-        index_k: torch.Tensor | None,
-        index_weights: torch.Tensor | None,
-        output: torch.Tensor,
-    ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         if isinstance(attn_metadata_raw, dict):
@@ -485,6 +479,26 @@ class DeepseekV32Attention(MLAAttention):
             quantize_mqa=self._fp8_query,
         )
 
+        self._sparse_indexer_and_attn(
+            q_c,
+            index_q_fp8,
+            index_weights_out,
+            ql_nope,
+            mqa_q,
+            output,
+        )
+        return self.o_proj(output)[0]
+
+    @eager_break_during_capture
+    def _sparse_indexer_and_attn(
+        self,
+        q_c: torch.Tensor,
+        index_q_fp8: torch.Tensor | None,
+        index_weights_out: torch.Tensor | None,
+        ql_nope: torch.Tensor,
+        mqa_q: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
         if self.indexer is not None and not self.skip_topk:
             sparse_attn_indexer(
                 q_c,
@@ -503,11 +517,19 @@ class DeepseekV32Attention(MLAAttention):
                 self.topk_indices_buffer,
                 skip_k_cache_insert=True,
                 use_pcp=False,
-                dense_mha_metadata_layer_name="",
+                dense_mha_metadata_layer_name=self._dense_mha_metadata_layer_name,
                 use_fp4_cache=False,
                 # fused_norm_rope already cleared the topk buffer this forward.
                 skip_topk_buffer_clear=True,
             )
+
+        attn_metadata_raw = get_forward_context().attn_metadata
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.layer_name)
+        elif isinstance(attn_metadata_raw, list):
+            attn_metadata = attn_metadata_raw[0].get(self.layer_name)
+        else:
+            attn_metadata = attn_metadata_raw
 
         if attn_metadata is None:
             output.zero_()
@@ -527,6 +549,10 @@ class DeepseekV32Attention(MLAAttention):
         attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
             mqa_q_arg, kv_cache, attn_metadata, self
         )
+
+        # NOTE(woosuk): While the below does not need to be in the eager region,
+        # we put it here to avoid copying the attention output. Move this back to the
+        # captured region once forward_mqa supports `out` argument.
         x = attn_out.view(
             num_actual, self.num_local_heads, self.kv_lora_rank
         ).transpose(0, 1)
