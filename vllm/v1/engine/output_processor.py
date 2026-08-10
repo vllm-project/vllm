@@ -513,6 +513,11 @@ class OutputProcessor:
                     )
                 ):
                     req_state.queue.put(request_output)
+                # Remove parent request once all of its children are gone.
+                if (parent := req_state.parent_req) is not None:
+                    parent.child_requests.discard(request_id)
+                    if not parent.child_requests:
+                        self.parent_requests.pop(parent.request_id, None)
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
