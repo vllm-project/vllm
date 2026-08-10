@@ -1489,6 +1489,7 @@ def _init_process_group_for_split_group(
     *,
     backend: str,
     distributed_init_method: str,
+    store: Store | None,
     world_size: int,
     rank: int,
     local_rank: int,
@@ -1512,7 +1513,8 @@ def _init_process_group_for_split_group(
         device_id = None
     torch.distributed.init_process_group(
         backend=init_backend,
-        init_method=distributed_init_method,
+        init_method=distributed_init_method if store is None else None,
+        store=store,
         world_size=world_size,
         rank=rank,
         timeout=timeout,
@@ -1654,6 +1656,11 @@ def init_distributed_environment(
                 "Fallback Gloo backend is not available."
             )
             backend = "gloo"
+        store = None
+        if distributed_init_method.startswith("file://"):
+            store = torch.distributed.FileStore(
+                distributed_init_method.removeprefix("file://"), world_size
+            )
         if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
             # split_group needs local_rank early to compute device_id for
             # the eager init. local_rank is not available in torch
@@ -1667,6 +1674,7 @@ def init_distributed_environment(
             _init_process_group_for_split_group(
                 backend=backend,
                 distributed_init_method=distributed_init_method,
+                store=store,
                 world_size=world_size,
                 rank=rank,
                 local_rank=local_rank,
@@ -1676,7 +1684,8 @@ def init_distributed_environment(
             # this backend is used for WORLD
             torch.distributed.init_process_group(
                 backend=backend,
-                init_method=distributed_init_method,
+                init_method=distributed_init_method if store is None else None,
+                store=store,
                 world_size=world_size,
                 rank=rank,
                 timeout=timeout,
