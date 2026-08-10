@@ -4,6 +4,7 @@
 
 import json
 import os
+from argparse import BooleanOptionalAction
 
 import pytest
 import yaml
@@ -391,7 +392,7 @@ def test_load_config_file_false_store_true_dropped(tmp_path):
         yaml.dump(config_data, config_file)
 
     parser = FlexibleArgumentParser()
-    parser.add_argument("--enable-feature", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--enable-feature", action=BooleanOptionalAction)
     parser.add_argument("--port", type=int)
 
     processed_args = parser.load_config_file(str(config_file_path))
