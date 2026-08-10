@@ -6,10 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tokenizers import AddedToken, Tokenizer
+from tokenizers.models import WordLevel
+from transformers import TokenizersBackend
 
 from vllm.entrypoints.chat_utils import parse_chat_messages
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
+from vllm.tokenizers.deepseek_v32 import get_deepseek_v32_tokenizer
 from vllm.tokenizers.registry import TokenizerRegistry
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "deepseek_v4"
@@ -74,6 +78,23 @@ def test_deepseek_v4_tokenizer_registered():
     assert RENDERER_REGISTRY.load_renderer_cls("deepseek_v4").__name__ == (
         "DeepseekV4Renderer"
     )
+
+
+@pytest.mark.parametrize(
+    "wrapper", [get_deepseek_v32_tokenizer, get_deepseek_v4_tokenizer]
+)
+def test_deepseek_tokenizer_preserves_vocab_size(wrapper):
+    backend = Tokenizer(
+        WordLevel({"<bos>": 0, "token": 1, "<unk>": 2}, unk_token="<unk>")
+    )
+    backend.add_special_tokens([AddedToken("<bos>", special=True)])
+    backend.add_tokens(["added"])
+    tokenizer = TokenizersBackend(tokenizer_object=backend)
+
+    wrapped = wrapper(tokenizer)
+
+    assert tokenizer.get_added_vocab() == {"<bos>": 0, "added": 3}
+    assert len(wrapped) == len(tokenizer) == 4
 
 
 def test_deepseek_v4_defaults_to_thinking_with_high_effort():
