@@ -80,3 +80,7 @@ class OffloadingConfig:
     # True when the canonical per-layer host byte layout was requested via
     # kv_connector_extra_config; certified per-layer at worker registration.
     canonical_layout: bool = False
+    # Identity of the canonical byte format when canonical_layout is set.
+    # Computed once at config build, where the vLLM config context exists —
+    # consumers (e.g. FileMapper) may run outside that context.
+    canonical_format: str | None = None
