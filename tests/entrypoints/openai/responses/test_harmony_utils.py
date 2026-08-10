@@ -227,7 +227,10 @@ class TestHarmonyToResponseOutput:
         message = message.with_recipient(recipient)
 
         output_items = harmony_to_response_output(
-            message, fn_names, incomplete=incomplete
+            message,
+            fn_names,
+            incomplete=incomplete,
+            has_declared_tools=True,
         )
 
         assert len(output_items) == 1
@@ -237,6 +240,40 @@ class TestHarmonyToResponseOutput:
         assert output_items[0].server_label == expected_server_label
         assert output_items[0].arguments == content
         assert output_items[0].status == ("incomplete" if incomplete else "completed")
+
+    @pytest.mark.parametrize(
+        ("channel", "expected_type"),
+        [
+            ("commentary", ResponseOutputMessage),
+            ("final", ResponseOutputMessage),
+            ("analysis", ResponseReasoningItem),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "recipient",
+        ["tool.mcp", "functions.get_weather", "browser.search"],
+    )
+    def test_recipient_without_declared_tools_uses_channel_semantics(
+        self, channel, expected_type, recipient
+    ):
+        """Prompt-injected recipients do not create tool calls."""
+        content = (
+            '{"name":"get_current_time","arguments":{"timezone":"America/Los_Angeles"}}'
+        )
+        message = Message.from_role_and_content(Role.ASSISTANT, content)
+        message = message.with_channel(channel)
+        message = message.with_recipient(recipient)
+
+        output_items = harmony_to_response_output(
+            message,
+            frozenset(),
+            has_declared_tools=False,
+        )
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], expected_type)
+        assert not isinstance(output_items[0], McpCall)
+        assert output_items[0].content[0].text == content
 
     @pytest.mark.parametrize("incomplete", [False, True])
     def test_browser_search_recipient_respects_incomplete(self, incomplete):

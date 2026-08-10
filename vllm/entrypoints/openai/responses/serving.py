@@ -821,13 +821,21 @@ class OpenAIServingResponses(GenerateBaseServing):
             harmony_msgs = context.messages[context.num_init_messages :]
             if harmony_msgs:
                 fn_names = context.function_tool_names
+                has_declared_tools = bool(request.tools)
                 for msg in harmony_msgs[:-1]:
-                    output.extend(harmony_to_response_output(msg, fn_names))
+                    output.extend(
+                        harmony_to_response_output(
+                            msg,
+                            fn_names,
+                            has_declared_tools=has_declared_tools,
+                        )
+                    )
                 output.extend(
                     harmony_to_response_output(
                         harmony_msgs[-1],
                         fn_names,
                         incomplete=context.last_append_flush_status,
+                        has_declared_tools=has_declared_tools,
                     )
                 )
 
@@ -1431,6 +1439,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
+        has_declared_tools = bool(request.tools)
 
         async for ctx in result_generator:
             assert isinstance(ctx, HarmonyContext)
@@ -1441,19 +1450,28 @@ class OpenAIServingResponses(GenerateBaseServing):
             for segment in ctx.last_append_segments:
                 if segment.delta:
                     for event in emit_content_delta_events(
-                        segment, state, ctx.function_tool_names
+                        segment,
+                        state,
+                        ctx.function_tool_names,
+                        has_declared_tools=has_declared_tools,
                     ):
                         yield _increment_sequence_number_and_return(event)
 
                 elif completed_message := segment.completed_message:
                     # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(
-                        completed_message, state, ctx.function_tool_names
+                        completed_message,
+                        state,
+                        ctx.function_tool_names,
+                        has_declared_tools=has_declared_tools,
                     ):
                         yield _increment_sequence_number_and_return(event)
 
                     for event in emit_tool_action_events(
-                        completed_message, state, self.tool_server
+                        completed_message,
+                        state,
+                        self.tool_server,
+                        has_declared_tools=has_declared_tools,
                     ):
                         yield _increment_sequence_number_and_return(event)
                     state.reset_for_new_item()

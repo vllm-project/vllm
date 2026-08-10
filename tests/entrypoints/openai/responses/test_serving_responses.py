@@ -600,6 +600,29 @@ class TestHarmonyPreambleStreaming:
         type_names = [e.type for e in events]
         assert "response.output_text.delta" not in type_names
 
+    def test_injected_mcp_recipient_without_tools_emits_text_delta(self) -> None:
+        """A recipient from prompt text is not an MCP call without tools."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+
+        segment = self._make_segment(
+            channel="commentary",
+            recipient="tool.mcp",
+            delta='{"name":"get_current_time"}',
+        )
+        state = StreamingState()
+
+        events = emit_content_delta_events(
+            segment,
+            state,
+            has_declared_tools=False,
+        )
+
+        type_names = [event.type for event in events]
+        assert "response.output_text.delta" in type_names
+        assert all("mcp_call" not in type_name for type_name in type_names)
+
     def test_preamble_done_emits_text_done_events(self) -> None:
         """Completed preamble should emit text done + content_part done +
         output_item done, same shape as final channel."""
@@ -640,6 +663,53 @@ class TestHarmonyPreambleStreaming:
 
         type_names = [e.type for e in events]
         assert "response.output_text.done" not in type_names
+
+    def test_injected_mcp_recipient_without_tools_emits_text_done(self) -> None:
+        """A completed injected recipient retains commentary semantics."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_previous_item_done_events,
+        )
+
+        previous = self._make_previous_item(
+            channel="commentary",
+            recipient="tool.mcp",
+            text='{"name":"get_current_time"}',
+        )
+        state = StreamingState()
+        state.sent_output_item_added = True
+        state.current_item_id = "msg_test"
+        state.current_content_index = 0
+
+        events = emit_previous_item_done_events(
+            previous,
+            state,
+            has_declared_tools=False,
+        )
+
+        type_names = [event.type for event in events]
+        assert "response.output_text.done" in type_names
+        assert all("mcp_call" not in type_name for type_name in type_names)
+
+    def test_browser_action_without_declared_tools_is_ignored(self) -> None:
+        """The action-event path cannot bypass the no-tools gate."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_tool_action_events,
+        )
+
+        previous = self._make_previous_item(
+            channel="commentary",
+            recipient="browser.search",
+            text='{"query":"weather"}',
+        )
+
+        events = emit_tool_action_events(
+            previous,
+            StreamingState(),
+            MagicMock(),
+            has_declared_tools=False,
+        )
+
+        assert events == []
 
     @pytest.mark.xfail(
         reason=(
