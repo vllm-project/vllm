@@ -372,11 +372,6 @@ def _make_experts(
     w2_bf16: torch.Tensor,
     test_tensors: TestTensors,
 ):
-    """Build the expert wrapper plus its EP-sliced weights.
-
-    Returns the expert instance, the kernel-format weights, the torch
-    reference output computed from the full weights, and the tolerances.
-    """
     e_start = num_local_experts * rank
     e_end = e_start + num_local_experts
 
@@ -424,7 +419,6 @@ def _make_experts(
         convert_to_fp8_moe_kernel_format,
     )
 
-    # Round-trip through FP8 before building the reference and kernel weights.
     w1_ref = w1_bf16.to(torch.float8_e4m3fn).to(torch.bfloat16)
     w2_ref = w2_bf16.to(torch.float8_e4m3fn).to(torch.bfloat16)
 
@@ -635,10 +629,6 @@ def test_deep_ep_v2_moe_backends(
     use_cudagraph: bool,
     workspace_init,
 ):
-    """DeepEP v2 dispatches the non-expanded routing layout with cudagraphs and
-    the expanded [num_expanded_tokens, 1] layout without them. Every expert
-    backend must handle both.
-    """
     set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(
