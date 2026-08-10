@@ -31,7 +31,7 @@ from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle
 from vllm.multimodal.inputs import NestedTensors
 
 from .laguna import LagunaDecoderLayer
-from .qwen3_dflash import DFlashQwen3Model
+from .qwen3_dflash import DFlashQwen3Model, _can_fuse_context_kv
 from .utils import (
     AutoWeightsLoader,
     get_draft_quant_config,
@@ -155,15 +155,19 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         layers_attn: list[nn.Module],
         has_bias: bool,
     ) -> None:
-        self._kv_weights = torch.stack(
-            [a.qkv_proj.weight[a.q_size :] for a in layers_attn], dim=0
-        ).contiguous()
-        if has_bias:
-            self._kv_biases: torch.Tensor | None = torch.stack(
-                [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
+        self._fuse_context_kv = _can_fuse_context_kv(a.qkv_proj for a in layers_attn)
+        if self._fuse_context_kv:
+            self._kv_weights = torch.stack(
+                [a.qkv_proj.weight[a.q_size :] for a in layers_attn], dim=0
             ).contiguous()
+            if has_bias:
+                self._kv_biases: torch.Tensor | None = torch.stack(
+                    [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
+                ).contiguous()
+            else:
+                self._kv_biases = None
         else:
-            self._kv_biases = None
+            self._kv_projections = [(a.qkv_proj, a.q_size) for a in layers_attn]
         self._input_layernorm_weights = torch.stack(
             [layer.input_layernorm.weight.data for layer in self.layers], dim=0
         ).contiguous()
@@ -190,12 +194,22 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
             self._input_layernorm_weights,
             self._rms_norm_eps,
         )
-        all_kv_flat = torch.bmm(
-            normed_context_states,
-            self._kv_weights.transpose(1, 2),
-        )
-        if self._kv_biases is not None:
-            all_kv_flat += self._kv_biases[:, None, :]
+        if self._fuse_context_kv:
+            all_kv_flat = torch.bmm(
+                normed_context_states,
+                self._kv_weights.transpose(1, 2),
+            )
+            if self._kv_biases is not None:
+                all_kv_flat += self._kv_biases[:, None, :]
+        else:
+            # Each layer norms its own context states, so project them per layer.
+            all_kv_flat = torch.stack(
+                [
+                    proj(normed_context_states[i])[0][..., q_size:]
+                    for i, (proj, q_size) in enumerate(self._kv_projections)
+                ],
+                dim=0,
+            )
         all_kv = (
             all_kv_flat.view(num_layers, num_ctx, 2, num_kv_heads, head_dim)
             .permute(2, 0, 1, 3, 4)

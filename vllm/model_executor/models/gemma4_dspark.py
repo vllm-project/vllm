@@ -22,7 +22,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
-from .qwen3_dflash import DFlashQwen3Model, _dflash_layer_causal
+from .qwen3_dflash import DFlashQwen3Model, _can_fuse_context_kv, _dflash_layer_causal
 from .qwen3_dspark import DSparkMarkovHead, Qwen3DSparkForCausalLM
 from .utils import extract_layer_index, maybe_prefix
 
@@ -212,10 +212,18 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         self, layers_attn: list[nn.Module], has_bias: bool
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
-        self._fused_k_weight = torch.cat([a.k_proj.weight for a in layers_attn], dim=0)
-        self._fused_k_bias: torch.Tensor | None = (
-            torch.cat([a.k_proj.bias for a in layers_attn], dim=0) if has_bias else None
-        )
+        self._fuse_context_kv = _can_fuse_context_kv(a.k_proj for a in layers_attn)
+        if self._fuse_context_kv:
+            self._fused_k_weight = torch.cat(
+                [a.k_proj.weight for a in layers_attn], dim=0
+            )
+            self._fused_k_bias: torch.Tensor | None = (
+                torch.cat([a.k_proj.bias for a in layers_attn], dim=0)
+                if has_bias
+                else None
+            )
+        else:
+            self._k_projections = [a.k_proj for a in layers_attn]
         self._k_norm_weights = torch.stack(
             [a.k_norm.weight.data for a in layers_attn], dim=0
         ).contiguous()
@@ -241,7 +249,12 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         ops.rms_norm(
             normed, context_states, self._hidden_norm_weight, self._rms_norm_eps
         )
-        all_k_flat = F.linear(normed, self._fused_k_weight, self._fused_k_bias)
+        if self._fuse_context_kv:
+            all_k_flat = F.linear(normed, self._fused_k_weight, self._fused_k_bias)
+        else:
+            all_k_flat = torch.cat(
+                [proj(normed)[0] for proj in self._k_projections], dim=-1
+            )
         all_k = (
             all_k_flat.view(num_ctx, num_layers, num_kv_heads, head_dim)
             .permute(1, 0, 2, 3)
