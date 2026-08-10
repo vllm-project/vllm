@@ -38,7 +38,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.ubatch_utils import is_last_ubatch_empty
+from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
 from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
 
 if TYPE_CHECKING:
@@ -301,16 +301,25 @@ class CudaGraphManager:
                 # DBO: also capture a FULL graph that splits this same token
                 # count into `num_ubatches` microbatches. Only FULL is
                 # supported (mirrors the eager DBO path, which only runs
-                # uncompiled); PIECEWISE+DBO stays unsupported. Skip sizes too
-                # small to fill every microbatch -- same guard the runtime
-                # dispatch path uses to decide whether to ubatch a real step
-                # at all (`is_last_ubatch_empty`), so we never capture a graph
-                # no real step could actually be routed to.
+                # uncompiled); PIECEWISE+DBO stays unsupported. Gate on the
+                # same thresholds the DP handshake votes with, so the captured
+                # shapes cannot drift from the dispatchable ones; either
+                # threshold admitting the shape is enough, since the handshake
+                # picks between them from the runtime batch. They are a pure
+                # function of config, which is what lets every DP rank derive
+                # the same candidate list.
+                num_ubatches = get_num_ubatches(self.vllm_config.parallel_config)
                 if (
                     self.ubatch_runner is not None
                     and mixed_mode == CUDAGraphMode.FULL
-                    and not is_last_ubatch_empty(
-                        num_tokens, num_tokens, self.ubatch_runner.num_ubatches
+                    and num_tokens >= num_ubatches
+                    and any(
+                        check_ubatch_thresholds(
+                            self.vllm_config.parallel_config,
+                            num_tokens,
+                            uniform_decode=ud,
+                        )
+                        for ud in (True, False)
                     )
                 ):
                     ubatch_desc = BatchExecutionDescriptor(
@@ -318,7 +327,7 @@ class CudaGraphManager:
                         num_tokens=num_tokens,
                         num_reqs=min(num_tokens, self.max_num_reqs),
                         num_active_loras=num_active_loras,
-                        num_ubatches=self.ubatch_runner.num_ubatches,
+                        num_ubatches=num_ubatches,
                     )
                     descs_by_mode[CUDAGraphMode.FULL].append(ubatch_desc)
 
@@ -344,6 +353,17 @@ class CudaGraphManager:
 
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
+
+    def _capture_stream(self, desc: BatchExecutionDescriptor) -> torch.cuda.Stream:
+        """Stream to capture `desc` on.
+
+        A microbatched graph has to be captured on the stream its microbatch
+        threads launch onto, or their work lands outside the graph.
+        """
+        if desc.num_ubatches > 1:
+            assert self.ubatch_runner is not None
+            return self.ubatch_runner.capture_stream
+        return current_stream()
 
     @torch.inference_mode()
     def capture(
@@ -416,7 +436,7 @@ class CudaGraphManager:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
                         with torch.cuda.graph(
-                            graph, self.pool, stream=current_stream()
+                            graph, self.pool, stream=self._capture_stream(desc)
                         ):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
@@ -609,6 +629,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 dummy_batch,
                 dummy_block_tables,
                 dummy_slot_mappings,
+                cg_mode=CUDAGraphMode.FULL,
                 for_capture=True,
             )
 
@@ -623,11 +644,13 @@ class ModelCudaGraphManager(CudaGraphManager):
                 assert intermediate_tensors is not None
                 model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
 
-            # Starts the microbatch threads and blocks until both have reached
-            # their `UBatchContext` -- pure CPU/event synchronization, so this
+            # Starts the microbatch threads on `ubatch_runner.capture_stream`
+            # -- the stream `capture()` opens the graph on -- and blocks until
+            # both have reached their `UBatchContext` with their CUDA and
+            # cuBLAS state initialized. Pure CPU/event synchronization, so it
             # is safe to run before `torch.cuda.graph(...)` opens.
             finish = self.ubatch_runner.begin_capturable_run(
-                model, model_inputs, ubatch_state
+                model, model_inputs, ubatch_state, for_capture=True
             )
 
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
