@@ -440,11 +440,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
         return self._o_proj(o, positions)
 
-    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # MergedColumnParallelLinear returns (output, bias); bias is None.
-        qr_kv, _ = self.fused_wqa_wkv(hidden_states)
-        return qr_kv
-
     def _run_parallel_input_projections(
         self, hidden_states: torch.Tensor
     ) -> tuple[
@@ -495,11 +490,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             aux_fns[1] = indexer_weights_proj
             aux_fns[2] = indexer_compressor_kv_score
 
-        def fused_wqa_wkv() -> torch.Tensor:
-            return self._fused_wqa_wkv_gemm(hidden_states)
-
         qr_kv, (kv_score, indexer_weights, indexer_kv_score) = execute_in_parallel(
-            fused_wqa_wkv,
+            lambda: self.fused_wqa_wkv(hidden_states)[0],
             aux_fns,
             self.ln_events[0],
             self.ln_events[1:4],
