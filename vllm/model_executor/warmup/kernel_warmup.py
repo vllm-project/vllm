@@ -219,6 +219,31 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     return None
 
 
+_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
+
+
+def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    linear_backend = runner.vllm_config.kernel_config.linear_backend
+    if (
+        linear_backend == "flashinfer_cutedsl"
+        and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
+    ):
+        return max_tokens, _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
+    return (max_tokens,)
+
+
+def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
+    for num_tokens in _flashinfer_autotune_token_counts(runner):
+        logger.info("Running FlashInfer autotune with %d tokens.", num_tokens)
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            randomize_inputs=True,
+        )
+
+
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     Autotune FlashInfer operations.
@@ -256,20 +281,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
 
     # We skip EPLB here since we don't want to record dummy metrics.
-    # When autotuning with number of tokens m, flashinfer will autotune
-    # operations for all number of tokens up to m, so we only need to
-    # run with the max number of tokens.
     # Randomize inputs to avoid every token pick the same experts,
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    dummy_run_kwargs = dict(
-        num_tokens=runner.scheduler_config.max_num_batched_tokens,
-        skip_eplb=True,
-        is_profile=True,
-        randomize_inputs=True,
-    )
-
     # Read cached autotune results and broadcast to all ranks.
     cached_results: bytes | None = None
     if is_leader and cache_path.exists():
@@ -288,7 +303,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             torch.inference_mode(),
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
-            runner._dummy_run(**dummy_run_kwargs)
+            _run_flashinfer_autotune_dummy_runs(runner)
     finally:
         set_autotune_process_group(None)
 

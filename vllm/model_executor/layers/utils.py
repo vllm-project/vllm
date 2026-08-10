@@ -565,12 +565,14 @@ def _get_configured_flashinfer_bf16_backend(
     return None
 
 
-def select_unquantized_gemm_impl() -> Callable[..., torch.Tensor]:
+def select_unquantized_gemm_impl(
+    configured_linear_backend: str | None = None,
+) -> Callable[..., torch.Tensor]:
     gemm_impl = dispatch_unquantized_gemm()
     if not current_platform.is_cuda():
         return gemm_impl
 
-    vllm_backend = _get_configured_linear_backend()
+    vllm_backend = configured_linear_backend or _get_configured_linear_backend()
     configured_backend = _get_configured_flashinfer_bf16_backend(vllm_backend)
     if configured_backend is None:
         return gemm_impl

@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Callable, Iterable
-from functools import cached_property
+from collections.abc import Iterable
 from typing import Any
 
 import torch
@@ -11,7 +10,7 @@ from torch.nn.parameter import Parameter
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -167,9 +166,12 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
-    @cached_property
-    def _gemm_impl(self) -> Callable[..., torch.Tensor]:
-        return select_unquantized_gemm_impl()
+    def __init__(self) -> None:
+        config = get_current_vllm_config_or_none()
+        linear_backend = (
+            config.kernel_config.linear_backend if config is not None else None
+        )
+        self._gemm_impl = select_unquantized_gemm_impl(linear_backend)
 
     def create_weights(
         self,
