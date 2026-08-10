@@ -131,11 +131,12 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
+            # Pre-temperature logits, cached from the previous decode step.
             self.draft_logits = torch.zeros(
                 self.max_num_reqs,
                 self.num_speculative_steps,
                 self.vocab_size,
-                dtype=torch.float32,
+                dtype=vllm_config.model_config.head_dtype,
                 device=device,
             )
 
@@ -333,8 +334,8 @@ class DraftModelSpeculator(BaseSpeculator):
                 seeds,
                 positions + 1,
                 apply_temperature=True,
-                output_processed_logits=draft_logits,
-                output_processed_logits_col=draft_step,
+                logits_cache=draft_logits,
+                logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
         return self._greedy_sample_draft(hidden_states)
