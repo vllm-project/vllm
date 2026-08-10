@@ -192,5 +192,7 @@ else
   exit 1
 fi
 
+bash .buildkite/scripts/publish-vllm-bench-images.sh release
+
 echo ""
 echo "Successfully published release images for v${RELEASE_VERSION}"

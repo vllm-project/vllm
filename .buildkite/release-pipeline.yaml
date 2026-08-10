@@ -398,6 +398,40 @@ steps:
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404" release-images'
 
+      - label: "Build vllm-bench release image - x86_64"
+        depends_on: ~
+        id: build-vllm-bench-release-image-x86
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              --label "org.opencontainers.image.revision=$BUILDKITE_COMMIT" \
+              --tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench-$(uname -m)" \
+              --progress plain \
+              -f docker/Dockerfile.vllm-bench .
+          - "docker run --rm public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench-$(uname -m) --version"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench-$(uname -m)"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench-$(uname -m)" release-images'
+
+      - label: "Build vllm-bench release image - aarch64"
+        depends_on: ~
+        id: build-vllm-bench-release-image-arm64
+        agents:
+          queue: arm64_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              --label "org.opencontainers.image.revision=$BUILDKITE_COMMIT" \
+              --tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench-$(uname -m)" \
+              --progress plain \
+              -f docker/Dockerfile.vllm-bench .
+          - "docker run --rm public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench-$(uname -m) --version"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench-$(uname -m)"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench-$(uname -m)" release-images'
+
       - label: ":docker: Build release image - x86_64 - XPU"
         depends_on: ~
         id: build-xpu-release-image
@@ -512,6 +546,19 @@ steps:
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 12.9 Ubuntu 24.04" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404" release-manifests'
 
+      - label: "Create vllm-bench multi-arch manifest"
+        depends_on:
+          - build-vllm-bench-release-image-x86
+          - build-vllm-bench-release-image-arm64
+        id: create-vllm-bench-multi-arch-manifest
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench-x86_64 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench-aarch64 --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: vllm-bench" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-vllm-bench" release-manifests'
+
       - label: "Create manifest - XPU"
         depends_on:
           - build-xpu-release-image
@@ -550,6 +597,23 @@ steps:
           - "bash .buildkite/scripts/push-nightly-builds.sh cu129"
           # Clean up old nightly builds (keep only last 14)
           - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu129-nightly-"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
+
+      - label: "Publish nightly vllm-bench image to DockerHub"
+        depends_on:
+          - create-vllm-bench-multi-arch-manifest
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/publish-vllm-bench-images.sh nightly"
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-bench"
         plugins:
           - docker-login#v3.0.0:
               username: vllmbot
@@ -947,6 +1011,7 @@ steps:
       - create-multi-arch-manifest-cuda-12-9
       - create-multi-arch-manifest-ubuntu2404
       - create-multi-arch-manifest-cuda-12-9-ubuntu2404
+      - create-vllm-bench-multi-arch-manifest
       - create-manifest-xpu
       - build-rocm-release-image
       - input-release-version

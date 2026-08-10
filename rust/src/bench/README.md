@@ -49,7 +49,7 @@ vllm-bench --backend vllm --base-url http://127.0.0.1:8000 \
 Build the standalone benchmark image from the repository root:
 
 ```bash
-docker build -f docker/Dockerfile.bench -t vllm-bench .
+docker build -f docker/Dockerfile.vllm-bench -t vllm-bench .
 ```
 
 Run it against a reachable vLLM server:
