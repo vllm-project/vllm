@@ -5,7 +5,6 @@ from argparse import ArgumentError
 
 import pytest
 
-from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
