@@ -192,15 +192,22 @@ def test_has_device_capability_comparisons(monkeypatch):
         NvmlCudaPlatform.get_device_capability.cache_clear()
 
 
-def _stub_nvml_uuids(monkeypatch, uuids: dict[int, str]):
+def _stub_nvml_uuids(monkeypatch,
+                     uuids: dict[int, str],
+                     mig_uuids: dict[int, list[str]] | None = None):
     """Stub NVML to report the given physical-index -> UUID map.
 
     ``nvmlDeviceGetHandleByUUID`` only matches exact, full UUIDs (mirroring
     NVML, which has no prefix-matching fallback), so short-form UUIDs must be
     resolved via the prefix scan in
     ``device_control_id_to_physical_device_id``.
+
+    ``mig_uuids`` optionally maps a physical GPU index to the UUIDs of its MIG
+    instances; MIG devices resolve to their parent GPU's physical index.
     """
     from vllm.platforms.cuda import pynvml
+
+    mig_uuids = mig_uuids or {}
 
     def handle_by_index(index: int):
         return f"handle-{index}"
@@ -214,14 +221,36 @@ def _stub_nvml_uuids(monkeypatch, uuids: dict[int, str]):
     def index_of(handle: str):
         return int(handle.split("-")[1])
 
+    def mig_handle_by_index(parent_handle: str, mig_idx: int):
+        parent = index_of(parent_handle)
+        migs = mig_uuids.get(parent, [])
+        if mig_idx >= len(migs):
+            raise pynvml.NVMLError_NotFound()
+        return f"mig-{parent}-{mig_idx}"
+
+    def parent_handle_of(mig_handle: str):
+        parent = int(mig_handle.split("-")[1])
+        return f"handle-{parent}"
+
+    def uuid_of(handle: str):
+        if handle.startswith("mig-"):
+            parent, mig_idx = int(handle.split("-")[1]), int(handle.split("-")[2])
+            return mig_uuids[parent][mig_idx]
+        return uuids[index_of(handle)]
+
     monkeypatch.setattr(pynvml, "nvmlInit", lambda: None)
     monkeypatch.setattr(pynvml, "nvmlShutdown", lambda: None)
     monkeypatch.setattr(pynvml, "nvmlDeviceGetCount", lambda: len(uuids))
     monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByIndex", handle_by_index)
     monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByUUID", handle_by_uuid)
     monkeypatch.setattr(pynvml, "nvmlDeviceGetIndex", index_of)
-    monkeypatch.setattr(pynvml, "nvmlDeviceGetUUID",
-                        lambda h: uuids[index_of(h)])
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetUUID", uuid_of)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetMaxMigDeviceCount",
+                        lambda h: len(mig_uuids.get(index_of(h), [])))
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetMigDeviceHandleByIndex",
+                        mig_handle_by_index)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetDeviceHandleFromMigDeviceHandle",
+                        parent_handle_of)
 
 
 def test_device_control_id_short_uuid_prefix(monkeypatch):
@@ -250,6 +279,38 @@ def test_device_control_id_short_uuid_prefix(monkeypatch):
     # Integer IDs still work.
     assert NvmlCudaPlatform.device_control_id_to_physical_device_id("0") == 0
     assert NvmlCudaPlatform.device_control_id_to_physical_device_id("1") == 1
+
+
+def test_device_control_id_mig_uuid(monkeypatch):
+    """MIG instance UUIDs (``MIG-...``) in CUDA_VISIBLE_DEVICES must resolve
+    to their parent GPU's physical index (issue #46132's scenario, fixed with
+    a prefix scan instead of silently returning the logical id)."""
+    from vllm.platforms.cuda import NvmlCudaPlatform
+
+    _stub_nvml_uuids(
+        monkeypatch,
+        uuids={
+            0: "GPU-af7b61d8-21af-baea-6a19-42a1f9f7c3cb",
+            1: "GPU-95a445f6-69ca-10b5-3201-e1cf693804b2",
+        },
+        mig_uuids={
+            1: ["MIG-4c60d78c-506f-5593-938d-a136eaa1fa52",
+                "MIG-aa11bb22-cc33-4455-6677-8899aabbccdd"],
+        },
+    )
+
+    # Exact MIG UUID resolves to its parent GPU's physical index.
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
+        "MIG-4c60d78c-506f-5593-938d-a136eaa1fa52") == 1
+    # Short MIG prefix.
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
+        "MIG-aa11bb22") == 1
+    # Short MIG prefix without the leading "MIG-".
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
+        "4c60d78c") == 1
+    # GPU UUIDs still resolve.
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
+        "GPU-95a445f6") == 1
 
 
 def test_device_control_id_short_uuid_no_match(monkeypatch):

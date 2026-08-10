@@ -733,13 +733,31 @@ class NvmlCudaPlatform(CudaPlatformBase):
                 # first few characters of a GPU UUID (including "GPU-") rather
                 # than the full 36-char UUID.  NVML's
                 # nvmlDeviceGetHandleByUUID() requires an exact, full match,
-                # so fall back to a prefix scan over the physical devices.
-                prefix = device_id.removeprefix("GPU-")
+                # so fall back to a prefix scan over the physical devices
+                # (and their MIG instances).
+                prefix = device_id.removeprefix("GPU-").removeprefix("MIG-")
                 for index in range(pynvml.nvmlDeviceGetCount()):
                     handle = pynvml.nvmlDeviceGetHandleByIndex(index)
                     uuid = pynvml.nvmlDeviceGetUUID(handle)
                     if uuid.removeprefix("GPU-").startswith(prefix):
                         return index
+                    # MIG instances share the parent GPU's physical index.
+                    try:
+                        for mig_idx in range(
+                                pynvml.nvmlDeviceGetMaxMigDeviceCount(handle)):
+                            mig_handle = (
+                                pynvml.nvmlDeviceGetMigDeviceHandleByIndex(
+                                    handle, mig_idx))
+                            mig_uuid = pynvml.nvmlDeviceGetUUID(mig_handle)
+                            if mig_uuid.removeprefix("MIG-").startswith(prefix):
+                                parent = (
+                                    pynvml
+                                    .nvmlDeviceGetDeviceHandleFromMigDeviceHandle(
+                                        mig_handle))
+                                return pynvml.nvmlDeviceGetIndex(parent)
+                    except pynvml.NVMLError:
+                        # No MIG instances on this device (or MIG disabled).
+                        pass
                 raise
 
     @classmethod
