@@ -15,6 +15,7 @@ import json
 import logging
 import queue
 from contextlib import contextmanager
+from dataclasses import asdict
 from typing import Any
 
 import numpy as np
@@ -38,6 +39,7 @@ from .constant import (
     UNPIN,
 )
 from .storage import PagedShmStorage
+from .types import AllocatedShmItem, ShmItem
 
 logger = logging.getLogger(__name__)
 
@@ -100,13 +102,9 @@ class _WriteContext:
         self.blocks: list[int] = []
 
     def __enter__(self) -> "_WriteContext":
-        item_spec = {
-            "uuid": self._uuid,
-            "size": self._size,
-            "use_cache": self._use_cache,
-        }
+        item_spec = ShmItem(uuid=self._uuid, size=self._size, use_cache=self._use_cache)
         alloc = self._client.open_write([item_spec])
-        self.blocks = alloc[0]["blocks"]
+        self.blocks = alloc[0].blocks
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -146,8 +144,8 @@ class _ReadContext:
 
     def __enter__(self) -> "_ReadContext":
         items = self._client.open_read(self._uuid)
-        self.size = items["size"]
-        self.blocks = items["blocks"]
+        self.size = items.size
+        self.blocks = items.blocks
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -190,7 +188,7 @@ class PagedShmClient(_BaseClient):
             self._pool.put(sock)
 
         # Retrieve storage metadata and attach to the shared memory segment
-        info = json.loads(self._request(GET_STORAGE_INFO))
+        info = json.loads(self._request(GET_STORAGE_INFO))["data"]
         self._storage = PagedShmStorage(
             size=info["size"],
             block_size=info["block_size"],
@@ -301,20 +299,28 @@ class PagedShmClient(_BaseClient):
     # Public API – each method maps 1:1 to a server command
     # ------------------------------------------------------------------
 
-    def open_write(self, items: list) -> list[dict[str, Any]]:
+    def open_write(self, items: list[ShmItem]) -> list[AllocatedShmItem]:
         """Allocate blocks for a batch of items to be written."""
-        payload = json.dumps(items)
+        payload = json.dumps([asdict(item) for item in items])
         resp = self._request(OPEN_WRITE, payload)
-        return json.loads(resp)
+        resp_dict = json.loads(resp)
+        status = resp_dict.pop("status", "error")
+        if status != "ok":
+            raise MemoryError()
+        return [AllocatedShmItem(**a) for a in resp_dict["data"]]
 
     def close_write(self, uuid: str) -> None:
         """Finalise a write operation for the given UUID."""
         self._request(CLOSE_WRITE, uuid)
 
-    def open_read(self, uuid: str) -> dict[str, Any]:
+    def open_read(self, uuid: str) -> AllocatedShmItem:
         """Acquire a read reference to an item and return its block list."""
         resp = self._request(OPEN_READ, uuid)
-        return json.loads(resp)
+        resp_dict = json.loads(resp)
+        status = resp_dict.pop("status", "error")
+        if status != "ok":
+            raise MemoryError()
+        return AllocatedShmItem(**resp_dict["data"])
 
     def close_read(self, uuid: str) -> None:
         """Release a read reference for the given UUID."""
@@ -335,7 +341,10 @@ class PagedShmClient(_BaseClient):
     def get_storage_info(self) -> dict[str, Any]:
         """Return storage metadata (name, size, block_size, n_block)."""
         resp = self._request(GET_STORAGE_INFO)
-        return json.loads(resp)
+        resp_dict = json.loads(resp)
+        status = resp_dict.pop("status", "error")
+        assert status == "ok"
+        return resp_dict["data"]
 
     def get_manager_state(self) -> dict[str, Any]:
         """Return manager statistics (allocations, cache state, etc.)."""

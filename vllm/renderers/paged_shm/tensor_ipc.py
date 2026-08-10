@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -11,9 +12,11 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
+from vllm.utils import random_uuid
 
 from .client import PagedShmClient
 from .client_async import AsyncPagedShmClient
+from .types import ShmItem
 
 
 def format_size(
@@ -71,37 +74,51 @@ class PagedShmTensorIPC:
         if not self.is_paged_shm_enabled:
             return None
 
-        print()
-        print("PagedShmMMInputs write")
-        print("-" * 80)
-        self._traversal(mm_inputs)
-        print("-" * 80)
+        elements: list[MultiModalFieldElem] = []
+
+        def _func(elem: MultiModalFieldElem):
+            if not isinstance(elem.data, torch.Tensor):
+                return
+            if elem.data.nbytes < self.block_size:
+                return
+
+            elements.append(elem)
+
+        self._traversal(mm_inputs, _func)
+
+        try:
+            alloc = self.client_sync.open_write(
+                [
+                    ShmItem(uuid=random_uuid(), size=elem.data.nbytes, use_cache=False)
+                    for elem in elements
+                ]
+            )
+        except MemoryError:
+            return None
+
+        for i, a in enumerate(alloc):
+            elements[i].shm_object = a
         return None
 
-    def _write(self, elem: MultiModalFieldElem):
-        data = elem.data
-        if isinstance(data, torch.Tensor) and data.nbytes > self.block_size:
-            print(format_size(data.nbytes))
-
-    def _traversal(self, obj: Any):
+    def _traversal(self, obj: Any, func: Callable[[MultiModalFieldElem], None]):
         if isinstance(obj, dict):
             for k, v in obj.items():
-                self._traversal(v)
+                self._traversal(v, func)
             return None
         elif isinstance(obj, (list, tuple)):
             for v in obj:
-                self._traversal(v)
+                self._traversal(v, func)
             return None
         elif isinstance(obj, MultiModalKwargsItem):
             for k, v in obj.items():
-                self._traversal(v)
+                self._traversal(v, func)
             return None
         elif isinstance(obj, MultiModalFieldElem):
-            self._write(obj)
+            func(obj)
             return None
         elif isinstance(obj, MultiModalKwargsItems):
             for modality, itemlist in obj.items():
                 for item in itemlist:
-                    self._traversal(item)
+                    self._traversal(item, func)
             return None
         return None

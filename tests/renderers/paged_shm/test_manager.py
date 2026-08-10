@@ -4,7 +4,8 @@
 
 import pytest
 
-from vllm.renderers.paged_shm.manager import Item, PagedShmManager
+from vllm.renderers.paged_shm.manager import PagedShmManager
+from vllm.renderers.paged_shm.types import ShmItem
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -20,19 +21,19 @@ def manager():
 @pytest.fixture
 def item_small():
     """An item that fits in 1 block."""
-    return Item(uuid="small", size=200, use_cache=True)
+    return ShmItem(uuid="small", size=200, use_cache=True)
 
 
 @pytest.fixture
 def item_large():
     """An item that needs 2 blocks."""
-    return Item(uuid="large", size=400, use_cache=True)
+    return ShmItem(uuid="large", size=400, use_cache=True)
 
 
 @pytest.fixture
 def item_nocache():
     """An item that should not be cached after writing."""
-    return Item(uuid="nocache", size=200, use_cache=False)
+    return ShmItem(uuid="nocache", size=200, use_cache=False)
 
 
 # ---------------------------------------------------------------------------
@@ -244,9 +245,9 @@ class TestDelete:
 class TestBatchAllocation:
     def test_batch_allocates_all_items(self, manager):
         items = [
-            Item(uuid="a", size=300, use_cache=True),  # needs 2 blocks
-            Item(uuid="b", size=100, use_cache=True),  # needs 1 block
-            Item(uuid="c", size=100, use_cache=True),  # needs 1 block
+            ShmItem(uuid="a", size=300, use_cache=True),  # needs 2 blocks
+            ShmItem(uuid="b", size=100, use_cache=True),  # needs 1 block
+            ShmItem(uuid="c", size=100, use_cache=True),  # needs 1 block
         ]
         allocs = manager.open_write(items)
         assert len(allocs) == 3
@@ -257,8 +258,8 @@ class TestBatchAllocation:
 
     def test_memory_error_when_not_enough_space(self, manager):
         items = [
-            Item(uuid="x", size=800, use_cache=True),  # needs 4 blocks
-            Item(uuid="y", size=10, use_cache=True),  # needs 1 block -> total 5 > 4
+            ShmItem(uuid="x", size=800, use_cache=True),  # needs 4 blocks
+            ShmItem(uuid="y", size=10, use_cache=True),  # needs 1 block -> total 5 > 4
         ]
         with pytest.raises(MemoryError, match="No sufficient space"):
             manager.open_write(items)
@@ -271,9 +272,9 @@ class TestBatchAllocation:
 
     def test_invalid_size_raises(self, manager):
         with pytest.raises(ValueError, match="must be greater than zero"):
-            manager.open_write([Item(uuid="z", size=0, use_cache=True)])
+            manager.open_write([ShmItem(uuid="z", size=0, use_cache=True)])
         with pytest.raises(ValueError, match="must be greater than zero"):
-            manager.open_write([Item(uuid="z", size=-1, use_cache=True)])
+            manager.open_write([ShmItem(uuid="z", size=-1, use_cache=True)])
 
 
 # ---------------------------------------------------------------------------
@@ -284,8 +285,8 @@ class TestBatchAllocation:
 class TestLRUEviction:
     def test_evicts_oldest_cached_item(self, manager):
         # Fill the pool with two items of 2 blocks each (total 4 blocks)
-        item1 = Item(uuid="old", size=400, use_cache=True)
-        item2 = Item(uuid="new", size=400, use_cache=True)
+        item1 = ShmItem(uuid="old", size=400, use_cache=True)
+        item2 = ShmItem(uuid="new", size=400, use_cache=True)
         manager.open_write([item1, item2])
         manager.close_write("old")
         manager.close_write("new")
@@ -293,7 +294,9 @@ class TestLRUEviction:
         assert len(manager._free_blocks) == 0
 
         # Request a 1‑block item → must evict the LRU item ("old")
-        [new_alloc] = manager.open_write([Item(uuid="extra", size=100, use_cache=True)])
+        [new_alloc] = manager.open_write(
+            [ShmItem(uuid="extra", size=100, use_cache=True)]
+        )
         assert len(new_alloc.blocks) == 1
         # "old" should have been evicted
         assert "old" not in manager._all_items
@@ -304,8 +307,8 @@ class TestLRUEviction:
 
     def test_pinned_item_not_evicted(self, manager):
         # Same setup, but pin the older item
-        item1 = Item(uuid="pinned_old", size=400, use_cache=True)
-        item2 = Item(uuid="unpinned", size=400, use_cache=True)
+        item1 = ShmItem(uuid="pinned_old", size=400, use_cache=True)
+        item2 = ShmItem(uuid="unpinned", size=400, use_cache=True)
         manager.open_write([item1, item2])
         manager.close_write("pinned_old")
         manager.close_write("unpinned")
@@ -313,7 +316,7 @@ class TestLRUEviction:
 
         # Now only "unpinned" is in cache. total_available_blocks = 2 (from unpinned)
         # free_blocks = 0.  Requesting a 1‑block item should evict "unpinned".
-        manager.open_write([Item(uuid="extra", size=100, use_cache=True)])
+        manager.open_write([ShmItem(uuid="extra", size=100, use_cache=True)])
         assert "pinned_old" in manager._all_items
         assert "unpinned" not in manager._all_items
 
@@ -321,9 +324,9 @@ class TestLRUEviction:
         """LRU order follows close_write, not open_write."""
         # Allocate three items: two small, one large (but large uses 2 blocks)
         items = [
-            Item(uuid="first", size=200, use_cache=True),  # 1 block
-            Item(uuid="second", size=200, use_cache=True),  # 1 block
-            Item(uuid="third", size=400, use_cache=True),  # 2 blocks
+            ShmItem(uuid="first", size=200, use_cache=True),  # 1 block
+            ShmItem(uuid="second", size=200, use_cache=True),  # 1 block
+            ShmItem(uuid="third", size=400, use_cache=True),  # 2 blocks
         ]
         manager.open_write(items)
         # Close them in a specific order: third, first, second
@@ -333,7 +336,7 @@ class TestLRUEviction:
         # Cache now contains all three; LRU order from oldest to newest:
         # third (2 blk), first (1 blk), second (1 blk)  total 4 blocks
         # A new request of 1 block must evict the LRU item (third).
-        [alloc] = manager.open_write([Item(uuid="new", size=100, use_cache=True)])
+        [alloc] = manager.open_write([ShmItem(uuid="new", size=100, use_cache=True)])
         assert "third" not in manager._all_items
         assert "first" in manager._all_items
         assert "second" in manager._all_items

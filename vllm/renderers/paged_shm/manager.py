@@ -11,34 +11,11 @@ items when free blocks run low.
 """
 
 from collections import deque
-from dataclasses import dataclass
 from typing import Any
 
 from vllm.utils.cache import LRUCache
 
-
-@dataclass
-class Item:
-    uuid: str
-    size: int
-    use_cache: bool  # whether the item should be cached after writing
-
-
-@dataclass
-class AllocatedItem(Item):
-    """
-    Represents an allocated item with block assignments and a reference count.
-
-    ref_count == 0: item can be evicted from cache.
-    ref_count > 0: item is currently being read by one or more users.
-    ref_count < 0: item is currently being written (exclusive access).
-    """
-
-    blocks: list[int]
-    ref_count: int = 0
-
-    def n_block(self):
-        return len(self.blocks)
+from .types import AllocatedShmItemInternal, ShmItem
 
 
 class PagedShmManager:
@@ -54,21 +31,21 @@ class PagedShmManager:
         assert self.size > 0
         assert self.n_block > 0
 
-        # uuid -> AllocatedItem
-        self._all_items: dict[str, AllocatedItem] = {}
+        # uuid -> AllocatedShmItemInternal
+        self._all_items: dict[str, AllocatedShmItemInternal] = {}
 
         # Initially all blocks are free
         self._free_blocks = deque(range(self.n_block))
         self._total_available_blocks = self.n_block
 
         # LRU cache tracks idle cacheable items by their block count.
-        self._lru_cache: LRUCache[str, AllocatedItem] = LRUCache(
+        self._lru_cache: LRUCache[str, AllocatedShmItemInternal] = LRUCache(
             capacity=self.n_block,
             getsizeof=lambda x: x.n_block(),
         )
         self._pinned_items: set[str] = set()
 
-    def open_write(self, items: list[Item]) -> list[AllocatedItem]:
+    def open_write(self, items: list[ShmItem]) -> list[AllocatedShmItemInternal]:
         """Allocate blocks for a batch of items for write.
 
         Note:
@@ -100,11 +77,11 @@ class PagedShmManager:
         self._evict(total_need)
 
         # 4. Allocate blocks and record.
-        allocated: list[AllocatedItem] = []
+        allocated: list[AllocatedShmItemInternal] = []
         for idx, item in enumerate(items):
             need = needs[idx]
             blocks = [self._free_blocks.popleft() for _ in range(need)]
-            new_item = AllocatedItem(
+            new_item = AllocatedShmItemInternal(
                 uuid=item.uuid,
                 size=item.size,
                 use_cache=item.use_cache,
@@ -133,7 +110,7 @@ class PagedShmManager:
             self._lru_cache.put(uuid, item)
 
     def open_read(self, uuid):
-        item: AllocatedItem | None = self._all_items.get(uuid, None)
+        item: AllocatedShmItemInternal | None = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
         if item.ref_count < 0:

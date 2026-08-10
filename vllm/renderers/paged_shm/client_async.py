@@ -16,6 +16,7 @@ import json
 import logging
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from typing import Any
 
 import zmq
@@ -38,6 +39,7 @@ from .constant import (
     PIN,
     UNPIN,
 )
+from .types import AllocatedShmItem, ShmItem
 
 logger = logging.getLogger(__name__)
 
@@ -83,13 +85,9 @@ class _AsyncWriteContext:
         self.blocks: list[int] = []
 
     async def __aenter__(self) -> "_AsyncWriteContext":
-        item_spec = {
-            "uuid": self._uuid,
-            "size": self._size,
-            "use_cache": self._use_cache,
-        }
+        item_spec = ShmItem(uuid=self._uuid, size=self._size, use_cache=self._use_cache)
         alloc = await self._client.open_write([item_spec])
-        self.blocks = alloc[0]["blocks"]
+        self.blocks = alloc[0].blocks
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
@@ -130,8 +128,8 @@ class _AsyncReadContext:
 
     async def __aenter__(self) -> "_AsyncReadContext":
         items = await self._client.open_read(self._uuid)
-        self.size = items["size"]
-        self.blocks = items["blocks"]
+        self.size = items.size
+        self.blocks = items.blocks
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
@@ -226,20 +224,26 @@ class AsyncPagedShmClient(_AsyncBaseClient):
     # Async version of the public API
     # ------------------------------------------------------------------
 
-    async def open_write(self, items: list) -> list[dict[str, Any]]:
+    async def open_write(self, items: list[ShmItem]) -> list[AllocatedShmItem]:
         """Allocate blocks for a batch of items to be written."""
-        payload = json.dumps(items)
+        payload = json.dumps([asdict(item) for item in items])
         resp = await self._request(OPEN_WRITE, payload)
-        return json.loads(resp)
+        resp_dict = json.loads(resp)
+        status = resp_dict.pop("status", "error")
+        assert status == "ok"
+        return [AllocatedShmItem(**a) for a in resp_dict["data"]]
 
     async def close_write(self, uuid: str) -> None:
         """Finalise a write operation."""
         await self._request(b"close_write", uuid)
 
-    async def open_read(self, uuid: str) -> dict[str, Any]:
+    async def open_read(self, uuid: str) -> AllocatedShmItem:
         """Acquire a read reference and return block list."""
         resp = await self._request(OPEN_READ, uuid)
-        return json.loads(resp)
+        resp_dict = json.loads(resp)
+        status = resp_dict.pop("status", "error")
+        assert status == "ok"
+        return AllocatedShmItem(**resp_dict["data"])
 
     async def close_read(self, uuid: str) -> None:
         """Release a read reference."""
@@ -260,7 +264,10 @@ class AsyncPagedShmClient(_AsyncBaseClient):
     async def get_storage_info(self) -> dict[str, Any]:
         """Return storage metadata."""
         resp = await self._request(GET_STORAGE_INFO)
-        return json.loads(resp)
+        resp_dict = json.loads(resp)
+        status = resp_dict.pop("status", "error")
+        assert status == "ok"
+        return resp_dict["data"]
 
     async def get_manager_state(self) -> dict[str, Any]:
         """Return manager statistics."""

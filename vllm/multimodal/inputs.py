@@ -31,8 +31,10 @@ if TYPE_CHECKING:
     import torch
     import torch.types
     from transformers.feature_extraction_utils import BatchFeature
+    from vllm.renderers.paged_shm.types import AllocatedShmItem
 else:
     torch = LazyLoader("torch", globals(), "torch")
+    AllocatedShmItem = object
 
 
 HfImageItem: TypeAlias = Union["Image", np.ndarray, "torch.Tensor"]
@@ -395,9 +397,9 @@ class MultiModalFieldElem:
     in order to batch multi-modal items together for model inference.
     """
 
-    uuid: str | None = None
+    shm_object: AllocatedShmItem | None = None
     """
-    uuid for tensor data in paged shared memory storage.
+    object in paged shared memory storage.
     """
 
     def __eq__(self, other: object) -> bool:

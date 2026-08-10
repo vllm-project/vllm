@@ -4,6 +4,7 @@ import contextlib
 import json
 import multiprocessing as mp
 from collections.abc import Callable
+from dataclasses import asdict
 from multiprocessing.synchronize import Event
 
 import zmq
@@ -28,8 +29,9 @@ from .constant import (
     POLL_INTERVAL,
     UNPIN,
 )
-from .manager import Item, PagedShmManager
+from .manager import PagedShmManager
 from .storage import PagedShmStorage
+from .types import AllocatedShmItem, ShmItem
 
 logger = init_logger(__name__)
 
@@ -54,17 +56,17 @@ class PagedShmServer:
         caller so the client receives detailed error messages.
         """
         items = json.loads(items_data)
-        item_objs = [Item(**item) for item in items]
+        item_objs = [ShmItem(**item) for item in items]
         allocated = self.manager.open_write(item_objs)
         result = [
-            {
-                "uuid": a.uuid,
-                "size": a.size,
-                "blocks": a.blocks,
-            }
+            asdict(
+                AllocatedShmItem(
+                    uuid=a.uuid, size=a.size, blocks=a.blocks, use_cache=a.use_cache
+                )
+            )
             for a in allocated
         ]
-        return json.dumps(result)
+        return json.dumps({"status": "ok", "data": result})
 
     def close_write(self, uuid: str) -> str:
         """Finish writing an item, making it readable and cacheable."""
@@ -74,7 +76,10 @@ class PagedShmServer:
     def open_read(self, uuid: str) -> str:
         """Acquire a read reference to an item, returning its block list and size."""
         item = self.manager.open_read(uuid)
-        return json.dumps({"status": "ok", "blocks": item.blocks, "size": item.size})
+        resp = AllocatedShmItem(
+            uuid=item.uuid, size=item.size, blocks=item.blocks, use_cache=item.use_cache
+        )
+        return json.dumps({"status": "ok", "data": asdict(resp)})
 
     def close_read(self, uuid: str) -> str:
         """Release a read reference."""
@@ -108,7 +113,7 @@ class PagedShmServer:
             "block_size": self.block_size,
             "n_block": self.n_block,
         }
-        return json.dumps(info)
+        return json.dumps({"status": "ok", "data": info})
 
     def get_info(self, uuid: str) -> str:
         """Return object info as a JSON string."""
