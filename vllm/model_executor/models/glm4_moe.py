@@ -495,7 +495,9 @@ class Glm4MoeModel(nn.Module):
             n_routed_experts=self.config.n_routed_experts,
             n_shared_experts=self.config.n_shared_experts or 1,
             enabled=resolve_model_fused_shared_expert_fusion(
-                layer.mlp for layer in self.layers if isinstance(layer.mlp, Glm4MoE)
+                layer.mlp
+                for layer in self.layers[self.start_layer : self.end_layer]
+                if isinstance(layer.mlp, Glm4MoE)
             ),
         )
         loader = AutoWeightsLoader(self)

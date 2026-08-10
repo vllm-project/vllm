@@ -575,7 +575,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
-            layer.ffn for layer in self.layers
+            layer.ffn for layer in self.layers[self.start_layer : self.end_layer]
         )
 
         if get_pp_group().is_last_rank:
