@@ -357,6 +357,7 @@ async def test_render_messages_async_returns_token_prompt():
 # generation_prefix_len — issue #51465
 # ---------------------------------------------------------------------------
 
+
 class _PrefixAwareStubTokenizer(StubTokenizer):
     """Returns full_ids when add_generation_prompt=True, base_ids otherwise.
 
@@ -417,9 +418,7 @@ def test_generation_prefix_len_absent_when_add_generation_prompt_false():
     renderer = _make_renderer(stub)
     params = ChatParams(chat_template_kwargs={"add_generation_prompt": False})
 
-    _, prompt = renderer.render_messages(
-        [{"role": "user", "content": "hi"}], params
-    )
+    _, prompt = renderer.render_messages([{"role": "user", "content": "hi"}], params)
 
     assert "generation_prefix_len" not in prompt
 
