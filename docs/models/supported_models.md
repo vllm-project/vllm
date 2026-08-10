@@ -653,15 +653,14 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     - Gemma 4 Unified assistant checkpoints (`model_type: gemma4_unified_assistant`) use the same MTP path as the tower-based variant. See the [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
 
 !!! note
-    On NVIDIA, `InklingForCausalLM` and `InklingForConditionalGeneration` need a
-    GPU with compute capability 9.x (Hopper), 10.x (B200/GB200/B300) or 11.x.
-    Inkling's relative attention has no portable fallback there: the FA4 kernel
-    implements paged KV only on those architectures, and vLLM always attends
-    over the paged KV cache. SM120/SM121 parts (RTX PRO 6000 Blackwell, GeForce
-    Blackwell, DGX Spark) are rejected at startup even though the NVFP4 MoE path
-    itself runs on them — see
+    `InklingForCausalLM` and `InklingForConditionalGeneration` are not supported
+    on SM120/SM121 NVIDIA parts (RTX PRO 6000 Blackwell, GeForce Blackwell, DGX
+    Spark). The FA4 relative-attention kernel has no paged-KV forward there and
+    vLLM always attends over the paged KV cache, so those devices are rejected
+    at startup even though the NVFP4 MoE path itself runs on them — see
     [vllm-project/vllm#51405](https://github.com/vllm-project/vllm/issues/51405).
-    ROCm uses a separate Triton implementation and is not subject to this limit.
+    The FA4 path is used on compute capability 9.x, 10.x and 11.x. ROCm uses a
+    separate Triton implementation and is not subject to this limit.
 
     Image and audio inputs each require the corresponding tower in the
     checkpoint config; variants without one expose no such modality.

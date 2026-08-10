@@ -100,8 +100,11 @@ def test_sheared_bias_architecture_selection(monkeypatch, major, expected):
         _use_sheared_bias.cache_clear()
 
 
-@pytest.mark.parametrize("major", [9, 10, 11])
+@pytest.mark.parametrize("major", [8, 9, 10, 11])
 def test_fa4_support_accepts_paged_kv_architectures(monkeypatch, major):
+    # SM8x is not rejected: it has no paged-KV FA4 forward either, but a
+    # FlexAttention fallback can serve Inkling there, so the guard leaves it
+    # open rather than blocking that path.
     monkeypatch.setattr(
         current_platform,
         "get_device_capability",
@@ -116,17 +119,16 @@ def test_fa4_support_allows_unknown_capability(monkeypatch):
     check_inkling_fa4_support()
 
 
-@pytest.mark.parametrize("major", [8, 12])
-def test_fa4_support_rejects_architectures_without_paged_kv(monkeypatch, major):
-    # Architectures with no paged-KV FA4 forward must be rejected while the
-    # model is being built, not by an assert inside the first forward pass.
+def test_fa4_support_rejects_architectures_without_paged_kv(monkeypatch):
+    # SM12x has no paged-KV path at all, so it must be rejected while the model
+    # is being built, not by an assert inside the first forward pass.
     monkeypatch.setattr(
         current_platform,
         "get_device_capability",
-        lambda: DeviceCapability(major=major, minor=1),
+        lambda: DeviceCapability(major=12, minor=1),
     )
     monkeypatch.setattr(current_platform, "get_device_name", lambda: "TestGPU")
-    with pytest.raises(ValueError, match=re.escape(f"capability {major}.1")):
+    with pytest.raises(ValueError, match=re.escape("capability 12.1")):
         check_inkling_fa4_support()
 
 
@@ -163,7 +165,7 @@ def test_attention_layer_checks_fa4_support(monkeypatch):
         "InklingMTPModel",
     ],
 )
-@pytest.mark.parametrize(("major", "rejected"), [(9, False), (12, True)])
+@pytest.mark.parametrize(("major", "rejected"), [(8, False), (9, False), (12, True)])
 def test_platform_rejects_inkling_before_engine_start(
     monkeypatch, model_arch, major, rejected
 ):

@@ -631,13 +631,14 @@ def skip_if_capability_restricted(model_arch: str) -> None:
     # Imported lazily: vllm.platforms.cuda assumes a CUDA platform at import.
     from vllm.platforms.cuda import _CAPABILITY_RESTRICTED_MODELS
 
-    supported_majors = _CAPABILITY_RESTRICTED_MODELS.get(model_arch)
-    if supported_majors is None:
+    unsupported_majors = _CAPABILITY_RESTRICTED_MODELS.get(model_arch)
+    if unsupported_majors is None:
         return
     capability = current_platform.get_device_capability()
-    if capability and capability.major not in supported_majors:
-        families = " / ".join(f"{major}.x" for major in supported_majors)
+    if capability and capability.major in unsupported_majors:
+        families = " / ".join(f"{major}.x" for major in unsupported_majors)
         pytest.skip(
-            f"{model_arch} requires compute capability {families}. Current "
-            f"device has compute capability {capability.major}.{capability.minor}"
+            f"{model_arch} has no working kernel on compute capability "
+            f"{families}. Current device has compute capability "
+            f"{capability.major}.{capability.minor}"
         )
