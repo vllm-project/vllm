@@ -167,6 +167,21 @@ class KVCacheEvictionEvent:
     reuse_gaps_seconds: tuple[float, ...]
 
 
+@dataclass(frozen=True)
+class PrefillAlignmentTelemetry:
+    schedule_sequence: int = 0
+    candidate_seen: bool = False
+    candidate_deferred: bool = False
+    capacity_force_allow: bool = False
+    token_usage: float = 0.0
+    running_batch: int = 0
+    max_prefill_batch: int = 0
+    max_running_requests: int = 0
+    waiting_queue_len: int = 0
+    actual_prefill_requests: int = 0
+    actual_prefill_tokens: int = 0
+
+
 @dataclass
 class SchedulerIterationDetails:
     """Scheduler-side details for one engine iteration."""
@@ -194,6 +209,25 @@ class SchedulerStats:
     # These are used for internal DP load-balancing.
     step_counter: int = 0
     current_wave: int = 0
+
+    # Coordinator-driven DP prefill alignment. Phase 1 is the regular
+    # observation (including the previous step's actual/ack); phase 2 is only
+    # a final ack when a wave pauses before another observation can be sent.
+    prefill_alignment_phase: int = 0
+    prefill_alignment_generation: int = -1
+    prefill_alignment_ack_generation: int = -1
+    prefill_alignment_ack_target_step: int = -1
+    prefill_alignment_release_late: bool = False
+    prefillable: bool = False
+    prefill_deferred: bool = False
+    prefill_force_allow: bool = False
+    prefill_token_usage: float = 0.0
+    prefill_running_batch: int = 0
+    prefill_max_batch: int = 0
+    prefill_max_running_requests: int = 0
+    prefill_waiting_queue_len: int = 0
+    actual_prefill_requests: int = 0
+    actual_prefill_tokens: int = 0
 
     kv_cache_usage: float = 0.0
     iteration_details: SchedulerIterationDetails | None = None

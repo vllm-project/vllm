@@ -55,7 +55,11 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    PrefillAlignmentTelemetry,
+    PrefixCacheStats,
+    SchedulerStats,
+)
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
@@ -289,6 +293,13 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        self.prefill_capacity_override_enabled = True
+        self.prefill_alignment_schedule_sequence = 0
+        self.last_prefill_candidate_seen = False
+        self.last_prefill_candidate_deferred = False
+        self.last_prefill_max_batch = 0
+        self.last_prefill_requests_scheduled = 0
+        self.last_prefill_tokens_scheduled = 0
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -437,6 +448,7 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -447,6 +459,15 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+
+        # Bookkeeping for the DP prefill delayer. This tracks prompt work that
+        # can be aligned across DP engines; it does not add scheduler phases.
+        self.prefill_alignment_schedule_sequence += 1
+        prefill_candidate_seen = False
+        prefill_candidate_deferred = False
+        prefill_candidate_count = 0
+        actual_prefill_requests = 0
+        actual_prefill_tokens = 0
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -476,13 +497,24 @@ class Scheduler(SchedulerInterface):
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
         defer_prefills = (
-            throttle_prefills and not self.prefill_capacity_bound
-        ) and any(not r.is_prefill_chunk for r in self.running)
+            throttle_prefills
+            and (
+                not self.prefill_capacity_override_enabled
+                or not self.prefill_capacity_bound
+            )
+            and (
+                not self.prefill_capacity_override_enabled
+                or any(not r.is_prefill_chunk for r in self.running)
+            )
+        )
 
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if request.is_prefill_chunk:
+                prefill_candidate_seen = True
+                prefill_candidate_count += 1
 
             if (
                 request.num_output_placeholders > 0
@@ -509,6 +541,7 @@ class Scheduler(SchedulerInterface):
             if defer_prefills and request.is_prefill_chunk:
                 # DP prefill balancing: defer this in-progress prefill chunk to a
                 # cadence-aligned step; decodes still run to fill this step.
+                prefill_candidate_deferred = True
                 req_index += 1
                 continue
 
@@ -639,6 +672,9 @@ class Scheduler(SchedulerInterface):
             # Schedule the request.
             scheduled_running_reqs.append(request)
             prefill_scheduled |= request.is_prefill_chunk
+            if request.is_prefill_chunk:
+                actual_prefill_requests += 1
+                actual_prefill_tokens += num_new_tokens
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
@@ -864,6 +900,9 @@ class Scheduler(SchedulerInterface):
                 elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
                     # DP prefill balancing: defer this step's local prefill
                     # compute to a cadence-aligned step.
+                    prefill_candidate_seen = True
+                    prefill_candidate_deferred = True
+                    prefill_candidate_count += 1
                     break
                 else:
                     # Number of tokens to be scheduled.
@@ -1012,6 +1051,12 @@ class Scheduler(SchedulerInterface):
                     self.kv_cache_manager.record_prefix_cache_stats(
                         request, num_new_local_computed_tokens
                     )
+
+                if num_new_tokens > 0 and num_computed_tokens < request.num_tokens - 1:
+                    prefill_candidate_seen = True
+                    prefill_candidate_count += 1
+                    actual_prefill_requests += 1
+                    actual_prefill_tokens += num_new_tokens
 
                 request = request_queue.pop_request()
                 if load_kv_async:
@@ -1244,6 +1289,11 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        self.last_prefill_candidate_seen = prefill_candidate_seen
+        self.last_prefill_candidate_deferred = prefill_candidate_deferred
+        self.last_prefill_max_batch = prefill_candidate_count
+        self.last_prefill_requests_scheduled = actual_prefill_requests
+        self.last_prefill_tokens_scheduled = actual_prefill_tokens
         return scheduler_output
 
     def _build_kv_connector_meta(
@@ -2220,6 +2270,24 @@ class Scheduler(SchedulerInterface):
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
+
+    def set_prefill_capacity_override_enabled(self, enabled: bool) -> None:
+        self.prefill_capacity_override_enabled = enabled
+
+    def get_prefill_alignment_telemetry(self) -> PrefillAlignmentTelemetry:
+        return PrefillAlignmentTelemetry(
+            schedule_sequence=self.prefill_alignment_schedule_sequence,
+            candidate_seen=self.last_prefill_candidate_seen,
+            candidate_deferred=self.last_prefill_candidate_deferred,
+            capacity_force_allow=self.prefill_capacity_bound,
+            token_usage=self.kv_cache_manager.usage,
+            running_batch=len(self.running),
+            max_prefill_batch=self.last_prefill_max_batch,
+            max_running_requests=self.max_num_running_reqs,
+            waiting_queue_len=len(self.waiting) + len(self.skipped_waiting),
+            actual_prefill_requests=self.last_prefill_requests_scheduled,
+            actual_prefill_tokens=self.last_prefill_tokens_scheduled,
+        )
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
