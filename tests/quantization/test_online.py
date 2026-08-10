@@ -88,6 +88,9 @@ def test_online_quantization(
 
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        rocm_aiter_ops.refresh_env_variables()
 
     if current_platform.is_xpu() and quant_scheme == "fp8_per_block":
         pytest.skip("Skip test for online fp8_per_block on XPU platform.")
