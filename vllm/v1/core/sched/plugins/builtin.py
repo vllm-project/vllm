@@ -4,6 +4,7 @@
 from typing import TYPE_CHECKING
 
 from vllm.v1.core.sched.plugins.interface import (
+    CandidateSelection,
     PreemptionPlugin,
     QueueSortPlugin,
     WaitingQueue,
@@ -14,6 +15,8 @@ from vllm.v1.core.sched.request_queue import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from vllm.v1.core.sched.request_queue import RequestQueue
     from vllm.v1.request import Request
 
@@ -42,6 +45,16 @@ class FCFSSchedulerPlugin(QueueSortPlugin, PreemptionPlugin):
     ) -> tuple[int | float, ...]:
         return (running_position,)
 
+    def order_candidates(
+        self,
+        waiting: "Sequence[Request]",
+        skipped: "Sequence[Request]",
+    ) -> list[CandidateSelection]:
+        return [
+            *(CandidateSelection(request, WaitingQueue.SKIPPED) for request in skipped),
+            *(CandidateSelection(request, WaitingQueue.WAITING) for request in waiting),
+        ]
+
 
 class PrioritySchedulerPlugin(QueueSortPlugin, PreemptionPlugin):
     name = "priority"
@@ -68,3 +81,14 @@ class PrioritySchedulerPlugin(QueueSortPlugin, PreemptionPlugin):
         running_position: int,
     ) -> tuple[int | float, ...]:
         return (request.priority, request.arrival_time)
+
+    def order_candidates(
+        self,
+        waiting: "Sequence[Request]",
+        skipped: "Sequence[Request]",
+    ) -> list[CandidateSelection]:
+        candidates = [
+            *(CandidateSelection(request, WaitingQueue.WAITING) for request in waiting),
+            *(CandidateSelection(request, WaitingQueue.SKIPPED) for request in skipped),
+        ]
+        return sorted(candidates, key=lambda candidate: candidate.request)

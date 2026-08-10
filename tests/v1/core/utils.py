@@ -12,6 +12,7 @@ from vllm.config import (
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
+    SchedulerPluginProfile,
     SpeculativeConfig,
     VllmConfig,
 )
@@ -70,6 +71,7 @@ def create_scheduler(
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
+    scheduler_plugin_profile: SchedulerPluginProfile | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -102,6 +104,7 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        scheduler_plugin_profile=scheduler_plugin_profile,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
     )

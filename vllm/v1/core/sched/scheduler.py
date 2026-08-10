@@ -46,7 +46,7 @@ from vllm.v1.core.sched.output import (
     ScheduledEncoderInputStats,
     SchedulerOutput,
 )
-from vllm.v1.core.sched.plugins import SchedulerPluginManager
+from vllm.v1.core.sched.plugins import SchedulerPluginManager, WaitingQueue
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
 )
@@ -178,7 +178,8 @@ class Scheduler(SchedulerInterface):
         self.requests: dict[str, Request] = {}
         # Scheduling policy
         self.scheduler_plugin_manager = SchedulerPluginManager(
-            self.scheduler_config.policy
+            self.scheduler_config.policy,
+            self.scheduler_config.scheduler_plugin_profile,
         )
         self.policy = self.scheduler_plugin_manager.policy
         # Priority queues for requests.
@@ -693,10 +694,29 @@ class Scheduler(SchedulerInterface):
                 if num_running >= self.max_num_running_reqs:
                     break
 
-                request_queue = self._select_waiting_queue_for_scheduling()
-                assert request_queue is not None
-
-                request = request_queue.peek_request()
+                request_queue: RequestQueue
+                if self.scheduler_plugin_manager.has_candidate_plugins:
+                    selection = self.scheduler_plugin_manager.select_candidate(
+                        self.waiting,
+                        self.skipped_waiting,
+                        block_size=self.block_size,
+                        token_budget=token_budget,
+                        encoder_budget=encoder_compute_budget,
+                        num_running_requests=num_running,
+                    )
+                    if selection is None:
+                        break
+                    request = selection.request
+                    request_queue = (
+                        self.waiting
+                        if selection.queue == WaitingQueue.WAITING
+                        else self.skipped_waiting
+                    )
+                else:
+                    selected_queue = self._select_waiting_queue_for_scheduling()
+                    assert selected_queue is not None
+                    request_queue = selected_queue
+                    request = request_queue.peek_request()
                 request_id = request.request_id
 
                 # try to promote blocked statuses while traversing skipped queue.
@@ -708,7 +728,7 @@ class Scheduler(SchedulerInterface):
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
                         )
-                    request_queue.pop_request()
+                    self._remove_waiting_candidate(request_queue, request)
                     step_skipped_waiting.prepend_request(request)
                     continue
 
@@ -719,7 +739,7 @@ class Scheduler(SchedulerInterface):
                     # Deliverable stale output still in flight: resuming now
                     # could resample a position that output later delivers.
                     # It drains within the pipeline depth.
-                    request_queue.pop_request()
+                    self._remove_waiting_candidate(request_queue, request)
                     step_skipped_waiting.prepend_request(request)
                     continue
 
@@ -734,7 +754,7 @@ class Scheduler(SchedulerInterface):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
-                    request_queue.pop_request()
+                    self._remove_waiting_candidate(request_queue, request)
                     step_skipped_waiting.prepend_request(request)
                     continue
 
@@ -772,7 +792,7 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
-                            request_queue.pop_request()
+                            self._remove_waiting_candidate(request_queue, request)
                             step_skipped_waiting.prepend_request(request)
                             continue
 
@@ -827,7 +847,7 @@ class Scheduler(SchedulerInterface):
                             request, num_computed_tokens
                         )
                     ):
-                        request_queue.pop_request()
+                        self._remove_waiting_candidate(request_queue, request)
                         step_skipped_waiting.prepend_request(request)
                         continue
 
@@ -1007,7 +1027,7 @@ class Scheduler(SchedulerInterface):
                         request, num_new_local_computed_tokens
                     )
 
-                request = request_queue.pop_request()
+                request = self._remove_waiting_candidate(request_queue, request)
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
@@ -2065,6 +2085,18 @@ class Scheduler(SchedulerInterface):
             self.waiting,
             self.skipped_waiting,
         )
+
+    def _remove_waiting_candidate(
+        self,
+        request_queue: RequestQueue,
+        request: Request,
+    ) -> Request:
+        if self.scheduler_plugin_manager.has_candidate_plugins:
+            request_queue.remove_request(request)
+            return request
+        popped = request_queue.pop_request()
+        assert popped is request
+        return popped
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""

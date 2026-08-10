@@ -6,19 +6,35 @@ from vllm.v1.core.sched.plugins.builtin import (
     PrioritySchedulerPlugin,
 )
 from vllm.v1.core.sched.plugins.interface import (
+    CandidateInfo,
+    CandidateSelection,
+    FilterPlugin,
+    FilterResult,
     PreemptionPlugin,
     QueueSortPlugin,
     SchedulerPlugin,
+    SchedulingCycleState,
+    ScorePlugin,
     WaitingQueue,
 )
-from vllm.v1.core.sched.plugins.manager import SchedulerPluginManager
+from vllm.v1.core.sched.plugins.manager import (
+    SchedulerPluginManager,
+    register_scheduler_plugin,
+)
 
 __all__ = [
+    "CandidateInfo",
+    "CandidateSelection",
     "FCFSSchedulerPlugin",
+    "FilterPlugin",
+    "FilterResult",
     "PrioritySchedulerPlugin",
     "PreemptionPlugin",
     "QueueSortPlugin",
     "SchedulerPlugin",
     "SchedulerPluginManager",
+    "SchedulingCycleState",
+    "ScorePlugin",
     "WaitingQueue",
+    "register_scheduler_plugin",
 ]

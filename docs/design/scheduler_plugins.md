@@ -2,9 +2,30 @@
 
 ## Status
 
-This document proposes a V1 scheduler plugin framework. It does not change the
-scheduler's ownership of batching, token budgets, KV cache allocation, or
-preemption safety.
+Phase 1 and Phase 2 are implemented on the development branch. The framework
+does not change the scheduler's ownership of batching, token budgets, KV cache
+allocation, or preemption safety.
+
+Implemented:
+
+- built-in FCFS and priority QueueSort and Preemption plugins;
+- typed plugin profiles;
+- bounded candidate selection;
+- read-only scheduling cycle state;
+- Filter AND semantics;
+- weighted Score fusion;
+- deterministic QueueSort tie-breaking;
+- atomic selection and removal by request identity;
+- the existing no-extension deque and heap fast paths.
+
+Not yet implemented:
+
+- dynamic QueueSort;
+- lazy scheduler feature providers;
+- local prefix-cache candidate information;
+- lifecycle extension points;
+- out-of-tree entry-point discovery;
+- budget hints and additional QoS extension points.
 
 ## Motivation
 
@@ -407,6 +428,20 @@ With Filter or Score plugins enabled, the framework performs these steps:
 6. Select the highest score, breaking ties with QueueSort order.
 7. Ask the owning queue to remove the selected request.
 8. Continue through the existing core scheduling path.
+
+Selection returns the request and its owning queue without mutating either
+queue:
+
+```python
+@dataclass(frozen=True)
+class CandidateSelection:
+    request: Request
+    queue: WaitingQueue
+```
+
+The scheduler core removes that exact request only after it reaches an existing
+skip or admission transition. This avoids a dynamic selection changing between
+peek and pop and keeps queue mutation out of plugins.
 
 If every candidate is filtered, the scheduler leaves them queued and stops
 admission for the cycle. Filtered candidates must not be repeatedly moved
