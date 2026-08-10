@@ -157,7 +157,7 @@ def _assert_fully_loaded(model, checkpoint) -> None:
 @pytest.mark.parametrize("enable_ihc", [False, True])
 @pytest.mark.parametrize("sparse", [False, True])
 def test_backbone_load_weights_covers_every_parameter(
-    tmp_path, dist_init, enable_ihc: bool, sparse: bool
+    tmp_path, dist_init, workspace_init, enable_ihc: bool, sparse: bool
 ) -> None:
     from vllm.models.hy_v4 import HYV4ForCausalLM
 
@@ -179,7 +179,7 @@ def test_backbone_load_weights_covers_every_parameter(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("sparse", [False, True])
 def test_mtp_load_weights_covers_every_parameter(
-    tmp_path, dist_init, sparse: bool
+    tmp_path, dist_init, workspace_init, sparse: bool
 ) -> None:
     from vllm.models.hy_v4 import HYV4MTP
 

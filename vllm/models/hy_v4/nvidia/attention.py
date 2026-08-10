@@ -6,14 +6,20 @@ NOTE: The reference implementation also offers a fused MLA preprocessing
 wrapper, an HPC gated-MLA GEMM and an MXFP4 indexer cache. None of those are
 available here, so this port keeps the eager MLA path with an FP8 indexer
 cache. TODO: restore the fused variants once the kernels land.
+
+The per-head learnable sink is supported through `.flashmla_sparse`, which
+subclasses the platform's sparse MLA backend to forward ``attn_sink``.
 """
+
+from typing import cast
 
 import regex as re
 import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config, PretrainedConfig
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MLAAttention
@@ -31,6 +37,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.selector import get_attn_backend
 
 logger = init_logger(__name__)
@@ -257,6 +265,10 @@ class HYV4MLAAttention(nn.Module):
     Main reference: the DeepSeek-V2 paper and the FlashInfer implementation
     (https://arxiv.org/abs/2405.04434). HY V4 additionally supports an output
     gate (``gated_mla``) and a per-head learnable attention sink.
+
+    The sink is applied by binding the sink-capable backend from
+    `.flashmla_sparse`; if no backend on this platform can consume sinks, the
+    weight is still loaded but the bias is disabled with a warning.
     """
 
     def __init__(
@@ -465,11 +477,15 @@ class HYV4MLAAttention(nn.Module):
         # holds the local TP shard.
         self.learnable_sink = bool(getattr(config, "learnable_sink", False))
         sinks = None
+        sink_backend: type[AttentionBackend] | None = None
         if self.learnable_sink:
-            enable_sink = self._probe_sink_support(kv_cache_dtype)
+            sink_backend = self._resolve_sink_backend(kv_cache_dtype)
+            enable_sink = sink_backend is not None
             self.learnable_sink_param = nn.Parameter(
                 torch.empty(
                     self.num_local_heads,
+                    # The kernels require fp32 sinks; the disabled path keeps
+                    # the checkpoint dtype since the value is never consumed.
                     dtype=torch.float32 if enable_sink else torch.bfloat16,
                 )
             )
@@ -492,18 +508,42 @@ class HYV4MLAAttention(nn.Module):
             use_sparse=self.is_sparse,
             indexer=self.indexer,
             topk_indices_buffer=topk_indices_buffer,
+            attn_backend=sink_backend,
             **extra_impl_args,
         )
 
-    def _probe_sink_support(self, kv_cache_dtype: str) -> bool:
-        """Return whether the selected MLA backend can consume sink biases."""
+    def _resolve_sink_backend(
+        self, kv_cache_dtype: str
+    ) -> type[AttentionBackend] | None:
+        """Return an MLA backend that can apply this layer's learnable sink.
+
+        The sink is part of the architecture, so a backend that cannot apply it
+        changes the model's output. Resolution order:
+
+        1. If the backend the selector would pick already advertises
+           `supports_sink`, keep it — this also honours an explicit
+           ``--attention-backend`` choice.
+        2. Otherwise fall back to the sink-capable ``FLASHMLA_SPARSE`` subclass
+           in `.flashmla_sparse`, whose kernels accept ``attn_sink``, provided
+           it validates against the current runtime configuration.
+        3. Otherwise give up on the bias rather than failing the load.
+
+        Args:
+            kv_cache_dtype: The layer's KV cache dtype string.
+
+        Returns:
+            The backend class to bind, or None when no sink-capable backend is
+            available; the caller then loads the sink weight but disables the
+            bias.
+        """
+        head_size = self.kv_lora_rank + self.qk_rope_head_dim
+        dtype = torch.get_default_dtype()
         try:
-            sink_backend_cls = get_attn_backend(
-                head_size=self.kv_lora_rank + self.qk_rope_head_dim,
-                dtype=torch.get_default_dtype(),
+            selected_cls = get_attn_backend(
+                head_size=head_size,
+                dtype=dtype,
                 kv_cache_dtype=kv_cache_dtype,
                 use_mla=True,
-                has_sink=True,
                 use_sparse=self.is_sparse,
                 num_heads=self.num_local_heads,
             )
@@ -511,20 +551,64 @@ class HYV4MLAAttention(nn.Module):
             # Stringify before logging: warning_once dedupes on the arguments,
             # and a fresh exception object per layer would defeat it.
             logger.warning_once(
-                "HYV4 failed to select a sink-capable MLA backend (%s); the "
-                "learnable sink parameter is loaded but the sink bias is "
+                "HYV4 failed to select an MLA backend for the learnable sink "
+                "(%s); the sink parameter is loaded but the sink bias is "
                 "disabled.",
                 str(exc),
             )
-            return False
-        if not sink_backend_cls.supports_sink():
+            return None
+
+        if selected_cls.supports_sink():
+            return selected_cls
+
+        from .flashmla_sparse import HYV4FlashMLASparseBackend
+
+        # Mirror how the selector derives the configuration-dependent inputs so
+        # this check accepts exactly what the backend would accept at runtime.
+        capability = current_platform.get_device_capability()
+        if capability is None:
             logger.warning_once(
-                "HYV4 MLA backend %s does not support learnable sinks; the "
-                "parameter is loaded but the sink bias is disabled.",
-                sink_backend_cls.get_name(),
+                "HYV4 learnable sink is unavailable: the device compute "
+                "capability is unknown. The sink parameter is loaded but the "
+                "sink bias is disabled."
             )
-            return False
-        return True
+            return None
+        cache_config = get_current_vllm_config().cache_config
+        block_size = (
+            cache_config.block_size
+            if cache_config is not None and cache_config.user_specified_block_size
+            else None
+        )
+        invalid_reasons = HYV4FlashMLASparseBackend.validate_configuration(
+            head_size=head_size,
+            dtype=dtype,
+            kv_cache_dtype=cast(CacheDType, kv_cache_dtype),
+            block_size=block_size,
+            use_mla=True,
+            has_sink=True,
+            use_sparse=self.is_sparse,
+            use_mm_prefix=False,
+            use_per_head_quant_scales=False,
+            device_capability=capability,
+            attn_type=AttentionType.DECODER,
+        )
+        if invalid_reasons:
+            logger.warning_once(
+                "HYV4 learnable sink is unavailable: the selected backend %s "
+                "cannot apply sinks and the sink-capable FLASHMLA_SPARSE path "
+                "is invalid here (%s). The sink parameter is loaded but the "
+                "sink bias is disabled.",
+                selected_cls.get_name(),
+                ", ".join(invalid_reasons),
+            )
+            return None
+
+        logger.info_once(
+            "HYV4 learnable sink enabled: using the sink-capable "
+            "FLASHMLA_SPARSE impl instead of %s, which cannot apply sinks.",
+            selected_cls.get_name(),
+        )
+        return HYV4FlashMLASparseBackend
 
     def forward(
         self,
