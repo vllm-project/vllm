@@ -448,11 +448,17 @@ class MsgpackDecoder:
         if shm_object_dict is not None:
             item = ShmTensor(**shm_object_dict)
             assert self.pshm_client is not None
-            tensor = self.pshm_client.read(
-                item.uuid, item.size, item.blocks, device="cuda:0"
-            )
             torch_dtype = getattr(torch, item.dtype)
-            obj["data"] = tensor.view(torch_dtype).view(item.shape)
+
+            stream = torch.cuda.Stream()
+            with stream:
+                tensor_gpu = self.pshm_client.read(
+                    item.uuid, item.size, item.blocks, device="cuda"
+                )
+                tensor_gpu = tensor_gpu.view(torch_dtype).view(item.shape)
+            stream.synchronize()
+
+            obj["data"] = tensor_gpu
         elif obj["data"] is not None:
             obj["data"] = self._decode_nested_tensors(obj["data"])
 

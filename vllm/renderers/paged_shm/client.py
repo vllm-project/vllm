@@ -422,7 +422,7 @@ class PagedShmClient(_BaseClient):
         while not self._pool.empty():
             try:
                 sock = self._pool.get_nowait()
-                sock.close()
+                sock.close(linger=0)
             except queue.Empty:
                 break
 
@@ -433,6 +433,9 @@ class PagedShmClient(_BaseClient):
         if hasattr(self, "_storage"):
             self._storage.close()
             logger.debug("Shared memory storage closed.")
+
+    def shutdown(self):
+        self.close()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -464,7 +467,7 @@ class PagedShmClient(_BaseClient):
             return self._parse_response(response)
         except Exception:
             with contextlib.suppress(Exception):
-                sock.close()
+                sock.close(linger=0)
             raise
         else:
             self._pool.put(sock)

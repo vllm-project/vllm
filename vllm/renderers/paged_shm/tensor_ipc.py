@@ -91,7 +91,7 @@ class PagedShmTensorIPC:
         items: list[ShmItem] = []
         for elem in elements:
             assert isinstance(elem.data, torch.Tensor)
-            item = ShmItem(uuid=random_uuid(), size=elem.data.nbytes, use_cache=False)
+            item = ShmItem(uuid=random_uuid(), size=elem.data.nbytes, use_cache=True)
             items.append(item)
 
         try:
@@ -139,3 +139,12 @@ class PagedShmTensorIPC:
                     self._traversal(item, func)
             return None
         return None
+
+    def shutdown(self):
+        if not self.is_paged_shm_enabled:
+            return None
+
+        self.client_sync = None
+
+        assert self.client_async is not None
+        self.client_async.shutdown()

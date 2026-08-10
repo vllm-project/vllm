@@ -233,11 +233,16 @@ class PagedShmStorage:
         dst_addrs = torch.tensor(dst_addrs_list, dtype=torch.int64)
         sizes = torch.tensor(sizes_list, dtype=torch.int64)
 
-        stream = torch.cuda.Stream()
+        current_stream = torch.cuda.current_stream()
+        default_stream = torch.cuda.default_stream()
+        sync = current_stream == default_stream
+        stream = torch.cuda.Stream() if sync else current_stream
+
         with torch.cuda.stream(stream):
             ops.swap_blocks_batch(src_addrs, dst_addrs, sizes)
-        torch.cuda.current_stream().wait_stream(stream)
 
+        if sync:
+            stream.synchronize()
         return output_tensor
 
     def close(self):

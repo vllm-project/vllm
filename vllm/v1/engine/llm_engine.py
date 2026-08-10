@@ -30,7 +30,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest, PauseMode
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.core_client import EngineCoreClient, MPClient
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -112,7 +112,9 @@ class LLMEngine:
             executor_class=executor_class,
             log_stats=self.log_stats,
         )
-        self.engine_core.resources.append(self.paged_shm_server)
+        if isinstance(self.engine_core, MPClient):
+            self.engine_core.resources.append(self.paged_shm_server)
+            self.engine_core.resources.append(self.renderer._pshm_tensor_ipc)
 
         self.logger_manager: StatLoggerManager | None = None
         if self.log_stats:

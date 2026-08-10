@@ -311,7 +311,7 @@ class AsyncPagedShmClient(_AsyncBaseClient):
         resp = await self._request(GET_INFO, uuid)
         return json.loads(resp)
 
-    async def close(self) -> None:
+    def close(self) -> None:
         """Close all async sockets, terminate context,
         and close sync client."""
 
@@ -328,6 +328,9 @@ class AsyncPagedShmClient(_AsyncBaseClient):
 
         # 3. close sync client
         self.sync_client.close()
+
+    def shutdown(self):
+        self.close()
 
     # ------------------------------------------------------------------
     # Internal helpers
