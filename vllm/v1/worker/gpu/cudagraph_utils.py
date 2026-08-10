@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
@@ -183,6 +183,28 @@ class CudaGraphManager:
         # Counts above the largest captured case clamp to it.
         return self._lora_dispatch_map.get(num_active_loras, self._max_lora_case)
 
+    def _maybe_ubatch_twin(
+        self, desc: BatchExecutionDescriptor, decode_query_len: int
+    ) -> BatchExecutionDescriptor | None:
+        """The microbatched counterpart of a capture candidate, if it needs one.
+
+        Only FULL graphs are captured for microbatched steps (the eager DBO
+        path is FULL-only too); PIECEWISE+DBO stays unsupported, as in V1.
+
+        The gate is the same predicate the DP handshake votes with, so the
+        captured shapes cannot drift from the dispatchable ones. It is asked
+        about a uniform decode because that threshold is the lower of the two:
+        a size either threshold admits has to have a graph. `wants_ubatch` is
+        a pure function of config, which is what lets every DP rank derive the
+        same candidate list -- they dispatch independently, and a rank that
+        replays while another runs eager would hang the expert all-to-all.
+        """
+        if self.ubatch_runner is None or desc.cg_mode != CUDAGraphMode.FULL:
+            return None
+        if not self.ubatch_runner.wants_ubatch(desc.num_tokens, decode_query_len):
+            return None
+        return replace(desc, num_ubatches=self.ubatch_runner.num_ubatches)
+
     def _init_candidates(self) -> None:
         """Build priority-ordered candidate lists for each token count."""
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
@@ -276,6 +298,21 @@ class CudaGraphManager:
                             (rounded_num_tokens, num_active_loras)
                         ].append(desc)
 
+                    # DBO: a microbatched twin of this decode graph. Uniform
+                    # decode is where FULL lives for backends that only
+                    # support uniform batches (MLA is one), and it is where
+                    # microbatching needs a graph most, since eager decode is
+                    # launch-bound. See the mixed-mode twin below for backends
+                    # whose mixed batches are FULL too.
+                    ubatch_desc = self._maybe_ubatch_twin(desc, decode_query_len)
+                    if ubatch_desc is not None and (
+                        ubatch_desc not in descs_by_mode[decode_mode]
+                    ):
+                        descs_by_mode[decode_mode].append(ubatch_desc)
+                        descs_by_token_lora[
+                            (rounded_num_tokens, num_active_loras)
+                        ].append(ubatch_desc)
+
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
                 # i.e. no request padding is needed, so we leave it as None.
@@ -294,31 +331,11 @@ class CudaGraphManager:
                 descs_by_mode[mixed_mode].append(desc)
                 descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
 
-                # DBO: also capture a FULL graph that splits this same token
-                # count into `num_ubatches` microbatches. Only FULL is
-                # supported (mirrors the eager DBO path, which only runs
-                # uncompiled); PIECEWISE+DBO stays unsupported. Gate on the
-                # same predicate the DP handshake votes with, so the captured
-                # shapes cannot drift from the dispatchable ones; ask it about
-                # a uniform decode, whose threshold is the lower of the two,
-                # since a shape either threshold admits has to have a graph.
-                # `wants_ubatch` is a pure function of config, which is what
-                # lets every DP rank derive the same candidate list.
-                if (
-                    self.ubatch_runner is not None
-                    and mixed_mode == CUDAGraphMode.FULL
-                    and self.ubatch_runner.wants_ubatch(
-                        num_tokens, self.decode_query_len
-                    )
-                ):
-                    ubatch_desc = BatchExecutionDescriptor(
-                        cg_mode=CUDAGraphMode.FULL,
-                        num_tokens=num_tokens,
-                        num_reqs=min(num_tokens, self.max_num_reqs),
-                        num_active_loras=num_active_loras,
-                        num_ubatches=self.ubatch_runner.num_ubatches,
-                    )
-                    descs_by_mode[CUDAGraphMode.FULL].append(ubatch_desc)
+                # DBO: a microbatched twin of the mixed-mode graph, for
+                # backends whose mixed batches are FULL as well.
+                ubatch_desc = self._maybe_ubatch_twin(desc, self.decode_query_len)
+                if ubatch_desc is not None:
+                    descs_by_mode[mixed_mode].append(ubatch_desc)
                     descs_by_token_lora[(num_tokens, num_active_loras)].append(
                         ubatch_desc
                     )

@@ -69,18 +69,24 @@ def sync_cudagraph_and_dp_padding(
         ubatch_num_tokens = int(num_tokens_across_dp.max().item())
         num_ubatches = ubatch_runner.num_ubatches
         if cudagraph_manager is not None:
-            # Try a captured FULL graph for this (num_tokens, num_ubatches)
-            # shape, the same dispatch the non-ubatched path below uses.
-            # `dispatch` falls back to a NONE descriptor when nothing matches
-            # (no graph captured for this shape, or eager-only mode), so
-            # microbatched steps run whether or not a graph exists.
+            # Try a captured FULL graph for this shape, the same dispatch the
+            # non-ubatched path below uses. It has to be asked with the synced
+            # uniform token count, because for backends that only support
+            # uniform batches (MLA) the FULL graphs -- microbatched ones
+            # included -- are the uniform-decode ones. `dispatch` falls back to
+            # a NONE descriptor when nothing matches (no graph captured for
+            # this shape, or eager-only mode), so microbatched steps run
+            # whether or not a graph exists.
             ubatch_desc = cudagraph_manager.dispatch(
                 num_reqs,
                 ubatch_num_tokens,
-                uniform_token_count=None,
+                _synced_uniform_token_count(uniform_token_counts_across_dp),
                 num_active_loras=num_active_loras,
                 num_ubatches=num_ubatches,
             )
+            # Dispatch rounds the token count up to the captured size, and
+            # every rank has to run what the graph expects.
+            ubatch_num_tokens = ubatch_desc.num_tokens
         else:
             # cudagraph_manager is only None during the profile run, where
             # every rank runs eager.
@@ -108,12 +114,9 @@ def sync_cudagraph_and_dp_padding(
         "where synced_cg_mode must be NONE across all DP ranks"
     )
     synced_num_tokens = int(num_tokens_across_dp.max().item())
-    synced_uniform_token_count = uniform_token_counts_across_dp[0]
-    # If ranks disagree on the uniform token count, or its 0 (means None) set to None
-    if synced_uniform_token_count == 0 or not torch.all(
-        uniform_token_counts_across_dp == synced_uniform_token_count
-    ):
-        synced_uniform_token_count = None
+    synced_uniform_token_count = _synced_uniform_token_count(
+        uniform_token_counts_across_dp
+    )
 
     # Varlen decode graphs are selected by the query-length bound, so ranks must agree
     # on it or they pad to different token counts below.
@@ -136,6 +139,19 @@ def sync_cudagraph_and_dp_padding(
     num_tokens_across_dp[:] = synced_desc.num_tokens
 
     return synced_desc, num_tokens_across_dp
+
+
+def _synced_uniform_token_count(
+    uniform_token_counts_across_dp: torch.Tensor,
+) -> int | None:
+    """The uniform token count all ranks share, or None if they disagree.
+
+    0 is how a rank encodes None in the all-reduce.
+    """
+    count = int(uniform_token_counts_across_dp[0].item())
+    if count == 0 or not torch.all(uniform_token_counts_across_dp == count):
+        return None
+    return count
 
 
 def dispatch_cg_and_sync_dp(
