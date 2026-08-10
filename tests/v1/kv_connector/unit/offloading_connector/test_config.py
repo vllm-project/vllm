@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -630,27 +631,18 @@ _SWA_MLA_SPEC = SlidingWindowMLASpec(
 )
 
 
+def _groups(*specs: KVCacheSpec) -> list[KVCacheGroupSpec]:
+    return [KVCacheGroupSpec([f"l{i}"], spec) for i, spec in enumerate(specs)]
+
+
 @pytest.mark.parametrize(
     ("kv_cache_groups", "certified"),
     [
+        pytest.param(_groups(_mla_spec(head_size=576)), True, id="mla-latent"),
         pytest.param(
-            [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))],
-            True,
-            id="mla-latent",
+            _groups(_full_attention_spec(), _SWA_SPEC), True, id="attention-hybrid"
         ),
-        pytest.param(
-            [
-                KVCacheGroupSpec(["l0"], _full_attention_spec()),
-                KVCacheGroupSpec(["l1"], _SWA_SPEC),
-            ],
-            True,
-            id="attention-hybrid",
-        ),
-        pytest.param(
-            [KVCacheGroupSpec(["l0"], _SWA_MLA_SPEC)],
-            False,
-            id="swa-mla",
-        ),
+        pytest.param(_groups(_SWA_MLA_SPEC), False, id="swa-mla"),
         pytest.param(
             list(_make_mamba_hybrid_kv_cache_config().kv_cache_groups),
             False,
