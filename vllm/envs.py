@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
+    VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALE_BPRESHUFFLE: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
@@ -1184,6 +1185,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER_LINEAR_HIPBMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", "False").lower() in ("true", "1")
+    ),
+    # Use the aiter pre-shuffled FP8 block-scale GEMM
+    # (gemm_a8w8_blockscale_bpreshuffle) in the block-scale linear path.
+    # The weight is pre-shuffled at load time so the faster kernel can be
+    # dispatched. Opt-in (default False) to preserve existing behavior.
+    "VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALE_BPRESHUFFLE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALE_BPRESHUFFLE", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter moe ops.
     # By default is enabled.

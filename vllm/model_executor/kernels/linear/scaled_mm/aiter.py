@@ -375,6 +375,14 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
         )
 
+        # Pre-shuffle the weight and dispatch the faster bpreshuffle GEMM when
+        # enabled and the weight shape is eligible (N and K divisible by 128).
+        self._bpreshuffled = (
+            rocm_aiter_ops.is_fp8_block_scale_bpreshuffle_enabled()
+            and n % 128 == 0
+            and k % 128 == 0
+        )
+
     @classmethod
     def is_supported(cls, compute_capability=None):
         return (
@@ -397,6 +405,34 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "quantization with group_shape=(1,128).",
             )
         return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+        layer.aiter_bpreshuffled = False
+        if not self._bpreshuffled:
+            return
+
+        params = self._get_layer_params(layer)
+        weight = params.weight
+        # bpreshuffle GEMM requires an fp8 2D weight with N and K divisible by
+        # 128; fall back to the standard path if the loaded weight is not.
+        if (
+            weight.dim() != 2
+            or weight.dtype != current_platform.fp8_dtype()
+            or weight.shape[0] % 128 != 0
+            or weight.shape[1] % 128 != 0
+        ):
+            self._bpreshuffled = False
+            return
+
+        shuffled_weight = rocm_aiter_ops.shuffle_weight(weight, layout=(16, 16))
+        replace_parameter(
+            layer,
+            params.WEIGHT,
+            torch.nn.Parameter(shuffled_weight.data, requires_grad=False),
+        )
+        layer.aiter_bpreshuffled = True
 
     def apply_block_scaled_mm(
         self,
@@ -421,6 +457,14 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
+        if getattr(self, "_bpreshuffled", False):
+            # Weight is pre-shuffled (16, 16); the bpreshuffle kernel expects
+            # a column-major activation scale (matches the aiter reference).
+            As = As.t().contiguous().t()
+            return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                A, B, As, Bs, list(self.weight_group_shape), output_dtype=out_dtype
+            )
+
         if self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
