@@ -37,6 +37,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import (
     ImageProcessorItems,
+    ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
 )
@@ -144,7 +145,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         )
 
     def get_max_image_tokens(self) -> int:
-        width, height = self.get_max_image_size()
+        width, height = self.get_image_size_with_most_features()
         processor = self.get_hf_processor()
         multimodal_config = self.ctx.model_config.multimodal_config
         mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
@@ -154,8 +155,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         image_tokens = mm_tokens["num_image_tokens"][0]
         return image_tokens
 
-    def get_max_image_size(self):
-        return 10_000, 10_000  # hardcode for arbitrary very large size
+    def get_image_size_with_most_features(self) -> ImageSize:
+        return ImageSize(width=10_000, height=10_000)  # arbitrary very large size
 
 
 class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingInfo]):
@@ -195,7 +196,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 overrides=mm_options.get("audio"),
             )
         if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
-            target_width, target_height = self.info.get_max_image_size()
+            target_width, target_height = self.info.get_image_size_with_most_features()
             data["image"] = self._get_dummy_images(
                 width=target_width,
                 height=target_height,
