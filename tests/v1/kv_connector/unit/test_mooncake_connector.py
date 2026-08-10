@@ -661,11 +661,11 @@ def test_should_launch_bootstrap_server_selects_single_owner(
 @pytest.mark.parametrize(
     ("dp_size", "tp_size", "dp_index", "local_engines_only", "expected_port"),
     [
-        (16, 1, 0, True, 8998 + 16 + 0),
-        (16, 1, 8, True, 8998 + 16 + 8),
-        (16, 1, 15, True, 8998 + 16 + 15),
-        (8, 4, 0, True, 8998 + 32 + 0),
-        (8, 4, 3, True, 8998 + 32 + 3),
+        (16, 1, 0, True, 8998 + 0),
+        (16, 1, 8, True, 8998 + 8),
+        (16, 1, 15, True, 8998 + 15),
+        (8, 4, 0, True, 8998 + 0),
+        (8, 4, 3, True, 8998 + 3),
         (1, 1, 0, False, 8998),
     ],
     ids=[
@@ -690,7 +690,7 @@ def test_get_bootstrap_port_per_dp_rank(
         tensor_parallel_size=tp_size,
         data_parallel_index=dp_index,
     )
-    assert _get_bootstrap_port(vllm_config.parallel_config) == expected_port
+    assert _get_bootstrap_port(vllm_config) == expected_port
 
 
 @pytest.mark.parametrize(
@@ -704,7 +704,7 @@ def test_get_bootstrap_port_per_dp_rank(
         "expected_port",
     ),
     [
-        (True, 2, 3, 8, 1, "127.0.0.1", 8998 + 8 + 3),
+        (True, 2, 3, 8, 1, "127.0.0.1", 8998 + 3),
         (False, 2, 0, 1, 1, "model-parallel-master", 8998),
         (False, 1, 0, 1, 1, "data-parallel-master", 8998),
     ],

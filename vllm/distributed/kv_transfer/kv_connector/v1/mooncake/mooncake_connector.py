@@ -2125,13 +2125,18 @@ def group_concurrent_contiguous(
     return src_groups, dst_groups
 
 
-def get_mooncake_side_channel_port(vllm_config: VllmConfig) -> int:
-    # This logic is now centralized
-    return (
-        envs.VLLM_MOONCAKE_BOOTSTRAP_PORT
-        + vllm_config.parallel_config.data_parallel_index
-        * vllm_config.parallel_config.tensor_parallel_size
-    )
+def _get_bootstrap_port(vllm_config: VllmConfig) -> int:
+    """Return the bootstrap server port for the current DP rank.
+
+    In external/hybrid LB mode each DP rank gets its own port so that
+    every supervised child can run its own bootstrap server without
+    colliding.
+    """
+    parallel_config = vllm_config.parallel_config
+    base = envs.VLLM_MOONCAKE_BOOTSTRAP_PORT
+    if parallel_config.local_engines_only:
+        return base + parallel_config.data_parallel_index
+    return base
 
 
 def _async_loop(loop: asyncio.AbstractEventLoop):
@@ -2157,24 +2162,6 @@ def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
     return parallel_config.data_parallel_index == 0
 
 
-def _get_bootstrap_port(parallel_config) -> int:
-    """Return the bootstrap server port for the current DP rank.
-
-    In external/hybrid LB mode each DP rank gets its own port, offset
-    above the side-channel port range to avoid collisions.
-    Side channels occupy ``dp_size * tp_size`` ports starting at the
-    base, so bootstrap servers start at
-    ``base + dp_size * tp_size + dp_index``.
-    """
-    base = envs.VLLM_MOONCAKE_BOOTSTRAP_PORT
-    if parallel_config.local_engines_only:
-        offset = (
-            parallel_config.data_parallel_size * parallel_config.tensor_parallel_size
-        )
-        return base + offset + parallel_config.data_parallel_index
-    return base
-
-
 def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
     """
     Returns the address of the Mooncake bootstrap server.
@@ -2191,5 +2178,5 @@ def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
         host = parallel_config.master_addr
     else:
         host = parallel_config.data_parallel_master_ip
-    port = _get_bootstrap_port(parallel_config)
+    port = _get_bootstrap_port(vllm_config)
     return (host, port)
