@@ -22,8 +22,6 @@ def prepare_lens(cu_seqlens: torch.Tensor) -> torch.Tensor:
 
 @tensor_cache
 def prepare_chunk_indices(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
-    # Per-sequence chunk counts are needed as Python ints to build the
-    # aranges below; cached by `@tensor_cache`, so this is not per-step.
     # This will be fixed by https://github.com/vllm-project/vllm/pull/51540.
     with gpu_sync_allowed():
         chunk_counts = triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()

@@ -1670,8 +1670,7 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         audio_data = audio_input["audio_data"]
         audio_data_seqlens = audio_input["audio_data_seqlens"]
         # The encoder chunks the input by per-audio feature lengths, which
-        # needs Python ints for `split`/`pad_sequence`; the D2H reads are
-        # unavoidable here.
+        # needs Python ints for `split`/`pad_sequence`.
         want_deepstack = len(self.deepstack_audio_merger_list) > 0
         with gpu_sync_allowed():
             last_hidden_state, deepstack = self.audio_encoder(

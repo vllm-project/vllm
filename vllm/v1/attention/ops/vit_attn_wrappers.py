@@ -54,8 +54,7 @@ def flash_attn_maxseqlen_wrapper(
     if max_seqlen is None:
         max_seqlen = q_len
     else:
-        # `flash_attn_varlen_func` needs a Python int for kernel launch
-        # bounds; the D2H is unavoidable here.
+        # `flash_attn_varlen_func` needs a Python int for kernel launch bounds.
         with gpu_sync_allowed():
             max_seqlen = max_seqlen.item()
 
@@ -169,7 +168,7 @@ def triton_attn_wrapper(
     if max_seqlen is None:
         max_seqlen = q_len
     else:
-        # `context_attention_fwd` needs a Python int; the D2H is unavoidable.
+        # `context_attention_fwd` needs a Python int.
         with gpu_sync_allowed():
             max_seqlen = max_seqlen.item()
 
@@ -273,7 +272,7 @@ def torch_sdpa_wrapper(
 
     outputs = []
 
-    # `torch.split` needs Python int sizes; the D2H is unavoidable here.
+    # `torch.split` needs Python int sizes.
     with gpu_sync_allowed():
         lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
     q_chunks = torch.split(q, lens, dim=1)
@@ -352,7 +351,7 @@ def flashinfer_wrapper(
     batch_offsets_v = cu_seqlens[cu_seqlength:].view(-1, 1, 1, 1)
     sequence_lengths = sequence_lengths.view(-1, 1, 1, 1)
     # `cudnn_batch_prefill_with_kv_cache` needs Python ints for the
-    # max-token-per-seq bounds; the D2H is unavoidable here.
+    # max-token-per-seq bounds.
     with gpu_sync_allowed():
         max_seqlen = max_seqlen.item()
 

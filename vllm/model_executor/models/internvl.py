@@ -735,7 +735,6 @@ class InternVLChatModel(
 
         video_token_id = kwargs["video_token_id"]
         if isinstance(video_token_id, torch.Tensor):
-            # The token id is needed as a Python int below.
             with gpu_sync_allowed():
                 video_token_id = video_token_id.flatten().unique().item()
 

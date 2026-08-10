@@ -503,7 +503,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         with gpu_sync_allowed():
             hidden_states = padded_embed[padded_mask_after_cnn]
-            # Use tolist() for efficient batch conversion from tensor to Python
+            # Use tolist() for efficient batch conversion from tensor to Python.
             aftercnn_lens_list = aftercnn_lens.tolist()
 
         # Compute cumulative sequence lengths for chunked attention
