@@ -27,6 +27,7 @@ def test_moe_runner_updates_shared_experts_overlap_decision():
     old_moe_config = _moe_config(enable_eplb=True)
     shared_experts = SharedExperts.__new__(SharedExperts)
     torch.nn.Module.__init__(shared_experts)
+    shared_experts._layer = SimpleNamespace(shard_sequence_parallel=False)
     shared_experts._moe_config = old_moe_config
 
     runner = MoERunner.__new__(MoERunner)
