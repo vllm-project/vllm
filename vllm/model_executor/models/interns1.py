@@ -634,7 +634,6 @@ class InternS1ForConditionalGeneration(
 
         image_token_id = kwargs["image_token_id"]
         if isinstance(image_token_id, torch.Tensor):
-            # The token id is needed as a Python int below.
             with gpu_sync_allowed():
                 image_token_id = image_token_id.flatten().unique().item()
 

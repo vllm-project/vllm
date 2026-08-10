@@ -588,8 +588,7 @@ class EplbState:
                 avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
                 max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
 
-                # Just to make type checker happy
-                # Metrics only; the values drive a Python-level ratio below.
+                # This gpu/cpu sync only happens with expert load stat logging is enabled.
                 with gpu_sync_allowed():
                     tokens_tensors: list[float] = torch.stack(
                         [avg_tokens_tensor, max_tokens_tensor]

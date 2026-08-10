@@ -1533,7 +1533,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        # Needed as a Python int to size the mask below.
         with gpu_sync_allowed():
             max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
@@ -1726,7 +1725,6 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        # Needed as a Python int to size the mask below.
         with gpu_sync_allowed():
             max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
@@ -1830,7 +1828,6 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        # Needed as a Python int to size the mask below.
         with gpu_sync_allowed():
             max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)

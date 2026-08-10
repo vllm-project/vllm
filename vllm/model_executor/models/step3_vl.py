@@ -683,8 +683,6 @@ class Step3VLForConditionalGeneration(
 
         merged_image_features = []
         cur_patch_idx = 0
-        # The per-image branch and slice bounds below need Python ints; read
-        # them back in one go rather than once per image.
         with gpu_sync_allowed():
             num_patches_list = num_patches.tolist()
         for i, num_patch in enumerate(num_patches_list):

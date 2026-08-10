@@ -741,8 +741,6 @@ class DiffusionGemmaRequestStates:
         )
 
     def add_request(self, slot_idx: int) -> None:
-        # `t[i] = scalar` on a 1-D tensor copies the scalar H2D and blocks;
-        # `fill_` on the element launches a kernel instead.
         self.is_encoder_phase[slot_idx].fill_(True)
         self.init_canvas(async_tensor_h2d([slot_idx], device=self.device))
         self.step[slot_idx].fill_(0)

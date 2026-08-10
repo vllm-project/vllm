@@ -1292,8 +1292,6 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
         image_grid_thw = image_input["image_grid_thw"]
         assert image_grid_thw.ndim == 2
 
-        # The grids are needed as Python ints to build the per-image position
-        # ids; read them back in one go rather than once per image.
         with gpu_sync_allowed():
             image_grid_thw_list = image_grid_thw.tolist()
         for idx, thw in enumerate(image_grid_thw_list):
