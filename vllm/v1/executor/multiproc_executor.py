@@ -47,8 +47,12 @@ from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
+    aiter_requires_tcp_store,
+    get_distributed_init_method,
     get_file_store_init_method,
     get_ip,
+    get_loopback_ip,
+    get_open_port,
 )
 from vllm.utils.ompmultiprocessing import OMPProcessManager
 from vllm.utils.system_utils import (
@@ -128,7 +132,12 @@ class MultiprocExecutor(Executor):
 
         set_multiprocessing_worker_envs(self.local_world_size)
 
-        distributed_init_method = get_file_store_init_method()
+        if aiter_requires_tcp_store():
+            distributed_init_method = get_distributed_init_method(
+                get_loopback_ip(), get_open_port()
+            )
+        else:
+            distributed_init_method = get_file_store_init_method()
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
