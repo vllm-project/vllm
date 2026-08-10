@@ -31,6 +31,7 @@ from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -111,6 +112,11 @@ def get_sliding_window_size_in_chunks(
     if isinstance(kv_cache_spec, SlidingWindowSpec):
         assert kv_cache_spec.sliding_window > 0
         return cdiv(kv_cache_spec.sliding_window, tokens_per_chunk)
+
+    if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
+        # Attention never reaches back past one chunk
+        assert kv_cache_spec.attention_chunk_size > 0
+        return cdiv(kv_cache_spec.attention_chunk_size, tokens_per_chunk)
 
     if isinstance(kv_cache_spec, MambaSpec):
         # Mamba depends on a single state
@@ -274,10 +280,6 @@ class SchedulerOffloadConfig(NamedTuple):
             spec.blocks_per_chunk == 1
             and len(group_block_sizes) == 1
             and has_partial_recurrent_group
-            and not (
-                spec.kv_events_config.enable_kv_cache_events
-                and spec.kv_events_config.self_describing_kv_events
-            )
             and all(
                 config.sliding_window_size_in_chunks is None
                 or config.requires_cow_source
@@ -891,10 +893,12 @@ class OffloadingConnectorScheduler:
         for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
             boundary_pending = False
             boundary_missed = False
+            boundary_keys = []
             for group_config in self.config.kv_group_configs:
                 key = self._make_boundary_key(
                     req_status.req, group_config.group_idx, boundary
                 )
+                boundary_keys.append(key)
                 result = self.manager.lookup(key, req_status.req_context)
                 if result is LookupResult.MISS:
                     boundary_missed = True
@@ -904,6 +908,12 @@ class OffloadingConnectorScheduler:
 
             pending |= boundary_pending
             if not boundary_missed and not boundary_pending:
+                for group_config, key in zip(
+                    self.config.kv_group_configs, boundary_keys
+                ):
+                    self._events_tracker.record_partial_lookup(
+                        req_status.req, group_config, boundary, key
+                    )
                 req_status.partial_tail_boundary = boundary
                 return boundary - local_tokens
 
@@ -1196,6 +1206,12 @@ class OffloadingConnectorScheduler:
                 continue
             if not store_output.keys_to_store:
                 continue
+
+            for group_config, key in zip(self.config.kv_group_configs, keys):
+                if key in store_output.keys_to_store:
+                    self._events_tracker.record_partial_store(
+                        req, group_config, boundary, key
+                    )
 
             group_by_key = {key: idx for idx, key in enumerate(keys)}
             accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]

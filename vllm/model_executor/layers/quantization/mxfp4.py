@@ -39,6 +39,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -381,7 +382,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -482,8 +482,6 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
     K3 is weight-only MXFP4 (W4A16) with SiTU activation, which the generic
     MXFP4 backend selector does not cover; route it to AITER on gfx950.
     """
-    from vllm.platforms import current_platform
-
     if not current_platform.is_rocm():
         return False
     from vllm._aiter_ops import rocm_aiter_ops
@@ -571,6 +569,38 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             activation=self.moe.activation,
         )
 
+    @staticmethod
+    def _encode_mxfp4_weight_scale(loaded_weight: torch.Tensor) -> torch.Tensor:
+        if loaded_weight.dtype == torch.uint8:
+            return loaded_weight
+        if loaded_weight.dtype == torch.float8_e8m0fnu:
+            return loaded_weight.view(torch.uint8)
+        if loaded_weight.is_floating_point():
+            return loaded_weight.to(torch.float8_e8m0fnu).view(torch.uint8)
+        return loaded_weight
+
+    @staticmethod
+    def get_scale_weight_loader(weight_loader):
+        def mxfp4_weight_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            weight_name: str,
+            shard_id: str,
+            expert_id: int,
+            return_success: bool = False,
+        ) -> bool | None:
+            loaded_weight = Mxfp4MoEMethod._encode_mxfp4_weight_scale(loaded_weight)
+            return weight_loader(
+                param,
+                loaded_weight,
+                weight_name,
+                shard_id,
+                expert_id,
+                return_success=return_success,
+            )
+
+        return mxfp4_weight_loader
+
     def create_weights(
         self,
         layer: RoutedExperts,
@@ -589,6 +619,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.num_experts = num_experts
         self.intermediate_size = intermediate_size_per_partition
         self.hidden_size = hidden_size
+        weight_loader = extra_weight_attrs.pop("weight_loader")
+        scale_weight_loader = Mxfp4MoEMethod.get_scale_weight_loader(weight_loader)
 
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
@@ -602,6 +634,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
+        set_weight_attrs(w13_weight, {"weight_loader": weight_loader})
 
         w13_weight_scale = torch.nn.Parameter(
             torch.zeros(
@@ -614,6 +647,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w13_weight_scale, {"weight_loader": scale_weight_loader})
         w13_weight_scale.quant_method = "block"
 
         # down_proj (row parallel)
@@ -628,6 +662,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+        set_weight_attrs(w2_weight, {"weight_loader": weight_loader})
 
         w2_weight_scale = torch.nn.Parameter(
             torch.zeros(
@@ -640,6 +675,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, {"weight_loader": scale_weight_loader})
         w2_weight_scale.quant_method = "block"
 
         if self.moe.has_bias:
@@ -653,6 +689,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             layer.register_parameter("w13_bias", w13_bias)
             set_weight_attrs(w13_bias, extra_weight_attrs)
+            set_weight_attrs(w13_bias, {"weight_loader": weight_loader})
 
             w2_bias = torch.nn.Parameter(
                 torch.zeros(
@@ -664,6 +701,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
+            set_weight_attrs(w2_bias, {"weight_loader": weight_loader})
 
     def _setup_kernel(
         self,
@@ -739,10 +777,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
-        from vllm.platforms.rocm import on_gfx1250
+        is_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            is_gfx1250 = on_gfx1250()
 
         uses_triton_weight_format = self.mxfp4_backend in TRITON_BACKENDS or (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
         )
         if not uses_triton_weight_format:
             replace_parameter(layer, "w13_weight", w13)
@@ -770,7 +812,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def _convert_k3_situ_weight_to_kernel_format(
@@ -830,10 +871,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = getattr(layer, "w2_bias", None)
         swiglu_limit = getattr(layer, "swiglu_limit", None)
 
-        from vllm.platforms.rocm import on_gfx1250
+        is_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            is_gfx1250 = on_gfx1250()
 
         if self.mxfp4_backend in TRITON_BACKENDS or (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
         ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.
