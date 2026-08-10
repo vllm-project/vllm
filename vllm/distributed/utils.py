@@ -693,29 +693,6 @@ def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
     _unregister_process_group(pg.group_name)
 
 
-def reinit_gloo_pg(
-    pg: ProcessGroup,
-    master_ip: str,
-    port: int,
-    rank: int,
-    size: int,
-    return_store: bool = False,
-):
-    """Destroy pg and create a replacement Gloo process group.
-
-    Returns the new group, or ``(group, store)`` when *return_store* is set.
-    """
-    stateless_destroy_torch_distributed_process_group(pg)
-    return stateless_init_torch_distributed_process_group(
-        master_ip,
-        port,
-        rank,
-        size,
-        backend="gloo",
-        return_store=return_store,
-    )
-
-
 def get_worker_rank_suffix(global_rank: int | None = None) -> str:
     """Generate a descriptive rank suffix for worker identification.
 

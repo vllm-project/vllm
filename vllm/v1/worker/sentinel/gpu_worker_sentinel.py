@@ -8,7 +8,9 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
-    reinit_gloo_pg,
+    get_eplb_group,
+    stateless_destroy_torch_distributed_process_group,
+    stateless_init_torch_distributed_process_group,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -18,14 +20,15 @@ from vllm.v1.worker.sentinel.eplb_redistribute import (
     compute_dead_ep_ranks,
     mark_dead_expert_slots_inplace,
     rebuild_logical_expert_maps,
+    rebuild_model_expert_maps,
     redistribute_expert_placement,
-    refresh_eplb_communicator_group,
-    reinit_eplb_gloo_groups,
     reload_experts_from_disk,
     reset_eplb_async_state,
+    sync_num_dispatchers_for_nixl_ep,
 )
 
 if TYPE_CHECKING:
+    from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -34,6 +37,16 @@ logger = init_logger(__name__)
 # All2all backends that support fault-tolerant timeout + rank masking,
 # required for FT under DP+EP MoE deployments.
 FT_BACKEND_SET = frozenset({"deepep_low_latency", "nixl_ep"})
+
+
+def _reinit_cpu_group(
+    group: "GroupCoordinator", master_ip: str, port: int, rank: int, size: int
+) -> None:
+    """Destroy and rebuild a group's Gloo cpu_group in place."""
+    stateless_destroy_torch_distributed_process_group(group.cpu_group)
+    group.cpu_group = stateless_init_torch_distributed_process_group(
+        master_ip, port, rank, size, backend="gloo"
+    )
 
 
 class WorkerSentinel:
@@ -59,7 +72,11 @@ class WorkerSentinel:
     def retry(self, ft_request: FaultToleranceRequest):
         torch.accelerator.synchronize()
         params = ft_request.params
+        # After a scale_down the DP master may be re-elected and the rebuilt
+        # gloo group is dense over the alive slots.
         master_ip = params["dp_master_ip"]
+        dp_group_rank = params["dp_group_rank"]
+        dp_group_size = params["dp_group_size"]
         self.worker.parallel_config.data_parallel_master_ip = master_ip
         self._clean_worker_state()
         reset_eplb_async_state(self.worker.model_runner)
@@ -72,61 +89,44 @@ class WorkerSentinel:
                 mgr.update_mask(ep_rank, masked=True)
             world_size = self.worker.parallel_config.world_size
             port = params["new_stateless_dp_group_ports"][self.worker.rank % world_size]
-            dp_group = get_dp_group()
-            dp_group.cpu_group = reinit_gloo_pg(
-                dp_group.cpu_group,
-                master_ip=master_ip,
-                port=port,
-                rank=params["dp_group_rank"],
-                size=params["dp_group_size"],
+            _reinit_cpu_group(
+                get_dp_group(), master_ip, port, dp_group_rank, dp_group_size
             )
-            dp_group.dead_dp_ranks = set(params["dead_dp_ranks"])
-
-            if not self.worker.model_runner.eep_eplb_suppressed:
-                reinit_eplb_gloo_groups(params, master_ip)
-                refresh_eplb_communicator_group(self.worker.model_runner)
+            get_dp_group().dead_dp_ranks = set(params["dead_dp_ranks"])
+            if (
+                self.worker.parallel_config.enable_eplb
+                and not self.worker.model_runner.eep_eplb_suppressed
+            ):
+                self._reinit_eplb_groups(params, master_ip)
 
     def scale_down(self, ft_request: FaultToleranceRequest):
-        torch.accelerator.synchronize()
-        params = ft_request.params
-        master_ip = params["dp_master_ip"]
-        self.worker.parallel_config.data_parallel_master_ip = master_ip
-        # Cumulative dead set in original DP coordinates (covers ranks removed
-        # by earlier scale-downs, whose masks clean_buffers wiped).
-        dead_dp_ranks = params["dead_dp_ranks"]
+        model_runner = self.worker.model_runner
+        eplb_config = self.worker.parallel_config.eplb_config
+        if model_runner.eplb_state is None or eplb_config.num_redundant_experts <= 0:
+            raise ValueError(
+                "[FT] scale_down requires EPLB with num_redundant_experts > 0 "
+                "to re-host the dead rank's experts."
+            )
+        # Suppress EPLB async rebalancing before retry so it skips the EPLB
+        # group reinit; placement is fixed by the redistribution below.
+        model_runner.eep_eplb_suppressed = True
+        self.retry(ft_request)
+
         tp_size = self.worker.parallel_config.tensor_parallel_size
-
-        self._clean_worker_state()
-        mgr = get_ep_all2all_manager()
-        mgr.clean_buffers()
-
+        dead_dp_ranks = ft_request.params["dead_dp_ranks"]
         dead_ep_ranks = compute_dead_ep_ranks(dead_dp_ranks, tp_size)
-        for ep_rank in sorted(dead_ep_ranks):
-            mgr.update_mask(ep_rank, masked=True)
-
         self._redistribute_experts(dead_ep_ranks)
-        self._sync_num_dispatchers_for_nixl_ep(dead_ep_ranks)
-
-        world_size = self.worker.parallel_config.world_size
-        port = params["new_stateless_dp_group_ports"][self.worker.rank % world_size]
-        dp_group = get_dp_group()
-        dp_group.cpu_group = reinit_gloo_pg(
-            dp_group.cpu_group,
-            master_ip=master_ip,
-            port=port,
-            rank=params["dp_group_rank"],
-            size=params["dp_group_size"],
+        sync_num_dispatchers_for_nixl_ep(
+            model_runner.model,
+            self.worker.parallel_config.all2all_backend,
+            dead_ep_ranks,
         )
-        dp_group.dead_dp_ranks = set(dead_dp_ranks)
-
-        self.worker.model_runner.eep_eplb_suppressed = True
-        reset_eplb_async_state(self.worker.model_runner)
 
         logger.info(
             "[FT] Worker scale_down complete: dp_group_size=%d, "
             "dp_group_rank=%d, dead_ep_ranks=%s, eplb_suppressed=True",
-            params["dp_group_size"],
-            params["dp_group_rank"],
+            ft_request.params["dp_group_size"],
+            ft_request.params["dp_group_rank"],
             sorted(dead_ep_ranks),
         )
 
@@ -134,6 +134,27 @@ class WorkerSentinel:
         """Return the current all2all active mask from the FT backend."""
         mask = get_ep_all2all_manager().query_active_mask()
         return {"mask": mask.tolist()}
+
+    def _reinit_eplb_groups(self, params: dict, master_ip: str) -> None:
+        """Reinit the EP/EPLB Gloo groups and refresh the EPLB
+        communicator's cpu_group reference."""
+        for port_key, get_group in [
+            ("new_ep_group_port", get_ep_group),
+            ("new_eplb_group_port", get_eplb_group),
+        ]:
+            port = params[port_key]
+            group = get_group()
+            _reinit_cpu_group(
+                group, master_ip, port, group.rank_in_group, group.world_size
+            )
+            logger.info("[FT] Reinited %s Gloo group on port %d", port_key, port)
+
+        eplb_state = self.worker.model_runner.eplb_state
+        assert eplb_state is not None
+        eplb_group = get_eplb_group()
+        for ms in eplb_state.model_states.values():
+            if hasattr(ms.communicator, "_cpu_group"):
+                ms.communicator._cpu_group = eplb_group.cpu_group
 
     def _redistribute_experts(self, dead_ep_ranks: set[int]) -> None:
         """One-shot expert redistribution after scale-down."""
@@ -155,7 +176,7 @@ class WorkerSentinel:
             p2l, num_logical, num_local_experts
         )
         rebuild_logical_expert_maps(p2l, l2p, lrc)
-        self.rebuild_model_expert_maps(p2l)
+        rebuild_model_expert_maps(model_runner.model, p2l)
 
         if reassignments:
             reload_experts_from_disk(
@@ -170,65 +191,6 @@ class WorkerSentinel:
             num_logical,
             ep_world_size,
             len(reassignments),
-        )
-
-    def rebuild_model_expert_maps(self, p2l: torch.Tensor) -> None:
-        """Rebuild each FusedMoE layer's model-side _expert_map from p2l."""
-        moe_layers = self.worker.model_runner.model.moe_layers
-        ep_rank = get_ep_group().rank_in_group
-        for layer_idx, layer in enumerate(moe_layers):
-            # v2 runner wraps FusedMoE in MoERunner; the expert map lives on
-            # routed_experts there, on the layer itself otherwise.
-            routed = getattr(layer, "routed_experts", layer)
-            expert_map = getattr(routed, "_expert_map", None)
-            if expert_map is None:
-                continue
-            num_local = p2l.shape[1] // layer.moe_config.moe_parallel_config.ep_size
-            local_start = ep_rank * num_local
-            p2l_row = p2l[layer_idx].cpu()
-
-            new_map = torch.full_like(expert_map, -1)
-            for local_idx in range(num_local):
-                lid = int(p2l_row[local_start + local_idx].item())
-                if 0 <= lid < new_map.shape[0]:
-                    new_map[lid] = local_idx
-            expert_map.copy_(new_map)
-
-    def _sync_num_dispatchers_for_nixl_ep(self, dead_ep_ranks: set[int]) -> None:
-        """Rewrite each MoE layer's num_dispatchers to the nixl_ep kernel's
-        active_rank_bound (= highest surviving EP rank + 1) after masking.
-
-        The kernel sizes combine output as active_rank_bound * max_tokens and
-        asserts the width matches; vLLM cache num_dispatchers as the
-        original EP world size, so masking the highest rank desyncs the two.
-        DeepEP-LL keeps a fixed num_ranks-wide layout and needs no sync.
-        """
-        if self.worker.parallel_config.all2all_backend != "nixl_ep":
-            return
-
-        ep_world_size = get_ep_group().world_size
-        surviving = sorted(set(range(ep_world_size)) - dead_ep_ranks)
-        if not surviving:
-            return
-        active_rank_bound = surviving[-1] + 1
-
-        for layer in self.worker.model_runner.model.moe_layers:
-            routed = getattr(layer, "routed_experts", layer)
-            quant_method = getattr(routed, "quant_method", None)
-            moe_kernel = getattr(quant_method, "moe_kernel", None)
-            if moe_kernel is None or moe_kernel.is_monolithic:
-                continue
-            pf = moe_kernel.prepare_finalize
-            experts = moe_kernel.fused_experts
-            if hasattr(pf, "num_dispatchers_"):
-                pf.num_dispatchers_ = active_rank_bound
-            if getattr(experts, "num_dispatchers", None) is not None:
-                experts.num_dispatchers = active_rank_bound
-
-        logger.info(
-            "[FT] Synced num_dispatchers to active_rank_bound=%d, dead_ep_ranks=%s",
-            active_rank_bound,
-            sorted(dead_ep_ranks),
         )
 
     def _clean_worker_state(self):
