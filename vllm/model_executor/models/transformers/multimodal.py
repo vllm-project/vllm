@@ -678,13 +678,25 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             tokens_per_item = total_tokens // total_expected
             token_split_sizes = [s * tokens_per_item for s in split_sizes]
         elif total_expected > 0:
-            # Mismatch (profiling with dummy data) - pad/truncate
+            # TODO: make this an error once we know profiling never relies on it
             if total_tokens == 0:
                 raise ValueError(
                     "Encoder returned empty embeddings. "
                     f"Expected {total_expected} tokens from "
                     f"split_sizes={split_sizes}"
                 )
+            # Keep the counts out of the message: `warning_once` keys its cache on
+            # the args, so varying them would log on every new pair
+            logger.warning_once(
+                "Encoder returned a different number of tokens than expected; "
+                "padding or truncating to fit. The embeddings are not trustworthy "
+                "outside of memory profiling."
+            )
+            logger.debug(
+                "Encoder returned %s tokens but %s were expected",
+                total_tokens,
+                total_expected,
+            )
             if total_tokens < total_expected:
                 repeat_factor = (total_expected + total_tokens - 1) // total_tokens
                 embeddings = embeddings.repeat(repeat_factor, 1)
