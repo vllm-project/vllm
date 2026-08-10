@@ -29,7 +29,8 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RendererSelection, TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RenderConfig, RendererSelection,
+    TlsConfig,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -90,6 +91,8 @@ pub enum Command {
     /// Run vLLM benchmarks.
     #[command(subcommand)]
     Bench(BenchCommand),
+    /// Run engine-free request rendering and preprocessing.
+    Render(RenderArgs),
 }
 
 /// Supported benchmark commands.
@@ -97,6 +100,67 @@ pub enum Command {
 pub enum BenchCommand {
     /// Benchmark online serving throughput.
     Serve(vllm_bench::BenchServeArgs),
+}
+
+/// Arguments for the engine-free text renderer.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct RenderArgs {
+    /// Model identifier or local model directory containing tokenizer files.
+    model: String,
+    /// HTTP bind host.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    /// HTTP bind port.
+    #[arg(long, default_value_t = 8000)]
+    port: u16,
+    /// Public model names accepted by the API.
+    #[arg(long, num_args = 0..)]
+    served_model_name: Vec<String>,
+    /// Select the tool-call parser. Use `auto` to infer from the model or
+    /// `none` to disable parsing.
+    #[arg(long, default_value_t)]
+    tool_call_parser: ParserSelection,
+    /// Select the reasoning parser. Use `auto` to infer from the model or
+    /// `none` to disable parsing.
+    #[arg(long, default_value_t)]
+    reasoning_parser: ParserSelection,
+    /// Select the native chat renderer implementation.
+    #[arg(long = "tokenizer-mode", default_value_t)]
+    renderer: RendererSelection,
+    /// Override the model chat template with a file path or inline template.
+    #[arg(long)]
+    chat_template: Option<String>,
+    /// Default JSON keyword arguments merged into every chat-template render.
+    #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
+    default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// How message content is exposed to the chat template.
+    #[arg(long, default_value_t)]
+    chat_template_content_format: ChatTemplateContentFormatOption,
+    /// Maximum model context length used for request validation.
+    #[arg(long)]
+    max_model_len: u32,
+    /// Maximum accepted logprobs count; -1 disables the cap.
+    #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
+    max_logprobs: Option<i32>,
+}
+
+impl RenderArgs {
+    pub(super) fn into_config(self) -> RenderConfig {
+        RenderConfig {
+            model: self.model,
+            served_model_name: self.served_model_name,
+            host: self.host,
+            port: self.port,
+            tool_call_parser: self.tool_call_parser,
+            reasoning_parser: self.reasoning_parser,
+            renderer: self.renderer,
+            chat_template: self.chat_template,
+            default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
+            chat_template_content_format: self.chat_template_content_format,
+            max_model_len: self.max_model_len,
+            max_logprobs: self.max_logprobs,
+        }
+    }
 }
 
 /// A JSON-encoded list of strings, matching Python's `json.loads` CLI type for

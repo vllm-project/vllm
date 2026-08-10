@@ -64,10 +64,12 @@ def _builder(
     kernel_block_size: int = 1,
     max_decode_rows: int = 32,
     num_heads: int = 16,
+    kv_cache_dtype: str = "auto",
 ):
     return SimpleNamespace(
         device=torch.device("cpu"),
         num_heads=num_heads,
+        _kv_cache_dtype_str=kv_cache_dtype,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
         paged_kv_indices=torch.empty(1024, dtype=torch.int32),
         paged_kv_indptr=torch.empty(max_decode_rows + 1, dtype=torch.int32),
@@ -108,8 +110,22 @@ def test_backend_declares_uniform_batch_support():
 
 
 @pytest.mark.parametrize("num_heads", [8, 16, 32, 64, 128])
-def test_mtp_builder_init_sizes_native_fp8_metadata(monkeypatch, num_heads):
-    """Aiter init passes real MTP qlen/dtypes to rocm_aiter_mla.py:349-355.
+@pytest.mark.parametrize(
+    "spec_method, parallel_drafting",
+    [
+        ("deepseek_mtp", False),
+        # A drafter that is not one of the historically recognized MTP methods,
+        # and a parallel one, so the threshold is 1 + 2 * num_spec rather than
+        # 1 + num_spec. Sizing the metadata off a method name instead leaves
+        # these at qlen=1 while the router still admits the full range.
+        ("dspark", True),
+        ("eagle", False),
+    ],
+)
+def test_mtp_builder_init_sizes_native_fp8_metadata(
+    monkeypatch, num_heads, spec_method, parallel_drafting
+):
+    """Aiter init sizes the metadata for every query length decode can be handed.
 
     Sweeping num_heads asserts the max(16, num_heads) clamp is what sizes the
     metadata, covering the fp8 nhead=32 (TP4) fold path.
@@ -143,6 +159,13 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(monkeypatch, num_heads):
 
     def init_common_builder(self, *args, **kwargs):
         self.num_heads = num_heads
+        # Mirror what _init_reorder_batch_threshold would have left behind: the
+        # metadata is sized from the routing threshold, so a stub that skips it
+        # would size for qlen=1 and hide the very mismatch this test covers.
+        spec = config.speculative_config
+        self.reorder_batch_threshold = (
+            1 + (2 if spec.parallel_drafting else 1) * spec.num_speculative_tokens
+        )
 
     monkeypatch.setitem(
         sys.modules,
@@ -161,8 +184,9 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(monkeypatch, num_heads):
 
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
-            method="deepseek_mtp",
+            method=spec_method,
             num_speculative_tokens=3,
+            parallel_drafting=parallel_drafting,
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=8),
         model_config=SimpleNamespace(max_model_len=16, dtype=torch.bfloat16),
@@ -182,7 +206,7 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(monkeypatch, num_heads):
     assert info_calls == [
         {
             "max_batch_size": config.scheduler_config.max_num_seqs,
-            "max_qo_len": config.speculative_config.num_speculative_tokens + 1,
+            "max_qo_len": builder.reorder_batch_threshold,
             "num_attention_heads": max(16, num_heads),
             "q_dtype": dtypes.fp8,
             "kv_dtype": dtypes.fp8,
@@ -352,26 +376,46 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "mtp_decode_qlen, qo_len, num_heads, expect_persistent",
+    "mtp_decode_qlen, qo_len, num_heads, kv_cache_dtype, expect_persistent",
     [
-        (1, 1, 16, True),  # non-MTP decode
-        (4, 2, 16, True),  # MTP deployment, in-range step
-        (4, 4, 16, True),  # MTP deployment, full-qlen verification step
-        (2, 4, 16, False),  # step demand exceeds provisioned K -> fallback
-        (1, 1, 8, False),  # small head count -> Gluon decode owns qlen==1
-        (4, 4, 8, False),  # small head count -> Gluon flatten owns qlen>1
+        (1, 1, 16, "auto", True),  # non-MTP decode
+        (4, 2, 16, "auto", True),  # MTP deployment, in-range step
+        (4, 4, 16, "auto", True),  # MTP deployment, full-qlen verification step
+        (2, 4, 16, "auto", False),  # step demand exceeds provisioned K -> fallback
+        (1, 1, 8, "auto", False),  # divisor head count -> Gluon decode owns qlen==1
+        (4, 4, 8, "auto", False),  # small head count -> Gluon flatten owns qlen>1
+        # A non-divisor head count is padded to 16 and runs the asm decode, so it
+        # needs the schedule even though num_heads < 16. Its verify still
+        # flattens onto Gluon though -- divisibility only steers the qlen==1
+        # decode, and bf16 has no small-head multi-token asm kernel either way.
+        (1, 1, 12, "auto", True),
+        (8, 8, 12, "auto", False),
+        # An fp8 cache never reaches Gluon, at any head count or qlen, so it
+        # always needs the schedule. (1, 1, 8) is the case the head-count gate
+        # got wrong: divisor head count, so it read as Gluon-owned.
+        (1, 1, 8, "fp8", True),
+        (1, 1, 12, "fp8", True),
+        (1, 1, 16, "fp8", True),
+        # DSpark verify shape. The fp8 fold path rejects non-persistent outright
+        # once qlen > 4, so these must not fall through.
+        (8, 8, 8, "fp8", True),
+        (8, 8, 12, "fp8", True),
     ],
 )
 def test_persistent_metadata_gate(
-    monkeypatch, mtp_decode_qlen, qo_len, num_heads, expect_persistent
+    monkeypatch, mtp_decode_qlen, qo_len, num_heads, kv_cache_dtype, expect_persistent
 ):
-    """Persistent metadata is passed iff num_heads >= 16 and 1 <= max_qo_len <= K.
+    """Persistent metadata is passed iff the asm decode runs and 1 <= qlen <= K.
 
     K = _mtp_decode_qlen sizes the metadata buffers at init; a decode step gets
     the pre-built schedule only when its qlen fits those buffers, otherwise it
     falls back to the kernel computing its own. qlen==1 (non-MTP) must stay
-    in-range -- dropping it is the regression this guards. Fewer than 16 heads
-    is served by the Gluon decode paths, which never read this schedule.
+    in-range -- dropping it is the regression this guards.
+
+    Only the Gluon paths ignore the schedule, so the gate follows the routing
+    predicates rather than the raw head count. Reading `num_heads >= 16` instead
+    denies the schedule to two sets of shapes that do run the asm kernels: a
+    non-divisor head count padded up to 16, and any fp8 cache below 16 heads.
     """
     get_mla_metadata_v1 = mock.MagicMock()
     monkeypatch.setitem(
@@ -382,6 +426,12 @@ def test_persistent_metadata_gate(
     monkeypatch.setattr(
         rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
     )
+    # The gate follows the routing now, so the small-head bf16 rows above only
+    # hold where a Gluon build exists. Pin the arch they describe: on gfx942
+    # those shapes run the asm decode and do get the schedule, which is a
+    # different assertion, made arch-free in the fp8 routing test.
+    monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
 
     # Uniform, non-CUDA-graph batch: every request has exactly qo_len tokens, so
     # num_decode_tokens == sum(qo_len) and no dummy-row padding kicks in.
@@ -390,7 +440,11 @@ def test_persistent_metadata_gate(
         0, (num_reqs + 1) * qo_len, step=qo_len, dtype=torch.int32
     )
     metadata = AiterMLAMetadataBuilder._build_decode(
-        _builder(mtp_decode_qlen=mtp_decode_qlen, num_heads=num_heads),
+        _builder(
+            mtp_decode_qlen=mtp_decode_qlen,
+            num_heads=num_heads,
+            kv_cache_dtype=kv_cache_dtype,
+        ),
         block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
         seq_lens_device=torch.tensor([8, 8], dtype=torch.int32),
         max_seq_len=8,
@@ -406,3 +460,68 @@ def test_persistent_metadata_gate(
     if expect_persistent:
         assert get_mla_metadata_v1.call_args.kwargs["max_seqlen_qo"] == qo_len
         assert get_mla_metadata_v1.call_args.kwargs["uni_seqlen_qo"] == qo_len
+
+
+@pytest.mark.parametrize(
+    "qo_len, num_heads, kv_cache_dtype, expect_persistent",
+    [
+        # A padded rank keeps the schedule wherever a persistent kernel exists:
+        # bf16 up to qseqlen 4, fp8 at every qlen (its fold requires it).
+        (1, 12, "auto", True),
+        (4, 12, "auto", True),
+        (1, 12, "fp8", True),
+        (8, 12, "fp8", True),
+        # Past qseqlen 4 bf16 has only the non-persistent entry, and the fold
+        # that would reach a persistent one is gfx950-only, so the padded rank
+        # must fall back rather than ask for a kernel that is not built.
+        (8, 12, "auto", False),
+        # A native 16-head rank is unchanged: it took the schedule before this
+        # backend keyed the gate off the routing, and still does.
+        (8, 16, "auto", True),
+    ],
+)
+def test_persistent_metadata_gate_without_gluon_build(
+    monkeypatch, qo_len, num_heads, kv_cache_dtype, expect_persistent
+):
+    """The gate on an arch with no Gluon build, i.e. gfx942.
+
+    Both Gluon predicates read False there, so a small-head shape reaches the
+    padded asm decode instead of being flattened. The schedule then has to
+    follow what the asm dispatch actually ships: bf16 has no gqa=16 persistent
+    kernel above qseqlen 4, and the q-row fold that reaches one on gfx950 is
+    guarded on that arch, so asking for the schedule there selects a kernel
+    that does not exist.
+    """
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: False)
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
+
+    num_reqs = 2
+    query_start_loc = torch.arange(
+        0, (num_reqs + 1) * qo_len, step=qo_len, dtype=torch.int32
+    )
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        _builder(
+            mtp_decode_qlen=qo_len,
+            num_heads=num_heads,
+            kv_cache_dtype=kv_cache_dtype,
+        ),
+        block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
+        seq_lens_device=torch.tensor([8, 8], dtype=torch.int32),
+        max_seq_len=8,
+        query_start_loc_cpu=query_start_loc,
+        query_start_loc_device=query_start_loc,
+        num_decode_tokens=num_reqs * qo_len,
+        dcp_tot_seq_lens_device=None,
+    )
+
+    assert metadata.has_persistent_metadata is expect_persistent
+    assert get_mla_metadata_v1.called is expect_persistent
