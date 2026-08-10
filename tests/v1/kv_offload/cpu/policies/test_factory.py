@@ -7,7 +7,7 @@ import pytest
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
-from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
+from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkSlotStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 
@@ -20,10 +20,10 @@ class _DummyCachePolicy(CachePolicy):
     def __init__(self, cache_capacity: int) -> None:
         self.cache_capacity = cache_capacity
 
-    def get(self, key: OffloadKey) -> BlockStatus | None:
+    def get(self, key: OffloadKey) -> ChunkSlotStatus | None:
         return None
 
-    def insert(self, key: OffloadKey, block: BlockStatus) -> None:
+    def insert(self, key: OffloadKey, chunk: ChunkSlotStatus) -> None:
         pass
 
     def remove(self, key: OffloadKey) -> None:
@@ -34,7 +34,7 @@ class _DummyCachePolicy(CachePolicy):
 
     def evict(
         self, n: int, protected: set[OffloadKey]
-    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
+    ) -> list[tuple[OffloadKey, ChunkSlotStatus]] | None:
         return None
 
     def clear(self) -> None:
@@ -72,7 +72,7 @@ class TestCachePolicyFactory:
         policy_cls = CachePolicyFactory.get_cache_policy_cls("dummy")
         assert policy_cls is _DummyCachePolicy
 
-        manager = CPUOffloadingManager(num_blocks=4, cache_policy="dummy")
+        manager = CPUOffloadingManager(num_chunk_slots=4, cache_policy="dummy")
         assert isinstance(manager._policy, _DummyCachePolicy)
 
     def test_unregistered_policy_raises(self):
@@ -98,7 +98,7 @@ class TestCachePolicyFactory:
         """End-to-end: CPUOffloadingManager resolves an unregistered policy
         purely from cache_policy_module_path."""
         manager = CPUOffloadingManager(
-            num_blocks=4,
+            num_chunk_slots=4,
             cache_policy="_DummyCachePolicy",
             cache_policy_module_path="tests.v1.kv_offload.cpu.policies.test_factory",
         )

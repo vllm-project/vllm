@@ -7,36 +7,33 @@ from collections.abc import Iterable
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
 
-class BlockStatus(ctypes.Structure):
+class ChunkSlotStatus(ctypes.Structure):
     """
-    Offloading status for a single block of KV data.
-    Holds the following information:
+    Status of a single chunk slot in the CPU cache.
 
-    ref_cnt - the current number of transfers using this block as a source.
-        A value of -1 indicates the block is not yet ready to be read.
-    block_id - index of the physical CPU buffer slot.
+    ref_cnt - the current number of transfers using this chunk as a source.
+        A value of -1 indicates the chunk is not yet ready to be read.
+    slot_id - index of the physical slot in the CPU cache.
     """
 
-    _fields_ = [("ref_cnt", ctypes.c_int32), ("block_id", ctypes.c_int64)]
+    _fields_ = [("ref_cnt", ctypes.c_int32), ("slot_id", ctypes.c_int64)]
 
-    def __init__(self, block_id: int):
+    def __init__(self, slot_id: int):
         super().__init__()
-        # initialize block as "not ready" (ref_cnt = -1)
+        # initialize chunk as "not ready" (ref_cnt = -1)
         self.ref_cnt = -1
-        self.block_id = block_id
+        self.slot_id = slot_id
 
     @property
     def is_ready(self) -> bool:
-        """
-        Returns whether the block is ready to be read.
-        """
+        """Returns whether the chunk is ready to be read."""
         return self.ref_cnt >= 0
 
 
 class CachePolicy(ABC):
     """
-    Encapsulates both block organization (data structures) and replacement
-    decisions (which block to evict). LRU and ARC differ in both dimensions —
+    Encapsulates both chunk organization (data structures) and replacement
+    decisions (which chunk to evict). LRU and ARC differ in both dimensions —
     ARC's ghost lists and target_t1_size live at the intersection of storage
     and eviction, so they cannot be separated cleanly.
     """
@@ -45,35 +42,35 @@ class CachePolicy(ABC):
         self.cache_capacity = cache_capacity
 
     @abstractmethod
-    def get(self, key: OffloadKey) -> BlockStatus | None:
-        """Find block in data structures. Returns None if not present."""
+    def get(self, key: OffloadKey) -> ChunkSlotStatus | None:
+        """Find chunk in data structures. Returns None if not present."""
 
     @abstractmethod
-    def insert(self, key: OffloadKey, block: BlockStatus) -> None:
-        """Add a newly allocated block. For ARC: also removes from ghost lists."""
+    def insert(self, key: OffloadKey, chunk: ChunkSlotStatus) -> None:
+        """Add a newly allocated chunk. For ARC: also removes from ghost lists."""
 
     @abstractmethod
     def remove(self, key: OffloadKey) -> None:
-        """Remove a block (used to clean up after a failed store)."""
+        """Remove a chunk (used to clean up after a failed store)."""
 
     @abstractmethod
     def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
         """
-        Mark blocks as recently used.
+        Mark chunks as recently used.
 
         Args:
-            keys: Blocks to mark as recently used.
-            req_context: Per-request context for the request touching these blocks.
+            keys: Chunks to mark as recently used.
+            req_context: Per-request context for the request touching these.
         """
 
     @abstractmethod
     def evict(
         self, n: int, protected: set[OffloadKey]
-    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
+    ) -> list[tuple[OffloadKey, ChunkSlotStatus]] | None:
         """
-        Evict exactly n blocks, skipping any in protected.
+        Evict exactly n chunks, skipping any in protected.
 
-        Returns a list of (key, block) for the evicted blocks,
+        Returns a list of (key, chunk) for the evicted chunks,
         or None if n evictions cannot be satisfied. The operation is atomic:
         if None is returned, no state changes are made.
 
@@ -84,15 +81,19 @@ class CachePolicy(ABC):
     @abstractmethod
     def clear(self) -> None:
         """
-        Remove ALL blocks regardless of ref_cnt.
+        Remove ALL chunks regardless of ref_cnt.
 
         Ghost lists and adaptive state are also reset.
         """
 
     def mark_evictable(self, key: OffloadKey) -> None:
-        """Called when a block's ref_cnt transitions to 0."""
+        """Called when a chunk's ref_cnt transitions to 0."""
         return
 
     def mark_non_evictable(self, key: OffloadKey) -> None:
-        """Called when a block's ref_cnt transitions from 0."""
+        """Called when a chunk's ref_cnt transitions from 0."""
         return
+
+
+# Backward-compat alias for out-of-tree CachePolicy implementations.
+BlockStatus = ChunkSlotStatus
