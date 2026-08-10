@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import torch.cuda
@@ -11,6 +13,7 @@ from vllm.model_executor.models import (
     is_text_generation_model,
     supports_multimodal,
 )
+from vllm.model_executor.models import registry as model_registry_module
 from vllm.model_executor.models.adapters import (
     as_embedding_model,
     as_seq_cls_model,
@@ -21,6 +24,9 @@ from vllm.model_executor.models.registry import (
     _TEXT_GENERATION_MODELS,
     ModelRegistry,
     _LazyRegisteredModel,
+    _ModelInfo,
+    _ModelRegistry,
+    _RegisteredModel,
 )
 from vllm.platforms import current_platform
 
@@ -164,6 +170,86 @@ def test_lazy_modelinfo_package_hash_includes_submodules(tmp_path):
     second_hash = _LazyRegisteredModel._get_modelinfo_module_hash(init_file)
 
     assert first_hash != second_hash
+
+
+def test_prepare_model_info_inspects_builtin_lazy_registration():
+    registry = _ModelRegistry(
+        {"Qwen3ForCausalLM": ModelRegistry.models["Qwen3ForCausalLM"]}
+    )
+    with patch.object(_LazyRegisteredModel, "prepare_model_info") as prepare_model_info:
+        registry.prepare_model_info("Qwen3ForCausalLM")
+
+    prepare_model_info.assert_called_once_with()
+
+
+def test_lazy_prepare_model_info_requires_readable_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    registered_model = ModelRegistry.models["Qwen3ForCausalLM"]
+
+    with (
+        patch.object(_LazyRegisteredModel, "inspect_model_cls"),
+        pytest.raises(RuntimeError, match="was not persisted"),
+    ):
+        registered_model.prepare_model_info()
+
+
+def test_inspect_model_info_keeps_best_effort_cache_write(tmp_path, monkeypatch):
+    cache_root = tmp_path / "not-a-directory"
+    cache_root.write_text("occupied", encoding="utf-8")
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(cache_root))
+    registered_model = ModelRegistry.models["Qwen3ForCausalLM"]
+    model_info = _ModelInfo.from_model_cls(torch.nn.Module)
+
+    with patch(
+        "vllm.model_executor.models.registry._run_in_subprocess",
+        return_value=model_info,
+    ):
+        assert registered_model.inspect_model_cls() is model_info
+
+
+def test_lazy_prepare_model_info_accepts_readable_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    registered_model = ModelRegistry.models["Qwen3ForCausalLM"]
+    model_info = _ModelInfo.from_model_cls(torch.nn.Module)
+    model_path = Path(model_registry_module.__file__).parent / "qwen3.py"
+    module_hash = registered_model._get_modelinfo_module_hash(model_path)
+    registered_model._save_modelinfo_to_cache(model_info, module_hash)
+
+    with patch.object(
+        _LazyRegisteredModel, "inspect_model_cls", return_value=model_info
+    ):
+        registered_model.prepare_model_info()
+
+
+@pytest.mark.parametrize(
+    ("registration", "model_arch", "error"),
+    [
+        (None, "UnknownForCausalLM", "is not registered"),
+        (
+            _LazyRegisteredModel("plugin.models", "PluginModel"),
+            "PluginForCausalLM",
+            "is not a built-in model",
+        ),
+        (
+            _RegisteredModel(interfaces=None, model_cls=torch.nn.Module),
+            "Qwen3ForCausalLM",
+            "is not registered lazily",
+        ),
+        (
+            _LazyRegisteredModel("plugin.models", "PluginModel"),
+            "Qwen3ForCausalLM",
+            "does not use its built-in registration",
+        ),
+    ],
+)
+def test_prepare_model_info_rejects_unsupported_registration(
+    registration, model_arch, error
+):
+    models = {} if registration is None else {model_arch: registration}
+    registry = _ModelRegistry(models)
+
+    with pytest.raises(ValueError, match=error):
+        registry.prepare_model_info(model_arch)
 
 
 def test_hf_registry_coverage():

@@ -9,7 +9,7 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {chat,complete,serve,launch,bench,collect-env,run-batch}
+vllm {chat,complete,serve,launch,bench,collect-env,prepare-model-info,run-batch}
 ```
 
 ## serve
@@ -187,6 +187,20 @@ Start collecting environment information.
 ```bash
 vllm collect-env
 ```
+
+## prepare-model-info
+
+Prepares the model-info cache for one built-in architecture in the installed
+runtime environment. Run this while building a deployment image, with the same
+`VLLM_CACHE_ROOT` that the server will use:
+
+```bash
+vllm prepare-model-info Qwen3ForCausalLM
+```
+
+The command does not download model weights. It uses vLLM's normal subprocess
+inspection so the calling process does not retain CUDA state. Missing or stale
+entries use the same subprocess inspection and cache replacement at runtime.
 
 ## run-batch
 

@@ -909,6 +909,24 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         cls_name = f"{self.module_name}-{self.class_name}".replace(".", "-")
         return f"{cls_name}.json"
 
+    def _get_current_modelinfo_module_hash(self) -> str | None:
+        # Modules registered with a non-default location (e.g. the
+        # hardware-isolated ``vllm.models.<name>`` layout) live outside
+        # ``vllm/model_executor/models``. Resolve the module spec directly
+        # so the file-hash cache stays warm for them.
+        if self.module_name.startswith("vllm.model_executor.models."):
+            model_path = Path(__file__).parent / f"{self.module_name.split('.')[-1]}.py"
+        else:
+            try:
+                spec = importlib.util.find_spec(self.module_name)
+            except (ImportError, ValueError):
+                spec = None
+            model_path = Path(spec.origin) if spec is not None and spec.origin else None
+
+        if model_path is None or not model_path.exists():
+            return None
+        return self._get_modelinfo_module_hash(model_path)
+
     @staticmethod
     def _get_modelinfo_module_hash(model_path: Path) -> str:
         if model_path.name == "__init__.py":
@@ -979,23 +997,8 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
     @logtime(logger=logger, msg="Registry inspect model class")
     def inspect_model_cls(self) -> _ModelInfo:
-        # Modules registered with a non-default location (e.g. the
-        # hardware-isolated ``vllm.models.<name>`` layout) live outside
-        # ``vllm/model_executor/models``. Resolve the module spec directly
-        # so the file-hash cache stays warm for them.
-        if self.module_name.startswith("vllm.model_executor.models."):
-            model_path = Path(__file__).parent / f"{self.module_name.split('.')[-1]}.py"
-        else:
-            try:
-                spec = importlib.util.find_spec(self.module_name)
-            except (ImportError, ValueError):
-                spec = None
-            model_path = Path(spec.origin) if spec is not None and spec.origin else None
-        module_hash = None
-
-        if model_path is not None and model_path.exists():
-            module_hash = self._get_modelinfo_module_hash(model_path)
-
+        module_hash = self._get_current_modelinfo_module_hash()
+        if module_hash is not None:
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:
                 logger.debug(
@@ -1024,6 +1027,15 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             self._save_modelinfo_to_cache(mi, module_hash)
 
         return mi
+
+    def prepare_model_info(self) -> None:
+        self.inspect_model_cls()
+        module_hash = self._get_current_modelinfo_module_hash()
+        if module_hash is None or self._load_modelinfo_from_cache(module_hash) is None:
+            raise RuntimeError(
+                f"Model info cache for class {self.module_name}.{self.class_name} "
+                "was not persisted"
+            )
 
     def load_model_cls(self) -> type[nn.Module]:
         mod = importlib.import_module(self.module_name)
@@ -1064,6 +1076,34 @@ class _ModelRegistry:
 
     def get_supported_archs(self) -> Set[str]:
         return self.models.keys()
+
+    def prepare_model_info(self, model_arch: str) -> None:
+        """Populate the model-info cache for a built-in lazy registration."""
+        registered_model = self.models.get(model_arch)
+        if registered_model is None:
+            raise ValueError(f"Model architecture '{model_arch}' is not registered")
+
+        builtin_model = _VLLM_MODELS.get(model_arch)
+        if builtin_model is None:
+            raise ValueError(
+                f"Model architecture '{model_arch}' is not a built-in model"
+            )
+        if not isinstance(registered_model, _LazyRegisteredModel):
+            raise ValueError(
+                f"Model architecture '{model_arch}' is not registered lazily"
+            )
+
+        module_name, class_name = builtin_model
+        if (
+            registered_model.module_name != _resolve_module_name(module_name)
+            or registered_model.class_name != class_name
+        ):
+            raise ValueError(
+                f"Model architecture '{model_arch}' does not use its built-in "
+                "registration"
+            )
+
+        registered_model.prepare_model_info()
 
     def register_model(
         self,

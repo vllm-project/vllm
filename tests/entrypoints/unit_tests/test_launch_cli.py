@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the `vllm launch` CLI subcommand."""
+"""Unit tests for public vLLM CLI parser and dispatch paths."""
 
 import argparse
+import sys
 from unittest.mock import patch
 
 import pytest
 
+from vllm.entrypoints.cli import main as cli_main
 from vllm.entrypoints.cli.launch import (
     LaunchSubcommand,
     RenderSubcommand,
@@ -109,3 +111,17 @@ def test_launch_registered_in_main():
     assert hasattr(launch_module, "cmd_init")
     subcmds = launch_module.cmd_init()
     assert any(s.name == "launch" for s in subcmds)
+
+
+def test_prepare_model_info_registered_in_main(capsys):
+    with (
+        patch.object(sys, "argv", ["vllm", "prepare-model-info", "Qwen3ForCausalLM"]),
+        patch("vllm.entrypoints.cli.benchmark.main.maybe_exec_rust_bench"),
+        patch(
+            "vllm.model_executor.models.ModelRegistry.prepare_model_info"
+        ) as prepare_model_info,
+    ):
+        cli_main.main()
+
+    prepare_model_info.assert_called_once_with("Qwen3ForCausalLM")
+    assert capsys.readouterr().out == "prepared model info for Qwen3ForCausalLM\n"
