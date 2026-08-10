@@ -50,7 +50,6 @@ from vllm.transformers_utils.processors.internvl import (
     InternVLProcessor,
     InternVLVideoProcessor,
 )
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -479,7 +478,9 @@ class InternVLMultiModalProcessor(
                 "video", video_num_patches
             ),
             video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
-            video_token_id=MultiModalFieldConfig.shared("video", num_videos),
+            video_token_id=MultiModalFieldConfig.shared(
+                "video", num_videos, keep_on_cpu=True
+            ),
         )
 
     def _get_mm_fields_config(
@@ -735,8 +736,7 @@ class InternVLChatModel(
 
         video_token_id = kwargs["video_token_id"]
         if isinstance(video_token_id, torch.Tensor):
-            with gpu_sync_allowed():
-                video_token_id = video_token_id.flatten().unique().item()
+            video_token_id = video_token_id.flatten().unique().item()
 
         assert isinstance(video_token_id, int)
         self.video_context_token_id = video_token_id
