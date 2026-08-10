@@ -30,7 +30,7 @@ def _resolve(module: str, name: str):
             return obj
         except (ImportError, AttributeError):
             logger.warning(
-                "hw-agnostic layer %s is not available; falling back to vLLM", name
+                "hw-agnostic layer %s is not available; falling back to default", name
             )
     return getattr(importlib.import_module(f"{_VLLM_PKG}.{module}"), name)
 

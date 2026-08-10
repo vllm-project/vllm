@@ -23,7 +23,7 @@ from vllm.model_executor.models.transformers.fx_utils import (
     replace_expr,
     single_self_call,
 )
-from vllm.model_executor.models.transformers.layer_registry import get_act_and_mul_fn
+from vllm.model_executor.models.transformers.layers import get_act_and_mul_fn
 from vllm.model_executor.models.transformers.utils import (
     log_replacement,
     replace_linear_class,

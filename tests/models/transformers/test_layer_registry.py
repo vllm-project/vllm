@@ -15,7 +15,7 @@ import types
 
 import pytest
 
-from vllm.model_executor.models.transformers import layer_registry
+from vllm.model_executor.models.transformers import layers
 
 HW_MODULE = "vllm.model_executor.hw_agnostic.layers.layernorm"
 
@@ -34,14 +34,14 @@ def test_falls_back_to_vllm_when_disabled(monkeypatch, fake_hw_layernorm):
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "0")
     from vllm.model_executor.layers.layernorm import RMSNorm as VllmRMSNorm
 
-    assert layer_registry._resolve("layernorm", "RMSNorm") is VllmRMSNorm
+    assert layers._resolve("layernorm", "RMSNorm") is VllmRMSNorm
 
 
 def test_uses_hw_agnostic_when_enabled(monkeypatch, fake_hw_layernorm, caplog):
     """Enabled and available: the hw-agnostic class is used and logged."""
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
     with caplog.at_level(logging.INFO):
-        resolved = layer_registry._resolve("layernorm", "RMSNorm")
+        resolved = layers._resolve("layernorm", "RMSNorm")
     assert resolved is fake_hw_layernorm.RMSNorm
     assert "Using hw-agnostic layer: RMSNorm" in caplog.text
 
@@ -55,7 +55,7 @@ def test_falls_back_when_symbol_missing(monkeypatch, caplog):
     from vllm.model_executor.layers.layernorm import RMSNorm as VllmRMSNorm
 
     with caplog.at_level(logging.WARNING):
-        resolved = layer_registry._resolve("layernorm", "RMSNorm")
+        resolved = layers._resolve("layernorm", "RMSNorm")
     assert resolved is VllmRMSNorm
     assert "falling back to vLLM" in caplog.text
 
@@ -70,4 +70,4 @@ def test_act_and_mul_falls_back_for_unknown_activation(
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
     from vllm.model_executor.layers.activation import GeluAndMul
 
-    assert isinstance(layer_registry.get_act_and_mul_fn("gelu"), GeluAndMul)
+    assert isinstance(layers.get_act_and_mul_fn("gelu"), GeluAndMul)

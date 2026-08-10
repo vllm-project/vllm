@@ -23,7 +23,7 @@ from vllm.model_executor.models.transformers.fx_utils import (
     peel,
     trace,
 )
-from vllm.model_executor.models.transformers.layer_registry import (
+from vllm.model_executor.models.transformers.layers import (
     GemmaRMSNorm,
     RMSNorm,
 )
