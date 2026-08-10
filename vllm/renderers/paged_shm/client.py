@@ -23,6 +23,8 @@ import torch
 import zmq
 from torch._prims_common import DeviceLikeType
 
+from vllm.config import ModelConfig
+
 from .constant import (
     CLOSE_READ,
     CLOSE_WRITE,
@@ -94,14 +96,27 @@ class _WriteContext:
     and commits (close_write) or rolls back (delete) on exit.
     """
 
-    def __init__(self, client: "PagedShmClient", uuid: str, size: int, use_cache: bool):
+    def __init__(
+        self,
+        client: "PagedShmClient",
+        uuid: str,
+        size: int,
+        use_cache: bool,
+        blocks: list[int] | None = None,
+    ):
         self._client = client
         self._uuid = uuid
         self._size = size
         self._use_cache = use_cache
-        self.blocks: list[int] = []
+        if blocks is None:
+            self.blocks: list[int] = []
+        else:
+            self.blocks = blocks
 
     def __enter__(self) -> "_WriteContext":
+        if len(self.blocks) > 0:
+            return self
+
         item_spec = ShmItem(uuid=self._uuid, size=self._size, use_cache=self._use_cache)
         alloc = self._client.open_write([item_spec])
         self.blocks = alloc[0].blocks
@@ -136,13 +151,25 @@ class _ReadContext:
     Exposes ``size`` and ``blocks`` attributes for the duration of the block.
     """
 
-    def __init__(self, client: "PagedShmClient", uuid: str):
+    def __init__(
+        self,
+        client: "PagedShmClient",
+        uuid: str,
+        size: int | None = None,
+        blocks: list[int] | None = None,
+    ):
         self._client = client
         self._uuid = uuid
-        self.size: int = 0
-        self.blocks: list[int] = []
+        self.size: int = size if size is not None else 0
+        if blocks is None:
+            self.blocks: list[int] = []
+        else:
+            self.blocks = blocks
 
     def __enter__(self) -> "_ReadContext":
+        if len(self.blocks) > 0 and self.size > 0:
+            return self
+
         items = self._client.open_read(self._uuid)
         self.size = items.size
         self.blocks = items.blocks
@@ -196,12 +223,27 @@ class PagedShmClient(_BaseClient):
             pin=self._pin,
         )
 
+    @classmethod
+    def from_model_config(cls, model_config: ModelConfig | None, pin: bool = False):
+        if model_config is None:
+            return None
+
+        multimodal_config = model_config.multimodal_config
+        if multimodal_config is None:
+            return None
+
+        return cls(address=multimodal_config.paged_shm_server_address, pin=pin)
+
     # ------------------------------------------------------------------
     # Context manager factories
     # ------------------------------------------------------------------
 
     def write_context(
-        self, uuid: str, size: int, use_cache: bool = True
+        self,
+        uuid: str,
+        size: int,
+        use_cache: bool = True,
+        blocks: list[int] | None = None,
     ) -> _WriteContext:
         """
         Create a context manager for a write operation.
@@ -210,16 +252,18 @@ class PagedShmClient(_BaseClient):
         entry and either commits (``close_write``) on normal exit or
         rolls back (``delete``) if an exception occurs.
         """
-        return _WriteContext(self, uuid, size, use_cache)
+        return _WriteContext(self, uuid, size, use_cache, blocks)
 
-    def read_context(self, uuid: str) -> _ReadContext:
+    def read_context(
+        self, uuid: str, size: int | None = None, blocks: list[int] | None = None
+    ) -> _ReadContext:
         """
         Create a context manager for a read operation.
 
         The context manager acquires a read lock on the server upon entry
         and releases it on exit, exposing the data size and block list.
         """
-        return _ReadContext(self, uuid)
+        return _ReadContext(self, uuid, size, blocks)
 
     # ------------------------------------------------------------------
     # High‑level convenience methods
@@ -230,6 +274,7 @@ class PagedShmClient(_BaseClient):
         uuid: str,
         data: bytes | np.ndarray | torch.Tensor,
         use_cache: bool = True,
+        blocks: list[int] | None = None,
     ) -> int:
         """
         Write an item to the shared memory store.
@@ -248,12 +293,16 @@ class PagedShmClient(_BaseClient):
         else:
             raise TypeError(f"Unsupported data type: {type(data)}")
 
-        with self.write_context(uuid, size, use_cache) as ctx:
+        with self.write_context(uuid, size, use_cache, blocks) as ctx:
             self._storage.write(data, ctx.blocks)
         return size
 
     def read(
-        self, uuid: str, device: DeviceLikeType = "cpu"
+        self,
+        uuid: str,
+        size: int | None = None,
+        blocks: list[int] | None = None,
+        device: DeviceLikeType = "cpu",
     ) -> np.ndarray | torch.Tensor:
         """
         Read an item from the shared memory store.
@@ -262,7 +311,7 @@ class PagedShmClient(_BaseClient):
         if a GPU device is specified.  The read lock is held for the
         duration of the data copy.
         """
-        with self.read_context(uuid) as ctx:
+        with self.read_context(uuid, size, blocks) as ctx:
             if not ctx.blocks:
                 raise ValueError(f"Server returned empty block list for uuid '{uuid}'")
             if device == "cpu":
@@ -355,7 +404,7 @@ class PagedShmClient(_BaseClient):
         """Return only the shared memory name."""
         return self.get_storage_info()["name"]
 
-    async def get_info(self) -> str:
+    def get_info(self) -> str:
         """Return object info."""
         resp = self._request(GET_INFO)
         return json.loads(resp)

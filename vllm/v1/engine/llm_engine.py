@@ -102,6 +102,8 @@ class LLMEngine:
             tracing_enabled=tracing_endpoint is not None,
         )
 
+        self.paged_shm_server = maybe_start_paged_shm_server(self.model_config)
+
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
             multiprocess_mode=multiprocess_mode,
@@ -110,6 +112,7 @@ class LLMEngine:
             executor_class=executor_class,
             log_stats=self.log_stats,
         )
+        self.engine_core.resources.append(self.paged_shm_server)
 
         self.logger_manager: StatLoggerManager | None = None
         if self.log_stats:
@@ -132,10 +135,6 @@ class LLMEngine:
                 self._finalizer = weakref.finalize(
                     self, LLMEngine._cleanup_instance_caches, model
                 )
-
-        if isinstance(self.engine_core, MPClient):
-            self.paged_shm_server = maybe_start_paged_shm_server(self.model_config)
-            self.engine_core.resources.append(self.paged_shm_server)
 
         if self.external_launcher_dp:
             # If we use DP in external launcher mode, we reuse the

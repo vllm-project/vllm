@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from dataclasses import asdict
 from typing import Any
 
 import torch
@@ -16,7 +17,7 @@ from vllm.utils import random_uuid
 
 from .client import PagedShmClient
 from .client_async import AsyncPagedShmClient
-from .types import ShmItem
+from .types import ShmItem, ShmTensor
 
 
 def format_size(
@@ -45,6 +46,7 @@ def format_size(
 class PagedShmTensorIPC:
     def __init__(self, model_config: ModelConfig, pin: bool = False):
         self.is_paged_shm_enabled = False
+        self.model_config = model_config
         self.multimodal_config = model_config.multimodal_config
         if self.multimodal_config is None:
             return
@@ -62,15 +64,13 @@ class PagedShmTensorIPC:
         if not self.is_paged_shm_enabled:
             return
 
-        if self.multimodal_config is None:
-            return
-
-        self.client_async = AsyncPagedShmClient(
-            address=self.multimodal_config.paged_shm_server_address, pin=self.pin
+        self.client_async = AsyncPagedShmClient.from_model_config(
+            self.model_config, pin=self.pin
         )
+        assert self.client_async is not None
         self.client_sync = self.client_async.sync_client
 
-    def write(self, mm_inputs: MultiModalInput):
+    def write(self, mm_inputs: MultiModalInput) -> None:
         if not self.is_paged_shm_enabled:
             return None
 
@@ -86,18 +86,31 @@ class PagedShmTensorIPC:
 
         self._traversal(mm_inputs, _func)
 
+        items: list[ShmItem] = []
+        for elem in elements:
+            assert isinstance(elem.data, torch.Tensor)
+            item = ShmItem(uuid=random_uuid(), size=elem.data.nbytes, use_cache=False)
+            items.append(item)
+
         try:
-            alloc = self.client_sync.open_write(
-                [
-                    ShmItem(uuid=random_uuid(), size=elem.data.nbytes, use_cache=False)
-                    for elem in elements
-                ]
-            )
+            alloc = self.client_sync.open_write(items)
         except MemoryError:
             return None
 
-        for i, a in enumerate(alloc):
-            elements[i].shm_object = a
+        for elem, item in zip(elements, alloc):
+            elem.shm_object = ShmTensor(
+                dtype=str(elem.data.dtype).removeprefix("torch."),
+                shape=tuple(elem.data.shape),
+                **asdict(item),
+            )
+            self.client_sync.write(
+                uuid=item.uuid,
+                data=elem.data,
+                use_cache=item.use_cache,
+                blocks=item.blocks,
+            )
+            elem.data = None
+            self.client_sync.open_read(item.uuid)
         return None
 
     def _traversal(self, obj: Any, func: Callable[[MultiModalFieldElem], None]):

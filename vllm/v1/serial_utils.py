@@ -6,6 +6,7 @@ import importlib
 import pickle
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from functools import partial
 from inspect import isclass
 from types import FunctionType
@@ -33,6 +34,8 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
+from vllm.renderers.paged_shm.client import PagedShmClient
+from vllm.renderers.paged_shm.types import AllocatedShmItem, ShmTensor
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.utils import tensor_data
 
@@ -287,6 +290,7 @@ class MsgpackEncoder:
                 None if elem.data is None else self._encode_nested_tensors(elem.data)
             ),
             "field": self._encode_mm_field(elem.field),
+            "shm_object": None if elem.shm_object is None else asdict(elem.shm_object)
         }
 
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
@@ -325,6 +329,7 @@ class MsgpackDecoder:
         t: Any | None = None,
         share_mem: bool = True,
         oob_tensor_provider: OOBTensorProvider | None = None,
+        pshm_client: PagedShmClient | None = None,
     ):
         self.share_mem = share_mem
         self.pin_tensors = PIN_MEMORY
@@ -334,6 +339,7 @@ class MsgpackDecoder:
         )
         self.aux_buffers: Sequence[bytestr] = ()
         self.oob_tensor_provider = oob_tensor_provider
+        self.pshm_client = pshm_client
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
@@ -438,7 +444,14 @@ class MsgpackDecoder:
         )
 
     def _decode_mm_field_elem(self, obj: dict[str, Any]) -> MultiModalFieldElem:
-        if obj["data"] is not None:
+        shm_object_dict: ShmTensor | None = obj.get("shm_object", None)
+        if shm_object_dict is not None:
+            item = ShmTensor(**shm_object_dict)
+            assert self.pshm_client is not None
+            tensor = self.pshm_client.read(item.uuid, item.blocks, device="cuda:0")
+            torch_dtype = getattr(torch, item.dtype)
+            obj["data"] = tensor.view(torch_dtype).view(item.shape)
+        elif obj["data"] is not None:
             obj["data"] = self._decode_nested_tensors(obj["data"])
 
         # Reconstruct the field processor using MultiModalFieldConfig

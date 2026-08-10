@@ -22,6 +22,7 @@ from typing import Any
 import zmq
 import zmq.asyncio
 
+from vllm.config import ModelConfig
 from vllm.utils.async_utils import make_async
 
 from .client import PagedShmClient
@@ -120,13 +121,25 @@ class _AsyncReadContext:
     Holds a read lock while active and provides ``size`` and ``blocks``.
     """
 
-    def __init__(self, client: "AsyncPagedShmClient", uuid: str):
+    def __init__(
+        self,
+        client: "AsyncPagedShmClient",
+        uuid: str,
+        size: int | None = None,
+        blocks: list[int] | None = None,
+    ):
         self._client = client
         self._uuid = uuid
-        self.size: int = 0
-        self.blocks: list[int] = []
+        self.size: int = size if size is not None else 0
+        if blocks is None:
+            self.blocks: list[int] = []
+        else:
+            self.blocks = blocks
 
     async def __aenter__(self) -> "_AsyncReadContext":
+        if len(self.blocks) > 0 and self.size > 0:
+            return self
+
         items = await self._client.open_read(self._uuid)
         self.size = items.size
         self.blocks = items.blocks
@@ -181,6 +194,17 @@ class AsyncPagedShmClient(_AsyncBaseClient):
 
         self.write = make_async(self.sync_client.write, executor=self._executor)
         self.read = make_async(self.sync_client.read, executor=self._executor)
+
+    @classmethod
+    def from_model_config(cls, model_config: ModelConfig | None, pin: bool = False):
+        if model_config is None:
+            return None
+
+        multimodal_config = model_config.multimodal_config
+        if multimodal_config is None:
+            return None
+
+        return cls(address=multimodal_config.paged_shm_server_address, pin=pin)
 
     # ------------------------------------------------------------------
     # Context manager factories

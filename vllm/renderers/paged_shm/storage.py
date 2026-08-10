@@ -114,7 +114,8 @@ class PagedShmStorage:
         else:
             raise TypeError(f"Unsupported data type: {type(data)}")
 
-        size = len(data_np)
+        data_np = data_np.flatten()
+        size = data_np.shape[0]
         n_blocks = len(blocks)
         if size > n_blocks * self.block_size:
             raise ValueError("Data too large for provided blocks")

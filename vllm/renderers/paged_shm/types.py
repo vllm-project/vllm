@@ -17,6 +17,13 @@ class AllocatedShmItem(ShmItem):
 
 
 @dataclass
+class ShmTensor(ShmItem):
+    blocks: list[int]
+    dtype: str
+    shape: tuple[int, ...]
+
+
+@dataclass
 class AllocatedShmItemInternal(AllocatedShmItem):
     ref_count: int = 0
 
