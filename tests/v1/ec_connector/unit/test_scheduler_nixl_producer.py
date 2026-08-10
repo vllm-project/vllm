@@ -88,11 +88,31 @@ def test_request_finished_producer_emits_params(monkeypatch):
     s.shutdown()
 
 
-def test_request_finished_skips_not_ready_entry(monkeypatch):
+def test_request_finished_announces_not_ready_entry(monkeypatch):
+    """A save whose GPU->mmap copy hasn't been confirmed complete yet is
+    still announced: the entry can't be evicted before it's ready, so
+    pin_if_ready's own NACK_MISSING (not this method) is what protects a
+    consumer from reading it too early."""
     s = _sched_gate_off(monkeypatch)
     s._nixl_enabled = True
     s._peer_host, s._peer_port = "1.2.3.4", 5601
+    s._hidden_dim, s._element_size = 32, 2
     s._cache.alloc("h1", 2)  # allocated but not marked ready
+
+    delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))
+    assert delay is False
+    assert params == {
+        "h1": {"peer_host": "1.2.3.4", "peer_port": 5601, "size_bytes": 2 * 32 * 2}
+    }
+    s.shutdown()
+
+
+def test_request_finished_skips_unallocated_entry(monkeypatch):
+    s = _sched_gate_off(monkeypatch)
+    s._nixl_enabled = True
+    s._peer_host, s._peer_port = "1.2.3.4", 5601
+    s._hidden_dim, s._element_size = 32, 2
+    # No alloc() for "h1" at all — e.g. the cache was full at save time.
 
     delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))
     assert delay is False
