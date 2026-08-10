@@ -1208,9 +1208,15 @@ def _get_kv_cache_groups_uniform_page_size(
     # is the minimum number of layers among all attention types. Need a better
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in layer_buckets])
+    bucket_sizes = [len(layers) for layers in layer_buckets]
+    multi_layer_sizes = [s for s in bucket_sizes if s > 1]
+
+    # Singleton buckets can be introduced by speculative drafters such as DFlash.
+    # Do not let such outliers force the group size to 1, which can significantly
+    # increase the number of KV cache groups.
+    min_num_layers = min(multi_layer_sizes) if multi_layer_sizes else 1
     group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in layer_buckets])
+    max_num_layers = max(bucket_sizes)
     if max_num_layers < min_num_layers * 1.5:
         # If the number of layers is not much larger than the minimum number of
         # layers, use the maximum number of layers as the group size to avoid
