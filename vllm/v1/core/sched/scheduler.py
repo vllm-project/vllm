@@ -2751,6 +2751,51 @@ class Scheduler(SchedulerInterface):
             assert req_id in self.requests
             self._free_blocks(self.requests[req_id])
 
+    def _find_longest_valid_kv_prefix(
+        self,
+        block_ids_by_group: tuple[list[int], ...],
+        invalid_block_ids: set[int],
+        max_num_computed_tokens: int,
+    ) -> int:
+        """Find the longest group-consistent prefix after a KV load failure."""
+        coordinator = self.kv_cache_manager.coordinator
+        managers = coordinator.single_type_managers
+        assert len(block_ids_by_group) == len(managers)
+
+        alignment = coordinator.cache_hit_alignment_tokens
+        candidate = max_num_computed_tokens // alignment * alignment
+
+        missing_prefixes: list[list[int]] = []
+        for block_ids in block_ids_by_group:
+            missing_prefix = [0]
+            for block_id in block_ids:
+                is_missing = block_id <= 0 or block_id in invalid_block_ids
+                missing_prefix.append(missing_prefix[-1] + is_missing)
+            missing_prefixes.append(missing_prefix)
+
+        while candidate > 0:
+            for manager, block_ids, missing_prefix in zip(
+                managers,
+                block_ids_by_group,
+                missing_prefixes,
+                strict=True,
+            ):
+                block_size = manager.block_size
+                first_required = max(
+                    0,
+                    manager.get_num_skipped_tokens(candidate) // block_size,
+                )
+                end_required = (candidate + block_size - 1) // block_size
+                if end_required > len(block_ids) or (
+                    missing_prefix[end_required] != missing_prefix[first_required]
+                ):
+                    candidate -= alignment
+                    break
+            else:
+                return candidate
+
+        return 0
+
     def _update_requests_with_invalid_blocks(
         self,
         requests: Iterable[Request],
@@ -2790,67 +2835,67 @@ class Scheduler(SchedulerInterface):
         # it. This set tracks blocks already marked for recomputation.
         marked_invalid_block_ids: set[int] = set()
         for request in requests:
-            is_affected = False
-            marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            req_block_ids_by_group = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
                 request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
             )
 
-            req_num_computed_blocks = (
-                req_num_computed_tokens + self.block_size - 1
-            ) // self.block_size
-            for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
-                if block_id not in invalid_block_ids:
-                    continue
-
-                is_affected = True
-
-                if block_id in marked_invalid_block_ids:
-                    # This invalid block is shared with a previous request
-                    # and was already marked for recomputation.
-                    # This means this request can still consider this block
-                    # as computed when rescheduled.
-                    # Currently this only applies to sync loading; Async
-                    # loading does not yet support block sharing
-                    continue
-
-                marked_invalid_block_ids.add(block_id)
-
-                if marked_invalid_block:
-                    # This request has already marked an invalid block for
-                    # recomputation and updated its num_computed_tokens.
-                    continue
-
-                marked_invalid_block = True
-                # Truncate the computed tokens at the first failed block
-                request.num_computed_tokens = idx * self.block_size
-                num_affected_tokens = (
-                    req_num_computed_tokens - request.num_computed_tokens
+            request_invalid_block_ids: set[int] = set()
+            managers = self.kv_cache_manager.coordinator.single_type_managers
+            for manager, block_ids in zip(
+                managers, req_block_ids_by_group, strict=True
+            ):
+                num_computed_blocks = (
+                    req_num_computed_tokens + manager.block_size - 1
+                ) // manager.block_size
+                request_invalid_block_ids.update(
+                    block_id
+                    for block_id in block_ids[:num_computed_blocks]
+                    if block_id in invalid_block_ids
                 )
-                total_affected_tokens += num_affected_tokens
 
-                # collect invalid block and all downstream dependent blocks
+            if not request_invalid_block_ids:
+                continue
+
+            owned_invalid_block_ids = (
+                request_invalid_block_ids - marked_invalid_block_ids
+            )
+            marked_invalid_block_ids.update(request_invalid_block_ids)
+
+            if not owned_invalid_block_ids:
+                # All invalid blocks of this request are shared with previous
+                # requests and will be recomputed by them.
+                total_affected_tokens += (
+                    request.num_computed_tokens - req_num_computed_tokens
+                )
+                request.num_computed_tokens = req_num_computed_tokens
+            else:
+                rewind_num_computed_tokens = self._find_longest_valid_kv_prefix(
+                    req_block_ids_by_group,
+                    owned_invalid_block_ids,
+                    req_num_computed_tokens,
+                )
+                request.num_computed_tokens = rewind_num_computed_tokens
+                total_affected_tokens += (
+                    req_num_computed_tokens - rewind_num_computed_tokens
+                )
+
                 if evict_blocks:
-                    blocks_to_evict.update(req_block_ids[idx:])
+                    blocks_to_evict.update(request_invalid_block_ids)
+                    for manager, block_ids in zip(
+                        managers, req_block_ids_by_group, strict=True
+                    ):
+                        first_block = rewind_num_computed_tokens // manager.block_size
+                        blocks_to_evict.update(
+                            block_id
+                            for block_id in block_ids[first_block:]
+                            if block_id > 0
+                        )
 
-            if is_affected:
-                if not marked_invalid_block:
-                    # All invalid blocks of this request are shared with
-                    # previous requests and will be recomputed by them.
-                    # Revert to considering only cached tokens as computed.
-                    # Currently this only applies to sync loading; Async
-                    # loading does not yet support block sharing
-                    total_affected_tokens += (
-                        request.num_computed_tokens - req_num_computed_tokens
-                    )
-                    request.num_computed_tokens = req_num_computed_tokens
-
-                affected_req_ids.add(request.request_id)
+            affected_req_ids.add(request.request_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 

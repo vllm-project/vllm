@@ -56,6 +56,112 @@ def recompute_scheduler():
     return create_scheduler(vllm_config)
 
 
+def _make_recovery_scheduler(
+    block_ids_by_group: tuple[list[int], ...],
+    group_block_sizes: tuple[int, ...],
+    get_num_skipped_tokens: tuple[Callable[[int], int], ...],
+    alignment: int = 16,
+) -> Scheduler:
+    scheduler = object.__new__(Scheduler)
+    scheduler.kv_cache_manager = Mock()
+    scheduler.kv_cache_manager.get_block_ids.return_value = block_ids_by_group
+
+    coordinator = Mock()
+    coordinator.cache_hit_alignment_tokens = alignment
+    managers = []
+    for block_size, get_skipped in zip(
+        group_block_sizes, get_num_skipped_tokens, strict=True
+    ):
+        manager = Mock()
+        manager.block_size = block_size
+        manager.get_num_skipped_tokens.side_effect = get_skipped
+        managers.append(manager)
+    coordinator.single_type_managers = tuple(managers)
+    scheduler.kv_cache_manager.coordinator = coordinator
+    return scheduler
+
+
+def _make_recovery_request(num_computed_tokens: int) -> Mock:
+    request = Mock()
+    request.request_id = "req-0"
+    request.num_computed_tokens = num_computed_tokens
+    return request
+
+
+def test_hybrid_recovery_uses_actual_failure_and_common_alignment():
+    scheduler = _make_recovery_scheduler(
+        block_ids_by_group=([1, 2], [10, 11, 12, 13]),
+        group_block_sizes=(16, 8),
+        get_num_skipped_tokens=(lambda _: 0, lambda _: 0),
+    )
+    request = _make_recovery_request(32)
+
+    affected, tokens, blocks = scheduler._update_requests_with_invalid_blocks(
+        [request], {13}, {}, evict_blocks=True
+    )
+
+    assert affected == {"req-0"}
+    assert request.num_computed_tokens == 16
+    assert tokens == 16
+    assert blocks == {2, 12, 13}
+
+
+def test_hybrid_recovery_rechecks_shifted_sliding_window():
+    window_size = 32
+    scheduler = _make_recovery_scheduler(
+        block_ids_by_group=([1, 2, 3, 4], [0, 0, 10, 11]),
+        group_block_sizes=(16, 16),
+        get_num_skipped_tokens=(
+            lambda _: 0,
+            lambda num_tokens: max(0, num_tokens - window_size + 1),
+        ),
+    )
+    request = _make_recovery_request(64)
+
+    affected, tokens, _ = scheduler._update_requests_with_invalid_blocks(
+        [request], {11}, {}, evict_blocks=False
+    )
+
+    assert affected == {"req-0"}
+    assert request.num_computed_tokens == 0
+    assert tokens == 64
+
+
+def test_hybrid_recovery_finds_previous_mamba_state():
+    scheduler = _make_recovery_scheduler(
+        block_ids_by_group=([1, 2, 3, 4], [0, 0, 20, 21]),
+        group_block_sizes=(16, 16),
+        get_num_skipped_tokens=(lambda _: 0, lambda num_tokens: num_tokens - 1),
+    )
+    request = _make_recovery_request(64)
+
+    affected, tokens, _ = scheduler._update_requests_with_invalid_blocks(
+        [request], {21}, {}, evict_blocks=False
+    )
+
+    assert affected == {"req-0"}
+    assert request.num_computed_tokens == 48
+    assert tokens == 16
+
+
+def test_load_failure_recovery_does_not_apply_eagle_drop_again():
+    scheduler = _make_recovery_scheduler(
+        block_ids_by_group=([1, 2, 3],),
+        group_block_sizes=(16,),
+        get_num_skipped_tokens=(lambda _: 0,),
+    )
+    scheduler.kv_cache_manager.coordinator.single_type_managers[0].use_eagle = True
+    request = _make_recovery_request(48)
+
+    affected, tokens, _ = scheduler._update_requests_with_invalid_blocks(
+        [request], {2}, {}, evict_blocks=False
+    )
+
+    assert affected == {"req-0"}
+    assert request.num_computed_tokens == 16
+    assert tokens == 32
+
+
 def test_sync_recompute_blocks_not_freed_for_running_requests(
     recompute_scheduler: Scheduler,
 ):

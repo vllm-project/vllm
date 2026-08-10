@@ -127,6 +127,10 @@ class KVCacheCoordinator(ABC):
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
 
+    @property
+    def cache_hit_alignment_tokens(self) -> int:
+        return self.scheduler_block_size
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -589,7 +593,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.verify_and_split_kv_cache_groups()
 
     @property
-    def _cache_hit_alignment_tokens(self) -> int:
+    def cache_hit_alignment_tokens(self) -> int:
         # Fine-grained partial hits may return hash-block-aligned lengths;
         # otherwise it must stay scheduler-block-aligned.
         return (
@@ -770,7 +774,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
-                    alignment_tokens=self._cache_hit_alignment_tokens,
+                    alignment_tokens=self.cache_hit_alignment_tokens,
                     dcp_world_size=(
                         self.dcp_world_size
                         if isinstance(spec, FullAttentionSpec)
@@ -839,7 +843,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 block_pool=self.block_pool,
                 kv_cache_spec=spec,
                 drop_eagle_block=use_eagle,
-                alignment_tokens=self._cache_hit_alignment_tokens,
+                alignment_tokens=self.cache_hit_alignment_tokens,
             )
             for gid, blks in zip(group_ids, blocks):
                 hit_blocks[gid] = blks
