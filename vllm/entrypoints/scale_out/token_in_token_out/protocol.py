@@ -108,6 +108,12 @@ class GenerateRequest(BaseModel):
     """Raw multimodal input; server resolves media. Mutually exclusive
     with ``features``."""
 
+    @model_validator(mode="after")
+    def _check_mm_fields_exclusive(self) -> "GenerateRequest":
+        if self.content_parts and self.features:
+            raise ValueError("content_parts and features are mutually exclusive")
+        return self
+
     sampling_params: SamplingParams
     """The sampling parameters for the model."""
 
