@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
@@ -29,8 +30,6 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.async_utils import make_async
 from vllm.utils.jsontree import json_iter_leaves
-
-from vllm.config import VllmConfig
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
