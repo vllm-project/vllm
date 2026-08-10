@@ -429,8 +429,24 @@ class TransferTopology:
         # Non-MLA backends caches have 5 dims [num_blocks, 2, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
         # Hybrid SSM models assume a single blocks_first layout
-        self._is_kv_layout_blocks_first = self.is_mamba or (
-            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+        #
+        # NOTE: CPUAttentionBackend ("CPU_ATTN") is a special case: its
+        # get_kv_cache_shape() returns a 4-dim shape
+        # (num_blocks, num_kv_heads, block_size, 2 * head_size) — blocks
+        # first, but with K/V concatenated into the last axis instead of a
+        # separate leading axis of size 2. The 5-dim check above therefore
+        # misses it and (falsely) treats it as not-blocks-first, which
+        # sends it down the split_k_and_v path in get_transfer_cache_regions
+        # and causes register_kv_caches() to iterate over the num_blocks
+        # dimension as if it were a 2-element K/V list, raising
+        # "All kv cache tensors must have the same number of blocks"
+        # (cache_shape=(num_kv_heads, block_size, 2*head_size) mistaken for
+        # a per-region tensor). Detect it explicitly instead of relying on
+        # shape length.
+        self._is_kv_layout_blocks_first = (
+            self.is_mamba
+            or (len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1)
+            or attn_backend.get_name() == "CPU_ATTN"
         )
 
         self._cross_layers_blocks = False

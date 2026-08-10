@@ -140,8 +140,12 @@ source .venv/bin/activate
 ```
 
 ```
+git clone villum
+cd villum
+
 uv pip install -r requirements/build/cpu.txt --torch-backend cpu --index-strategy unsafe-best-match
 uv pip install -r requirements/cpu.txt --torch-backend cpu --index-strategy unsafe-best-match
+uv pip install nixl==1.3.0
 ```
 
 ```
@@ -156,8 +160,8 @@ Before use vLLM CPU installed via wheels, make sure TCMalloc and Intel OpenMP ar
 sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
 
 # manually find the path
-sudo find / -iname *libtcmalloc_minimal.so.4
-sudo find / -iname *libiomp5.so
+sudo find / -iname '*libtcmalloc_minimal.so.4' 2>/dev/null
+sudo find / -iname '*libiomp5.so' 2>/dev/null
 TC_PATH=...
 IOMP_PATH=...
 
