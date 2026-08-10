@@ -1245,12 +1245,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _merge_ec_connector_no_forward(
         self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
     ) -> ModelRunnerOutput:
-        """Merge the EC connector's send/recv bookkeeping into `output` for a
+        """Merge the EC connector's output into `output` for a
         step with no work to run.
 
         A no-op unless this rank runs the EC connector: the connector is the
-        no-op one unless an encoder cache exists, which is only built on the
-        first PP rank of a multimodal model.
+        no-op one unless an encoder cache exists.
         """
         return ModelRunnerOutput.attach_ec_conn_output(
             output,
@@ -1383,7 +1382,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         inputs_embeds = None
         ec_connector_output = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
-            assert self.encoder_cache is not None
             # Run MM encoder (if needed) and get multimodal embeddings.
             # Only first PP rank prepares multimodal embeddings.
             if dummy_run:

@@ -6,17 +6,11 @@ from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
 
 
 class ECOutputAggregator:
-    """Merge the EC connector output of all workers into the one output that
-    reaches the scheduler.
+    """Merge every worker's EC connector output into the one ModelRunnerOutput
+    that reaches the scheduler.
 
-    Mirrors KVOutputAggregator's role for KV connectors: only one worker's
-    ModelRunnerOutput (`output_rank`, e.g. the last pipeline-parallel rank)
-    reaches the scheduler, while the EC connector runs on the first pipeline
-    rank, where the multimodal encoder lives.
-
-    Finished sending/recving ids are unioned, so a connector that reports an
-    id from more than one worker must tolerate the scheduler acting on the
-    first report.
+    Mirrors KVOutputAggregator: only `output_rank`'s output is returned to the
+    scheduler, but the EC connector may have run on other ranks.
     """
 
     def aggregate(
