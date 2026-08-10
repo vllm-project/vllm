@@ -430,6 +430,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 max_num_reqs,
                 max_prefill_qlen,
                 vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.model_config.dtype,
                 device,
             )
 
@@ -447,6 +448,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         max_num_reqs: int,
         max_prefill_qlen: int,
         max_num_batched_tokens: int,
+        attn_out_dtype: torch.dtype,
         device: torch.device,
     ) -> None:
         """Pre-allocate persistent buffers for FP8 MLA prefill PS metadata.
@@ -469,6 +471,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 is bounded by this budget rather than by a single request's
                 ``max_prefill_qlen`` — concurrent requests can sum to more than
                 ``max_model_len`` when ``max_model_len < max_num_batched_tokens``.
+            attn_out_dtype: Dtype of the attention output buffer, used to size
+                the padded-head output scratch (small head counts only).
             device: Target device for the buffers.
         """
         from aiter import get_ps_metadata_info_v1
@@ -523,7 +527,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         from vllm.v1.worker.workspace import current_workspace_manager
 
         max_num_partial_tiles = reduce_partial_map_size
-        current_workspace_manager().get_simultaneous(
+        reservations: list[tuple[tuple[int, ...], torch.dtype]] = [
             (
                 (max_num_partial_tiles * _FP8_PREFILL_TILE_Q, num_head_k, v_head_dim),
                 torch.float32,
@@ -533,7 +537,15 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 torch.float32,
             ),
             ((max_num_batched_tokens, num_head_k), torch.float32),
-        )
+        ]
+        if self.num_heads < num_head_k:
+            # Padded head counts also take their kernel output buffer from the
+            # workspace: the caller's [total_q, num_heads * v_head_dim] output
+            # cannot back a num_head_k-head view (see _mla_fp8_prefill_attn).
+            reservations.append(
+                ((max_num_batched_tokens, num_head_k, v_head_dim), attn_out_dtype)
+            )
+        current_workspace_manager().get_simultaneous(*reservations)
 
         logger.info(
             "FP8 MLA prefill PS buffers allocated "
@@ -1132,25 +1144,25 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         num_partial_tiles = attn_metadata.fp8_prefill_num_partial_tiles
         assert num_partial_tiles is not None
 
-        # Reuse the caller's output buffer to skip the per-call alloc + copy.
-        # The ASM and reduce kernels both write to a [total_q, nhead, v_head_dim]
-        # view, which aliases the [total_q, nhead * v_head_dim] storage of out.
-        if _pad16:
-            # Padded heads can't alias the real-head `out` storage; use scratch.
-            out_3d = torch.empty(
-                total_q, nhead, v_head_dim, dtype=out.dtype, device=out.device
-            )
-        else:
-            out_3d = out.view(total_q, nhead, v_head_dim)
-
-        # Per-call scratch (logits, attn_lse, final_lse) is served from the
-        # workspace manager so allocator churn in the prefill hot path is
-        # bounded after warmup, matching the pattern in PR #41002.
-        logits, attn_lse, final_lse = current_workspace_manager().get_simultaneous(
+        # Per-call scratch is served from the workspace manager so allocator
+        # churn in the prefill hot path is bounded after warmup, matching the
+        # pattern in PR #41002.  The builder reserves the maximum shape of every
+        # tensor requested here before the workspace is locked.
+        scratch: list[tuple[tuple[int, ...], torch.dtype]] = [
             ((num_partial_tiles * tile_q, nhead, v_head_dim), torch.float32),
             ((num_partial_tiles * tile_q, nhead), torch.float32),
             ((total_q, nhead), torch.float32),
-        )
+        ]
+        if _pad16:
+            # The ASM and reduce kernels write a [total_q, nhead, v_head_dim]
+            # buffer.  With unpadded heads that aliases the caller's
+            # [total_q, nhead * v_head_dim] output, so write straight into it;
+            # padded heads do not fit that storage and need their own buffer.
+            scratch.append(((total_q, nhead, v_head_dim), out.dtype))
+
+        workspace = current_workspace_manager()
+        logits, attn_lse, final_lse, *pad_out = workspace.get_simultaneous(*scratch)
+        out_3d = pad_out[0] if _pad16 else out.view(total_q, nhead, v_head_dim)
 
         # Phase 1: persistent-scheduling assembly prefill kernel.
         self._mla_prefill_ps_asm_fwd(
