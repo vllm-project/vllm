@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """EAGLE3 speculative decoding under pipeline parallelism."""
 
+import shutil
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -9,6 +12,9 @@ from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.v1.metrics.reader import Metric
+
+MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+DRAFT = "nm-testing/Llama3_2_1B_speculator.eagle3"
 
 PROMPTS = [
     "The capital of France is",
@@ -63,16 +69,57 @@ def _run(pp_size: int, model: str, draft: str, cudagraph_mode: str | None) -> fl
         cleanup_dist_env_and_memory()
 
 
+@pytest.fixture(scope="module")
+def draft_without_embed_tokens(tmp_path_factory) -> str:
+    """``DRAFT`` with its input embedding stripped out.
+
+    Most EAGLE3 checkpoints ship no ``embed_tokens`` and alias the target's --
+    yuhuili/EAGLE3-LLaMA3.1-Instruct-8B, which test_eagle_correctness.py runs, is
+    one. ``DRAFT`` carries its own, so on its own it never exercises that path.
+    Removing the key reproduces the shared-embedding class at 1B.
+    """
+    from huggingface_hub import snapshot_download
+    from safetensors.torch import load_file, save_file
+
+    src = Path(
+        snapshot_download(DRAFT, allow_patterns=["*.json", "*.py", "*.safetensors"])
+    )
+    dst = tmp_path_factory.mktemp("eagle3_shared_embed")
+    for path in src.iterdir():
+        if path.is_file() and path.suffix in (".json", ".py"):
+            shutil.copy(path, dst / path.name)
+
+    tensors = load_file(src / "model.safetensors")
+    stripped = [name for name in tensors if "embed_tokens" in name]
+    assert stripped, f"{DRAFT} has no embed_tokens to strip"
+    for name in stripped:
+        del tensors[name]
+    save_file(tensors, str(dst / "model.safetensors"), metadata={"format": "pt"})
+    return str(dst)
+
+
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize(
-    "model,draft",
-    [
-        (
-            "meta-llama/Llama-3.2-1B-Instruct",
-            "nm-testing/Llama3_2_1B_speculator.eagle3",
-        ),
-    ],
-)
+def test_eagle3_pipeline_parallel_shared_embedding(draft_without_embed_tokens: str):
+    """A drafter with no embedding of its own must still get the target's.
+
+    Sharing is what supplies it, and under PP the target's embedding lives on the
+    first stage while the drafter runs on the last. Get this wrong and the
+    embedding is never written at all: the load is skipped for a key the
+    checkpoint lacks, and the drafter proposes from uninitialized memory, which
+    costs acceptance without failing.
+    """
+    baseline = _run(1, MODEL, draft_without_embed_tokens, "FULL_AND_PIECEWISE")
+    parallel = _run(2, MODEL, draft_without_embed_tokens, "FULL_AND_PIECEWISE")
+
+    assert parallel >= baseline * ACCEPTANCE_TOLERANCE, (
+        f"acceptance length regressed under PP=2 for a drafter sharing the "
+        f"target's embedding: {parallel:.3f} < {baseline:.3f} * "
+        f"{ACCEPTANCE_TOLERANCE}"
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model,draft", [(MODEL, DRAFT)])
 @pytest.mark.parametrize("cudagraph_mode", [None, "FULL_AND_PIECEWISE"])
 def test_eagle3_pipeline_parallel_acceptance(
     model: str,
@@ -102,15 +149,7 @@ def test_eagle3_pipeline_parallel_acceptance(
 
 
 @multi_gpu_test(num_gpus=4)
-@pytest.mark.parametrize(
-    "model,draft",
-    [
-        (
-            "meta-llama/Llama-3.2-1B-Instruct",
-            "nm-testing/Llama3_2_1B_speculator.eagle3",
-        ),
-    ],
-)
+@pytest.mark.parametrize("model,draft", [(MODEL, DRAFT)])
 def test_eagle3_pipeline_parallel_far_stage_acceptance(model: str, draft: str):
     """Cover the stages that do not hand off to the rank consuming their taps.
 

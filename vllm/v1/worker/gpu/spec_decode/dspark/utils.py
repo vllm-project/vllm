@@ -5,10 +5,10 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,
     get_target_lm_head,
+    maybe_share_target_embed,
 )
 
 
@@ -54,20 +54,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     target_inner = target_language_model.model
     draft_inner = draft_model.model
 
-    target_embed = getattr(target_inner, "embed_tokens", None)
-    draft_embed = getattr(draft_inner, "embed_tokens", None)
-    if isinstance(target_embed, PPMissingLayer):
-        raise RuntimeError(
-            f"{type(target_inner).__name__} has no embed_tokens on the last "
-            "PP rank; instantiate it when spec_decode_needs_target_embed() is true "
-            "so the DSpark drafter can share it."
-        )
-    if target_embed is not None and _should_share(
-        draft_model, "has_own_embed_tokens", draft_embed, target_embed
-    ):
-        if draft_embed is not None:
-            del draft_inner.embed_tokens
-        draft_inner.embed_tokens = target_embed
+    maybe_share_target_embed(draft_model, draft_inner, target_inner)
 
     target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(draft_model, "lm_head", None)

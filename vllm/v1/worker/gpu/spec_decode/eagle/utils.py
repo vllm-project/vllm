@@ -7,6 +7,7 @@ from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.utils import PPMissingLayer
 
 
 def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
@@ -31,6 +32,58 @@ def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module
     return getattr(target_language_model, "lm_head", None) or getattr(
         target_model, "lm_head", None
     )
+
+
+def maybe_share_target_embed(
+    draft_model: nn.Module, draft_inner: nn.Module, target_inner: nn.Module
+) -> None:
+    """Alias the target's input embedding into the drafter when it needs one.
+
+    Under PP the drafter runs on the last stage, where the target's embedding
+    exists only because spec_decode_needs_target_embed() asked for it.
+    """
+    target_embed = getattr(target_inner, "embed_tokens", None) or getattr(
+        target_inner, "embedding", None
+    )
+    if isinstance(target_embed, PPMissingLayer):
+        target_embed = None
+    # If the target's embedding is LoRA-wrapped, share the underlying base
+    # layer. The draft is not part of the LoRA adapter; sharing the wrapper
+    # would make the draft run the LoRA embedding kernel with the target's
+    # punica metadata (sized for the target's token count), causing an
+    # out-of-bounds GPU access during multi-step draft decode.
+    if isinstance(target_embed, BaseLayerWithLoRA):
+        target_embed = target_embed.base_layer
+    draft_embed = getattr(draft_inner, "embed_tokens", None)
+
+    if get_pp_group().world_size > 1 and not hasattr(
+        draft_model, "has_own_embed_tokens"
+    ):
+        # MTP-style drafts load an embedding from the target checkpoint, and the
+        # flag that would tell a loaded one from a missing one is EAGLE-only.
+        return
+
+    if target_embed is None:
+        # hasattr, not draft_embed is not None: DSpark drafts declare
+        # embed_tokens as None and wait for the alias, and they are the ones
+        # that cannot run without it.
+        if hasattr(draft_inner, "embed_tokens") and not getattr(
+            draft_model, "has_own_embed_tokens", False
+        ):
+            raise RuntimeError(
+                f"{type(draft_model).__name__} ships no input embedding of its "
+                "own and the target's is absent on this pipeline stage, "
+                "leaving the drafter nothing to embed its proposals with. "
+                "spec_decode_needs_target_embed() must be true for "
+                f"{type(target_inner).__name__} so the last stage instantiates "
+                "the target's embed_tokens."
+            )
+        return
+
+    if _should_share(draft_model, "has_own_embed_tokens", draft_embed, target_embed):
+        if draft_embed is not None:
+            del draft_inner.embed_tokens
+        draft_inner.embed_tokens = target_embed
 
 
 def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
@@ -60,25 +113,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     target_inner = target_language_model.model
     draft_inner = eagle_model.model
 
-    # Skip embedding sharing under PP — each rank owns its own embedding.
-    if get_pp_group().world_size == 1:
-        target_embed = getattr(target_inner, "embed_tokens", None) or getattr(
-            target_inner, "embedding", None
-        )
-        # If the target's embedding is LoRA-wrapped, share the underlying base
-        # layer. The draft is not part of the LoRA adapter; sharing the wrapper
-        # would make the draft run the LoRA embedding kernel with the target's
-        # punica metadata (sized for the target's token count), causing an
-        # out-of-bounds GPU access during multi-step draft decode.
-        if isinstance(target_embed, BaseLayerWithLoRA):
-            target_embed = target_embed.base_layer
-        draft_embed = getattr(draft_inner, "embed_tokens", None)
-        if target_embed is not None and _should_share(
-            eagle_model, "has_own_embed_tokens", draft_embed, target_embed
-        ):
-            if draft_embed is not None:
-                del draft_inner.embed_tokens
-            draft_inner.embed_tokens = target_embed
+    maybe_share_target_embed(eagle_model, draft_inner, target_inner)
 
     target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(eagle_model, "lm_head", None)
