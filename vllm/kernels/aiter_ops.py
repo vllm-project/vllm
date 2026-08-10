@@ -75,7 +75,6 @@ def _rms_norm_fake(x: Tensor, weight: Tensor, variance_epsilon: float) -> Tensor
 direct_register_aiter_op(
     op_name="rms_norm", op_func=_rms_norm_impl, fake_impl=_rms_norm_fake
 )
-
 rms_add_no_var_16bit_only = (
     lambda x, x_residual, weight, epsilon, variance_size=None: variance_size is None
     and x.dtype in (torch.float16, torch.bfloat16)
@@ -112,6 +111,12 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter import rmsnorm2d_fwd_with_add
 
+    x_shape = x.shape
+    residual_shape = residual.shape
+    hidden_size = x.shape[-1]
+    x = x.reshape(-1, hidden_size)
+    residual = residual.reshape(-1, hidden_size)
+
     # TODO can out = x and residual_out = residual to save memory?
     #  Need to check if the kernel supports in-place residual output
     #  (if yes set mutates_args and inplace)
@@ -125,7 +130,7 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
         weight,
         variance_epsilon,
     )
-    return out, residual_out
+    return out.reshape(x_shape), residual_out.reshape(residual_shape)
 
 
 def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(

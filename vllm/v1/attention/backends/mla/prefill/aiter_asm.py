@@ -360,27 +360,32 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         ps["kv_indices"] = self._get_kv_indices_buf(device, total_q)
         self._new_tokens_ps = ps
 
-        # 2. Prep buffers for each context chunk (non-causal).
+        # 2. Prep buffers for each context chunk (non-causal). Each chunk packs a
+        # run of prefill requests (possibly splitting one across chunks) and
+        # carries its own request-local query and context offsets; the query
+        # tensor is sliced to the chunk's tokens by the caller.
         self._context_ps = []
         cc = prefill_metadata.chunked_context
         if cc is not None:
-            for chunk_idx in range(len(cc.seq_tot)):
-                kv_indptr = cc.cu_seq_lens[chunk_idx]
-                kv_indptr_cpu = cc.cu_seq_lens_cpu[chunk_idx].to(torch.int32)
+            for chunk in cc.chunks:
+                chunk_qo_indptr = chunk.query_start_loc
+                chunk_qo_indptr_cpu = chunk.query_start_loc_cpu.to(torch.int32)
+                kv_indptr = chunk.cu_seq_lens
+                kv_indptr_cpu = chunk.cu_seq_lens_cpu.to(torch.int32)
                 k_seq_lens_cpu = (kv_indptr_cpu[1:] - kv_indptr_cpu[:-1]).to(
                     torch.int32
                 )
                 total_k = int(kv_indptr_cpu[-1].item())
                 chunk_ps = self._build_ps_metadata_for_chunk(
-                    qo_indptr_cpu=qo_indptr_cpu,
+                    qo_indptr_cpu=chunk_qo_indptr_cpu,
                     kv_indptr_cpu=kv_indptr_cpu,
                     seq_lens_cpu=k_seq_lens_cpu,
                     is_causal=False,
                     device=device,
-                    max_qlen=max_query_len,
-                    max_kvlen=cc.max_seq_lens[chunk_idx],
+                    max_qlen=chunk.max_query_len,
+                    max_kvlen=chunk.max_seq_len,
                 )
-                chunk_ps["qo_indptr"] = qo_indptr
+                chunk_ps["qo_indptr"] = chunk_qo_indptr
                 chunk_ps["kv_indptr"] = kv_indptr
                 chunk_ps["kv_indices"] = self._get_kv_indices_buf(device, total_k)
                 self._context_ps.append(chunk_ps)
@@ -487,14 +492,14 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert 0 <= chunk_idx < len(self._context_ps), (
-            f"context chunk {chunk_idx} requested but prepare_metadata built "
+        assert 0 <= chunk.index < len(self._context_ps), (
+            f"context chunk {chunk.index} requested but prepare_metadata built "
             f"{len(self._context_ps)} chunk(s). Call prepare_metadata first."
         )
-        ps = self._context_ps[chunk_idx]
+        ps = self._context_ps[chunk.index]
         return self._run_kernel(q, k, v, ps, is_causal=False)
