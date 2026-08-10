@@ -25,7 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.core.kv_cache_utils import BlockHash, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
@@ -63,6 +63,7 @@ class MooncakeStoreScheduler:
         # Skips lookup CPU cost on instances that never load KV from the store.
         self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
         self.client = LookupKeyClient(vllm_config)
+        self.use_eagle_prefix_cache_hashing = False
 
         # Align with the engine's own scheduler_block_size and hash_block_size.
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
@@ -77,6 +78,36 @@ class MooncakeStoreScheduler:
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
+        # The final successor hash is known after this step's connector metadata
+        # is built, so carry its save metadata into the next scheduler step.
+        self._pending_finished_saves: dict[str, ReqMeta] = {}
+
+    def _publishable_hashes(self, request: Request) -> list[BlockHash]:
+        if self.use_eagle_prefix_cache_hashing:
+            return request.block_hashes[: request.num_publishable_block_hashes]
+        return request.block_hashes
+
+    def _request_hashes_for_meta(
+        self,
+        request: Request,
+        load_spec: LoadSpec | None,
+    ) -> list[BlockHash]:
+        if load_spec is not None and load_spec.can_load:
+            return request.block_hashes
+        return self._publishable_hashes(request)
+
+    def _max_save_tokens(
+        self,
+        request: Request,
+        load_spec: LoadSpec | None = None,
+    ) -> int | None:
+        if (
+            not self.use_eagle_prefix_cache_hashing
+            or load_spec is not None
+            and load_spec.can_load
+        ):
+            return None
+        return request.num_publishable_block_hashes * self._hash_block_size
 
     def get_num_new_matched_tokens(
         self,
@@ -173,6 +204,11 @@ class MooncakeStoreScheduler:
     ) -> KVConnectorMetadata:
         """Build connector metadata for this scheduler step."""
         force_skip_save = self.kv_role == "kv_consumer"
+        finished_save_metas = [
+            req_meta
+            for req_id in scheduler_output.finished_req_ids
+            if (req_meta := self._pending_finished_saves.pop(req_id, None)) is not None
+        ]
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self.client.discard(finished_req_id)
@@ -183,6 +219,7 @@ class MooncakeStoreScheduler:
 
         preempted_ids = scheduler_output.preempted_req_ids or set()
         for req_id in preempted_ids:
+            self._pending_finished_saves.pop(req_id, None)
             self.load_specs.pop(req_id, None)
             if request_tracker := self._request_trackers.get(req_id):
                 request_tracker.reset()
@@ -192,6 +229,8 @@ class MooncakeStoreScheduler:
             self._unfinished_request_ids,
             preempted_ids,
         )
+        for req_meta in finished_save_metas:
+            meta.add_request(req_meta)
 
         # Handle new requests
         for request in scheduler_output.scheduled_new_reqs:
@@ -231,8 +270,9 @@ class MooncakeStoreScheduler:
                 self._block_size,
                 load_spec=load_spec,
                 skip_save=force_skip_save,
-                block_hashes=request_real.block_hashes,
+                block_hashes=self._request_hashes_for_meta(request_real, load_spec),
                 is_last_chunk=(request_tracker.token_len >= last_chunk_tokens_num),
+                max_save_tokens=self._max_save_tokens(request_real, load_spec),
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -241,8 +281,13 @@ class MooncakeStoreScheduler:
         cached_reqs = scheduler_output.scheduled_cached_reqs
         if not force_skip_save:
             for i, req_id in enumerate(cached_reqs.req_ids):
+                req_tuple = self._unfinished_requests.get(req_id)
+                if req_tuple is None:
+                    raise ValueError(f"Request {req_id} is not in _unfinished_requests")
                 new_block_ids = cached_reqs.new_block_ids[i]
-                if not new_block_ids:
+                if new_block_ids is None:
+                    new_block_ids = tuple([] for _ in req_tuple[1])
+                if not new_block_ids and not self.use_eagle_prefix_cache_hashing:
                     continue
 
                 req_meta = None
@@ -253,8 +298,7 @@ class MooncakeStoreScheduler:
                     else:
                         new_block_ids = (new_block_ids.copy(),)
                     load_spec = self.load_specs.pop(req_id, None)
-                    request_tuple = self._unfinished_requests.get(req_id)
-                    request_real = request_tuple[0]  # type: ignore[index]
+                    request_real = req_tuple[0]
                     num_tokens_to_compute = (
                         request_real.num_computed_tokens
                         + scheduler_output.num_scheduled_tokens[req_id]
@@ -280,27 +324,27 @@ class MooncakeStoreScheduler:
                         self._block_size,
                         load_spec=load_spec,
                         skip_save=force_skip_save,
-                        block_hashes=request_real.block_hashes,
+                        block_hashes=self._request_hashes_for_meta(
+                            request_real, load_spec
+                        ),
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
+                        ),
+                        max_save_tokens=self._max_save_tokens(
+                            request_real,
+                            load_spec,
                         ),
                     )
                 else:
                     # Decode/chunked request
                     request_tracker = self._request_trackers[req_id]
                     num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-                    req_tuple = self._unfinished_requests.get(req_id)
-                    if req_tuple:
-                        unfinished_req = req_tuple[0]
-                        num_current_tokens = request_tracker.token_len
-                        new_token_ids = unfinished_req.all_token_ids[
-                            num_current_tokens : num_current_tokens + num_new_tokens
-                        ]
-                        request_tracker.token_len += len(new_token_ids)
-                    else:
-                        raise ValueError(
-                            f"Request {req_id} is not in _unfinished_requests"
-                        )
+                    unfinished_req = req_tuple[0]
+                    num_current_tokens = request_tracker.token_len
+                    new_token_ids = unfinished_req.all_token_ids[
+                        num_current_tokens : num_current_tokens + num_new_tokens
+                    ]
+                    request_tracker.token_len += len(new_token_ids)
                     num_computed_token = cached_reqs.num_computed_tokens[i]
                     # Use the tracker's snapshot of the prefill range so resumed
                     # requests keep saving past the original prompt boundary.
@@ -317,10 +361,11 @@ class MooncakeStoreScheduler:
                         self._block_size,
                         load_spec=None,
                         skip_save=force_skip_save,
-                        block_hashes=unfinished_req.block_hashes,
+                        block_hashes=self._publishable_hashes(unfinished_req),
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
                         ),
+                        max_save_tokens=self._max_save_tokens(unfinished_req),
                     )
 
                 if req_meta is not None:
@@ -349,7 +394,10 @@ class MooncakeStoreScheduler:
                     self._block_size,
                     load_spec=load_spec,
                     skip_save=None,
-                    block_hashes=unfinished_req.block_hashes,
+                    block_hashes=self._request_hashes_for_meta(
+                        unfinished_req, load_spec
+                    ),
+                    max_save_tokens=None,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -385,7 +433,7 @@ class MooncakeStoreScheduler:
                         req_id=req_id,
                         token_len_chunk=0,
                         block_ids=tracker.allocated_block_ids,
-                        block_hashes=req_tuple[0].block_hashes,
+                        block_hashes=self._publishable_hashes(req_tuple[0]),
                         can_save=True,
                         num_prompt_tokens=tracker.prefill_end_tokens,
                         partial_tail_offloads=groups,
@@ -406,9 +454,26 @@ class MooncakeStoreScheduler:
         # Missing tracker can happen when the request is aborted before the
         # connector observes the normal finished lifecycle or is preempted
         # before finishing.
-        if tracker is None or (
-            tracker.num_saved_tokens <= 0 and not tracker.has_pending_offload
-        ):
+        if tracker is None:
+            return False, None
+
+        if self.use_eagle_prefix_cache_hashing:
+            tracker.token_len = min(
+                request.num_tokens,
+                request.num_publishable_block_hashes * self._hash_block_size,
+            )
+            tracker.allocated_block_ids = tuple(group.copy() for group in block_ids)
+            req_meta = ReqMeta.from_request_tracker(
+                tracker,
+                self._block_size,
+                block_hashes=self._publishable_hashes(request),
+                is_last_chunk=True,
+                max_save_tokens=self._max_save_tokens(request),
+            )
+            if req_meta is not None:
+                self._pending_finished_saves[request.request_id] = req_meta
+
+        if tracker.num_saved_tokens <= 0 and not tracker.has_pending_offload:
             return False, None
         total_blocks = sum(len(g) for g in block_ids)
         delay_free_blocks = total_blocks > 0

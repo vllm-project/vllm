@@ -492,6 +492,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_group_semantics: bool = False,
         supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
+        use_eagle_prefix_cache_hashing: bool = False,
     ):
         super().__init__(
             store,
@@ -506,6 +507,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
+        self.use_eagle_prefix_cache_hashing = use_eagle_prefix_cache_hashing
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.enable_kv_event = enable_kv_event
         # Caller always passes a non-None ReplicateConfig — see
@@ -781,6 +783,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 token_len,
                 save_start,
                 num_prompt_tokens=req_meta.num_prompt_tokens,
+                apply_eagle_drop=not self.use_eagle_prefix_cache_hashing,
             )
 
             starts: list[int] = []
@@ -1242,6 +1245,7 @@ class MooncakeStoreWorker:
             )
         )
         self.cache_config = vllm_config.cache_config
+        self.use_eagle_prefix_cache_hashing = False
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
@@ -1590,6 +1594,7 @@ class MooncakeStoreWorker:
                 enable_group_semantics=self.enable_group_semantics,
                 supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
+                use_eagle_prefix_cache_hashing=self.use_eagle_prefix_cache_hashing,
             )
             self.kv_send_thread.start()
 
@@ -1757,7 +1762,11 @@ class MooncakeStoreWorker:
 
         return finished_sending
 
-    def lookup(self, num_tokens: int, block_hashes: Sequence[BlockHash]) -> int:
+    def lookup(
+        self,
+        num_tokens: int,
+        block_hashes: Sequence[BlockHash],
+    ) -> int:
         """Check how many prefix tokens exist in the store.
 
         Checks across all rank-specific key namespaces that may be loaded. A
@@ -1771,12 +1780,18 @@ class MooncakeStoreWorker:
         if not block_hashes or token_len <= 0:
             return 0
 
+        apply_eagle_drop = not self.use_eagle_prefix_cache_hashing
+
         # Build per-(group, hash) candidate keys expanded across rank namespaces.
         # candidate_meta stores the (group, hash_bytes) for key slice.
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
         fine_grained = self.coord.enable_partial_hash_hits
-        lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
+        lookup_masks = (
+            None
+            if fine_grained
+            else self.coord.lookup_mask(token_len, apply_eagle_drop=apply_eagle_drop)
+        )
         for g_idx, db in enumerate(self.token_dbs):
             spec_block_size = db.block_size
             key_prefixes = self._lookup_key_prefixes[g_idx]
@@ -1850,6 +1865,7 @@ class MooncakeStoreWorker:
             block_hashes,
             token_len,
             cached_block_pool,
+            apply_eagle_drop=apply_eagle_drop,
         )
         if hit_length >= num_tokens:
             usable_length = self.coord.align_lookup_length(num_tokens - 1)
@@ -1859,6 +1875,7 @@ class MooncakeStoreWorker:
                 block_hashes,
                 usable_length,
                 cached_block_pool,
+                apply_eagle_drop=apply_eagle_drop,
             )
         return hit_length
 
@@ -1992,7 +2009,11 @@ class LookupKeyClient:
         )
         self.futures: dict[str, Future[int]] = {}
 
-    def _lookup(self, num_tokens: int, block_hashes: list[BlockHash]) -> int:
+    def _lookup(
+        self,
+        num_tokens: int,
+        block_hashes: list[BlockHash],
+    ) -> int:
         hash_len = len(block_hashes[0]) if block_hashes else 0
         all_frames = (
             LOOKUP_MSG,

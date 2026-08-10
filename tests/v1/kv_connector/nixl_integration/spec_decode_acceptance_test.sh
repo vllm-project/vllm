@@ -325,6 +325,7 @@ run_test_for_device() {
 
   # Run test
   echo "Running spec decode acceptance test (kv_buffer_device=${kv_device}, backend=${ATTENTION_BACKEND})..."
+  PREFILL_PORT=${PREFILL_PORTS[0]} \
   DECODE_PORT=${DECODE_PORTS[0]} \
   SERVER_HOST=$SERVER_HOST \
   TEST_MODEL=$MODEL_NAME \

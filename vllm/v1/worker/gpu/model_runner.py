@@ -1586,6 +1586,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            draft_kv_materialized_req_ids=(
+                set(input_batch.req_ids)
+                if self.speculator is not None
+                and self.speculative_config is not None
+                and self.speculative_config.use_eagle()
+                else None
+            ),
         )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(

@@ -101,7 +101,12 @@ class SupportsHMA(ABC):
 
         NOTE(Kuntai): This function is only supported by connectors that support HMA.
 
-        The connector may assumes responsibility for freeing the blocks
+        ``block_ids`` contains every resident block covering the request's
+        computed prefix, including a partial physical tail. Content-addressed
+        connectors must apply ``request.num_publishable_block_hashes`` before
+        storing blocks by hash.
+
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:
@@ -191,6 +196,14 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
+    def supports_eagle_prefix_cache_hashing(self) -> bool:
+        """Whether this engine can use successor-aware EAGLE cache keys.
+
+        Engines sharing a content-addressed cache must make the same choice.
+        """
+        return False
+
+    @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
 
@@ -220,6 +233,11 @@ class KVConnectorBase_V1(ABC):
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._kv_cache_config = kv_cache_config
         self._role = role
+        self.use_eagle_prefix_cache_hashing = False
+
+    def set_eagle_prefix_cache_hashing(self, enabled: bool) -> None:
+        """Configure the engine-wide prefix-cache hash protocol."""
+        self.use_eagle_prefix_cache_hashing = enabled
 
     @property
     def role(self) -> KVConnectorRole:
@@ -574,7 +592,12 @@ class KVConnectorBase_V1(ABC):
         Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the blocks
+        ``block_ids`` contains every resident block covering the request's
+        computed prefix, including a partial physical tail. Content-addressed
+        connectors must apply ``request.num_publishable_block_hashes`` before
+        storing blocks by hash.
+
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:

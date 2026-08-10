@@ -63,8 +63,12 @@ class AsyncScheduler(Scheduler):
             assert request.num_output_placeholders >= 0
 
         # Cache the new tokens. Preempted requests should be skipped.
-        if status_before_update == RequestStatus.RUNNING:
+        if (
+            status_before_update == RequestStatus.RUNNING
+            and not self.use_eagle_prefix_cache_hashing
+        ):
             self.kv_cache_manager.cache_blocks(
-                request, request.num_computed_tokens - request.num_output_placeholders
+                request,
+                request.num_computed_tokens - request.num_output_placeholders,
             )
         return new_token_ids, stopped

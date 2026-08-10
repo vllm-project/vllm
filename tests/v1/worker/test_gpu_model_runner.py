@@ -9,6 +9,7 @@ import pytest
 import torch
 
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
+import vllm.v1.worker.kv_connector_model_runner_mixin as kv_connector_mixin_module
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -19,6 +20,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.reasoning import ReasoningConfig
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -56,11 +58,64 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.kv_connector_model_runner_mixin import (
+    KVConnectorModelRunnerMixin,
+)
 from vllm.v1.worker.utils import select_common_block_size
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_deferred_kv_connector_finalizes_after_drafter(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+    connector = Mock(spec=KVConnectorBase)
+    connector.bind_connector_metadata.side_effect = lambda _: events.append("bind")
+    connector.start_load_kv.side_effect = lambda _: events.append("start")
+    connector.wait_for_save.side_effect = lambda: events.append("wait")
+
+    def get_finished(_):
+        events.append("finish")
+        return set(), set()
+
+    connector.get_finished.side_effect = get_finished
+    connector.clear_connector_metadata.side_effect = lambda: events.append("clear")
+    monkeypatch.setattr(
+        kv_connector_mixin_module, "has_kv_transfer_group", lambda: True
+    )
+    monkeypatch.setattr(
+        kv_connector_mixin_module,
+        "get_kv_transfer_group",
+        lambda: connector,
+    )
+    monkeypatch.setattr(kv_connector_mixin_module, "get_forward_context", object)
+    scheduler_output = SimpleNamespace(
+        kv_connector_metadata=object(),
+        finished_req_ids=set(),
+    )
+
+    with KVConnectorModelRunnerMixin.maybe_get_kv_connector_output(
+        scheduler_output,
+        defer_finalize=True,
+    ) as output:
+        events.append("target")
+
+    assert events == ["bind", "start", "target"]
+    events.append("draft")
+    KVConnectorModelRunnerMixin.finalize_kv_connector(scheduler_output, output)
+
+    assert events == [
+        "bind",
+        "start",
+        "target",
+        "draft",
+        "wait",
+        "finish",
+        "clear",
+    ]
 
 
 def initialize_kv_cache(runner: GPUModelRunner):

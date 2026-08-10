@@ -27,7 +27,11 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_utils import (
+    get_request_block_hasher,
+    get_request_eagle_block_hasher,
+    init_none_hash,
+)
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
@@ -51,6 +55,13 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
+
+
+def _enable_eagle_prefix_hashing(scheduler: Scheduler) -> None:
+    scheduler.use_eagle_prefix_cache_hashing = True
+    manager = scheduler.kv_cache_manager
+    manager.coordinator.use_eagle_prefix_cache_hashing = True
+    manager.block_pool.use_eagle_prefix_cache_hashing = True
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
@@ -198,6 +209,162 @@ def test_scheduler_stats_route_to_existing_output_client():
     assert 0 not in engine_core_outputs
     assert engine_core_outputs[1].scheduler_stats is not None
     assert len(engine_core_outputs[1].outputs) == 1
+
+
+def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
+    block_size = 2
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_num_batched_tokens=16,
+    )
+    _enable_eagle_prefix_hashing(scheduler)
+    coordinator = scheduler.kv_cache_manager.coordinator
+    coordinator.eagle_group_ids = {0}
+    coordinator.single_type_managers[0].use_eagle = True
+
+    request = Request(
+        request_id="first",
+        prompt_token_ids=[0, 1, 2, 3, 4],
+        sampling_params=SamplingParams(max_tokens=2),
+        pooling_params=None,
+        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+
+    before_ack = Request(
+        request_id="before_ack",
+        prompt_token_ids=[0, 1, 2, 3, 4],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+    )
+    _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(before_ack)
+    assert num_tokens == 0
+
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[5]],
+            draft_kv_materialized_req_ids={request.request_id},
+        ),
+    )
+
+    after_ack = Request(
+        request_id="after_ack",
+        prompt_token_ids=[0, 1, 2, 3, 4],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+    )
+    _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(after_ack)
+    assert num_tokens == 2 * block_size
+
+    (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    scheduler._update_requests_with_invalid_blocks(
+        [request], {block_ids[0]}, {}, evict_blocks=False
+    )
+    assert request.num_publishable_block_hashes == 0
+
+    request.mark_eagle_hashes_publishable(4, block_size)
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, timestamp=0.0)
+    assert request.num_publishable_block_hashes == 0
+
+
+def test_scheduler_does_not_publish_eagle_blocks_without_worker_acknowledgement():
+    block_size = 2
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_num_batched_tokens=16,
+    )
+    _enable_eagle_prefix_hashing(scheduler)
+    request = Request(
+        request_id="request",
+        prompt_token_ids=[0, 1, 2, 3, 4],
+        sampling_params=SamplingParams(max_tokens=3),
+        pooling_params=None,
+        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+    )
+    scheduler.add_request(request)
+
+    first_step = scheduler.schedule()
+    scheduler.update_from_output(
+        first_step,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[5]],
+        ),
+    )
+    assert request.num_publishable_block_hashes == 0
+
+    second_step = scheduler.schedule()
+    assert second_step.scheduled_cached_reqs is not None
+    scheduler.update_from_output(
+        second_step,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[6]],
+        ),
+    )
+
+    assert request.num_publishable_block_hashes == 0
+
+
+def test_connector_finish_includes_partial_eagle_block(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    block_size = 16
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_num_batched_tokens=64,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    _enable_eagle_prefix_hashing(scheduler)
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(33)),
+        sampling_params=SamplingParams(max_tokens=2),
+        pooling_params=None,
+        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[33]],
+            draft_kv_materialized_req_ids={request.request_id},
+        ),
+    )
+    assert request.num_computed_tokens == 33
+    assert request.num_publishable_block_hashes == 2
+
+    captured_block_ids = None
+
+    def request_finished(_request, block_ids):
+        nonlocal captured_block_ids
+        captured_block_ids = block_ids
+        return False, None
+
+    assert scheduler.connector is not None
+    monkeypatch.setattr(scheduler.connector, "request_finished", request_finished)
+    scheduler._connector_finished(request)
+
+    assert captured_block_ids is not None
+    assert len(captured_block_ids) == 3
 
 
 def test_schedule_multimodal_requests():
@@ -3259,6 +3426,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.enable_return_routed_experts = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
+    scheduler.use_eagle_prefix_cache_hashing = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 

@@ -14,6 +14,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     supports_hma,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
+    is_eagle_prefix_cache_hashing_enabled,
+)
 from vllm.logger import init_logger
 from vllm.utils.func_utils import supports_kw
 
@@ -72,7 +75,11 @@ class KVConnectorFactory:
         # - Co-locate with worker process
         # - Should only be used inside the forward context & attention layer
         # We build separately to enforce strict separation
-        return connector_cls(config, role, kv_cache_config)
+        connector = connector_cls(config, role, kv_cache_config)
+        connector.set_eagle_prefix_cache_hashing(
+            is_eagle_prefix_cache_hashing_enabled(config, connector)
+        )
+        return connector
 
     @classmethod
     def get_connector_class_by_name(

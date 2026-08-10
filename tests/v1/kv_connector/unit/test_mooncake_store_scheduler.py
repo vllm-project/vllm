@@ -18,8 +18,10 @@ def _make_bare_scheduler(
 ) -> MooncakeStoreScheduler:
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = "kv_both"
+    scheduler.use_eagle_prefix_cache_hashing = False
     scheduler.lookup_async = False
     scheduler.enable_lookup = True
+    scheduler.client = SimpleNamespace(discard=lambda req_id: None)
     scheduler._block_size = 16
     scheduler._hash_block_size = hash_block_size
     scheduler.enable_partial_hash_hits = enable_partial_hash_hits
@@ -27,6 +29,7 @@ def _make_bare_scheduler(
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
+    scheduler._pending_finished_saves = {}
     return scheduler
 
 
@@ -477,6 +480,34 @@ def test_from_request_tracker_no_load_saves_normally():
     assert tracker.num_saved_tokens == 48
 
 
+def test_from_request_tracker_waits_for_materialized_eagle_kv():
+    tracker = RequestTracker(
+        req_id="req-0",
+        token_len=48,
+        allocated_block_ids=([0, 1, 2],),
+        num_saved_tokens=0,
+    )
+
+    pending = ReqMeta.from_request_tracker(
+        tracker,
+        block_size=16,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        max_save_tokens=0,
+    )
+    assert pending is None
+    assert tracker.num_saved_tokens == 0
+
+    ready = ReqMeta.from_request_tracker(
+        tracker,
+        block_size=16,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        max_save_tokens=48,
+    )
+    assert ready is not None
+    assert ready.can_save is True
+    assert tracker.num_saved_tokens == 48
+
+
 class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens
@@ -791,3 +822,89 @@ def test_resumed_partial_tail_attached_to_save_keeps_handoff_boundary():
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 48
     assert tracker.has_pending_offload is True
+
+
+def test_eagle_materialized_prefix_is_retried_without_new_blocks():
+    scheduler = _make_bare_scheduler()
+    scheduler.use_eagle_prefix_cache_hashing = True
+    token_ids = list(range(32))
+    request = SimpleNamespace(
+        all_token_ids=token_ids,
+        block_hashes=[b"eagle-0"],
+        num_publishable_block_hashes=1,
+        num_output_placeholders=0,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([0, 1],))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=16,
+        allocated_block_ids=([0, 1],),
+        num_saved_tokens=0,
+        token_ids=token_ids[:16],
+        prefill_end_tokens=32,
+    )
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-0"],
+            new_block_ids=[[]],
+            num_computed_tokens=[16],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={"req-0": 1},
+        scheduled_spec_decode_tokens={},
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert len(meta.requests) == 1
+    assert meta.requests[0].block_hashes == [b"eagle-0"]
+    assert meta.requests[0].token_len_chunk == 16
+    assert scheduler._request_trackers["req-0"].num_saved_tokens == 16
+
+
+def test_eagle_finished_request_flushes_materialized_prefix():
+    scheduler = _make_bare_scheduler()
+    scheduler.use_eagle_prefix_cache_hashing = True
+    token_ids = list(range(32))
+    request = SimpleNamespace(
+        request_id="req-0",
+        all_token_ids=token_ids,
+        block_hashes=[b"eagle-0"],
+        num_tokens=32,
+        num_publishable_block_hashes=1,
+    )
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=32,
+        allocated_block_ids=([0, 1],),
+        num_saved_tokens=0,
+        token_ids=token_ids,
+        prefill_end_tokens=32,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([0, 1],))
+    scheduler._unfinished_request_ids.add("req-0")
+
+    delay_free, _ = scheduler.request_finished(request, ([0, 1],))
+
+    assert delay_free is True
+    out = SimpleNamespace(
+        finished_req_ids={"req-0"},
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
+    )
+    meta = scheduler.build_connector_meta(out)
+
+    assert len(meta.requests) == 1
+    assert meta.requests[0].block_hashes == [b"eagle-0"]
+    assert meta.requests[0].token_len_chunk == 16
