@@ -45,7 +45,9 @@ def build_cache_manifest(
     cache = vllm_config.cache_config
     scheduler = vllm_config.scheduler_config
     compilation = vllm_config.compilation_config
-    capability = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+    capability = (
+        torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+    )
     device_name = torch.cuda.get_device_name() if torch.cuda.is_available() else None
 
     return {
@@ -111,7 +113,9 @@ class PersistentCompileCache:
 
     def __init__(self, key: str, rank: int, dp_rank: int, prefix: str) -> None:
         safe_prefix = hashlib.sha256(prefix.encode()).hexdigest()[:16]
-        self.uri = f"{_BUCKET}/v{_SCHEMA}/{key}/rank_{rank}_{dp_rank}/{safe_prefix}.tar.gz"
+        self.uri = (
+            f"{_BUCKET}/v{_SCHEMA}/{key}/rank_{rank}_{dp_rank}/{safe_prefix}.tar.gz"
+        )
 
     @staticmethod
     def _aws(*args: str) -> subprocess.CompletedProcess[bytes]:
@@ -136,7 +140,10 @@ class PersistentCompileCache:
             archive = os.path.join(tmp, "cache.tar.gz")
             result = self._aws("cp", self.uri, archive, "--only-show-errors")
             if result.returncode != 0:
-                logger.info("Persistent compile cache miss for key %s", self.uri.split("/")[-3])
+                logger.info(
+                    "Persistent compile cache miss for key %s",
+                    self.uri.split("/")[-3],
+                )
                 return False
             try:
                 with tarfile.open(archive, "r:gz") as tar:
@@ -147,9 +154,13 @@ class PersistentCompileCache:
                             raise ValueError("cache archive contains an unsafe path")
                         if member.issym() or member.islnk():
                             raise ValueError("cache archive contains a link")
-                    tar.extractall(destination, filter="data")
+                        if not (member.isfile() or member.isdir()):
+                            raise ValueError("cache archive contains a special file")
+                    tar.extractall(destination)
             except (OSError, tarfile.TarError, ValueError):
-                logger.warning("Ignoring invalid persistent compile cache artifact", exc_info=True)
+                logger.warning(
+                    "Ignoring invalid persistent compile cache artifact", exc_info=True
+                )
                 return False
         logger.info("Persistent compile cache hit; restored compiled artifacts")
         return True
