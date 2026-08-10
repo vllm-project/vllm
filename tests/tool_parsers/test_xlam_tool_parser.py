@@ -545,6 +545,7 @@ def test_extract_tool_calls_streaming_incremental(
         "json_code_block_with_surrounding_content",
         "tool_calls_tag_with_leading_content",
         "single_tool_non_ascii",
+        "empty_args_then_second_tool",
     ],
     argnames=["model_output"],
     argvalues=[
@@ -573,6 +574,9 @@ def test_extract_tool_calls_streaming_incremental(
             """I'll check the weather for you.[TOOL_CALLS][{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]""",  # noqa: E501
         ),
         ("""[{"name": "get_current_weather", "arguments": {"city": "北京"}}]""",),
+        (
+            """[{"name": "enable_dark_mode", "arguments": {}}, {"name": "set_brightness", "arguments": {"level": 7}}]""",  # noqa: E501
+        ),
     ],
 )
 def test_streaming_matches_nonstreaming(xlam_tool_parser, xlam_tokenizer, model_output):
@@ -582,12 +586,16 @@ def test_streaming_matches_nonstreaming(xlam_tool_parser, xlam_tokenizer, model_
     leaking into streamed content, and the serving layer's end-of-stream
     flush (get_remaining_unstreamed_args) re-appending the full argument
     string because the parser did not maintain streamed_args_for_tool.
+    Reconstruction applies the same conditional flush the serving layer
+    does in finalize_generation: remaining unstreamed arguments are
+    appended only when the final delta carries tool calls.
     """
     request = ChatCompletionRequest(model=MODEL, messages=[])
 
     content = ""
     names: dict[int, str] = {}
     args: dict[int, str] = {}
+    final_delta = None
     for delta in stream_delta_message_generator(
         xlam_tool_parser, xlam_tokenizer, model_output, request
     ):
@@ -600,10 +608,12 @@ def test_streaming_matches_nonstreaming(xlam_tool_parser, xlam_tokenizer, model_
                 args[tool_call.index] = (
                     args.get(tool_call.index, "") + tool_call.function.arguments
                 )
+        final_delta = delta
 
-    # Nothing may be left over for the serving layer to flush, otherwise
-    # finalize_generation appends the full argument string a second time.
-    assert xlam_tool_parser.get_remaining_unstreamed_args() == ""
+    tail = xlam_tool_parser.get_remaining_unstreamed_args()
+    if tail and final_delta is not None and final_delta.tool_calls:
+        last_index = max(args) if args else final_delta.tool_calls[-1].index
+        args[last_index] = args.get(last_index, "") + tail
 
     reference = xLAMToolParser(xlam_tokenizer).extract_tool_calls(
         model_output, request=request
@@ -613,6 +623,8 @@ def test_streaming_matches_nonstreaming(xlam_tool_parser, xlam_tokenizer, model_
         tool_call.function.name for tool_call in reference.tool_calls
     ]
     for i, tool_call in enumerate(reference.tool_calls):
+        # json.loads also fails if the old duplication bug re-appends the
+        # full argument string, e.g. {"city": "X"}{"city": "X"}.
         assert json.loads(args[i]) == json.loads(tool_call.function.arguments)
 
 
