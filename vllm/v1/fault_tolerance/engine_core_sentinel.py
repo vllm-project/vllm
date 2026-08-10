@@ -56,15 +56,16 @@ class EngineCoreSentinel:
         self._dead_dp_ranks: set[int] = set()
         # Guards against concurrent recovery: auto-recovery runs on the
         # busy-loop thread, external commands on the input-sockets thread.
-        self._recovering = False
+        self._recovery_lock = threading.Lock()
 
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
         """Dispatch an FT command by instruction name."""
         ft_request = FaultToleranceRequest(**ft_args)
         reject_reason: str | None = None
+        acquired = False
         if self.status_type != EngineStatusType.UNHEALTHY:
             reject_reason = f"status is {self.status_type.name}"
-        elif self._recovering:
+        elif not (acquired := self._recovery_lock.acquire(blocking=False)):
             reject_reason = "recovery already in progress"
         if reject_reason is not None:
             reason = (
@@ -78,7 +79,6 @@ class EngineCoreSentinel:
                 reason=reason,
             )
         else:
-            self._recovering = True
             try:
                 result = run_method(self, ft_request.instruction, (ft_request,), {})
             except Exception as e:
@@ -87,7 +87,8 @@ class EngineCoreSentinel:
                     request_id=ft_request.request_id, success=False, reason=str(e)
                 )
             finally:
-                self._recovering = False
+                if acquired:
+                    self._recovery_lock.release()
 
         uo = UtilityOutput(call_id)
         uo.result = UtilityResult(msgspec.structs.asdict(result))
@@ -121,13 +122,14 @@ class EngineCoreSentinel:
             self.status_type.name,
             exc_info=exc,
         )
-        self._push_status()
 
-        if self.auto_recovery and self.status_type == EngineStatusType.UNHEALTHY:
-            try:
-                self.auto_recover()
-            except Exception:
-                logger.exception("[FT] Auto-recovery failed")
+        with self._recovery_lock:
+            self._push_status()
+            if self.auto_recovery and self.status_type == EngineStatusType.UNHEALTHY:
+                try:
+                    self.auto_recover()
+                except Exception:
+                    logger.exception("[FT] Auto-recovery failed")
 
     def _push_status(self):
         """Push current health to the client so it can refresh its cache."""
@@ -201,42 +203,35 @@ class EngineCoreSentinel:
 
     def auto_recover(self):
         """Auto-recover based on the cluster-wide all2all mask."""
-        if self._recovering:
-            logger.info("[FT] Auto-recovery skipped: recovery already in progress")
-            return
-        self._recovering = True
-        try:
-            mask = self._exchange_masks(self._query_mask())
-            if mask is None:
-                logger.warning(
-                    "[FT] Auto-recovery aborted: mask exchange failed; "
-                    "waiting for external command"
-                )
-                return
-
-            dead_dp_ranks = self._dead_dp_ranks_from_mask(mask) | self._dead_dp_ranks
-            if not dead_dp_ranks - self._dead_dp_ranks:
-                logger.info("[FT] Auto-recovery: no newly dead ranks, retrying")
-                ft_request = FaultToleranceRequest(instruction="retry", params={})
-                self.retry(ft_request)
-                return
-
-            if self.parallel_config.data_parallel_rank in dead_dp_ranks:
-                logger.warning(
-                    "[FT] Auto-recovery aborted: this rank is masked as dead "
-                    "by the cluster; waiting for external command"
-                )
-                return
-
-            dead = sorted(dead_dp_ranks)
-            logger.info("[FT] Auto-recovery: scale_down, dead_dp_ranks=%s", dead)
-            ft_request = FaultToleranceRequest(
-                instruction="scale_down",
-                params={"removed_dp_ranks": dead},
+        mask = self._exchange_masks(self._query_mask())
+        if mask is None:
+            logger.warning(
+                "[FT] Auto-recovery aborted: mask exchange failed; "
+                "waiting for external command"
             )
-            self.scale_down(ft_request)
-        finally:
-            self._recovering = False
+            return
+
+        dead_dp_ranks = self._dead_dp_ranks_from_mask(mask) | self._dead_dp_ranks
+        if not dead_dp_ranks - self._dead_dp_ranks:
+            logger.info("[FT] Auto-recovery: no newly dead ranks, retrying")
+            ft_request = FaultToleranceRequest(instruction="retry", params={})
+            self.retry(ft_request)
+            return
+
+        if self.parallel_config.data_parallel_rank in dead_dp_ranks:
+            logger.warning(
+                "[FT] Auto-recovery aborted: this rank is masked as dead "
+                "by the cluster; waiting for external command"
+            )
+            return
+
+        dead = sorted(dead_dp_ranks)
+        logger.info("[FT] Auto-recovery: scale_down, dead_dp_ranks=%s", dead)
+        ft_request = FaultToleranceRequest(
+            instruction="scale_down",
+            params={"removed_dp_ranks": dead},
+        )
+        self.scale_down(ft_request)
 
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         # Workers replay masks for the cumulative dead set.
