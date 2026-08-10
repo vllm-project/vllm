@@ -80,6 +80,7 @@ logger = init_logger(__name__)
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
+DEFAULT_TENANT_ID = "default"
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
 _T = TypeVar("_T")
@@ -87,6 +88,22 @@ _T = TypeVar("_T")
 
 def _rotate_list(values: list[_T], offset: int) -> list[_T]:
     return values[offset:] + values[:offset]
+
+
+def _replicate_config_supports_group_ids(
+    replicate_config_cls: type[Any],
+    replicate_config: Any,
+) -> bool:
+    if hasattr(replicate_config_cls, "group_ids"):
+        return True
+    return hasattr(replicate_config, "group_ids")
+
+
+def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
+    # Mooncake group ids describe the lifecycle unit. For vLLM, that unit is
+    # a prefix chunk, so shard dimensions stay only in the object key.
+    prefix = f"{metadata.cache_prefix}@" if metadata.cache_prefix else ""
+    return f"vllm-mooncake-store:{prefix}{metadata.model_name}@{chunk_hash}"
 
 
 # Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.
@@ -118,6 +135,7 @@ class MooncakeStoreConfig:
     global_segment_size: int = DEFAULT_GLOBAL_SEGMENT_SIZE
     local_buffer_size: int = DEFAULT_LOCAL_BUFFER_SIZE
     enable_offload: bool = False
+    tenant_id: str = DEFAULT_TENANT_ID
 
     def __post_init__(self) -> None:
         if self.mode not in ("embedded", "standalone-store"):
@@ -146,6 +164,7 @@ class MooncakeStoreConfig:
                 config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)
             ),
             enable_offload=bool(config.get("enable_offload", False)),
+            tenant_id=_normalize_tenant_id(config.get("tenant_id", DEFAULT_TENANT_ID)),
         )
 
     @staticmethod
@@ -156,6 +175,17 @@ class MooncakeStoreConfig:
                 "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
             )
         return MooncakeStoreConfig.from_file(config_path)
+
+
+def _normalize_tenant_id(value: Any) -> str:
+    if value is None:
+        return DEFAULT_TENANT_ID
+    if not isinstance(value, str):
+        raise TypeError(
+            f"tenant_id must be a string or null, got {type(value).__name__}: {value!r}"
+        )
+    tenant_id = value.strip()
+    return tenant_id if tenant_id else DEFAULT_TENANT_ID
 
 
 def _parse_size(value: Any) -> int:
@@ -459,6 +489,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         ready_event: threading.Event,
         enable_kv_event: bool = False,
         replicate_config: Any = None,
+        enable_group_semantics: bool = False,
+        supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
     ):
         super().__init__(
@@ -479,6 +511,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # Caller always passes a non-None ReplicateConfig — see
         # MooncakeStoreWorker.__init__ where store_replicate_config is built.
         self.replicate_config = replicate_config
+        self.enable_group_semantics = enable_group_semantics
+        self.supports_group_ids = supports_group_ids
 
         # Pause store requests when CPU/disk offloading is under pressure.
         self._store_pressure_active = False
@@ -567,6 +601,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         keys: list[str] = []
         addrs: list[list[int]] = []
         sizes: list[list[int]] = []
+        group_ids: list[str] | None = (
+            [] if self.enable_group_semantics and self.supports_group_ids else None
+        )
         saved = self._saved_offset.get(req_meta.req_id, 0)
         for g_idx, db in enumerate(self.token_databases):
             group_blocks = req_meta.block_ids[g_idx]
@@ -603,9 +640,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     continue
                 addr, size = db.prepare_value_for_block(block_id)
-                keys.append(db.key_for(key_hash))
+                key = db.key_for(key_hash)
+                keys.append(key)
                 addrs.append(addr)
                 sizes.append(size)
+                if group_ids is not None:
+                    group_ids.append(
+                        _make_mooncake_group_id(
+                            db.metadata,
+                            key.rsplit("@", 1)[-1],
+                        )
+                    )
 
         if not keys:
             return True
@@ -633,9 +678,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
         keys = [keys[i] for i in missing]
         addrs = [addrs[i] for i in missing]
         sizes = [sizes[i] for i in missing]
+        if group_ids is not None:
+            group_ids = [group_ids[i] for i in missing]
         if req_meta.current_event is not None:
             # Fence the CoW block copy enqueued earlier this step.
             req_meta.current_event.synchronize()
+        if group_ids is not None:
+            assert len(group_ids) == len(keys)
+            self.replicate_config.group_ids = group_ids
         batch_bytes = _sum_batch_bytes(sizes)
         put_start = time.perf_counter()
         try:
@@ -797,6 +847,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     ]
                 group_indices = [group_indices[i] for i in missing_indices]
 
+            group_ids = (
+                [
+                    _make_mooncake_group_id(
+                        self.token_databases[g_idx].metadata,
+                        key.rsplit("@", 1)[-1],
+                    )
+                    for key, g_idx in zip(keys, group_indices, strict=True)
+                ]
+                if self.enable_group_semantics and self.supports_group_ids
+                else None
+            )
+
             logger.debug(
                 "Storing KV cache for %d blocks (groups=%s) for request %s",
                 len(keys),
@@ -854,6 +916,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             if current_event is not None:
                 current_event.synchronize()
+
+            if group_ids is not None:
+                assert len(group_ids) == len(keys)
+                self.replicate_config.group_ids = group_ids
 
             batch_bytes = _sum_batch_bytes(sizes)
             put_start = time.perf_counter()
@@ -1193,6 +1259,9 @@ class MooncakeStoreWorker:
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
         local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
+        setup_kwargs: dict[str, str] = {}
+        if store_config.tenant_id != DEFAULT_TENANT_ID:
+            setup_kwargs["tenant_id"] = store_config.tenant_id
         ret = self.store.setup(
             local_hostname,
             store_config.metadata_server,
@@ -1201,6 +1270,7 @@ class MooncakeStoreWorker:
             store_config.protocol,
             store_config.device_name,
             store_config.master_server_address,
+            **setup_kwargs,
         )
         if ret != 0:
             msg = "Initialize MooncakeDistributedStore failed."
@@ -1210,17 +1280,31 @@ class MooncakeStoreWorker:
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
         self.store_replicate_config = ReplicateConfig()
+        self.enable_group_semantics = (
+            str(extra_config.get("enable_group_semantics", "False")).strip().lower()
+            == "true"
+        )
+        self._supports_group_ids = _replicate_config_supports_group_ids(
+            ReplicateConfig, self.store_replicate_config
+        )
+        if self.enable_group_semantics and not self._supports_group_ids:
+            logger.warning(
+                "Mooncake group semantics is enabled, but the installed "
+                "Mooncake package does not support ReplicateConfig.group_ids. "
+                "Falling back to the existing batch_put_from_multi_buffers path."
+            )
         if preferred_segment is not None:
             self.store_replicate_config.preferred_segment = preferred_segment
 
         logger.info(
             "Mooncake mode=%s (global_segment_size=%d, local_buffer_size=%d, "
-            "preferred_segment=%s, enable_offload=%s)",
+            "preferred_segment=%s, enable_offload=%s, tenant_id=%s)",
             store_config.mode,
             store_config.global_segment_size,
             store_config.local_buffer_size,
             preferred_segment or "<none>",
             store_config.enable_offload,
+            store_config.tenant_id,
         )
         if store_config.mode == "embedded":
             if store_config.enable_offload and preferred_segment is None:
@@ -1503,6 +1587,8 @@ class MooncakeStoreWorker:
                 ready_event_sending,
                 self.enable_kv_events,
                 self.store_replicate_config,
+                enable_group_semantics=self.enable_group_semantics,
+                supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
             )
             self.kv_send_thread.start()
