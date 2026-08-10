@@ -40,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import (
     DraftTokenIds,
+    ECConnectorOutput,
     KVConnectorOutput,
     ModelRunnerOutput,
     make_empty_encoder_model_runner_output,
@@ -3237,6 +3238,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
 
     scheduler.perf_metrics = None
     scheduler.connector = None
+    scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
     scheduler.structured_output_manager.should_advance.return_value = True
     scheduler.structured_output_manager.trim_reasoning_for_advance.side_effect = (
@@ -3608,6 +3610,89 @@ def test_scheduler_no_ec_connector_by_default():
     """Test scheduler doesn't have EC connector by default."""
     scheduler = create_scheduler()
     assert scheduler.ec_connector is None
+
+
+def test_mamba_align_encoder_cache_cap_makes_progress():
+    """Two individually cacheable images must not deadlock Mamba alignment."""
+    block_size = 768
+    encoder_cache_size = 600
+    scheduler = create_scheduler(
+        max_num_batched_tokens=8192,
+        block_size=block_size,
+        enable_prefix_caching=True,
+    )
+    scheduler.need_mamba_block_aligned_split = True
+    scheduler.max_num_encoder_input_tokens = encoder_cache_size
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=encoder_cache_size)
+
+    first_image_end = 510
+    request = create_requests(
+        num_requests=1,
+        num_tokens=1010,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=500),
+                PlaceholderRange(offset=first_image_end, length=500),
+            ]
+        ],
+        max_tokens=1,
+        block_size=block_size,
+        req_ids=["req"],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == first_image_end
+    assert output.scheduled_encoder_inputs[request.request_id] == [0]
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    output = scheduler.schedule()
+    next_block_boundary = block_size
+    assert output.num_scheduled_tokens[request.request_id] == (
+        next_block_boundary - first_image_end
+    )
+    assert output.scheduled_encoder_inputs[request.request_id] == [1]
+
+
+def test_mamba_align_eagle_schedules_encoder_at_boundary():
+    """EAGLE lookahead at an aligned MM boundary requires encoder cache."""
+    block_size = 512
+    scheduler = create_scheduler(
+        max_num_batched_tokens=700,
+        max_model_len=2048,
+        block_size=block_size,
+        enable_prefix_caching=True,
+    )
+    scheduler.need_mamba_block_aligned_split = True
+    scheduler.use_eagle = True
+    scheduler.max_num_encoder_input_tokens = 2048
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=1200,
+        mm_positions=[[PlaceholderRange(offset=block_size, length=100)]],
+        max_tokens=1,
+        block_size=block_size,
+        req_ids=["req"],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[request.request_id] == block_size
+    assert output.scheduled_encoder_inputs[request.request_id] == [0]
 
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
@@ -4771,6 +4856,41 @@ def test_scheduler_kv_connector_stats():
         assert final_stats == expected_data
 
 
+def test_ec_connector_update_connector_output_called():
+    """Test that worker-side EC connector output is forwarded to the
+    EC connector's update_connector_output hook."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    scheduler.ec_connector.update_connector_output = Mock()
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    ec_connector_output = ECConnectorOutput(finished_sending={"hash_test1"})
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        ec_connector_output=ec_connector_output,
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    scheduler.ec_connector.update_connector_output.assert_called_once_with(
+        ec_connector_output
+    )
+
+
 # ==============================================================================
 # Variable-length encoder cross-attention block allocation tests
 # ==============================================================================
@@ -5547,6 +5667,7 @@ def _create_hybrid_mamba_connector_scheduler(
     matched_tokens: int,
     block_size: int = 16,
     num_blocks: int = 100,
+    supports_divergent_hits: bool = True,
 ) -> Scheduler:
     """FA + Mamba ("all" cache mode) scheduler with a MockKVConnector."""
     model_config = ModelConfig(
@@ -5577,6 +5698,7 @@ def _create_hybrid_mamba_connector_scheduler(
             kv_connector_extra_config={
                 "matched_tokens": matched_tokens,
                 "is_async": False,
+                "supports_divergent_local_hybrid_hits": supports_divergent_hits,
             },
         ),
     )
@@ -5686,22 +5808,33 @@ def test_hybrid_per_group_hit_divergence_with_connector(
 
 
 @pytest.mark.parametrize(
-    ("matched_tokens", "replay_blocks", "expected_num_computed"),
+    (
+        "supports_divergent_local_hybrid_hits",
+        "matched_tokens",
+        "replay_blocks",
+        "expected_num_computed",
+    ),
     [
-        (0, 5, 16),
-        (16, 6, 80),
+        (True, 0, 5, 16),
+        (True, 16, 6, 80),
+        (False, 16, 6, 32),
     ],
 )
-def test_hybrid_fa_deeper_hit_uses_external_mamba_state(
+def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
+    supports_divergent_local_hybrid_hits: bool,
     matched_tokens: int,
     replay_blocks: int,
     expected_num_computed: int,
 ):
-    """A positive external hit supplies the Mamba state at the resume
-    boundary; without one, the scheduler falls back to the common local hit.
+    """A capable connector may restore missing Mamba state at the deeper FA
+    boundary. An external miss or an incapable connector uses a locally
+    consistent boundary instead.
     """
     block_size = 16
-    scheduler = _create_hybrid_mamba_connector_scheduler(matched_tokens)
+    scheduler = _create_hybrid_mamba_connector_scheduler(
+        matched_tokens,
+        supports_divergent_hits=supports_divergent_local_hybrid_hits,
+    )
     manager = scheduler.kv_cache_manager
     assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
 
