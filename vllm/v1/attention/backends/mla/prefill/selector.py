@@ -45,6 +45,20 @@ class MLAPrefillSelectorConfig(NamedTuple):
         )
 
 
+def _should_use_cpu_native_prefill(vllm_config: "VllmConfig" | None) -> bool:
+    from vllm.platforms import CpuArchEnum, current_platform
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    if vllm_config is None:
+        return False
+
+    return (
+        current_platform.get_cpu_architecture() == CpuArchEnum.X86
+        and torch.cpu._is_amx_tile_supported()
+        and vllm_config.attention_config.backend != AttentionBackendEnum.CPU_MLA
+    )
+
+
 def _get_mla_prefill_backend_priorities(
     device_capability: DeviceCapability,
     mla_dimensions: MLADimensions,
@@ -107,10 +121,15 @@ def get_mla_prefill_backend(
     """
     from vllm.platforms import current_platform
 
+    if current_platform.is_cpu():
+        if _should_use_cpu_native_prefill(vllm_config):
+            logger.info_once("Using CPU native MLA prefill backend.")
+            return MLAPrefillBackendEnum.CPU_NATIVE.get_class()
+        logger.info_once("Using CPU SDPA MLA prefill backend.")
+        return MLAPrefillBackendEnum.CPU.get_class()
+
     device_capability = current_platform.get_device_capability()
     if device_capability is None:
-        if current_platform.is_cpu():
-            return MLAPrefillBackendEnum.CPU_NATIVE.get_class()
         logger.info_once(
             "Device capability not available, using FlashAttention MLA prefill backend."
         )
