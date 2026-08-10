@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
+    MultiKVConnectorMetadata,
     MultiKVConnectorStats,
     MultiKVConnectorWorkerMetadata,
 )
@@ -1151,3 +1152,83 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             assert mc._all_support_hma is False
         finally:
             llm.llm_engine.engine_core.shutdown()
+
+
+# ============================================================================
+# Async transfer completion accounting (`get_finished`)
+# ============================================================================
+
+
+def _bind_extra(
+    mc: MultiConnector,
+    *,
+    saves: dict[str, int] | None = None,
+    loads: dict[str, int] | None = None,
+) -> None:
+    """Deliver the scheduler-side counts to the worker-side connector."""
+    mc.bind_connector_metadata(
+        MultiKVConnectorMetadata(
+            metadata=tuple(MagicMock() for _ in mc._connectors),
+            extra_async_saves=saves,
+            extra_async_loads=loads,
+        )
+    )
+
+
+def _stub_finished(
+    mc: MultiConnector, results: list[tuple[set[str] | None, set[str] | None]]
+) -> None:
+    for connector, result in zip(mc._connectors, results):
+        connector.get_finished.return_value = result
+
+
+def test_get_finished_forwards_a_lone_reporter(mc: MultiConnector):
+    """With no extra count recorded, a single report is passed straight up."""
+    _stub_finished(mc, [({"req-0"}, {"req-1"}), (None, None)])
+
+    assert mc.get_finished(set()) == ({"req-0"}, {"req-1"})
+
+
+def test_get_finished_defers_recving_until_the_last_loader(mc: MultiConnector):
+    """Two connectors loading one request means two reports; the scheduler must
+    see exactly one. A second report moves an already-resumed request through
+    `assert RequestStatus.is_finished(req.status)` in
+    `Scheduler._update_from_kv_xfer_finished`, killing EngineCore."""
+    _bind_extra(mc, loads={"req-0": 1})
+
+    _stub_finished(mc, [(None, {"req-0"}), (None, None)])
+    assert mc.get_finished(set())[1] is None, "first of two loaders is not the load"
+
+    _stub_finished(mc, [(None, None), (None, {"req-0"})])
+    assert mc.get_finished(set())[1] == {"req-0"}
+    assert mc._extra_async_loads == {}
+
+
+def test_get_finished_defers_sending_until_the_last_saver(mc: MultiConnector):
+    """Same accounting on the save side: the blocks stay allocated until the
+    last connector saving the request is done with them."""
+    _bind_extra(mc, saves={"req-0": 1})
+
+    _stub_finished(mc, [({"req-0"}, None), (None, None)])
+    assert mc.get_finished(set())[0] is None, "first of two savers is not the save"
+
+    _stub_finished(mc, [(None, None), ({"req-0"}, None)])
+    assert mc.get_finished(set())[0] == {"req-0"}
+    assert mc._extra_async_saves == {}
+
+
+def test_extra_counts_ship_to_the_worker_once(mc: MultiConnector):
+    """The counts are computed scheduler-side and drained worker-side, so they
+    travel in the connector metadata, and only in the next one built."""
+    mc._extra_async_saves = {"req-0": 2}
+    mc._extra_async_loads = {"req-1": 1}
+
+    metadata = mc.build_connector_meta(MagicMock())
+
+    assert metadata.extra_async_saves == {"req-0": 2}
+    assert metadata.extra_async_loads == {"req-1": 1}
+    assert mc._extra_async_saves == {}
+    assert mc._extra_async_loads == {}
+    next_metadata = mc.build_connector_meta(MagicMock())
+    assert next_metadata.extra_async_saves is None
+    assert next_metadata.extra_async_loads is None

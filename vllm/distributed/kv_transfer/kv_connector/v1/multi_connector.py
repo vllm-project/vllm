@@ -46,6 +46,7 @@ logger = init_logger(__name__)
 class MultiKVConnectorMetadata(KVConnectorMetadata):
     metadata: tuple[KVConnectorMetadata, ...]
     extra_async_saves: dict[str, int] | None = None
+    extra_async_loads: dict[str, int] | None = None
 
 
 @dataclass
@@ -198,10 +199,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self._requests_to_connector: dict[str, int] = {}
 
         # Keeps track of *additional* remaining async saves (beyond 1) to be
-        # finished per request. Not needed for async loads since we only allow
-        # a single connector to load.
+        # finished per request.
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
+
+        # Same, for async loads, for when more than one connector loads a
+        # single request. Today only one connector is picked per request, so
+        # this stays empty; it is the accounting a multi-loader request needs.
+        # Propagated from scheduler to worker side via the connector metadata.
+        self._extra_async_loads: dict[str, int] = {}
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -271,6 +277,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(connector_metadata, MultiKVConnectorMetadata)
         if connector_metadata.extra_async_saves:
             self._extra_async_saves.update(connector_metadata.extra_async_saves)
+        if connector_metadata.extra_async_loads:
+            self._extra_async_loads.update(connector_metadata.extra_async_loads)
         for c, cm in zip(self._connectors, connector_metadata.metadata):
             c.bind_connector_metadata(cm)
         super().bind_connector_metadata(connector_metadata)
@@ -327,23 +335,41 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             sending, recving = c.get_finished(finished_req_ids)
             if not recving and not sending:
                 continue
-            # Aggregate finished recving request ids.
-            finished_recving.update(recving or ())
+            # Aggregate finished recving request ids - only include once we've
+            # drained the "extra" count, exactly as for sends below. When more
+            # than one connector loads a single request, the scheduler must not
+            # be told the load is complete until the last of them reports: the
+            # first report moves the request out of WAITING_FOR_REMOTE_KVS, so
+            # a second one would hit `assert RequestStatus.is_finished(...)` in
+            # `Scheduler._update_from_kv_xfer_finished` and kill EngineCore.
+            for req_id in recving or ():
+                if self._drain_extra(self._extra_async_loads, req_id):
+                    finished_recving.add(req_id)
             # Aggregate finished sending request ids - only include
             # once we've drained the "extra" count (for cases where
             # more than one connector is async-saving the same request).
             for req_id in sending or ():
-                extra_pending = self._extra_async_saves.get(req_id)
-                if extra_pending is None:
+                if self._drain_extra(self._extra_async_saves, req_id):
                     finished_sending.add(req_id)
-                    continue
-                assert extra_pending > 0
-                if extra_pending == 1:
-                    del self._extra_async_saves[req_id]
-                else:
-                    self._extra_async_saves[req_id] = extra_pending - 1
 
         return finished_sending or None, finished_recving or None
+
+    @staticmethod
+    def _drain_extra(extra: dict[str, int], req_id: str) -> bool:
+        """Whether this is the last connector to report `req_id`.
+
+        `extra` holds the number of reports still expected *beyond* this one.
+        A missing entry means no other connector is working on the request.
+        """
+        extra_pending = extra.get(req_id)
+        if extra_pending is None:
+            return True
+        assert extra_pending > 0
+        if extra_pending == 1:
+            del extra[req_id]
+        else:
+            extra[req_id] = extra_pending - 1
+        return False
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         agg_block_ids: set[int] = set()
@@ -436,6 +462,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         if self._extra_async_saves:
             metadata.extra_async_saves = self._extra_async_saves
             self._extra_async_saves = {}
+        if self._extra_async_loads:
+            metadata.extra_async_loads = self._extra_async_loads
+            self._extra_async_loads = {}
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
