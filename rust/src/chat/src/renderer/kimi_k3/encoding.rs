@@ -126,7 +126,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
             resolved.sort_by_key(|item| (item.0, item.1));
         }
 
-        for (xtml_index, (_, _, content, name)) in resolved.into_iter().enumerate() {
+        for (position, _, content, name) in resolved {
             let tool_name = name.as_deref().ok_or_else(|| {
                 Error::ChatTemplate(
                     "Kimi K3 tool messages need a resolvable tool name: \
@@ -135,7 +135,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
                         .to_string(),
                 )
             })?;
-            write_tool_message(out, tool_name, xtml_index + 1, &content)?;
+            write_tool_message(out, tool_name, position, &content)?;
         }
         Ok(())
     };
@@ -291,12 +291,17 @@ fn write_tool_declare(
     let mut specs = Vec::with_capacity(tools.len());
     for tool in tools {
         let mut function = Map::new();
-        function.insert(
-            "description".to_string(),
-            Value::String(tool.description.clone().unwrap_or_default()),
-        );
+        if let Some(description) = &tool.description {
+            function.insert(
+                "description".to_string(),
+                Value::String(description.clone()),
+            );
+        }
         function.insert("name".to_string(), Value::String(tool.name.clone()));
         function.insert("parameters".to_string(), sort_json(&tool.parameters));
+        if let Some(strict) = tool.strict {
+            function.insert("strict".to_string(), Value::Bool(strict));
+        }
         specs.push(json!({
             "function": Value::Object(function),
             "type": "function",

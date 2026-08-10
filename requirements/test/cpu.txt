@@ -70,8 +70,6 @@ azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
     # via -r requirements/test/cuda.in
-bitsandbytes==0.49.2
-    # via -r requirements/test/cuda.in
 black==24.10.0
     # via datamodel-code-generator
 blake3==1.0.9
@@ -126,6 +124,8 @@ click==8.4.2
     #   uvicorn
 cloudpickle==3.1.2
     # via -r requirements/test/../common.txt
+cohere==7.0.8
+    # via -r requirements/test/cuda.in
 cohere-melody==0.9.0
     # via -r requirements/test/cuda.in
 colorama==0.4.6
@@ -226,11 +226,13 @@ fastar==0.11.0
     # via
     #   fastapi
     #   fastapi-cloud-cli
+fastavro==1.12.2
+    # via cohere
 fastparquet==2024.11.0
     # via genai-perf
 fastrlock==0.8.2
     # via cupy-cuda12x
-fastsafetensors==0.3.2
+fastsafetensors==0.3.3
     # via -r requirements/test/cuda.in
 filelock==3.16.1
     # via
@@ -326,6 +328,7 @@ httpx==0.27.2
     # via
     #   -r requirements/test/cuda.in
     #   anthropic
+    #   cohere
     #   fastapi
     #   fastapi-cloud-cli
     #   huggingface-hub
@@ -336,8 +339,9 @@ httpx==0.27.2
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.22.0
+huggingface-hub==1.26.0
     # via
+    #   -r requirements/test/../common.txt
     #   accelerate
     #   datasets
     #   evaluate
@@ -476,7 +480,7 @@ mcp==1.28.1
     # via -r requirements/test/../common.txt
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.5
+mistral-common==1.11.6
     # via
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
@@ -529,7 +533,6 @@ numpy==2.2.6
     #   -r requirements/test/../common.txt
     #   accelerate
     #   albumentations
-    #   bitsandbytes
     #   bm25s
     #   contourpy
     #   cupy-cuda12x
@@ -636,7 +639,6 @@ outlines-core==0.2.14
 packaging==24.2
     # via
     #   accelerate
-    #   bitsandbytes
     #   black
     #   datamodel-code-generator
     #   datasets
@@ -772,6 +774,7 @@ pydantic==2.12.0
     #   -r requirements/test/../common.txt
     #   albumentations
     #   anthropic
+    #   cohere
     #   compressed-tensors
     #   datamodel-code-generator
     #   fastapi
@@ -789,7 +792,9 @@ pydantic==2.12.0
     #   ray
     #   xgrammar
 pydantic-core==2.41.1
-    # via pydantic
+    # via
+    #   cohere
+    #   pydantic
 pydantic-extra-types==2.10.5
     # via
     #   fastapi
@@ -911,6 +916,7 @@ requests==2.32.3
     #   -r requirements/test/../common.txt
     #   azure-core
     #   buildkite-test-collector
+    #   cohere
     #   datasets
     #   docker
     #   evaluate
@@ -1110,12 +1116,12 @@ tokenizers==0.22.2
     # via
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
+    #   cohere
     #   transformers
 torch==2.13.0+cpu
     # via
     #   -r requirements/test/cuda.in
     #   accelerate
-    #   bitsandbytes
     #   compressed-tensors
     #   encodec
     #   instanttensor
@@ -1191,6 +1197,8 @@ typer==0.26.8
     #   fastsafetensors
     #   perceptron
     #   transformers
+types-requests==2.33.0.20260712
+    # via cohere
 typing-extensions==4.15.0
     # via
     #   -r requirements/test/../common.txt
@@ -1204,6 +1212,7 @@ typing-extensions==4.15.0
     #   azure-identity
     #   azure-storage-blob
     #   chz
+    #   cohere
     #   fastapi
     #   grpcio
     #   huggingface-hub
@@ -1248,6 +1257,7 @@ urllib3==2.2.3
     #   responses
     #   sentry-sdk
     #   tritonclient
+    #   types-requests
 uvicorn==0.35.0
     # via
     #   fastapi

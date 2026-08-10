@@ -5,6 +5,7 @@
 on partial hits, and same-step deferral."""
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -31,6 +32,41 @@ def _auto_init_hash_fn():
     init_none_hash(sha256)
 
 
+def test_connector_without_divergent_hit_support_uses_common_lookup():
+    common_blocks = MagicMock()
+    manager = MagicMock()
+    manager.get_computed_blocks.return_value = (common_blocks, 0, 0)
+    scheduler = SimpleNamespace(
+        connector=SimpleNamespace(supports_divergent_local_hybrid_hits=False),
+        kv_cache_manager=manager,
+    )
+
+    result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
+
+    assert result == (common_blocks, 0, 0, False)
+    manager.get_computed_blocks_for_connector.assert_not_called()
+
+
+def test_capable_connector_uses_divergent_partial_hit_lookup():
+    per_group_blocks = MagicMock()
+    manager = MagicMock()
+    manager.get_computed_blocks_for_connector.return_value = (
+        per_group_blocks,
+        6,
+        0,
+        True,
+    )
+    scheduler = SimpleNamespace(
+        connector=SimpleNamespace(supports_divergent_local_hybrid_hits=True),
+        kv_cache_manager=manager,
+    )
+
+    result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
+
+    assert result == (per_group_blocks, 6, 0, True)
+    manager.get_computed_blocks.assert_not_called()
+
+
 def test_mamba_align_split_partial_tail_schedule():
     """Chunk ends with partial hits on: block-aligned chunks, one extra stop
     at the prompt's last hash boundary (registering the partial tail), then
@@ -40,6 +76,8 @@ def test_mamba_align_split_partial_tail_schedule():
     hash_block_size = 32
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size),
+        max_num_scheduled_tokens=8192,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle=False,
         hash_block_size=hash_block_size,
         mamba_partial_cache_hit=True,
@@ -73,6 +111,78 @@ def test_mamba_align_split_partial_tail_schedule():
     assert split(self=mock, request=req2, num_new_tokens=2016) == 256
     req2.num_computed_tokens = 10240
     assert split(self=mock, request=req2, num_new_tokens=1000) == 512
+
+
+def test_mamba_align_split_when_block_exceeds_scheduling_budget():
+    """Sub-block chunks make progress only when no step can fit a full block."""
+    block_size = 11392
+    token_budget = 8192
+    prompt_length = 30000
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        max_num_scheduled_tokens=token_budget,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        use_eagle=False,
+        hash_block_size=32,
+        mamba_partial_cache_hit=False,
+    )
+    req = make_request("0", [0] * prompt_length, 32, sha256)
+    split = Scheduler._mamba_block_aligned_split
+
+    mock.max_num_scheduled_tokens = block_size
+    assert split(self=mock, request=req, num_new_tokens=token_budget) == 0
+    mock.max_num_scheduled_tokens = token_budget
+
+    scheduled_chunks = []
+    while req.num_computed_tokens < prompt_length:
+        num_new_tokens = min(token_budget, prompt_length - req.num_computed_tokens)
+        num_scheduled_tokens = split(
+            self=mock,
+            request=req,
+            num_new_tokens=num_new_tokens,
+        )
+        assert 0 < num_scheduled_tokens <= token_budget
+        scheduled_chunks.append(num_scheduled_tokens)
+        req.num_computed_tokens += num_scheduled_tokens
+
+    assert scheduled_chunks == [8192, 3200, 8192, 3200, 7216]
+
+
+def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
+    """A long-prefill cap below the block size permits sub-block progress."""
+    block_size = 512
+    token_budget = 8192
+    long_prefill_threshold = 384
+    prompt_length = 1300
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        max_num_scheduled_tokens=token_budget,
+        scheduler_config=SimpleNamespace(
+            long_prefill_token_threshold=long_prefill_threshold
+        ),
+        use_eagle=False,
+        hash_block_size=32,
+        mamba_partial_cache_hit=False,
+    )
+    req = make_request("0", [0] * prompt_length, 32, sha256)
+    split = Scheduler._mamba_block_aligned_split
+
+    scheduled_chunks = []
+    while req.num_computed_tokens < prompt_length:
+        num_new_tokens = min(
+            long_prefill_threshold,
+            prompt_length - req.num_computed_tokens,
+        )
+        num_scheduled_tokens = split(
+            self=mock,
+            request=req,
+            num_new_tokens=num_new_tokens,
+        )
+        assert 0 < num_scheduled_tokens <= long_prefill_threshold
+        scheduled_chunks.append(num_scheduled_tokens)
+        req.num_computed_tokens += num_scheduled_tokens
+
+    assert scheduled_chunks == [384, 128, 384, 128, 276]
 
 
 def test_hybrid_mamba_align_partial_hash_hit():
@@ -513,6 +623,70 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
 
     assert [len(group) for group in truncated.blocks] == [2, 1]
     assert truncated.blocks[1][0].is_null
+    assert [len(group) for group in blocks.blocks] == [3, 2]
+
+
+def test_truncate_computed_blocks_allows_short_mamba_group_only():
+    """External state may replace a short Mamba hit, but other groups must
+    cover the aligned local endpoint."""
+    hash_block_size = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=2 * hash_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    producer = make_request("producer", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    blocks, num_computed, _ = manager.get_computed_blocks(producer)
+    assert manager.allocate_slots(producer, 6, num_computed, blocks) is not None
+    manager.free(producer)
+    manager.new_step_starts()
+
+    consumer = make_request(
+        "consumer", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256
+    )
+    blocks, num_computed, _ = manager.get_computed_blocks(consumer)
+    assert num_computed == 6
+    assert [len(group) for group in blocks.blocks] == [3, 2]
+
+    short_mamba = manager.create_kv_cache_blocks((list(blocks.blocks[0]), []))
+    truncated = manager.truncate_computed_blocks(short_mamba, 4)
+    assert [len(group) for group in truncated.blocks] == [2, 0]
+
+    short_full_attention = manager.create_kv_cache_blocks(
+        (list(blocks.blocks[0][:1]), list(blocks.blocks[1]))
+    )
+    with pytest.raises(AssertionError):
+        manager.truncate_computed_blocks(short_full_attention, 4)
+
+    with pytest.raises(AssertionError):
+        manager.truncate_computed_blocks(blocks, 6)
+
+    # The lookup result itself is never mutated.
     assert [len(group) for group in blocks.blocks] == [3, 2]
 
 
