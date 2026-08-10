@@ -42,7 +42,10 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
 )
 from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import (
+    maybe_disable_graph_partition,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import (
     FusedRMSNormGated,
@@ -117,7 +120,11 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = param_tp_rank
 
 
-@torch.compile(backend=current_platform.simple_compile_backend)
+@torch.compile(
+    dynamic=True,
+    backend=current_platform.simple_compile_backend,
+    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
+)
 def _cast_sigmoid(x: torch.Tensor) -> torch.Tensor:
     """Fuse the fp32 cast + sigmoid into one Inductor kernel."""
     return x.float().sigmoid()
@@ -434,9 +441,20 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # are one-per-request. Mirrors olmo_gdn_linear_attn.py. Projections are
         # [n, *] (token dim 0); g1/beta are [1, n, h, d] (token dim 1).
         if use_spec:
-            qkv_spec = qkv_proj_states.index_select(0, spec_token_indx)
-            g1_spec = g1.index_select(1, spec_token_indx)
-            beta_spec = beta.index_select(1, spec_token_indx)
+            # In a pure spec-verify step (no non-spec tokens) the metadata
+            # builder sets spec_token_indx = arange(num_actual_tokens), making
+            # the index_select calls below identity copies. Skip them on this
+            # steady-state decode hot path. The outputs alias the inputs here;
+            # the downstream conv/recurrent kernels read them without mutating
+            # in place, so the aliasing is safe.
+            if non_spec_token_indx is None or non_spec_token_indx.numel() == 0:
+                qkv_spec = qkv_proj_states
+                g1_spec = g1
+                beta_spec = beta
+            else:
+                qkv_spec = qkv_proj_states.index_select(0, spec_token_indx)
+                g1_spec = g1.index_select(1, spec_token_indx)
+                beta_spec = beta.index_select(1, spec_token_indx)
             if non_spec_token_indx is not None and non_spec_token_indx.numel() > 0:
                 qkv_ns = qkv_proj_states.index_select(0, non_spec_token_indx)
                 g1_ns = g1.index_select(1, non_spec_token_indx)
