@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import torch
 from torch import nn
 
@@ -14,6 +16,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.models import utils as model_utils
 
 
 def _column_layer() -> ColumnParallelLinear:
@@ -35,7 +38,7 @@ def _row_layer() -> RowParallelLinear:
     layer.bias = None
     layer.input_is_parallel = True
     layer.quant_method = Mock()
-    layer.reduce_results = True
+    layer.reduce_results = False
     layer.return_bias = False
     layer.sequence_parallel = True
     layer.skip_bias_add = False
@@ -50,6 +53,12 @@ def test_column_parallel_linear_gathers_sequence_shards(monkeypatch):
     output_parallel = gathered_input[:, :1]
     all_gather = Mock(return_value=gathered_input)
     monkeypatch.setattr(linear_module, "sequence_parallel_all_gather", all_gather)
+    monkeypatch.setattr(linear_module, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        linear_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(batch_descriptor=SimpleNamespace(num_tokens=4)),
+    )
     layer = _column_layer()
     layer.quant_method.apply.return_value = output_parallel
 
@@ -57,6 +66,27 @@ def test_column_parallel_linear_gathers_sequence_shards(monkeypatch):
 
     all_gather.assert_called_once_with(local_input)
     layer.quant_method.apply.assert_called_once_with(layer, gathered_input, None)
+    torch.testing.assert_close(output, output_parallel)
+
+
+def test_column_parallel_linear_skips_gather_for_replicated_input(monkeypatch):
+    replicated_input = torch.arange(8, dtype=torch.float32).view(4, 2)
+    output_parallel = replicated_input[:, :1]
+    all_gather = Mock(side_effect=AssertionError("unexpected all-gather"))
+    monkeypatch.setattr(linear_module, "sequence_parallel_all_gather", all_gather)
+    monkeypatch.setattr(linear_module, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        linear_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(batch_descriptor=SimpleNamespace(num_tokens=4)),
+    )
+    layer = _column_layer()
+    layer.quant_method.apply.return_value = output_parallel
+
+    output = layer(replicated_input)
+
+    all_gather.assert_not_called()
+    layer.quant_method.apply.assert_called_once_with(layer, replicated_input, None)
     torch.testing.assert_close(output, output_parallel)
 
 
@@ -84,6 +114,30 @@ def test_row_parallel_linear_reduce_scatters_sequence_shards(monkeypatch):
     reduce_scatter.assert_called_once_with(output_parallel)
     all_reduce.assert_not_called()
     torch.testing.assert_close(output, local_output)
+
+
+def test_row_parallel_linear_requires_runner_padding(monkeypatch):
+    output_parallel = torch.arange(6, dtype=torch.float32).view(3, 2)
+    reduce_scatter = Mock()
+    monkeypatch.setattr(
+        linear_module,
+        "sequence_parallel_reduce_scatter",
+        reduce_scatter,
+    )
+    layer = _row_layer()
+
+    with pytest.raises(AssertionError, match="padded by the model runner"):
+        layer.reduce_output(output_parallel)
+
+    reduce_scatter.assert_not_called()
+
+
+def test_sequence_parallel_chunk_requires_runner_padding(monkeypatch):
+    monkeypatch.setattr(model_utils, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(model_utils, "get_tensor_model_parallel_rank", lambda: 0)
+
+    with pytest.raises(AssertionError, match="padded by the model runner"):
+        model_utils.sequence_parallel_chunk_impl(torch.zeros(3, 2))
 
 
 def test_sequence_parallel_reduce_scatter_does_not_pad(monkeypatch):
@@ -126,6 +180,7 @@ def test_row_parallel_linear_keeps_all_reduce_by_default(monkeypatch):
     )
     layer = _row_layer()
     layer.sequence_parallel = False
+    layer.reduce_results = True
 
     output = layer.reduce_output(output_parallel)
 

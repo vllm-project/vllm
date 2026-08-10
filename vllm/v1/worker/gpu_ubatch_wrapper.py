@@ -3,7 +3,7 @@
 
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
@@ -359,13 +359,18 @@ class UBatchWrapper:
         # slot_mapping can be None, an empty dict (from create_forward_context
         # converting None to {}), or a list of dicts (one per ubatch)
         has_slot_mapping = slot_mapping and isinstance(slot_mapping, list)
+        assert batch_descriptor is not None
         for i, ubatch_slice in enumerate(ubatch_slices):
+            ubatch_batch_descriptor = replace(
+                batch_descriptor,
+                num_tokens=ubatch_slice.num_tokens,
+            )
             forward_contexts.append(
                 create_forward_context(
                     attn_metadata[i] if attn_metadata is not None else None,
                     self.vllm_config,
                     dp_metadata=dp_metadata[i],
-                    batch_descriptor=batch_descriptor,
+                    batch_descriptor=ubatch_batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     slot_mapping=slot_mapping[i] if has_slot_mapping else None,
                 )

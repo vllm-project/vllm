@@ -774,6 +774,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         return self._forward_method(hidden_states)
 
+    def _prepare_sequence_parallel_input(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.in_proj_qkvz.prepare_input(hidden_states)
+
     def _output_projection(
         self,
         core_attn_out: torch.Tensor,
@@ -799,6 +805,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
+        hidden_states = self._prepare_sequence_parallel_input(hidden_states)
         if GDN_AITER_TRITON_AVAILABLE:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
@@ -839,6 +846,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
+        hidden_states = self._prepare_sequence_parallel_input(hidden_states)
         num_tokens = hidden_states.size(0)
         # ============================================================
         # Part 1: Input Projection
@@ -899,6 +907,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
+        hidden_states = self._prepare_sequence_parallel_input(hidden_states)
         num_tokens = hidden_states.size(0)
 
         # ============================================================
@@ -943,6 +952,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on CPU."
+
+        hidden_states = self._prepare_sequence_parallel_input(hidden_states)
 
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
         ba, _ = self.in_proj_ba(hidden_states)
