@@ -7,7 +7,6 @@ import io
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
-from typing import Any
 
 import msgspec
 import numpy as np
@@ -15,6 +14,7 @@ import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     clamp_prompt_logprobs,
@@ -102,34 +102,6 @@ class ServingTokens(GenerateBaseServing):
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
 
-    async def _resolve_content_parts(
-        self, parts: list[dict[str, Any]]
-    ) -> tuple[dict[str, list], dict[str, list[str | None]]]:
-        """Fetch raw media from content_parts into MultiModalDataDict."""
-        from vllm import envs
-        from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY
-
-        connector = MEDIA_CONNECTOR_REGISTRY.load(envs.VLLM_MEDIA_CONNECTOR)
-        mm_data: dict[str, list] = {}
-        mm_uuids: dict[str, list[str | None]] = {}
-        for part in parts:
-            ptype = part.get("type", "")
-            url = part.get("url")
-            uuid = part.get("uuid")
-            if ptype == "image_url" and url:
-                img = await connector.fetch_image_async(url)
-                mm_data.setdefault("image", []).append(img)
-                mm_uuids.setdefault("image", []).append(uuid)
-            elif ptype == "audio_url" and url:
-                audio = await connector.fetch_audio_async(url)
-                mm_data.setdefault("audio", []).append(audio)
-                mm_uuids.setdefault("audio", []).append(uuid)
-            elif ptype == "video_url" and url:
-                video = await connector.fetch_video_async(url)
-                mm_data.setdefault("video", []).append(video)
-                mm_uuids.setdefault("video", []).append(uuid)
-        return mm_data, mm_uuids
-
     async def serve_tokens(
         self,
         request: GenerateRequest,
@@ -173,7 +145,19 @@ class ServingTokens(GenerateBaseServing):
 
         engine_input: EngineInput
         if request.content_parts:
-            mm_data, mm_uuids = await self._resolve_content_parts(request.content_parts)
+            tracker = AsyncMultiModalItemTracker(self.model_config)
+            mm_parser = tracker.create_parser()
+            for part in request.content_parts:
+                ptype = part.get("type", "")
+                url = part.get("url")
+                uuid = part.get("uuid")
+                if ptype == "image_url":
+                    mm_parser.parse_image(url, uuid)
+                elif ptype == "audio_url":
+                    mm_parser.parse_audio(url, uuid)
+                elif ptype == "video_url":
+                    mm_parser.parse_video(url, uuid)
+            mm_data, mm_uuids = await tracker.resolve_items()
             prompt = TokensPrompt(prompt_token_ids=request.token_ids)
             if mm_data:
                 prompt["multi_modal_data"] = mm_data
