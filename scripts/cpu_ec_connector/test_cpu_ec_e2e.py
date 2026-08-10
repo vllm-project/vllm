@@ -307,11 +307,11 @@ class LocalHarness:
         with ThreadPoolExecutor(max_workers=1) as ex:
             ex.submit(
                 wait_for_health,
-                self.producer.http_port,
+                self.producer.base_url,
                 self.producer_proc,
                 HEALTH_TIMEOUT_S,
             ).result()
-        print(f"  ✓ producer healthy on {self.producer.http_port}")
+        print(f"  ✓ producer healthy on {self.producer.base_url}")
 
 
 # -----------------------------------------------------------------------------
