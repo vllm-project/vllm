@@ -3,8 +3,6 @@
 
 use std::fmt;
 
-use clap::Parser;
-
 /// Backend type for the benchmark endpoint.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
@@ -77,7 +75,7 @@ pub enum DatasetName {
     ShareGpt,
     #[value(name = "sonnet")]
     Sonnet,
-    #[value(name = "speed-bench")]
+    #[value(name = "speed-bench", alias = "speed_bench")]
     SpeedBench,
     #[value(name = "hf")]
     Hf,
@@ -144,13 +142,8 @@ impl fmt::Display for SpeedBenchConfig {
 }
 
 /// High-performance benchmark client for vLLM serving endpoints.
-#[derive(Parser, Debug, Clone)]
-#[command(
-    name = "vllm-bench",
-    about = "Benchmark online serving throughput",
-    version
-)]
-pub struct Cli {
+#[derive(clap::Args, Debug, Clone)]
+pub struct BenchServeArgs {
     /// The type of backend or endpoint to use for the benchmark.
     #[arg(long, default_value = "openai")]
     pub backend: BackendKind,
@@ -659,7 +652,7 @@ pub struct Cli {
     pub lora_assignment: LoraAssignment,
 }
 
-impl Cli {
+impl BenchServeArgs {
     /// Resolve the base URL from explicit --base-url or from --host/--port.
     pub fn resolve_base_url(&self) -> String {
         if let Some(ref base) = self.base_url {

@@ -7,6 +7,9 @@
 
 set -euo pipefail
 
+# The macmini queue uses persistent checkouts, so refresh tags for setuptools-scm.
+git fetch --tags --force origin
+
 # The Rust frontend build needs protoc.
 if ! command -v protoc >/dev/null 2>&1; then
   brew install protobuf

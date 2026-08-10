@@ -507,6 +507,12 @@ def dummy_hf_overrides(
         hf_config = _hf_config
         hf_text_config = text_config
 
+        # Keep architecture conversion on the default multimodal path; this
+        # helper only needs HF-derived fields, not deployment MM limits.
+        @staticmethod
+        def _supports_multimodal_for_mm_prefix() -> bool:
+            return True
+
     model_arch_config = ModelConfig.get_model_arch_config(DummyConfig)
     # Only set MoE related config when the model has MoE layers.
     # Otherwise all models detected as MoE by _get_transformers_backend_cls.
