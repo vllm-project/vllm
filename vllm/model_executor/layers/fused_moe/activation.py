@@ -288,3 +288,36 @@ def apply_moe_activation(
         raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
     return output
+
+
+def situ_and_mul_quant(
+    output: torch.Tensor,
+    scale: torch.Tensor,
+    input: torch.Tensor,
+    *,
+    beta: float,
+    linear_beta: float | None,
+    valid_rows: torch.Tensor | None = None,
+) -> None:
+    """Fused Kimi SITU activation + per-token dynamic FP8 quantization.
+
+    Writes the quantized fp8 down-projection input into ``output`` [M, d] and the
+    per-token (row) float32 scale into ``scale`` [M, 1] (dequant = q * scale),
+    fusing the SITU activation with the per-token FP8 quant that Humming's w2
+    GEMM would otherwise perform in a separate pass -- this avoids materializing
+    (and rounding through) the bf16 activation_output buffer.
+
+    ``linear_beta`` <= 0 (or None) means "unset" (up passed through), matching
+    ``SituAndMul(linear_beta=None)``. ``valid_rows`` (int64 scalar tensor) is the
+    DeepEP v2 contiguous-layout valid row count; padding rows are skipped and
+    receive a benign scale of 1.0. Kept in this module so that every
+    ``torch.ops._C.situ*`` call lives in one file.
+    """
+    torch.ops._C.situ_and_mul_quant(
+        output,
+        scale,
+        input,
+        beta,
+        -1.0 if linear_beta is None else linear_beta,
+        valid_rows,
+    )

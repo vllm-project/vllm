@@ -626,6 +626,61 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 valid_rows=valid_rows,
             )
 
+    def fused_situ_quant_enabled(self, activation: MoEActivation) -> bool:
+        """Whether the SITU activation + w2 quant can be fused into one kernel.
+
+        Only the per-token FP8 (e4m3) / float32-scale w2 quantization is fused;
+        anything else (block-FP8, MXFP8, 16-bit passthrough, non-SITU) falls back
+        to the separate situ_and_mul + quantize_input path.
+        """
+        if not envs.VLLM_HUMMING_FUSE_ACT_QUANT:
+            return False
+        if activation != MoEActivation.SITU:
+            return False
+        w2cfg = self.humming_configs["w2"]
+        return (
+            w2cfg.a_dtype.num_bits == 8
+            and str(w2cfg.a_dtype) == "float8e4m3"
+            and not w2cfg.input_scale_group_size
+            and w2cfg.as_dtype is not None
+            and str(w2cfg.as_dtype) == "float32"
+        )
+
+    def fused_situ_quant(
+        self,
+        gate_up_output: torch.Tensor,
+        quanted_down_input: torch.Tensor,
+        valid_rows: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the fused SITU activation + per-token FP8 quant for the w2 input.
+
+        Returns ``(quanted_down_input, input_scale)`` in the same layout the
+        unfused ``apply_activation`` + ``quantize_input("w2")`` pair produces:
+        an fp8 [M, d] tensor and a per-token float32 [M, 1] scale.
+        """
+        from vllm.model_executor.layers.fused_moe.activation import (
+            situ_and_mul_quant,
+        )
+
+        cfg = self.activation_config
+        assert cfg.activation_situ_beta is not None, (
+            "SITU requires activation_situ_beta from FusedMoEConfig"
+        )
+        input_scale = torch.empty(
+            (quanted_down_input.size(0), 1),
+            dtype=torch.float32,
+            device=quanted_down_input.device,
+        )
+        situ_and_mul_quant(
+            quanted_down_input,
+            input_scale,
+            gate_up_output,
+            beta=cfg.activation_situ_beta,
+            linear_beta=cfg.activation_situ_linear_beta,
+            valid_rows=valid_rows,
+        )
+        return quanted_down_input, input_scale
+
 
 class HummingIndexedExperts(HummingExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -757,18 +812,27 @@ class HummingIndexedExperts(HummingExpertsBase):
             topk = topk_ids.size(1)
             valid_rows = psum[-1:].to(torch.int64) * topk
 
-        self.apply_activation(
-            activation=activation,
-            input=buffers["gate_up_output"],
-            output=buffers["activation_output"],
-            valid_rows=valid_rows,
-        )
+        if self.fused_situ_quant_enabled(activation):
+            # Fused SITU + per-token FP8 quant straight into the w2 input,
+            # skipping the bf16 activation_output round-trip.
+            inputs, input_scale = self.fused_situ_quant(
+                gate_up_output=buffers["gate_up_output"],
+                quanted_down_input=buffers["quanted_down_input"],
+                valid_rows=valid_rows,
+            )
+        else:
+            self.apply_activation(
+                activation=activation,
+                input=buffers["gate_up_output"],
+                output=buffers["activation_output"],
+                valid_rows=valid_rows,
+            )
 
-        inputs, input_scale = self.quantize_input(
-            "w2",
-            inputs=buffers["activation_output"],
-            quanted_input=buffers.get("quanted_down_input", None),
-        )
+            inputs, input_scale = self.quantize_input(
+                "w2",
+                inputs=buffers["activation_output"],
+                quanted_input=buffers.get("quanted_down_input", None),
+            )
 
         self.humming_forward(
             "w2",

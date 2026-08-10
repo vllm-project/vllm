@@ -1,5 +1,6 @@
 #include <cuda.h>
 #include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/util/Float8_e4m3fn.h>
 
 #include <cmath>
 
@@ -498,6 +499,90 @@ __global__ void situ_and_mul_kernel(
   }
 }
 
+// Saturating float -> fp8 conversion. `inv_scale = 1 / scale`, so this computes
+// clamp(val / scale) and casts (round-to-nearest-even) to fp8. `fp8_max` is the
+// representable max for the target fp8 type (448 for e4m3fn), passed from the
+// host to avoid device-side numeric_limits.
+template <typename fp8_type>
+__device__ __forceinline__ fp8_type quant_to_fp8(float val, float inv_scale,
+                                                 float fp8_max) {
+  float x = val * inv_scale;
+  x = fmaxf(-fp8_max, fminf(x, fp8_max));
+  return static_cast<fp8_type>(x);
+}
+
+// Fused SITU (Kimi SituGLU) activation + per-token dynamic FP8 quantization.
+// One block per row: pass 1 computes the SITU activation (rounded through
+// `scalar_t` so the abs-max/quantization match the unfused
+// situ_and_mul + quant_input path bit-for-bit) and reduces the per-row abs-max;
+// pass 2 recomputes SITU and writes the quantized fp8 output. The per-token
+// scale (absmax / fp8_max, so dequant = q * scale) matches humming calc_scale.
+// Padding rows (row >= *valid_rows_ptr) from the DeepEP v2 contiguous layout are
+// never read by the down GEMM: leave `out` untouched and store a benign scale.
+template <typename scalar_t, typename fp8_type>
+__global__ void situ_and_mul_quant_kernel(
+    fp8_type* __restrict__ out,          // [num_tokens, d]
+    float* __restrict__ scale_out,       // [num_tokens] (per-token)
+    const scalar_t* __restrict__ input,  // [num_tokens, 2, d]
+    const int d, const float beta, const float linear_beta, const float fp8_max,
+    const int64_t* __restrict__ valid_rows_ptr) {
+  const int64_t row = blockIdx.x;
+  const int tid = threadIdx.x;
+  const int nthreads = blockDim.x;
+
+  if (valid_rows_ptr != nullptr && row >= *valid_rows_ptr) {
+    if (tid == 0) scale_out[row] = 1.0f;
+    return;
+  }
+
+  const scalar_t* gate_ptr = input + row * 2 * d;
+  const scalar_t* up_ptr = gate_ptr + d;
+  fp8_type* out_ptr = out + row * d;
+  const bool clamp_up = linear_beta > 0.0f;
+  const float inv_beta = 1.0f / beta;
+  const float inv_linear_beta = clamp_up ? 1.0f / linear_beta : 0.0f;
+
+  // Pass 1: SITU activation (rounded to scalar_t) + per-row abs-max reduction.
+  float thread_max = 0.0f;
+  for (int idx = tid; idx < d; idx += nthreads) {
+    const float g = (float)VLLM_LDG(&gate_ptr[idx]);
+    const float u = (float)VLLM_LDG(&up_ptr[idx]);
+    const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
+    const float up_out =
+        clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
+    const float act = (float)(scalar_t)(gate_out * up_out);
+    thread_max = fmaxf(thread_max, fabsf(act));
+  }
+
+  __shared__ float s_reduce[1024];
+  s_reduce[tid] = thread_max;
+  __syncthreads();
+  for (int n = nthreads; n > 1;) {
+    const int half = (n + 1) >> 1;
+    if (tid < n - half) {
+      s_reduce[tid] = fmaxf(s_reduce[tid], s_reduce[tid + half]);
+    }
+    __syncthreads();
+    n = half;
+  }
+
+  const float absmax = fmaxf(s_reduce[0], 1e-30f);
+  const float scale = absmax / fp8_max;
+  if (tid == 0) scale_out[row] = scale;
+  const float inv_scale = 1.0f / scale;
+
+  // Pass 2: recompute SITU and emit the quantized fp8 down-projection input.
+  for (int idx = tid; idx < d; idx += nthreads) {
+    const float g = (float)VLLM_LDG(&gate_ptr[idx]);
+    const float u = (float)VLLM_LDG(&up_ptr[idx]);
+    const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
+    const float up_out =
+        clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
+    const float act = (float)(scalar_t)(gate_out * up_out);
+    out_ptr[idx] = quant_to_fp8<fp8_type>(act, inv_scale, fp8_max);
+  }
+}
+
 template <typename scalar_t>
 __global__ void masked_situ_and_mul_kernel(
     scalar_t* __restrict__ out, const scalar_t* __restrict__ input,
@@ -668,6 +753,60 @@ void masked_situ_and_mul(torch::stable::Tensor& out,    // [E, T, d]
             out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
             expert_num_tokens.const_data_ptr<int>(), max_num_tokens, d,
             (float)beta, (float)linear_beta);
+      });
+}
+
+// Fused Kimi SITU activation + per-token dynamic FP8 quantization. Produces the
+// fp8 down-projection input (`out`) and its per-token scale (`scale`, dequant =
+// q * scale) in one pass, replacing the separate situ_and_mul + quant_input
+// kernels on the Humming w2 path. `linear_beta <= 0` means "unset" (up passed
+// through), matching SituAndMul(linear_beta=None). `valid_rows` (int64 scalar
+// tensor) is the DeepEP v2 contiguous-layout valid row count; padding rows are
+// skipped and receive a benign scale.
+void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
+                        torch::stable::Tensor& scale,  // [..., 1]  (float32)
+                        torch::stable::Tensor& input,  // [..., 2 * d]
+                        double beta, double linear_beta,
+                        std::optional<torch::stable::Tensor> valid_rows) {
+  STD_TORCH_CHECK(
+      out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn ||
+          out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fnuz,
+      "situ_and_mul_quant output must be FP8 e4m3");
+  STD_TORCH_CHECK(input.scalar_type() == torch::headeronly::ScalarType::Half ||
+                      input.scalar_type() ==
+                          torch::headeronly::ScalarType::BFloat16,
+                  "situ_and_mul_quant input must be FP16 or BF16");
+  STD_TORCH_CHECK(scale.scalar_type() == torch::headeronly::ScalarType::Float,
+                  "situ_and_mul_quant scale must be float32");
+  int d = input.size(-1) / 2;
+  int64_t num_tokens = input.numel() / input.size(-1);
+  if (num_tokens == 0) {
+    return;
+  }
+  dim3 grid(num_tokens);
+  dim3 block(std::min(d, 1024));
+  const int64_t* valid_rows_ptr = nullptr;
+  if (valid_rows.has_value()) {
+    valid_rows_ptr = valid_rows->const_data_ptr<int64_t>();
+  }
+  float fp8_max = 448.0f;  // e4m3fn; matches humming calc_scale (absmax / 448)
+  if (out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fnuz) {
+    fp8_max = 224.0f;  // ROCm fnuz convention (vllm quant_type_max)
+  }
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "situ_and_mul_quant_kernel", [&] {
+        VLLM_STABLE_DISPATCH_FP8_TYPES(
+            out.scalar_type(), "situ_and_mul_quant_kernel_fp8", [&] {
+              vllm::situ_and_mul_quant_kernel<scalar_t, fp8_t>
+                  <<<grid, block, 0, stream>>>(
+                      out.mutable_data_ptr<fp8_t>(),
+                      scale.mutable_data_ptr<float>(),
+                      input.const_data_ptr<scalar_t>(), d, (float)beta,
+                      (float)linear_beta, fp8_max, valid_rows_ptr);
+            });
       });
 }
 namespace vllm {
