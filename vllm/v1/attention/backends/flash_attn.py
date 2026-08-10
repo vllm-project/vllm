@@ -35,7 +35,10 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp_alltoall import (
+    dcp_a2a_lse_reduce,
+    ensure_dcp_a2a_backend,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -861,6 +864,8 @@ class FlashAttentionImpl(AttentionImpl):
             and vllm_config.parallel_config.decode_context_parallel_size > 1
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
+        if dcp_a2a:
+            ensure_dcp_a2a_backend(vllm_config)
         self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
 
         self._dcp_dtype: torch.dtype | None = None
