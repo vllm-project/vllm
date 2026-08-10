@@ -914,7 +914,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output, _max_logits, lse = flash_mla_sparse_fwd(
+        output, _, lse = flash_mla_sparse_fwd(
             q,
             kv_c_and_k_pe_cache,
             topk_indices,
