@@ -9,7 +9,7 @@ documented flags. This test keeps the snapshot itself current.
 
 Run this file directly to regenerate the snapshot:
 
-    python tests/benchmarks/test_rust_bench_cli_parity.py
+    .venv/bin/python tests/benchmarks/test_rust_bench_cli_parity.py
 """
 
 from pathlib import Path
@@ -19,7 +19,7 @@ SNAPSHOT = REPO_ROOT / "rust" / "src" / "bench" / "tests" / "python_serve_flags.
 HEADER = """\
 # Long CLI flags of the Python `vllm bench serve` parser
 # (vllm.benchmarks.serve.add_cli_args), sorted; --help excluded.
-# Regenerate: python tests/benchmarks/test_rust_bench_cli_parity.py
+# Regenerate: .venv/bin/python tests/benchmarks/test_rust_bench_cli_parity.py
 # Consumed by rust/src/bench/tests/cli_parity.rs, which requires every flag
 # below to be a known vllm-bench flag/alias or a PYTHON_ONLY allowlist entry.
 """
@@ -50,9 +50,9 @@ def test_serve_flag_snapshot_is_current():
     assert SNAPSHOT.is_file(), f"missing snapshot {SNAPSHOT}"
     assert _current_flags() == _snapshot_flags(), (
         "`vllm bench serve` flags changed. Regenerate the snapshot with "
-        "`python tests/benchmarks/test_rust_bench_cli_parity.py`, then for any "
-        "added flag either support it in rust/src/bench/src/cli.rs or add it "
-        "to PYTHON_ONLY in rust/src/bench/tests/cli_parity.rs"
+        "`.venv/bin/python tests/benchmarks/test_rust_bench_cli_parity.py`, "
+        "then for any added flag either support it in rust/src/bench/src/cli.rs "
+        "or add it to PYTHON_ONLY in rust/src/bench/tests/cli_parity.rs"
     )
 
 
