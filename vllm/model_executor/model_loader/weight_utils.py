@@ -330,9 +330,6 @@ def get_quant_config(
         assert isinstance(model_config.quantization_config, QuantizationConfigArgs)
         return OnlineQuantizationConfig(args=model_config.quantization_config)
 
-    # Inflight BNB quantization
-    if model_config.quantization == "bitsandbytes":
-        return quant_cls.from_config({})
     model_name_or_path = (
         maybe_download_from_modelscope(
             model_config.model,
@@ -380,9 +377,7 @@ def get_quant_config(
     with open(quant_config_file) as f:
         config = json.load(f)
 
-        if model_config.quantization == "bitsandbytes":
-            config["adapter_name_or_path"] = model_config.model
-        elif model_config.quantization in ("modelopt", "modelopt_mixed"):
+        if model_config.quantization in ("modelopt", "modelopt_mixed"):
             if config.get("producer", {}).get("name") == "modelopt":
                 return quant_cls.from_config(config)
             else:
@@ -694,12 +689,10 @@ def _get_checkpoints_size_bytes(files: list[str]) -> int:
 
 
 def _get_available_ram_bytes() -> int:
-    """Return available RAM, honoring cgroup limits on ROCm."""
+    """Return available RAM, honoring cgroup limits."""
     import psutil
 
     host_available = psutil.virtual_memory().available
-    if not current_platform.is_rocm():
-        return host_available
 
     from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
 

@@ -7,13 +7,13 @@ import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
-from vllm.distributed.kv_events import MEDIUM_OBJ
 from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
 from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     ReqContext,
@@ -98,7 +98,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
 
-    medium: ClassVar[str] = MEDIUM_OBJ
+    medium: ClassVar[Medium] = Medium.STORAGE
 
     def __init__(
         self,
@@ -141,6 +141,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 )
         # Keys of in-flight store jobs, tracked only when events are enabled.
         self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Keys of in-flight load (promotion) jobs, so a failed download can
+        # mark its own cached lookup verdicts False (see get_finished_jobs).
+        self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
 
         agent_config = nixl_agent_config(backends=[])
         self._agent = nixl_agent("ObjAgent", agent_config)
@@ -281,6 +284,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         )
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
+        self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
@@ -307,24 +311,46 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             else:
                 if state == NIXL_PROC:
                     continue
-                elif state == NIXL_DONE:
+                if state == NIXL_DONE:
                     success = True
                 else:
                     success = False
                     logger.warning("transfer failed job=%d state=%s", job_id, state)
+
+            try:
+                self._agent.release_xfer_handle(entry.xfer_handle)
+            except Exception as exc:
+                # Keep the entry until NIXL confirms that the transfer handle
+                # can be released. The transfer may still access primary-tier
+                # memory, so publishing its result would allow unsafe reuse.
+                logger.warning("release_xfer_handle failed for job %d: %s", job_id, exc)
+                continue
+
+            # Once the transfer handle is released, these remaining cleanup
+            # failures must not suppress the job completion. They can leak
+            # NIXL metadata, but cannot leave an active data transfer behind.
+            try:
+                self._agent.release_dlist_handle(entry.obj_handle)
+            except Exception as exc:
+                logger.warning(
+                    "release_dlist_handle failed for job %d: %s", job_id, exc
+                )
+            try:
+                self._agent.deregister_memory(entry.files_desc)
+            except Exception as exc:
+                logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
+
             del self._transfers[job_id]
-            self._agent.release_xfer_handle(entry.xfer_handle)
-            self._agent.release_dlist_handle(entry.obj_handle)
-            self._agent.deregister_memory(entry.files_desc)
             self._pending_results.append(JobResult(job_id=job_id, success=success))
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        """Poll in-flight transfers; return completed (job_id, success) pairs."""
+        """Poll transfers; a failed promotion marks its cached verdicts False
+        here (scheduler thread)."""
         self._poll_active_transfers()
         results = self._pending_results
         self._pending_results = []
-        if self.events is not None:
-            for result in results:
+        for result in results:
+            if self.events is not None:
                 keys = self._store_job_keys.pop(result.job_id, None)
                 if result.success and keys:
                     self.events.append(
@@ -335,6 +361,17 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                             locality=self.locality,
                         )
                     )
+            # Mark only the keys that did not load as a miss; the request
+            # recomputes them. The miss is per-request (cleared when the request
+            # finishes), so other requests still HIT the blocks that loaded
+            # fine. nixl reports the batch as a whole (successful_keys is None),
+            # so today this marks all keys; the subtraction keeps it correct if
+            # partial results are ever reported.
+            load_keys = self._load_job_keys.pop(result.job_id, None)
+            if load_keys is not None and not result.success:
+                successful = set(result.successful_keys or ())
+                failed = [k for k in load_keys if k not in successful]
+                self._lookup_manager.mark_miss(failed)
         return results
 
     def take_events(self) -> Iterable[OffloadingEvent]:
