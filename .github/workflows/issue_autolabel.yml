@@ -257,8 +257,9 @@ jobs:
                   { term: "medusa", searchIn: "title" },
                 ],
                 substrings: [
-                  { term: "speculative decod", searchIn: "title" },
-                  { term: "draft model",       searchIn: "title" },
+                  { term: "speculative decoding", searchIn: "title" },
+                  { term: "speculative decode",   searchIn: "title" },
+                  { term: "draft model",          searchIn: "title" },
                 ],
               },
               "structured-output": {
@@ -292,7 +293,8 @@ jobs:
                 substrings: [
                   { term: "kv cache manager", searchIn: "title" },
                   { term: "block manager",    searchIn: "title" },
-                  { term: "prefix cach",      searchIn: "title" },
+                  { term: "prefix cache",     searchIn: "title" },
+                  { term: "prefix caching",   searchIn: "title" },
                 ],
               },
               "torch.compile": {

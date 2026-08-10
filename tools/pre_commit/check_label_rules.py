@@ -11,10 +11,10 @@ Usage:
     python tools/pre_commit/check_label_rules.py
 """
 
-import re
 import subprocess
 import sys
 
+import regex as re
 import yaml
 
 MERGIFY = ".github/mergify.yml"

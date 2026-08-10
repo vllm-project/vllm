@@ -3,7 +3,7 @@
 vLLM applies most labels automatically. Three systems do the work:
 
 | | Config | Applies to |
-|---|---|---|
+| --- | --- | --- |
 | Mergify | `.github/mergify.yml` | pull requests, by changed file path or title |
 | GitHub Action | `.github/workflows/issue_autolabel.yml` | issues, by title keyword |
 | Issue templates | `.github/ISSUE_TEMPLATE/*.yml` | issues, by which template was used |
