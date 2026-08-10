@@ -852,9 +852,7 @@ class TestDelegatingParserLargeDelta:
         args = json.loads(output.tool_calls[0]["arguments"])
         assert args == {"location": "Berlin", "units": "celsius"}
 
-    def test_default_thinking_extracts_tool_call_without_think_end(
-        self, dsv4_tokens
-    ):
+    def test_default_thinking_extracts_tool_call_without_think_end(self, dsv4_tokens):
         tokens = [
             token
             for token in dsv4_tokens
