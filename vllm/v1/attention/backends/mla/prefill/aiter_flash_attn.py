@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# The FP8 path has a validated uplift only at or above this cached context size.
+_FP8_PREFILL_MIN_CONTEXT = 786432
+
 
 class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
     """AITER FlashAttention backend for MLA prefill"""
@@ -71,17 +74,15 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         from aiter import flash_attn_varlen_func
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
+        # Capability state for the opt-in, model shape, and AITER support.
         self._fp8_prefill_enabled = False
+        # Per-request state selected from the request's cached context length.
         self._fp8_prefill_active = False
+        # Optional AITER symbols stay unset when the dependency lacks this path.
         self._fp8_prefill_func = None
         self._fp8_quant_func = None
-        self._fp8_v_enabled = (
-            os.environ.get("VLLM_ROCM_KIMI_K3_FP8_PREFILL_V", "1") == "1"
-        )
+        # Q is shared by all context chunks, so quantize it once per request.
         self._fp8_q_cache: tuple[int, torch.Tensor, torch.Tensor] | None = None
-        self._fp8_prefill_min_context = int(
-            os.environ.get("VLLM_ROCM_KIMI_K3_FP8_PREFILL_MIN_CONTEXT", "786432")
-        )
 
         if os.environ.get("VLLM_ROCM_KIMI_K3_FP8_PREFILL", "0") == "1":
             try:
@@ -129,7 +130,7 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
             seq_tot = getattr(chunked_context, "seq_tot", [])
             context_lens = [sum(seq_tot)] if seq_tot else []
         self._fp8_prefill_active = self._fp8_prefill_enabled and (
-            max(context_lens or [], default=0) >= self._fp8_prefill_min_context
+            max(context_lens or [], default=0) >= _FP8_PREFILL_MIN_CONTEXT
         )
 
     def _quantize_per_head(
@@ -212,15 +213,11 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
                 fp8_dtype = current_platform.fp8_dtype()
                 q_fp8, q_descale = self._quantize_q_once(q)
                 k_fp8, k_descale = self._quantize_per_head(k, fp8_dtype)
-                if self._fp8_v_enabled:
-                    v_input, v_descale = self._quantize_per_head(v, fp8_dtype)
-                else:
-                    v_input = v
-                    v_descale = None
+                v_fp8, v_descale = self._quantize_per_head(v, fp8_dtype)
                 return self._fp8_prefill_func(
                     q=q_fp8,
                     k=k_fp8,
-                    v=v_input,
+                    v=v_fp8,
                     cu_seqlens_q=chunk.query_start_loc,
                     cu_seqlens_k=chunk.cu_seq_lens,
                     max_seqlen_q=chunk.max_query_len,
