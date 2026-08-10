@@ -383,7 +383,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             enable_pdl=True,
             activation_type=self._flashinfer_activation_type(activation),
             output=output,
-            # tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
 
     def apply(
