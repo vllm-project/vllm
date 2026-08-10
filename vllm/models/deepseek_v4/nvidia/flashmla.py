@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers import dsv4_packed_attn
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
@@ -338,6 +339,39 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             combined_indices_out = combined_indices_out[: query_end - query_start]
             combined_lens_out = combined_lens_out[: query_end - query_start]
 
+            # Head-packed C128A path: 16 query tokens x 8 real heads per tile
+            # instead of one token padded to 64 heads. Derives its index
+            # ranges from positions, so the [tokens, topk+window] matrix
+            # below is never built when it applies.
+            packed_ok = (
+                not swa_only
+                and self.compress_ratio != 4
+                and dsv4_packed_attn.enabled()
+                and dsv4_packed_attn.try_packed_prefill(
+                    q=q[query_start:query_end],
+                    kv=kv,
+                    out=output[query_start:query_end],
+                    attn_sink=self.attn_sink,
+                    sm_scale=self.scale,
+                    query_start_loc=query_start_loc[
+                        num_decodes + chunk_start : num_decodes + chunk_end + 1
+                    ],
+                    seq_lens=seq_lens[chunk_start:chunk_end],
+                    gather_lens=gather_lens[chunk_start:chunk_end],
+                    chunk_M=chunk_M,
+                    chunk_N=chunk_N,
+                    window_size=self.window_size,
+                    compress_ratio=self.compress_ratio,
+                    top_k=top_k,
+                    n_local_heads=self.n_local_heads,
+                    cache_owner=swa_metadata,
+                    cache_key=(chunk_start, chunk_end, chunk_M, chunk_N),
+                )
+            )
+            if packed_ok and not dsv4_packed_attn.checking():
+                continue
+            packed_out = output[query_start:query_end].clone() if packed_ok else None
+
             combined_indices, combined_lens = combine_topk_swa_indices(
                 topk_indices[query_start:query_end],
                 query_start_loc[
@@ -361,3 +395,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 topk_length=combined_lens,
                 out=output[query_start:query_end],
             )
+            if packed_ok:
+                dsv4_packed_attn.report_check(
+                    packed_out, output[query_start:query_end], self.n_local_heads
+                )

@@ -17,7 +17,11 @@ build-backend = "setuptools.build_meta"
 name = "vllm"
 authors = [{name = "vLLM Team"}]
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = [
+    "LICENSE",
+    "vllm/model_executor/layers/litetopk_kernels/LICENSE*",
+    "vllm/third_party/flash_mla/LICENSE*",
+]
 readme = "README.md"
 description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
 classifiers = [

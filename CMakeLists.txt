@@ -887,6 +887,36 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   #
+  # Grouped sparse prefill attention for DSA models on Blackwell. LiteTopK's
+  # fused indexer is JIT-compiled from its wheel-packaged sources; this native op
+  # supplies the exact group-union builder and FP8 packed attention consumed
+  # by vllm/model_executor/layers/litedsa.py.
+  #
+  # The qualified kernels use B200-specific cluster/smem assumptions. Expand
+  # this list only after correctness and resource qualification on another
+  # Blackwell target.
+  cuda_archs_loose_intersection(LITEDSA_ARCHS "10.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND LITEDSA_ARCHS)
+    set(LITEDSA_SRCS
+      "csrc/libtorch_stable/attention/dsa/litedsa.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${LITEDSA_SRCS}"
+      CUDA_ARCHS "${LITEDSA_ARCHS}")
+    set_source_files_properties(${LITEDSA_SRCS} PROPERTIES INCLUDE_DIRECTORIES
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/attention/dsa/include;${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/attention/dsa/vendor_fmla;${CUTLASS_INCLUDE_DIR}")
+    get_source_file_property(_litedsa_flags ${LITEDSA_SRCS} COMPILE_FLAGS)
+    if(NOT _litedsa_flags)
+      set(_litedsa_flags "")
+    endif()
+    set_source_files_properties(${LITEDSA_SRCS} PROPERTIES COMPILE_FLAGS
+      "${_litedsa_flags} --use_fast_math")
+    list(APPEND VLLM_STABLE_EXT_SRC "${LITEDSA_SRCS}")
+    message(STATUS "Building LiteDSA for archs: ${LITEDSA_ARCHS}")
+  else()
+    message(STATUS "Not building LiteDSA (needs CUDA>=12.8 and SM100)")
+  endif()
+
+  #
   # For the cutlass_scaled_mm kernels we want to build the c2x (CUTLASS 2.x)
   # kernels for the remaining archs that are not already built for 3x.
   # (Build 8.9 for FP8)
@@ -1193,6 +1223,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(KIMI_K3_ATTN_RES_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_KIMI_K3_ATTN_RES=1)
+    endif()
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND
+       LITEDSA_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        ENABLE_LITEDSA=1)
     endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE

@@ -1190,6 +1190,15 @@ package_data = {
         "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
+        # LiteTopK is JIT-compiled at runtime, so its sources must be present
+        # in both editable installs and binary wheels.
+        "model_executor/layers/litetopk_kernels/*.cu",
+        "model_executor/layers/litetopk_kernels/*.cuh",
+        "model_executor/layers/litetopk_kernels/LICENSE*",
+        "model_executor/layers/litetopk_kernels/README.md",
+        # License notice for the FlashMLA-derived LiteDSA kernels compiled
+        # into the stable-libtorch extension.
+        "third_party/flash_mla/LICENSE*",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",

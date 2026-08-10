@@ -555,6 +555,17 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
       "Tensor workspace, int k, int max_seq_len) -> ()");
 
+#ifdef ENABLE_LITEDSA
+  ops.def(
+      "litedsa_union_qm(Tensor topk_indices, Tensor! u_phys, "
+      "Tensor! counts, Tensor! memb_qm, Tensor req_pg, Tensor block_table, "
+      "int block_size, int seq_space) -> ()");
+  ops.def(
+      "litedsa_masked_mla_fp8(Tensor q, Tensor kv, Tensor indices, "
+      "float sm_scale, float out_scale, Tensor topk_length, Tensor memb_qm, "
+      "int h_per_q, Tensor! out, Tensor! max_logits, Tensor! lse) -> ()");
+#endif
+
 #ifdef VLLM_ENABLE_COOPERATIVE_TOPK
   ops.def(
       "cooperative_topk(Tensor logits, Tensor lengths, Tensor! output, "
@@ -796,6 +807,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
   ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
   ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
+#ifdef ENABLE_LITEDSA
+  ops.impl("litedsa_union_qm", TORCH_BOX(&litedsa_union_qm));
+  ops.impl("litedsa_masked_mla_fp8", TORCH_BOX(&litedsa_masked_mla_fp8));
+#endif
 #ifdef VLLM_ENABLE_COOPERATIVE_TOPK
   ops.impl("cooperative_topk", TORCH_BOX(&cooperative_topk));
 #endif
