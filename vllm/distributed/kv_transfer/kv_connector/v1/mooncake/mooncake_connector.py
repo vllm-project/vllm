@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import json
 import logging
+import os
 import threading
 import time
 from collections import defaultdict
@@ -66,6 +68,32 @@ if TYPE_CHECKING:
 
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
+
+
+_KVSERVE_TRACE_LOCK = threading.Lock()
+
+
+def _trace_kvserve_transfer(event: str, **fields: Any) -> None:
+    """Append an optional, per-transfer observability record.
+
+    The Connector runs in a worker process whose stdout is often owned by a
+    process manager. A separate JSONL trace makes compressed and raw paths
+    independently auditable without changing the vLLM connector contract.
+    """
+    path = os.environ.get("KVSERVE_TRACE_PATH")
+    if not path:
+        return
+    record = {
+        "timestamp_ns": time.time_ns(),
+        "pid": os.getpid(),
+        "event": event,
+        **fields,
+    }
+    try:
+        with _KVSERVE_TRACE_LOCK, open(path, "a", encoding="utf-8") as trace:
+            trace.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    except OSError:
+        logger.exception("Unable to write KVServe transfer trace to %s", path)
 
 
 @dataclass(frozen=True)
@@ -252,6 +280,13 @@ class MooncakeXferMetadata(
     req_blocks: dict[ReqId, tuple[TransferId, list[int]]]
     kv_caches_base_addr: list[int]
     block_lens: list[int]
+    # Compression is negotiated per request.  The data plane still uses the
+    # same Mooncake write primitive; these addresses point to bounded decoder
+    # staging buffers, never to Python-owned serialized tensors.
+    compressed_reqs: dict[ReqId, bool] = msgspec.field(default_factory=dict)
+    staging_addrs: dict[ReqId, int] = msgspec.field(default_factory=dict)
+    staging_capacities: dict[ReqId, int] = msgspec.field(default_factory=dict)
+    compression_wire_version: int = 0
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -271,6 +306,11 @@ class MooncakeXferResponse(
     ok_reqs: list[ReqId] | None = None
     err_reqs: list[ReqId] | None = None
     err_msg: str | None = None
+    # Descriptor-only response.  Body and auxiliary tensors remain in the
+    # decoder staging buffer and are never put on this control channel.
+    compressed_payloads: dict[ReqId, dict[str, Any]] = msgspec.field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -284,6 +324,8 @@ class PullReqMeta:
     expire_time: float = float("inf")
     # Designed for one D pairing to multiple P
     pull_tasks_count: int = 0
+    compressed: bool = False
+    staging_slot: int = -1
 
 
 @dataclass
@@ -415,6 +457,10 @@ class MooncakeConnector(KVConnectorBase_V1):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -701,6 +747,57 @@ class MooncakeConnectorWorker:
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
         self.reqs_need_send: dict[TransferId, SendBlockMeta] = {}
+        compression_config = kv_transfer_config.kv_connector_extra_config.get(
+            "compression"
+        )
+        # Keep compatibility with the existing launch helper, which wraps the
+        # actual CompressionManager spec in a runtime policy object.
+        if isinstance(compression_config, dict) and "spec" in compression_config:
+            compression_config = compression_config["spec"]
+        self._compression_config = compression_config
+        self._compression_adapter: Any | None = None
+        self._compression_wire_version = 1
+        self._compressed_payloads: dict[ReqId, dict[str, Any]] = {}
+        self._staging_pool: Any | None = None
+        self._workspace_pool: Any | None = None
+        self._registered_addresses: list[int] = []
+        self._shutdown = False
+        self._staging_slot_bytes = int(
+            kv_transfer_config.kv_connector_extra_config.get(
+                "compression_staging_bytes", 256 * 1024 * 1024
+            )
+        )
+        self._staging_slots = int(
+            kv_transfer_config.kv_connector_extra_config.get(
+                "compression_staging_slots", 2
+            )
+        )
+        self._workspace_slot_bytes = int(
+            kv_transfer_config.kv_connector_extra_config.get(
+                "compression_workspace_bytes", self._staging_slot_bytes
+            )
+        )
+        self._workspace_slots = int(
+            kv_transfer_config.kv_connector_extra_config.get(
+                "compression_workspace_slots", self._staging_slots
+            )
+        )
+        from mooncake.kvserve.session import SessionBudget, TransferSessionManager
+
+        self._session_manager = TransferSessionManager(
+            SessionBudget(
+                max_operations=int(
+                    kv_transfer_config.kv_connector_extra_config.get(
+                        "compression_max_operations", 128
+                    )
+                ),
+                max_bytes=int(
+                    kv_transfer_config.kv_connector_extra_config.get(
+                        "compression_max_bytes", 2 * 1024 * 1024 * 1024
+                    )
+                ),
+            )
+        )
 
         # For kv_both, we will act both prefiller and decoder.
         if not self.is_kv_consumer:
@@ -738,6 +835,15 @@ class MooncakeConnectorWorker:
 
         self.finished_sending_reqs: set[ReqId] = set()
         self.finished_recving_reqs: set[ReqId] = set()
+        # Guards finished_recving_reqs and _pending_compressed_recvs, which are
+        # written from both the receiver loop thread and the worker main
+        # thread (_apply_pending_compressed).  Without it, an add racing
+        # fetch_finished_recving_reqs' read-then-clear is silently lost and
+        # the request hangs in WAITING_FOR_REMOTE_KVS forever.
+        self._recv_state_lock = threading.Lock()
+        self._load_error_block_ids: set[int] = set()
+        self._pending_compressed_recvs: dict[ReqId, tuple[dict[str, Any], PullReqMeta]] = {}
+        self._inflight_compressed_buffers: dict[TransferId, list[torch.Tensor]] = {}
 
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
@@ -769,24 +875,91 @@ class MooncakeConnectorWorker:
         self._xfer_meta_decoder = msgspec.msgpack.Decoder(MooncakeXferMetadata)
         self._xfer_resp_decoder = msgspec.msgpack.Decoder(MooncakeXferResponse)
 
+        if not self.is_kv_producer and self._compression_config:
+            from mooncake.kvserve.staging import StagingPool
+
+            self._staging_pool = StagingPool(
+                slots=self._staging_slots,
+                bytes_per_slot=self._staging_slot_bytes,
+                device=torch.device("cuda", torch.cuda.current_device()),
+            )
+
+        # Producer-side bounded gather workspace: compression reads the KV
+        # blocks into a preallocated slot instead of fresh dense tensors, so
+        # peak producer memory is capped by slots * bytes_per_slot.
+        if not self.is_kv_consumer and self._compression_config:
+            from mooncake.kvserve.staging import StagingPool
+
+            self._workspace_pool = StagingPool(
+                slots=self._workspace_slots,
+                bytes_per_slot=self._workspace_slot_bytes,
+                device=torch.device("cuda", torch.cuda.current_device()),
+            )
+
     def __del__(self):
-        self.shutdown()
+        try:
+            self.shutdown()
+        except Exception:
+            # Destructors must never mask the original initialization/runtime
+            # failure (and may run on a partially initialized worker).
+            pass
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
-        self.async_zmq_ctx.term()
-        if not self.is_kv_consumer:
-            self._sender_executor.shutdown(wait=False)
-            if self.sender_loop.is_running():
+        if getattr(self, "_shutdown", False):
+            return
+        self._shutdown = True
+        # Stop accepting new work before tearing down sockets.  All temporary
+        # compressed buffers are owned by their transfer/session and can be
+        # dropped only after the background loops have stopped.
+        for transfer_id in list(getattr(self, "_inflight_compressed_buffers", {})):
+            self._inflight_compressed_buffers.pop(transfer_id, None)
+            if getattr(self, "_session_manager", None) is not None:
+                self._session_manager.cleanup(transfer_id)
+            if getattr(self, "_workspace_pool", None) is not None:
+                self._workspace_pool.release(transfer_id)
+        recv_state_lock = getattr(self, "_recv_state_lock", None)
+        pending_recvs = getattr(self, "_pending_compressed_recvs", None)
+        if pending_recvs:
+            items = list(pending_recvs.items())
+            if recv_state_lock is not None:
+                with recv_state_lock:
+                    pending_recvs.clear()
+            else:
+                pending_recvs.clear()
+            for req_id, (_descriptor, pull_meta) in items:
+                if getattr(self, "_staging_pool", None) is not None:
+                    # Leases are keyed by transfer_id, not by the request id
+                    # that keys _pending_compressed_recvs.
+                    self._staging_pool.release(pull_meta.transfer_id)
+        if getattr(self, "async_zmq_ctx", None) is not None:
+            self.async_zmq_ctx.term()
+        if not getattr(self, "is_kv_consumer", True):
+            if getattr(self, "_sender_executor", None) is not None:
+                self._sender_executor.shutdown(wait=False)
+            if getattr(self, "sender_loop", None) is not None and self.sender_loop.is_running():
                 self.sender_loop.call_soon_threadsafe(self.sender_loop.stop)
                 self._sender_listener_t.join()
             if should_launch_bootstrap_server(self.vllm_config) and hasattr(
                 self, "bootstrap_server"
             ):
                 self.bootstrap_server.shutdown()
-        if not self.is_kv_producer and self.receiver_loop.is_running():
+        if (not getattr(self, "is_kv_producer", True)
+                and getattr(self, "receiver_loop", None) is not None
+                and self.receiver_loop.is_running()):
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
             self._mooncake_receiver_t.join()
+        # TransferEngine has no process-wide shutdown method in the Python
+        # binding.  Memory registration is therefore explicitly balanced here.
+        if getattr(self, "_registered_addresses", None):
+            try:
+                ret = self.engine.batch_unregister_memory(self._registered_addresses)
+                if ret != 0:
+                    logger.warning("Mooncake memory unregister returned %s", ret)
+            except Exception:
+                logger.exception("Failed to unregister Mooncake memory")
+            finally:
+                self._registered_addresses.clear()
 
     async def register_worker_with_bootstrap(self):
         host, port = get_mooncake_bootstrap_addr(self.vllm_config)
@@ -992,6 +1165,7 @@ class MooncakeConnectorWorker:
                 lengths,
                 err_reqs,
                 err_msg,
+                compressed_payloads,
             ) = await self._build_transfer_params(
                 ready_reqs,
                 meta,
@@ -1024,15 +1198,37 @@ class MooncakeConnectorWorker:
                         else f"{err_msg}; {transfer_err_msg}"
                     )
                     err_reqs = list(err_reqs)
-                    for d_req_id, _ in ok_ready_reqs:
+                    for d_req_id, send_meta in ok_ready_reqs:
+                        _trace_kvserve_transfer(
+                            "transfer_failed",
+                            request_id=d_req_id,
+                            transfer_id=send_meta.transfer_id,
+                            error=transfer_err_msg,
+                        )
                         err_reqs.append(d_req_id)
                         err_req_set.add(d_req_id)
                     ok_ready_reqs = []
+                else:
+                    for d_req_id, send_meta in ok_ready_reqs:
+                        descriptor = compressed_payloads.get(d_req_id)
+                        if descriptor is not None:
+                            _trace_kvserve_transfer(
+                                "compressed_transfer_completed",
+                                request_id=d_req_id,
+                                transfer_id=send_meta.transfer_id,
+                                wire_bytes=descriptor["total_bytes"],
+                                body_chunks=len(descriptor["body_chunks"]),
+                                aux_chunks=len(descriptor["aux_chunks"]),
+                            )
 
             for d_req_id, send_meta in ready_reqs:
                 send_meta.sending -= 1
 
                 if d_req_id in err_req_set:
+                    self._inflight_compressed_buffers.pop(send_meta.transfer_id, None)
+                    self._session_manager.cleanup(send_meta.transfer_id)
+                    if self._workspace_pool is not None:
+                        self._workspace_pool.release(send_meta.transfer_id)
                     continue
 
                 send_meta.sent += 1
@@ -1041,12 +1237,18 @@ class MooncakeConnectorWorker:
                     and self.reqs_need_send.pop(send_meta.transfer_id, None) is not None
                 ):
                     self.finished_sending_reqs.add(send_meta.p_req_id)
+                    # All paired decoder ranks have completed their writes.
+                    self._inflight_compressed_buffers.pop(send_meta.transfer_id, None)
+                    self._session_manager.cleanup(send_meta.transfer_id)
+                    if self._workspace_pool is not None:
+                        self._workspace_pool.release(send_meta.transfer_id)
 
             response = MooncakeXferResponse(
                 status=response_status,
                 ok_reqs=[d_req_id for d_req_id, _ in ok_ready_reqs] or None,
                 err_reqs=err_reqs or None,
                 err_msg=err_msg,
+                compressed_payloads=compressed_payloads,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
 
@@ -1072,6 +1274,7 @@ class MooncakeConnectorWorker:
         lengths = []
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
+        compressed_payloads: dict[ReqId, dict[str, Any]] = {}
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
 
         for d_req_id, send_meta in ready_reqs:
@@ -1096,6 +1299,92 @@ class MooncakeConnectorWorker:
                 continue
             if num_local_blocks > num_remote_blocks:
                 local_block_ids = local_block_ids[-num_remote_blocks:]
+
+            compression_supported = (
+                self.tp_size == agent_meta.remote_tp_size
+                and not self._producer_cache_is_replicated()
+                and not self.use_mla
+            )
+            compression_requested = agent_meta.compressed_reqs.get(d_req_id, False)
+            if compression_requested:
+                from mooncake.kvserve.compression.wire import WIRE_VERSION
+
+                if agent_meta.compression_wire_version != WIRE_VERSION:
+                    # The decoder advertised a different wire version; stay
+                    # on the native raw path (observable fallback).
+                    logger.warning(
+                        "Decoder %s speaks compressed wire version %d, we "
+                        "speak %d; using raw transfer",
+                        d_req_id,
+                        agent_meta.compression_wire_version,
+                        WIRE_VERSION,
+                    )
+                    compression_requested = False
+                elif not compression_supported:
+                    logger.warning(
+                        "Compressed transfer unsupported for heterogeneous or "
+                        "replicated TP request %s; using native raw transfer",
+                        d_req_id,
+                    )
+                    compression_requested = False
+            if compression_requested:
+                try:
+                    compressed = self._build_compressed_transfer(
+                        request_id=d_req_id,
+                        transfer_id=send_meta.transfer_id,
+                        local_block_ids=local_block_ids,
+                        staging_addr=agent_meta.staging_addrs[d_req_id],
+                        staging_capacity=agent_meta.staging_capacities[d_req_id],
+                    )
+                except Exception as exc:
+                    _trace_kvserve_transfer(
+                        "raw_fallback",
+                        request_id=d_req_id,
+                        transfer_id=send_meta.transfer_id,
+                        reason="compression_exception",
+                        error=str(exc),
+                    )
+                    logger.exception(
+                        "Compression failed for request %s; falling back to raw",
+                        d_req_id,
+                    )
+                    compressed = None
+                    if self._workspace_pool is not None:
+                        self._workspace_pool.release(send_meta.transfer_id)
+                    self._session_manager.cleanup(send_meta.transfer_id)
+                    err_msg = f"compression fallback for {d_req_id}: {exc}"
+                if compressed is not None:
+                    body_ptrs, aux_ptrs, body_lens, aux_lens, descriptor, buffers = compressed
+                    src_ptrs.extend(body_ptrs)
+                    dst_ptrs.extend(
+                        agent_meta.staging_addrs[d_req_id] + int(item["offset"])
+                        for item in descriptor["body_chunks"]
+                    )
+                    lengths.extend(body_lens)
+                    src_ptrs.extend(aux_ptrs)
+                    dst_ptrs.extend(
+                        agent_meta.staging_addrs[d_req_id] + int(item["offset"])
+                        for item in descriptor["aux_chunks"]
+                    )
+                    lengths.extend(aux_lens)
+                    compressed_payloads[d_req_id] = descriptor
+                    self._inflight_compressed_buffers[send_meta.transfer_id] = buffers
+                    logger.info(
+                        "Compressed Mooncake transfer req=%s transfer=%s chunks=%d aux=%d bytes=%d",
+                        d_req_id,
+                        send_meta.transfer_id,
+                        len(descriptor["body_chunks"]),
+                        len(descriptor["aux_chunks"]),
+                        descriptor["total_bytes"],
+                    )
+                    continue
+
+                _trace_kvserve_transfer(
+                    "raw_fallback",
+                    request_id=d_req_id,
+                    transfer_id=send_meta.transfer_id,
+                    reason="compression_not_admitted",
+                )
 
             # Group by indices
             group_local_block_ids, group_remote_block_ids = group_concurrent_contiguous(
@@ -1191,7 +1480,257 @@ class MooncakeConnectorWorker:
                 remote_session,
             )
 
-        return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg
+        return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg, compressed_payloads
+
+    def _get_compression_adapter(self):
+        if not self._compression_config or self.use_mla:
+            return None
+        if self._compression_adapter is None:
+            from mooncake.kvserve.compression.manager import KVCompressionAdapter
+
+            self._compression_adapter = KVCompressionAdapter(
+                compression_spec=self._compression_config,
+                num_kv_heads=self.model_config.get_num_kv_heads(
+                    self.vllm_config.parallel_config
+                ),
+                head_size=self.model_config.get_head_size(),
+                model_name=os.path.basename(self.model_config.model.rstrip("/")),
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+            )
+        return self._compression_adapter
+
+    def _gather_kv_blocks(
+        self, block_ids: list[int], workspace: torch.Tensor
+    ) -> torch.Tensor:
+        """Gather requested HND blocks into the bounded producer workspace.
+
+        Each layer is copied directly into a view of ``workspace`` (at most
+        one temporary layer at a time) instead of building a fresh dense
+        stack, so peak producer gather memory stays bounded by the pool.
+        """
+        if not block_ids:
+            raise ValueError("cannot compress an empty block list")
+        if not self.device_kv_caches:
+            raise ValueError("no KV cache tensors are registered")
+
+        split_k_and_v = self.kv_topo.split_k_and_v
+        num_blocks = len(block_ids)
+        first_entry = next(iter(self.device_kv_caches.values()))
+        first_cache = first_entry[0] if split_k_and_v else first_entry
+        # Non-split HND cache is block-major [blocks, 2, ...]; split caches
+        # are [blocks, ...] each.  KVServe's contract is KV-major [2, ...].
+        trailing_shape = (
+            first_cache.shape[1:] if split_k_and_v else first_cache.shape[2:]
+        )
+        dtype = first_cache.dtype
+        num_layers = len(self.device_kv_caches)
+        buf_shape = (num_layers, 2, num_blocks, *trailing_shape)
+        numel = 1
+        for dim in buf_shape:
+            numel *= dim
+        nbytes = numel * dtype.itemsize
+        if nbytes > workspace.numel():
+            raise ValueError(
+                f"compression workspace too small: need {nbytes} bytes, "
+                f"have {workspace.numel()}"
+            )
+        buf = workspace[:nbytes].view(dtype).reshape(buf_shape)
+
+        ids_by_device: dict[torch.device, torch.Tensor] = {}
+        for layer_index, (layer_name, cache_or_caches) in enumerate(
+            self.device_kv_caches.items()
+        ):
+            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+            device = cache_list[0].device
+            ids = ids_by_device.setdefault(
+                device, torch.tensor(block_ids, dtype=torch.long, device=device)
+            )
+            if split_k_and_v:
+                if len(cache_list) != 2:
+                    raise ValueError(
+                        f"expected K/V cache pair for layer {layer_name}, "
+                        f"got {len(cache_list)} caches"
+                    )
+                for kv_index, cache in enumerate(cache_list):
+                    buf[layer_index, kv_index].copy_(cache.index_select(0, ids))
+            else:
+                cache = cache_list[0]
+                if cache.ndim < 2 or cache.shape[1] != 2:
+                    raise ValueError(
+                        f"unsupported KV cache shape for layer {layer_name}: "
+                        f"{tuple(cache.shape)}"
+                    )
+                buf[layer_index].copy_(cache.index_select(0, ids).transpose(0, 1))
+        return buf
+
+    def _build_compressed_transfer(
+        self,
+        *,
+        request_id: str,
+        transfer_id: str,
+        local_block_ids: list[int],
+        staging_addr: int,
+        staging_capacity: int,
+    ):
+        from mooncake.kvserve.compression.wire import build_wire
+
+        adapter = self._get_compression_adapter()
+        if adapter is None:
+            return None
+        from mooncake.kvserve.session import BudgetExceeded
+
+        if self._workspace_pool is None:
+            _trace_kvserve_transfer(
+                "raw_fallback",
+                request_id=request_id,
+                transfer_id=transfer_id,
+                reason="workspace_pool_unavailable",
+            )
+            logger.warning(
+                "Compression workspace pool not configured; using raw transfer"
+            )
+            return None
+        lease = self._workspace_pool.reserve(transfer_id)
+        deadline = time.monotonic() + 300
+        while lease is None:
+            if time.monotonic() > deadline:
+                _trace_kvserve_transfer(
+                    "raw_fallback",
+                    request_id=request_id,
+                    transfer_id=transfer_id,
+                    reason="workspace_exhausted_timeout",
+                )
+                logger.warning(
+                    "Compression workspace exhausted for %s after 300s timeout; using raw transfer",
+                    transfer_id,
+                )
+                return None
+            logger.warning(
+                "Compression workspace exhausted for %s, waiting for slot...",
+                transfer_id,
+            )
+            time.sleep(0.1)
+            lease = self._workspace_pool.reserve(transfer_id)
+
+        admitted = False
+        while not admitted:
+            if time.monotonic() > deadline:
+                _trace_kvserve_transfer(
+                    "raw_fallback",
+                    request_id=request_id,
+                    transfer_id=transfer_id,
+                    reason="compression_budget_exhausted_timeout",
+                )
+                logger.warning(
+                    "Compression budget exhausted for %s after 300s timeout; using raw transfer",
+                    transfer_id,
+                )
+                self._workspace_pool.release(transfer_id)
+                return None
+            try:
+                self._session_manager.admit(
+                    transfer_id,
+                    request_id,
+                    reserved_bytes=staging_capacity + lease.capacity,
+                    reserved_ops=1,
+                )
+                admitted = True
+            except BudgetExceeded:
+                logger.warning(
+                    "Compression budget exhausted for %s, waiting for slot...",
+                    transfer_id,
+                )
+                time.sleep(0.1)
+        _trace_kvserve_transfer(
+            "compression_admitted",
+            request_id=request_id,
+            transfer_id=transfer_id,
+            workspace_bytes=lease.capacity,
+            staging_bytes=staging_capacity,
+        )
+        stacked = self._gather_kv_blocks(local_block_ids, lease.tensor)
+        original_bytes = stacked.numel() * stacked.element_size()
+        compressed = adapter.compress(stacked, request_id)
+        if compressed is None:
+            _trace_kvserve_transfer(
+                "raw_fallback",
+                request_id=request_id,
+                transfer_id=transfer_id,
+                reason="compression_manager_returned_none",
+            )
+            self._workspace_pool.release(transfer_id)
+            self._session_manager.cleanup(transfer_id)
+            return None
+        wire = build_wire(
+            compressed,
+            max_chunk_bytes=max(1, staging_capacity // 2),
+            transfer_id=transfer_id,
+            request_id=request_id,
+        )
+        # Gather/compress/contiguous kernels were merely enqueued on this
+        # thread's CUDA stream.  The Transfer Engine reads these buffers via
+        # RDMA, which bypasses stream ordering, so the writes must be complete
+        # before any pointer below is exposed to it.
+        torch.cuda.current_stream().synchronize()
+        body_ptrs: list[int] = []
+        aux_ptrs: list[int] = []
+        body_lens: list[int] = []
+        aux_lens: list[int] = []
+        body_specs: list[dict[str, Any]] = []
+        aux_specs: list[dict[str, Any]] = []
+        offset = 0
+        for tensor in wire.body_chunks:
+            nbytes = tensor.numel() * tensor.element_size()
+            # nvcomp requires 256-byte aligned input addresses; pad offset
+            # so every chunk in the staging buffer starts on an aligned boundary.
+            misalign = offset % 256
+            if misalign:
+                offset += 256 - misalign
+            body_ptrs.append(tensor.data_ptr())
+            body_lens.append(nbytes)
+            body_specs.append({"offset": offset, "nbytes": nbytes, "shape": list(tensor.shape), "dtype": str(tensor.dtype).replace("torch.", "")})
+            offset += nbytes
+        for tensor in wire.aux_tensors:
+            nbytes = tensor.numel() * tensor.element_size()
+            # Align to this tensor's element_size before writing its offset
+            alignment = max(tensor.element_size(), 256)
+            misalign = offset % alignment
+            if misalign:
+                offset += alignment - misalign
+            aux_ptrs.append(tensor.data_ptr())
+            aux_lens.append(nbytes)
+            aux_specs.append({"offset": offset, "nbytes": nbytes, "shape": list(tensor.shape), "dtype": str(tensor.dtype).replace("torch.", "")})
+            offset += nbytes
+        if offset > staging_capacity:
+            self._workspace_pool.release(transfer_id)
+            self._session_manager.cleanup(transfer_id)
+            return None
+        descriptor = dict(wire.meta)
+        descriptor.update(
+            {
+                "body_chunks": body_specs,
+                "aux_chunks": aux_specs,
+                "total_bytes": offset,
+                "block_ids": list(local_block_ids),
+                # Explicit config agreement: the decoder verifies this against
+                # its own adapter fingerprint before decompressing.
+                "compression_fingerprint": adapter.fingerprint,
+            }
+        )
+        wire.validate(expected_transfer_id=transfer_id, expected_request_id=request_id)
+        _trace_kvserve_transfer(
+            "compressed_wire_built",
+            request_id=request_id,
+            transfer_id=transfer_id,
+            original_bytes=original_bytes,
+            wire_bytes=offset,
+            body_bytes=sum(body_lens),
+            aux_bytes=sum(aux_lens),
+            body_chunks=len(body_specs),
+            aux_chunks=len(aux_specs),
+        )
+        return body_ptrs, aux_ptrs, body_lens, aux_lens, descriptor, wire.body_chunks + wire.aux_tensors
 
     def _send_blocks(
         self,
@@ -1266,6 +1805,22 @@ class MooncakeConnectorWorker:
         ret_value = self.engine.batch_register_memory(kv_data_ptrs, kv_data_lens)
         if ret_value != 0:
             raise RuntimeError("Mooncake batch memory registration failed.")
+        self._registered_addresses.extend(kv_data_ptrs)
+
+        if self._staging_pool is not None:
+            staging_tensors = self._staging_pool.buffers()
+            staging_ret = self.engine.batch_register_memory(
+                [tensor.data_ptr() for tensor in staging_tensors],
+                [tensor.numel() for tensor in staging_tensors],
+            )
+            if staging_ret != 0:
+                raise RuntimeError("Mooncake compressed staging registration failed.")
+            self._registered_addresses.extend(tensor.data_ptr() for tensor in staging_tensors)
+            logger.info(
+                "Registered %d compressed staging buffers (%d bytes each)",
+                len(staging_tensors),
+                self._staging_slot_bytes,
+            )
 
         assert tensor_size_bytes is not None
         assert self.num_blocks != 0
@@ -1287,8 +1842,9 @@ class MooncakeConnectorWorker:
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:
-        finished_recving_reqs = self.finished_recving_reqs
-        self.finished_recving_reqs = set()
+        with self._recv_state_lock:
+            finished_recving_reqs = self.finished_recving_reqs
+            self.finished_recving_reqs = set()
         return finished_recving_reqs
 
     async def fetch_finished_sending_reqs(self) -> set[ReqId]:
@@ -1351,11 +1907,52 @@ class MooncakeConnectorWorker:
 
         return finished_sending_reqs or None, finished_recving_reqs or None
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        failed = self._load_error_block_ids
+        self._load_error_block_ids = set()
+        return failed
+
     async def receive_kv_from_single_worker(
         self,
         worker_addr: str,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
+        compressed_reqs: dict[ReqId, bool] = {}
+        staging_addrs: dict[ReqId, int] = {}
+        staging_capacities: dict[ReqId, int] = {}
+        if self._staging_pool is not None:
+            for req_id, pull_meta in pull_metas.items():
+                if not pull_meta.local_block_ids:
+                    continue
+                lease = self._staging_pool.reserve(pull_meta.transfer_id)
+                deadline = time.monotonic() + 300
+                while lease is None:
+                    if time.monotonic() > deadline:
+                        logger.warning(
+                            "Compressed staging exhausted for %s after 300s timeout; using raw transfer",
+                            req_id,
+                        )
+                        break
+                    logger.warning(
+                        "Compressed staging exhausted for %s, waiting for slot...",
+                        req_id,
+                    )
+                    await asyncio.sleep(0.1)
+                    lease = self._staging_pool.reserve(pull_meta.transfer_id)
+                if lease is None:
+                    continue
+                pull_meta.compressed = True
+                pull_meta.staging_slot = lease.slot
+                compressed_reqs[req_id] = True
+                staging_addrs[req_id] = lease.address
+                staging_capacities[req_id] = lease.capacity
+                _trace_kvserve_transfer(
+                    "compressed_staging_reserved",
+                    request_id=req_id,
+                    transfer_id=pull_meta.transfer_id,
+                    staging_slot=lease.slot,
+                    staging_bytes=lease.capacity,
+                )
         req_ids = set(pull_metas)
         metadata = MooncakeXferMetadata(
             remote_hostname=self.hostname,
@@ -1368,6 +1965,10 @@ class MooncakeConnectorWorker:
             },
             kv_caches_base_addr=self.kv_caches_base_addr,
             block_lens=self.block_len_per_layer,
+            compressed_reqs=compressed_reqs,
+            staging_addrs=staging_addrs,
+            staging_capacities=staging_capacities,
+            compression_wire_version=(1 if compressed_reqs else 0),
         )
 
         encoded_data = self._encoder.encode(metadata)
@@ -1397,6 +1998,7 @@ class MooncakeConnectorWorker:
                             req_ids,
                             response.err_msg,
                         )
+                        self._fail_pull_metas(pull_metas, response.err_msg or "transfer error")
                         return
                     self.process_pulling_result(response, pull_metas)
                     if response.status == MooncakeXferResponseStatus.FINISH:
@@ -1405,7 +2007,19 @@ class MooncakeConnectorWorker:
             logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
         except Exception as e:
             logger.error("MooncakeXferMetadata transfer failed for %s: %s", req_ids, e)
+            self._fail_pull_metas(pull_metas, str(e))
             return
+
+    def _fail_pull_metas(
+        self, pull_metas: dict[ReqId, PullReqMeta], reason: str
+    ) -> None:
+        logger.error("Marking %d KV receives failed: %s", len(pull_metas), reason)
+        for req_id, pull_meta in pull_metas.items():
+            self._load_error_block_ids.update(pull_meta.local_block_ids)
+            if self._staging_pool is not None:
+                self._staging_pool.release(pull_meta.transfer_id)
+            with self._recv_state_lock:
+                self.finished_recving_reqs.add(req_id)
 
     def process_pulling_result(
         self,
@@ -1419,7 +2033,31 @@ class MooncakeConnectorWorker:
             # No race because we are in async loop.
             pull_meta.pull_tasks_count -= 1
             if pull_meta.pull_tasks_count == 0:
-                self.finished_recving_reqs.add(pull_meta.d_req_id)
+                descriptor = response.compressed_payloads.get(req_id)
+                if descriptor is not None:
+                    _trace_kvserve_transfer(
+                        "compressed_wire_received",
+                        request_id=req_id,
+                        transfer_id=pull_meta.transfer_id,
+                        wire_bytes=descriptor["total_bytes"],
+                        body_chunks=len(descriptor["body_chunks"]),
+                        aux_chunks=len(descriptor["aux_chunks"]),
+                    )
+                    with self._recv_state_lock:
+                        self._pending_compressed_recvs[req_id] = (descriptor, pull_meta)
+                else:
+                    # Producer selected deterministic raw fallback (for
+                    # example compression admission or capability failure).
+                    if pull_meta.compressed and self._staging_pool is not None:
+                        self._staging_pool.release(pull_meta.transfer_id)
+                    _trace_kvserve_transfer(
+                        "raw_received",
+                        request_id=req_id,
+                        transfer_id=pull_meta.transfer_id,
+                        reason="producer_raw_fallback",
+                    )
+                    with self._recv_state_lock:
+                        self.finished_recving_reqs.add(pull_meta.d_req_id)
 
         if ok_reqs:
             logger.debug("pulling kv_caches for %s finished", ok_reqs)
@@ -1430,6 +2068,98 @@ class MooncakeConnectorWorker:
                 response.err_reqs,
                 response.err_msg,
             )
+            for req_id in response.err_reqs:
+                pull_meta = pull_metas.get(req_id)
+                if pull_meta is not None:
+                    self._load_error_block_ids.update(pull_meta.local_block_ids)
+                    if self._staging_pool is not None:
+                        self._staging_pool.release(pull_meta.transfer_id)
+                    with self._recv_state_lock:
+                        self.finished_recving_reqs.add(req_id)
+
+    def _apply_pending_compressed(self) -> None:
+        with self._recv_state_lock:
+            pending = list(self._pending_compressed_recvs.items())
+        if not pending:
+            return
+        adapter = self._get_compression_adapter()
+        if adapter is None:
+            return
+        from mooncake.kvserve.compression.wire import (
+            restore_from_wire,
+            wire_views_from_buffer,
+        )
+
+        for req_id, (descriptor, pull_meta) in pending:
+            lease = self._staging_pool.get(pull_meta.transfer_id) if self._staging_pool else None
+            if lease is None:
+                continue
+            try:
+                # Explicit producer/decoder configuration agreement: the
+                # fingerprint of the producer's effective compression config
+                # must match ours.  A mismatch is a deterministic load error,
+                # never silent decompression with the wrong pipeline.
+                remote_fingerprint = descriptor.get("compression_fingerprint")
+                if (remote_fingerprint is not None
+                        and remote_fingerprint != adapter.fingerprint):
+                    raise ValueError(
+                        f"compression config mismatch: producer "
+                        f"{remote_fingerprint} != decoder {adapter.fingerprint}"
+                    )
+                wire = wire_views_from_buffer(
+                    lease.tensor,
+                    descriptor,
+                    expected_transfer_id=pull_meta.transfer_id,
+                    expected_request_id=req_id,
+                )
+                restored = restore_from_wire(wire)
+                stacked = adapter.decompress(restored)
+                if stacked is None:
+                    raise RuntimeError("decompression returned no tensor")
+                ids_by_device: dict[torch.device, torch.Tensor] = {}
+                cache_names = list(self.device_kv_caches)
+                if len(cache_names) != stacked.shape[0]:
+                    raise RuntimeError("compressed layer count does not match KV cache")
+                for layer_index, layer_name in enumerate(cache_names):
+                    cache_or_caches = self.device_kv_caches[layer_name]
+                    cache_list = cache_or_caches if self.kv_topo.split_k_and_v else [cache_or_caches]
+                    device = cache_list[0].device
+                    ids = ids_by_device.setdefault(
+                        device,
+                        torch.tensor(pull_meta.local_block_ids, dtype=torch.long, device=device),
+                    )
+                    source = stacked[layer_index].to(device=device)
+                    if self.kv_topo.split_k_and_v:
+                        for kv_index, cache in enumerate(cache_list):
+                            cache.index_copy_(0, ids, source[kv_index].contiguous())
+                    else:
+                        cache_list[0].index_copy_(0, ids, source.transpose(0, 1).contiguous())
+                _trace_kvserve_transfer(
+                    "compressed_decompressed_scattered",
+                    request_id=req_id,
+                    transfer_id=pull_meta.transfer_id,
+                    wire_bytes=descriptor["total_bytes"],
+                    restored_bytes=stacked.numel() * stacked.element_size(),
+                    layers=stacked.shape[0],
+                )
+                with self._recv_state_lock:
+                    self.finished_recving_reqs.add(req_id)
+            except Exception as exc:
+                _trace_kvserve_transfer(
+                    "compressed_decompression_failed",
+                    request_id=req_id,
+                    transfer_id=pull_meta.transfer_id,
+                    error=str(exc),
+                )
+                logger.exception("Failed to apply compressed KV for %s", req_id)
+                self._load_error_block_ids.update(pull_meta.local_block_ids)
+                with self._recv_state_lock:
+                    self.finished_recving_reqs.add(req_id)
+            finally:
+                if self._staging_pool is not None:
+                    self._staging_pool.release(pull_meta.transfer_id)
+                with self._recv_state_lock:
+                    self._pending_compressed_recvs.pop(req_id, None)
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"
@@ -1543,6 +2273,11 @@ class MooncakeConnectorWorker:
                 assert not send_meta.ready.is_set()
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
+        # A compressed transfer is marked finished only after this worker has
+        # rebuilt the GPU wire views, decompressed, and scattered into the
+        # decoder KV blocks.  This prevents Scheduler from observing a false
+        # remote-KV completion one step early.
+        self._apply_pending_compressed()
         if not self.is_kv_producer and metadata.reqs_to_recv:
             asyncio.run_coroutine_threadsafe(
                 self._start_load_kv(metadata.reqs_to_recv), self.receiver_loop
