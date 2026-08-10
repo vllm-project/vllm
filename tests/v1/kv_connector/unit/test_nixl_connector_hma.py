@@ -901,7 +901,7 @@ def test_post_process_zeroes_untransferred_tail():
     worker.device_kv_caches = {"attn.0": attn_cache, "mamba.0": mamba_cache}
     fa_group = MagicMock(layer_names=["attn.0"])
     ssm_group = MagicMock(layer_names=["mamba.0"])
-    worker.kv_cache_config = MagicMock(kv_cache_groups=[fa_group, ssm_group])
+    worker.kv_cache_config = MagicMock(transfer_groups=[fa_group, ssm_group])
     # The cached property filters mamba layers out of the permuted caches.
     attn_caches = NixlConnectorWorker._attention_kv_caches.func(worker)
     assert len(attn_caches) == 1 and attn_caches[0] is attn_cache
