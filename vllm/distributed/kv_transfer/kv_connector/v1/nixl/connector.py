@@ -91,6 +91,10 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_scheduler.use_eagle_prefix_cache_hashing = enabled
 
     @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return True
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         if any(
             [

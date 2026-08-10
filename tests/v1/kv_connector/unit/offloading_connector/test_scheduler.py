@@ -16,6 +16,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
+from vllm.config import KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -31,11 +32,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    get_sliding_window_size_in_chunks,
     is_store_reachable_swa_chunk,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheGroupSpec,
     SlidingWindowSpec,
@@ -58,9 +61,12 @@ from vllm.v1.request import RequestStatus
 
 
 def _make_partial_tail_scheduler() -> OffloadingConnectorScheduler:
-    vllm_config = _make_vllm_config()
+    vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
     vllm_config.cache_config.prefix_match_unit = 4
     vllm_config.speculative_config = None
+    vllm_config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="null"
+    )
     kv_cache_config = _make_mamba_hybrid_kv_cache_config()
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
     return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
@@ -75,6 +81,8 @@ def _make_partial_tail_request(
     request.num_prompt_tokens = 30
     request.num_tokens = 30
     request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(7)]
+    request.all_token_ids = list(range(30))
+    request.lora_request = None
     request.is_finished.return_value = False
     scheduler.on_new_request(request)
     return request
@@ -117,6 +125,34 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
         12: {job_id},
         99: {job_id},
     }
+    assert scheduler.config.supports_partial_tail
+
+    events = list(
+        scheduler._events_tracker.take_events(
+            [
+                OffloadingEvent(
+                    keys=list(scheduler._jobs[job_id].keys),
+                    medium=Medium.CPU,
+                    removed=False,
+                )
+            ]
+        )
+    )
+    assert len(events) == 2
+    assert all(isinstance(event, BlockStored) for event in events)
+    assert {event.group_idx for event in events} == {0, 1}
+    events_by_group = {event.group_idx: event for event in events}
+    full_attention_event = events_by_group[0]
+    assert full_attention_event.block_size == 4
+    assert full_attention_event.token_ids == list(range(16, 28))
+    assert len(full_attention_event.block_hashes) == 3
+    assert full_attention_event.parent_block_hash is not None
+
+    recurrent_event = events_by_group[1]
+    assert recurrent_event.block_size == 0
+    assert recurrent_event.token_ids == []
+    assert len(recurrent_event.block_hashes) == 1
+    assert recurrent_event.parent_block_hash is None
 
 
 def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
@@ -3311,3 +3347,19 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
     assert len(runner.connector_scheduler._jobs) == 0
+
+
+def test_chunked_local_attention_reports_its_chunk_window():
+    """Llama 4 uses chunked local attention, which used to trip the
+    FullAttentionSpec assert and kill the engine at startup."""
+    spec = ChunkedLocalAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.bfloat16,
+        attention_chunk_size=8192,
+    )
+
+    assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=1024) == 8
+    # Partial chunks round up, so the reachable tail is never understated.
+    assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=3000) == 3
