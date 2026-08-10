@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, peek, seq};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
@@ -540,8 +543,10 @@ mod tests {
             .parse_chunk(r#"<tool_call>{"name":"f","arguments":42}</tool_call>"#)
             .unwrap_err();
 
-        expect!["tool parser parsing failed: invalid Granite4 arguments"]
-            .assert_eq(&error.to_report_string());
+        expect![[
+            r#"tool parser parsing failed: near "42}</tool_call>": invalid Granite4 arguments"#
+        ]]
+        .assert_eq(&error.to_report_string());
     }
 
     #[test]

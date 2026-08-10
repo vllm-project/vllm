@@ -119,8 +119,10 @@ def _hermes_config() -> ParserEngineConfig:
 def _make_engine(
     config: ParserEngineConfig | None = None,
     tools: list | None = None,
+    vocab: dict[str, int] | None = None,
+    special_tokens: list[str] | None = None,
 ) -> ParserEngine:
-    tokenizer = make_mock_tokenizer(_VOCAB)
+    tokenizer = make_mock_tokenizer(vocab or _VOCAB, special_tokens=special_tokens)
     cfg = config or _combined_config()
     return ParserEngine(
         tokenizer,
@@ -843,6 +845,7 @@ class TestParseTokenIdPassthrough:
 
         assert content is not None
         assert "<tool_call>" in content
+        assert content == "Use <tool_call> to call tools."
         assert tool_calls is not None
         assert len(tool_calls) == 1
         assert tool_calls[0].name == "f"
@@ -893,6 +896,7 @@ def _make_delegating_request():
     req = MagicMock(spec=ChatCompletionRequest)
     req.tools = []
     req.tool_choice = "auto"
+    req.include_reasoning = True
     return req
 
 
@@ -1069,6 +1073,91 @@ class TestReasoningOnlyEndTokenLeak:
         )
         assert "</think>" not in d2.content
         assert "Hi!" in d2.content
+
+
+class TestSkipToolSpanForwarding:
+    """Reasoning (skip_tool_parsing) pass: tool syntax is forwarded verbatim
+    for the tool pass, and the lexical passthrough flag never goes stale.
+
+    ``_combined_config`` defines ``</tool_call>`` only from ``TOOL_ARGS``; the
+    skip pass stays in ``CONTENT``, so the closer arrives with no current-state
+    transition. It must still be forwarded and must clear the span — otherwise
+    ``_in_skipped_tool_span`` stays True for the rest of the request. This is the
+    shape of every current engine grammar whose wrapper closer has no CONTENT
+    transition (qwen3, deepseek, glm47_moe, nemotron_v3).
+    """
+
+    _TOOL_VOCAB = {**_VOCAB, '{"a":1}': 300}
+    _TOOL_CALL = '<tool_call>{"a":1}</tool_call>'
+    _TOOL_IDS = [202, 300, 203]
+
+    def _skip_engine(self):
+        engine = _make_engine(
+            vocab=self._TOOL_VOCAB,
+            special_tokens=list(_VOCAB.keys()),
+        )
+        engine._engine.skip_tool_parsing = True
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+        return engine
+
+    def test_tool_syntax_forwarded_and_span_cleared(self):
+        engine = self._skip_engine()
+        events = engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        forwarded = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert forwarded == self._TOOL_CALL
+        assert engine._engine._in_skipped_tool_span is False
+
+    def test_span_not_stale_across_two_tool_calls(self):
+        engine = self._skip_engine()
+        engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        assert engine._engine._in_skipped_tool_span is False
+        events = engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        forwarded = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert forwarded == self._TOOL_CALL
+        assert engine._engine._in_skipped_tool_span is False
+
+    def test_content_after_transitionless_closer_observable(self):
+        """Observable lifecycle contract (not just the private flag): after a
+        tool closer with no CONTENT transition, a later *shared* block-ender
+        that also closes text blocks must be consumed, not leaked as content.
+
+        The config combines the two real patterns — a qwen3-style tool-only
+        closer with no CONTENT transition (``</a>``) and an inkling-style token
+        that closes both tool and text blocks (``</b>``). A stale span would
+        route the trailing ``</b>`` down the forward path and leak it.
+        """
+        ts, close_a, close_b = "<tc>", "</a>", "</b>"
+        cfg = ParserEngineConfig(
+            name="shared_closer_test",
+            terminals={"TOOL_START": ts, "CLOSE_A": close_a, "CLOSE_B": close_b},
+            transitions={
+                (ParserState.CONTENT, "TOOL_START"): Transition(
+                    ParserState.TOOL_ARGS, (EventType.TOOL_CALL_START,)
+                ),
+                (ParserState.TOOL_ARGS, "CLOSE_A"): Transition(
+                    ParserState.CONTENT, (EventType.TOOL_CALL_END,)
+                ),
+                (ParserState.TOOL_ARGS, "CLOSE_B"): Transition(
+                    ParserState.CONTENT, (EventType.TOOL_CALL_END,)
+                ),
+                (ParserState.CONTENT, "CLOSE_B"): Transition(ParserState.CONTENT, ()),
+            },
+            initial_state=ParserState.CONTENT,
+            content_events={
+                ParserState.CONTENT: EventType.TEXT_CHUNK,
+                ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            },
+        )
+        engine = _make_engine(config=cfg, vocab={ts: 210, close_a: 211, close_b: 212})
+        engine._engine.skip_tool_parsing = True
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+
+        events = engine._engine.feed(f"{ts}args{close_a}text{close_b}", [])
+        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+
+        assert content == f"{ts}args{close_a}text"
+        assert close_b not in content
+        assert engine._engine._in_skipped_tool_span is False
 
 
 # ── TestToolAdapterForwardsKwargs ──────────────────────────────────
@@ -1490,3 +1579,203 @@ class TestCoercionInstabilityRegression:
         assert parsed["val"] == "4e"
         assert isinstance(parsed["val"], str)
         assert parsed["extra"] == "ok"
+
+
+_DROP_VOCAB: dict[str, int] = {
+    **_VOCAB,
+    "<bos>": 204,
+    "<eos>": 205,
+}
+
+
+class TestDropSpecialTokens:
+    """Special token dropping via the __DROP__ terminal mechanism."""
+
+    def test_drops_special_token_by_id_from_content(self):
+        """A special token (not a configured terminal) is dropped when
+        it arrives as its actual token ID."""
+        config = ParserEngineConfig(
+            name="drop_content_test",
+            terminals={},
+            token_id_terminals={},
+            transitions={},
+            initial_state=ParserState.CONTENT,
+            content_events={ParserState.CONTENT: EventType.TEXT_CHUNK},
+        )
+        engine = _make_engine(
+            config=config,
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = engine._engine.feed("hello<bos>world", [72, 204, 73])
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert "<bos>" not in delta.content
+        assert delta.content == "helloworld"
+
+    def test_drops_special_token_by_id_from_reasoning(self):
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = engine._engine.feed("thinking<eos>more", [72, 205, 73])
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert "<eos>" not in delta.reasoning
+        assert delta.reasoning == "thinkingmore"
+
+    def test_drops_via_text_fallback_when_no_token_ids(self):
+        """When no token IDs are provided, text-based lexer catches
+        drop tokens as a fallback."""
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = engine._engine.feed("hello<bos>world", [])
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert "<bos>" not in delta.reasoning
+
+    def test_regular_tokens_spelling_special_survive(self):
+        """Regular tokens that spell out a drop-token string survive
+        when token IDs prove they are not the special token."""
+        vocab = {**_DROP_VOCAB, "h": 72, "<": 73, "bos": 74, ">": 75, "w": 76}
+        engine = _make_engine(
+            vocab=vocab,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        # Feed regular token IDs (73, 74, 75) that spell <bos>,
+        # not the special token ID 204.
+        events = engine._engine.feed("h<bos>w", [72, 73, 74, 75, 76])
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert "<bos>" in delta.reasoning
+
+    def test_configured_terminal_not_treated_as_drop(self):
+        """Tokens already in config.terminals (like <think>) are handled
+        by the state machine, not the drop mechanism."""
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        # Start from CONTENT so <think> triggers REASONING_START
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+        events = engine._engine.feed("<think>", [200])
+        has_reasoning_start = any(e.type == EventType.REASONING_START for e in events)
+        assert has_reasoning_start
+
+    def test_tool_name_not_affected_by_drops(self):
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = [
+            SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
+            SemanticEvent(EventType.TOOL_NAME, "get_weather", tool_index=0),
+            SemanticEvent(EventType.ARG_VALUE_CHUNK, '{"city": "NYC"}', tool_index=0),
+            SemanticEvent(EventType.TOOL_CALL_END, tool_index=0),
+        ]
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert delta.tool_calls is not None
+        names = [
+            tc.function.name
+            for tc in delta.tool_calls
+            if tc.function and tc.function.name
+        ]
+        assert "get_weather" in names
+
+    def test_adjacent_drop_tokens_by_id(self):
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = engine._engine.feed("<bos><eos>", [204, 205])
+        delta = engine._events_to_delta(events)
+        assert delta is None
+
+    def test_no_special_tokens_means_no_drops(self):
+        """Engine with no special tokens passes all text through."""
+        engine = _make_engine(special_tokens=[])
+        engine._engine.reset()
+        events = engine._engine.feed("hello<bos>world", [])
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert "<bos>" in delta.reasoning
+
+    def test_drops_applied_with_skip_tool_parsing(self):
+        """Drop tokens are always dropped, even with skip_tool_parsing.
+        DROP_TERMINALs have no transitions by construction, so no parser
+        pass can use them."""
+        for initial_state in (ParserState.REASONING, ParserState.CONTENT):
+            engine = _make_engine(
+                vocab=_DROP_VOCAB,
+                special_tokens=list(_DROP_VOCAB.keys()),
+            )
+            engine._engine.skip_tool_parsing = True
+            engine._engine.reset(initial_state=initial_state)
+            events = engine._engine.feed("hello<bos>world", [72, 204, 73])
+            delta = engine._events_to_delta(events)
+            assert delta is not None
+            output = (delta.reasoning or "") + (delta.content or "")
+            assert "<bos>" not in output, f"<bos> leaked in state {initial_state}"
+
+    def test_transitions_unaffected_by_drop_in_reasoning_with_skip_tool_parsing(self):
+        """With skip_tool_parsing in REASONING state, drop tokens are
+        removed but configured terminals still fire their transitions."""
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.skip_tool_parsing = True
+        engine._engine.reset()
+        events = engine._engine.feed("thought<bos></think>answer", [72, 204, 201, 73])
+        types = [e.type for e in events]
+        assert EventType.REASONING_CHUNK in types
+        assert EventType.REASONING_END in types
+        assert EventType.TEXT_CHUNK in types
+        reasoning_text = "".join(
+            e.value for e in events if e.type == EventType.REASONING_CHUNK
+        )
+        assert "<bos>" not in reasoning_text
+
+    def test_drops_in_tool_args_state(self):
+        """Drop tokens in TOOL_ARGS state are silently discarded."""
+        vocab = {**_DROP_VOCAB, '{"a":1}': 300}
+        engine = _make_engine(
+            vocab=vocab,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+        events = engine._engine.feed(
+            '<tool_call>{"a":1}<bos></tool_call>',
+            [202, 300, 204, 203],
+        )
+        arg_chunks = [e.value for e in events if e.type == EventType.ARG_VALUE_CHUNK]
+        combined = "".join(arg_chunks)
+        assert "<bos>" not in combined
+        assert '{"a":1}' in combined
+
+    def test_mixed_configured_and_drop_terminals(self):
+        """Configured terminals trigger transitions while drop terminals
+        are silently removed in the same stream."""
+        engine = _make_engine(
+            vocab=_DROP_VOCAB,
+            special_tokens=list(_DROP_VOCAB.keys()),
+        )
+        engine._engine.reset()
+        events = engine._engine.feed("thought<bos></think>answer", [72, 204, 201, 73])
+        types = [e.type for e in events]
+        assert EventType.REASONING_CHUNK in types
+        assert EventType.REASONING_END in types
+        assert EventType.TEXT_CHUNK in types
+        reasoning_text = "".join(
+            e.value for e in events if e.type == EventType.REASONING_CHUNK
+        )
+        assert "<bos>" not in reasoning_text

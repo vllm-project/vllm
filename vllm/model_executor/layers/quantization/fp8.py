@@ -4,10 +4,8 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-from torch.utils._python_dispatch import TorchDispatchMode
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -30,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -219,48 +216,19 @@ class Fp8Config(QuantizationConfig):
             return Fp8KVCacheMethod(self)
         return None
 
-    def get_cache_scale_mapper(self) -> "WeightsMapper":
+    @staticmethod
+    def get_cache_scale_mapper() -> "WeightsMapper":
         """Map compressed-tensors KV-cache scale names to vLLM names."""
         from vllm.model_executor.models.utils import WeightsMapper
 
-        return WeightsMapper(
-            orig_to_new_suffix={
-                ".k_proj.output_scale": ".attn.k_scale",
-                ".v_proj.output_scale": ".attn.v_scale",
-                ".q_proj.output_scale": ".attn.q_scale",
-                ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
-            }
-        )
-
-
-class CopyNumelCounter(TorchDispatchMode):
-    """
-    Tracks total number of elements modified with `copy_`. Useful for keeping
-    track of weight loading where underlying weights can be arbitrarily
-    transformed (such as with `narrow`) before calling copy.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.copied_numel = 0
-
-    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        if kwargs is None:
-            kwargs = {}
-        out = func(*args, **kwargs)
-        if func == torch.ops.aten.copy_.default:
-            self.copied_numel += args[0].numel()
-        return out
-
-
-def _copy_missing_attrs(old: torch.Tensor, new: torch.Tensor) -> None:
-    """Copies any attrs present in `old` but not in `new` to `new`"""
-    new_attrs = set(dir(new))
-    attrs_to_set = {}
-    for attr in dir(old):
-        if attr not in new_attrs:
-            attrs_to_set[attr] = getattr(old, attr)
-    set_weight_attrs(new, attrs_to_set)
+        orig_to_new_suffix = {
+            ".k_proj.output_scale": ".attn.k_scale",
+            ".v_proj.output_scale": ".attn.v_scale",
+            ".q_proj.output_scale": ".attn.q_scale",
+            ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
+        }
+        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=orig_to_new_suffix)
+        return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
 
 class Fp8LinearMethod(LinearMethodBase):
@@ -576,7 +544,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -602,7 +570,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=layer.orig_dtype,
                 ),
                 requires_grad=False,
@@ -619,13 +587,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # WEIGHT_SCALES
         if not self.block_quant:
             # For per-tensor quant, the scales are per expert and weight.
-            w13_scale_data = torch.ones(num_experts, 2, dtype=torch.float32)
+            w13_scale_data = torch.ones(
+                num_experts, self.moe.w13_num_shards, dtype=torch.float32
+            )
             w2_scale_data = torch.ones(num_experts, dtype=torch.float32)
         else:
             # For block quant, the scales are per block (typically 128x128).
             w13_scale_data = torch.ones(
                 num_experts,
-                2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
+                self.moe.w13_num_shards
+                * ((intermediate_size_per_partition + block_n - 1) // block_n),
                 (hidden_size + block_k - 1) // block_k,
                 dtype=torch.float32,
             )
@@ -699,21 +670,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
-        # AITER backend requires weights to be marked as shuffled.
-        if self.fp8_backend == Fp8MoeBackend.AITER:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
-            assert self.experts_cls is not None
-            self.moe_kernel = make_fp8_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                fp8_backend=self.fp8_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-            )
+        assert self.moe_quant_config is not None
+        assert self.experts_cls is not None
+        self.moe_kernel = make_fp8_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # Allow for accessing weights and scales in standard way.
@@ -742,7 +708,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert not self.block_quant
             assert w13_input_scale is not None and w2_input_scale is not None
             w13_input_scale, w2_input_scale = process_fp8_input_tensor_strategy_moe(
-                w13_input_scale, w2_input_scale
+                w13_input_scale,
+                w2_input_scale,
+                layer.moe_config.moe_parallel_config.enable_eplb,
             )
             replace_parameter(layer, "w13_input_scale", w13_input_scale)
             replace_parameter(layer, "w2_input_scale", w2_input_scale)
@@ -752,21 +720,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if not self.block_quant:
             shard_size = layer.intermediate_size_per_partition
             w13, w13_scale = process_fp8_weight_tensor_strategy_moe(
-                w13, w13_scale, shard_size, layer.local_num_experts
+                w13,
+                w13_scale,
+                shard_size,
+                layer.local_num_experts,
+                is_act_and_mul=self.moe.is_act_and_mul,
             )
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
-        )
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
@@ -785,6 +748,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
         # Inject biases into the quant config if the model has them

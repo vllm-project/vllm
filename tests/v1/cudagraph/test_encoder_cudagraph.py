@@ -107,8 +107,14 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     """
     mgr = object.__new__(EncoderCudaGraphManager)
     mgr.token_budgets = sorted(budgets)
+    mgr.path_token_budgets = {"default": mgr.token_budgets}
     mgr.max_batch_size = 16
     mgr.use_dp = False
+    mgr.config = EncoderCudaGraphConfig(
+        modalities=["image"],
+        buffer_keys=[],
+        out_hidden_size=32,
+    )
     mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
     mgr._ordered_secondary_capture_axis_keys = None
@@ -421,6 +427,7 @@ def _make_manager_for_gpu(
     """Create EncoderCudaGraphManager bypassing VllmConfig for GPU tests."""
     mgr = object.__new__(EncoderCudaGraphManager)
     mgr.token_budgets = sorted(token_budgets)
+    mgr.path_token_budgets = {"default": mgr.token_budgets}
     mgr.max_batch_size = max_batch_size
     mgr.max_frames_per_batch = (
         max_frames_per_batch if max_frames_per_batch is not None else max_batch_size * 2

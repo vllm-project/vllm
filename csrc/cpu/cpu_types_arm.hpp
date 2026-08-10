@@ -3,6 +3,8 @@
 
 #include <arm_neon.h>
 
+#include "cpu/cpu_tanhf_neon.hpp"
+
 #include <torch/all.h>
 #include <ATen/cpu/vec/functional.h>
 #include <ATen/cpu/vec/vec.h>
@@ -345,6 +347,10 @@ struct FP32Vec4 : public VectorizedRegWrapper<FP32Vec4, 1, float> {
   explicit FP32Vec4(float32x4_t data) : Base(VectorizedT(data)) {};
 
   explicit FP32Vec4(const FP32Vec4& data) : Base(data) {};
+
+  FORCE_INLINE FP32Vec4 tanh() const {
+    return FP32Vec4(fast_tanhf_f32x4(reg.val[0]));
+  }
 };
 
 struct FP32Vec8 : public VectorizedRegWrapper<FP32Vec8, 2, float> {
@@ -389,6 +395,13 @@ struct FP32Vec8 : public VectorizedRegWrapper<FP32Vec8, 2, float> {
   explicit FP32Vec8(float32x4x2_t data) {
     reg.val[0] = Vectorized<float>(data.val[0]);
     reg.val[1] = Vectorized<float>(data.val[1]);
+  }
+
+  FORCE_INLINE FP32Vec8 tanh() const {
+    FP32Vec8 r(uninit);
+    r.reg.val[0] = Vectorized<float>(fast_tanhf_f32x4(reg.val[0]));
+    r.reg.val[1] = Vectorized<float>(fast_tanhf_f32x4(reg.val[1]));
+    return r;
   }
 
   FORCE_INLINE float reduce_sum() const noexcept {
@@ -496,6 +509,15 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
     reg.val[2] = Vectorized<float>(vcvt_f32_f16(vget_low_f16(v.reg.val[1])));
     reg.val[3] = Vectorized<float>(vcvt_f32_f16(vget_high_f16(v.reg.val[1])));
   };
+
+  FORCE_INLINE FP32Vec16 tanh() const {
+    FP32Vec16 r(uninit);
+    r.reg.val[0] = Vectorized<float>(fast_tanhf_f32x4(reg.val[0]));
+    r.reg.val[1] = Vectorized<float>(fast_tanhf_f32x4(reg.val[1]));
+    r.reg.val[2] = Vectorized<float>(fast_tanhf_f32x4(reg.val[2]));
+    r.reg.val[3] = Vectorized<float>(fast_tanhf_f32x4(reg.val[3]));
+    return r;
+  }
 
   static FORCE_INLINE void load_even_odd(const float* ptr, FP32Vec16& even,
                                          FP32Vec16& odd) noexcept {
@@ -921,10 +943,14 @@ inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
 };
 
 inline void fma(FP32Vec16& acc, FP32Vec16& a, FP32Vec16& b) {
-  fmadd(acc.reg.val[0], a.reg.val[0], b.reg.val[0]);
-  fmadd(acc.reg.val[1], a.reg.val[1], b.reg.val[1]);
-  fmadd(acc.reg.val[2], a.reg.val[2], b.reg.val[2]);
-  fmadd(acc.reg.val[3], a.reg.val[3], b.reg.val[3]);
+  // NOTE: at::vec::fmadd(a, b, c) returns a * b + c and does not mutate its
+  // arguments; we must capture the result back into acc, otherwise the FMA
+  // is a no-op. On x86 fma is implemented as `acc = acc + a * b` which does
+  // the assignment; the ARM version previously dropped the return value.
+  acc.reg.val[0] = fmadd(a.reg.val[0], b.reg.val[0], acc.reg.val[0]);
+  acc.reg.val[1] = fmadd(a.reg.val[1], b.reg.val[1], acc.reg.val[1]);
+  acc.reg.val[2] = fmadd(a.reg.val[2], b.reg.val[2], acc.reg.val[2]);
+  acc.reg.val[3] = fmadd(a.reg.val[3], b.reg.val[3], acc.reg.val[3]);
 };
 
 inline BF16Vec8::BF16Vec8(const FP32Vec8& v) {
@@ -945,10 +971,11 @@ inline void fma(FP32Vec16& acc, BF16Vec32& a, BF16Vec32& b) {
   std::tie(b0_low, b0_high) = convert_bfloat16_float(b.reg.val[0]);
   std::tie(b1_low, b1_high) = convert_bfloat16_float(b.reg.val[1]);
 
-  fmadd(acc.reg.val[0], a0_low, b0_low);
-  fmadd(acc.reg.val[1], a0_high, b0_high);
-  fmadd(acc.reg.val[2], a1_low, b1_low);
-  fmadd(acc.reg.val[3], a1_high, b1_high);
+  // Same fmadd semantic as the FP32 overload above: capture the result.
+  acc.reg.val[0] = fmadd(a0_low, b0_low, acc.reg.val[0]);
+  acc.reg.val[1] = fmadd(a0_high, b0_high, acc.reg.val[1]);
+  acc.reg.val[2] = fmadd(a1_low, b1_low, acc.reg.val[2]);
+  acc.reg.val[3] = fmadd(a1_high, b1_high, acc.reg.val[3]);
 };
 
 template <>

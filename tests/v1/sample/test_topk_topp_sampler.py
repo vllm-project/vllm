@@ -65,6 +65,10 @@ def test_sampler_threads_fp64_gumbel_to_topk_topp_sampler():
     assert sampler.topk_topp_sampler.use_fp64_gumbel
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm aiter sampler test only runs on ROCm",
+)
 def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -426,7 +430,7 @@ class TestTritonTopkTopp:
         # logits is modified in place; the only extra device memory is the
         # per-SM scratch buffer (~num_sm * vocab), so allow ~1 GB of headroom.
         required_bytes = batch_size * vocab_size * 4 + (1 << 30)
-        if torch.cuda.mem_get_info()[0] < required_bytes:
+        if torch.accelerator.get_memory_info()[0] < required_bytes:
             pytest.skip(f"needs ~{required_bytes / 1e9:.0f} GB of free GPU memory")
 
         logits = torch.randn(
