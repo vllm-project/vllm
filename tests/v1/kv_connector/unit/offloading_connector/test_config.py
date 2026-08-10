@@ -661,6 +661,42 @@ def test_canonical_layout_certifies_attention_hybrids():
     )
 
 
+def test_canonical_layout_certifies_uniform_type_wrapper():
+    """GLM-5.2/DSv3.2-style groups wrap same-type specs with different page
+    sizes (MLA plus its DSA indexer cache) in UniformTypeKVCacheSpecs; the
+    gate must look through the wrapper like the mapping derivation does."""
+
+    def uniform_groups(indexer_spec) -> list[KVCacheGroupSpec]:
+        return [
+            KVCacheGroupSpec(
+                ["mla_layer", "indexer_layer"],
+                UniformTypeKVCacheSpecs(
+                    block_size=16,
+                    kv_cache_specs={
+                        "mla_layer": _mla_spec(head_size=576),
+                        "indexer_layer": indexer_spec,
+                    },
+                ),
+            )
+        ]
+
+    mla_wrapped = uniform_groups(_mla_spec(head_size=128))
+    assert not _parallelism_agnostic(mla_wrapped)
+    assert _parallelism_agnostic(mla_wrapped, canonical=True)
+
+    # one uncertifiable inner spec poisons the wrapper
+    swa_mla_wrapped = uniform_groups(
+        SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.float32,
+            sliding_window=128,
+        )
+    )
+    assert not _parallelism_agnostic(swa_mla_wrapped, canonical=True)
+
+
 def test_canonical_layout_certifies_v2_model_runner():
     """Canonical bytes are certified per layer against live tensor strides at
     registration, so the static gate must not depend on the model-runner

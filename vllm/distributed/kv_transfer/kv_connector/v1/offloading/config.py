@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -179,6 +180,12 @@ def build_offloading_config(
         def spec_certifiable(spec: KVCacheSpec) -> bool:
             """Statically mirrors _layer_mapping's certifiable spec classes;
             hybrid attention models certify group by group."""
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                # Same-type layers with differing page sizes (e.g. MLA plus
+                # its DSA indexer cache); mappings derive per inner spec
+                return len(spec.kv_cache_specs) > 0 and all(
+                    spec_certifiable(inner) for inner in spec.kv_cache_specs.values()
+                )
             if not isinstance(spec, AttentionSpec):
                 return False
             if spec.kv_quant_mode.is_per_token_head:
