@@ -941,8 +941,8 @@ def w8a8_triton_block_scaled_mm(
         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
     else:
         # Default config
-        # Block-wise quant: BLOCK_SIZE_N must be divisible by block_size[0]
-        # BLOCK_SIZE_K must be divisible by block_size[1]
+        # Block-wise quant: the kernel reads one scale per K tile, so
+        # block_size[1] must be divisible by BLOCK_SIZE_K
         config = {
             "BLOCK_SIZE_M": 64,
             "BLOCK_SIZE_N": block_size[0],
@@ -951,6 +951,12 @@ def w8a8_triton_block_scaled_mm(
             "num_warps": 4,
             "num_stages": 2,
         }
+
+    # The kernel picks a single scale pair per K tile, so a tile must not span
+    # more than one quantization group. Tuned configs can carry a larger
+    # BLOCK_SIZE_K; clamp it the way the fused-MoE launcher already does.
+    config = dict(config)
+    config["BLOCK_SIZE_K"] = min(config["BLOCK_SIZE_K"], block_k)
 
     def grid(META):
         return (
