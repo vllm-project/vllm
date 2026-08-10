@@ -386,9 +386,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
         # bpreshuffle GEMM requires an fp8 2D weight with N and K divisible by 128
         self._is_bpreshuffled = (
-            rocm_aiter_ops.is_fp8_block_scale_bpreshuffle_enabled()
-            and n % 128 == 0
-            and k % 128 == 0
+            rocm_aiter_ops.is_linear_fp8_enabled() and n % 128 == 0 and k % 128 == 0
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
