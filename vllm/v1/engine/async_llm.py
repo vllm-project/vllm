@@ -27,6 +27,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
+from vllm.profiler.wrapper import TorchProfilerWrapper
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -186,16 +187,17 @@ class AsyncLLM(EngineClient):
                 profiler_dir,
             )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
-            self.profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                ],
-                with_stack=vllm_config.profiler_config.torch_profiler_with_stack,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    profiler_dir,
-                    worker_name=worker_name,
-                    use_gzip=vllm_config.profiler_config.torch_profiler_use_gzip,
-                ),
+            # Use TorchProfilerWrapper (WorkerProfiler) instead of a raw
+            # torch.profiler.profile: WorkerProfiler.start()/stop() are
+            # guarded against double start/stop. A raw profiler raises
+            # RuntimeError (or segfaults in ActivityTraceWrapper::save for a
+            # large trace) when stop() is called twice. The wrapper builds the
+            # tensorboard trace handler itself from profiler_config.
+            self.profiler = TorchProfilerWrapper(
+                vllm_config.profiler_config,
+                worker_name=worker_name,
+                local_rank=0,
+                activities=["CPU"],
             )
         else:
             self.profiler = None
