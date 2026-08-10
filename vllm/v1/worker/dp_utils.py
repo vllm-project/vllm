@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
+
 import torch
 import torch.distributed as dist
 
@@ -137,10 +139,14 @@ def _synchronize_dp_ranks(
         parallel_config=parallel_config,
     )
 
-    # The post-all-reduce reads (`.item()` / `.cpu()`) are inherently
-    # GPU->CPU syncs: the values drive Python-level control flow for
-    # ubatching, DP padding, and cudagraph-mode selection.
-    with gpu_sync_allowed():
+    # Only the NCCL path leaves `tensor` on device. With Gloo -- the default
+    # under async scheduling -- the all-reduce runs on CPU, so the reads below
+    # are host-side and the check should stay armed.
+    with (
+        nullcontext()
+        if parallel_config.disable_nccl_for_dp_synchronization
+        else gpu_sync_allowed()
+    ):
         # Synchronize cudagraph_mode across ranks first (take min).
         # This is needed before DP padding decision since we use the synced
         # cudagraph mode to determine whether DP padding is needed.
