@@ -71,6 +71,8 @@ def get_device_name_as_file_name(device_id: int = 0) -> str:
     from vllm.platforms import current_platform
 
     name = current_platform.get_device_name(device_id)
+    if not isinstance(name, str) and current_platform.is_rocm():
+        name = torch.cuda.get_device_name(device_id)
     name = re.sub(r"[\s/]+", "_", name)
     return name
 
