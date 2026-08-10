@@ -180,7 +180,7 @@ def test_gfx942_gluon_graph_passes_ragged_metadata_directly(monkeypatch):
     monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
     monkeypatch.setattr(
         rocm_aiter_mla,
-        "_get_mla_gluon_gfx942_graph",
+        "_get_mla_gluon_gfx942",
         lambda: graph,
     )
 
@@ -253,7 +253,7 @@ def test_gfx942_gluon_graph_unsupported_cases_fall_back(monkeypatch, unsupported
     )
     monkeypatch.setattr(
         rocm_aiter_mla,
-        "_get_mla_gluon_gfx942_graph",
+        "_get_mla_gluon_gfx942",
         lambda: None if unsupported == "symbol" else graph,
     )
     monkeypatch.setattr(rocm_aiter_mla.rocm_aiter_ops, "mla_decode_fwd", asm)
@@ -278,7 +278,7 @@ def test_gfx942_gluon_graph_runtime_errors_propagate(monkeypatch):
     monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
     monkeypatch.setattr(
         rocm_aiter_mla,
-        "_get_mla_gluon_gfx942_graph",
+        "_get_mla_gluon_gfx942",
         lambda: mock.Mock(side_effect=RuntimeError("kernel failed")),
     )
     monkeypatch.setattr(rocm_aiter_mla.rocm_aiter_ops, "mla_decode_fwd", asm)

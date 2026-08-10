@@ -41,7 +41,7 @@ def _on_gfx942() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
-def _get_mla_gluon_gfx942_graph() -> Callable[..., torch.Tensor] | None:
+def _get_mla_gluon_gfx942() -> Callable[..., torch.Tensor] | None:
     """Load the graph-safe gfx942 Gluon MLA entry point when available."""
     module_name = "aiter.ops.triton.attention.mla"
     try:
@@ -50,7 +50,7 @@ def _get_mla_gluon_gfx942_graph() -> Callable[..., torch.Tensor] | None:
         if not module_name.startswith(import_error.name or ""):
             raise
         return None
-    return getattr(module, "mla_gluon_gfx942_graph", None)
+    return getattr(module, "mla_gluon_gfx942", None)
 
 
 @functools.lru_cache(maxsize=1)
@@ -1268,7 +1268,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             and decode.attn_out_dtype == torch.bfloat16
             and AiterMLAHelper.use_gluon_gfx942_graph(self.num_heads, qlen, num_reqs)
         ):
-            mla_gluon_gfx942_graph = _get_mla_gluon_gfx942_graph()
+            mla_gluon_gfx942 = _get_mla_gluon_gfx942()
             graph_inputs = _prepare_gluon_gfx942_graph_inputs(
                 q,
                 kv_c_and_k_pe_cache,
@@ -1278,7 +1278,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 self.kv_lora_rank,
                 self.qk_rope_head_dim,
             )
-            if mla_gluon_gfx942_graph is not None and graph_inputs is not None:
+            if mla_gluon_gfx942 is not None and graph_inputs is not None:
                 q_nope, q_pe, kv_buffer = graph_inputs
                 o = torch.empty(
                     num_reqs,
@@ -1288,7 +1288,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                     dtype=decode.attn_out_dtype,
                     device=q_nope.device,
                 )
-                mla_gluon_gfx942_graph(
+                mla_gluon_gfx942(
                     q_nope,
                     q_pe,
                     kv_buffer,
