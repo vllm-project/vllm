@@ -677,6 +677,9 @@ def sparse_attn_indexer_kpool(
                     q_quant[:num_decode_tokens], decode_lens
                 )
                 padded_q_scale = None
+            padded_weights = pack_seq_triton(
+                weights[:num_decode_tokens], decode_lens, pad_value=0
+            ).reshape(-1, *weights.shape[1:])
         else:
             padded_q_quant_decode_tokens = q_quant[:num_decode_tokens].reshape(
                 decode_lens.shape[0], -1, *q_quant.shape[1:]
@@ -687,6 +690,7 @@ def sparse_attn_indexer_kpool(
                 )
             else:
                 padded_q_scale = None
+            padded_weights = weights[:num_decode_tokens]
         # TODO: move and optimize below logic with triton kernels
         batch_size = padded_q_quant_decode_tokens.shape[0]
         next_n = padded_q_quant_decode_tokens.shape[1]
@@ -703,7 +707,7 @@ def sparse_attn_indexer_kpool(
         logits = fp8_fp4_paged_mqa_logits(
             (padded_q_quant_cast, padded_q_scale),
             kv_cache,
-            weights[:num_padded_tokens],
+            padded_weights[:num_padded_tokens],
             seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
