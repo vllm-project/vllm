@@ -5,7 +5,7 @@ The persistent compilation cache is disabled by default. Enable it with
 options are mutually exclusive.
 
 When enabled, vLLM restores and publishes a per-rank bundle under
-`s3://eric-alcaide-dev/vllm_cache/`. The bundle contains:
+`s3://llm-s3-shared-mount/vllm_cache/`. The bundle contains:
 
 - vLLM's `torch_compile_cache` artifacts;
 - FlashInfer JIT artifacts under `~/.cache/flashinfer`, including architecture-

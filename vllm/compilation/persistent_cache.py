@@ -21,7 +21,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_BUCKET = "s3://eric-alcaide-dev/vllm_cache"
+_BUCKET = "s3://llm-s3-shared-mount/vllm_cache"
 _ENDPOINT = "https://storage.eu-north1.nebius.cloud"
 _REGION = "eu-north1"
 _SCHEMA = 2
