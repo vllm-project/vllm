@@ -212,7 +212,7 @@ __device__ __forceinline__ void store_hot_index(
 //   s_chunk_off[nbc + 1]     prefix sums for hit (then miss) compaction
 //   s_evict_off[nbc + 1]     prefix sums for evictable compaction
 //   s_hash_keys[hash_size]   open addressing: global id -> top-k index
-//   s_counters[4]            hits, phase-1 resolved, rotate?, valid count
+//   s_counters[3]            hits, phase-1 resolved, valid count
 //   s_lru_out[hot_size]      int16, compacted slots: [hits fwd | evict bwd]
 //   s_hash_vals[hash_size]   int16 hash values (top-k index)
 // Valid global ids must be unique within each row.
@@ -297,10 +297,10 @@ __global__ void hisparse_swap_in_kernel(
   int32_t* s_evict_off = s_chunk_off + (num_buffer_chunks + 1);
   int32_t* s_hash_keys = s_evict_off + (num_buffer_chunks + 1);
   int32_t* s_counters = s_hash_keys + hash_size;
-  int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_counters + 4);
+  int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_counters + 3);
   int16_t* s_hash_vals = s_lru_out + hot_size;
 
-  if (tid < 4) {
+  if (tid < 3) {
     s_counters[tid] = 0;
   }
   for (int i = tid; i < hash_size; i += blockDim.x) {
@@ -359,7 +359,6 @@ __global__ void hisparse_swap_in_kernel(
                       attention_block_stride);
       s_topk[i] = kTokenDone;
       atomicAdd(&s_counters[1], 1);
-      atomicAdd(&s_counters[3], 1);
     } else if (g < 0) {
       store_hot_index(row_out, row_attention, i, -1, hot_block_size,
                       attention_block_stride);
@@ -385,13 +384,8 @@ __global__ void hisparse_swap_in_kernel(
   // Fully resident rows need only request-relative page translation. Avoid
   // scanning or rewriting the hot LRU when no selected row can consult it.
   if (resident_block_table != nullptr && s_counters[1] == top_k) {
-    if (tid == 0) {
-      if (compact_miss_counts != nullptr) {
-        compact_miss_counts[batch_row] = 0;
-      }
-      if (stats != nullptr) {
-        atomicAdd(&stats[0], static_cast<unsigned long long>(s_counters[3]));
-      }
+    if (tid == 0 && compact_miss_counts != nullptr) {
+      compact_miss_counts[batch_row] = 0;
     }
     return;
   }
@@ -1130,7 +1124,7 @@ void hisparse_swap_in(
   const int hash_size = 2 * top_k;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const size_t smem_bytes =
-      sizeof(int32_t) * (top_k + 2 * (num_buffer_chunks + 1) + hash_size + 4) +
+      sizeof(int32_t) * (top_k + 2 * (num_buffer_chunks + 1) + hash_size + 3) +
       sizeof(int16_t) * (hot_size + hash_size);
 
   const torch::stable::accelerator::DeviceGuard device_guard(
