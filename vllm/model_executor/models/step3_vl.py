@@ -44,7 +44,6 @@ from vllm.transformers_utils.processors.step3_vl import (
     Step3VLImageProcessor,
     Step3VLProcessor,
 )
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -201,7 +200,7 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo])
             patch_pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_patches
             ),
-            num_patches=MultiModalFieldConfig.batched("image"),
+            num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             patch_newline_mask=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_patches
             ),
@@ -683,8 +682,7 @@ class Step3VLForConditionalGeneration(
 
         merged_image_features = []
         cur_patch_idx = 0
-        with gpu_sync_allowed():
-            num_patches_list = num_patches.tolist()
+        num_patches_list = num_patches.tolist()
         for i, num_patch in enumerate(num_patches_list):
             cur_feature = []
             if num_patch > 0:

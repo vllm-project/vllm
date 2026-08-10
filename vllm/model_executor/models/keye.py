@@ -58,7 +58,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -872,12 +871,12 @@ def _keye_field_config(
     return dict(
         pixel_values=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
         image_embeds=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
-        image_grid_thw=MultiModalFieldConfig.batched("image"),
+        image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
             "video", video_grid_sizes
         ),
         video_embeds=MultiModalFieldConfig.flat_from_sizes("video", video_grid_sizes),
-        video_grid_thw=MultiModalFieldConfig.batched("video"),
+        video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
     )
 
 
@@ -1292,8 +1291,7 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
         image_grid_thw = image_input["image_grid_thw"]
         assert image_grid_thw.ndim == 2
 
-        with gpu_sync_allowed():
-            image_grid_thw_list = image_grid_thw.tolist()
+        image_grid_thw_list = image_grid_thw.tolist()
         for idx, thw in enumerate(image_grid_thw_list):
             thw_tuple = tuple(thw)
             numel = np.prod(thw_tuple)
