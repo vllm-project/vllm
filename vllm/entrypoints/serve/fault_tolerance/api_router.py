@@ -18,10 +18,6 @@ router = APIRouter()
 
 _ALLOWED_INSTRUCTIONS = {"retry", "scale_down"}
 
-_REQUIRED_PARAMS: dict[str, set[str]] = {
-    "scale_down": {"removed_dp_ranks"},
-}
-
 
 def _validate_payload(body: dict) -> tuple[str, dict, str]:
     if not isinstance(body, dict):
@@ -34,11 +30,7 @@ def _validate_payload(body: dict) -> tuple[str, dict, str]:
     params = body.get("params", {})
     if not isinstance(params, dict):
         raise HTTPException(400, "'params' must be an object.")
-    missing = _REQUIRED_PARAMS.get(instruction, set()) - set(params.keys())
-    if missing:
-        raise HTTPException(
-            400, f"Missing params for '{instruction}': {sorted(missing)}"
-        )
+
     request_id = body.get("request_id", "")
     if not isinstance(request_id, str):
         raise HTTPException(400, "'request_id' must be a string.")
@@ -62,10 +54,10 @@ async def process_fault_tolerance_instruction(
         raise HTTPException(400, "Invalid JSON format") from e
 
     instruction, params, request_id = _validate_payload(body)
-    # A recovery round fans out to all engines with the same request_id, which
-    # also namespaces that round's coordination keys; a retry must use a fresh
-    # one. Empty means the caller doesn't track rounds (engines use the local
-    # epoch for coordination instead).
+    # All engines in one recovery round must share the same request_id, which
+    # namespaces that round's coordination keys. It is either supplied by the
+    # external orchestrator or, when empty, derived from the engine's local
+    # epoch.
     ft_request = FaultToleranceRequest(
         instruction=instruction,
         params=params,
