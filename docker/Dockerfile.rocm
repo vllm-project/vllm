@@ -254,20 +254,31 @@ RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,
     fi
 
 # -----------------------
+# Shared vLLM build dependencies
+#
+# Install requirements once, before bringing source-specific inputs into either
+# consumer. Native compilation and wheel packaging then share this expensive
+# layer while retaining their independent source cache boundaries.
+FROM base AS build_vllm_dependencies
+ARG COMMON_WORKDIR
+ENV VLLM_TARGET_DEVICE=rocm
+WORKDIR ${COMMON_WORKDIR}/vllm
+
+COPY --from=fetch_vllm \
+    ${COMMON_WORKDIR}/vllm/requirements/common.txt \
+    ${COMMON_WORKDIR}/vllm/requirements/rocm.txt \
+    requirements/
+
+RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
+    uv pip install --system -r requirements/rocm.txt
+
+# -----------------------
 # vLLM native build stages
 #
 # csrc-build intentionally copies only files that affect ROCm native extension
 # compilation. That keeps unrelated CI/test/docs edits from invalidating the
 # expensive HIP/C++ build layer.
-FROM base AS csrc-build
-ARG COMMON_WORKDIR
-WORKDIR ${COMMON_WORKDIR}/vllm
-
-COPY requirements/rocm.txt requirements/rocm.txt
-COPY requirements/common.txt requirements/common.txt
-RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    uv pip install --system -r requirements/rocm.txt
-
+FROM build_vllm_dependencies AS csrc-build
 # pyproject.toml is bind-mounted so it is not persisted in the csrc-build image,
 # but it still participates in the BuildKit cache key for this RUN step.
 COPY setup.py CMakeLists.txt ./
@@ -277,7 +288,6 @@ COPY csrc csrc/
 COPY vllm/envs.py vllm/envs.py
 COPY vllm/__init__.py vllm/__init__.py
 
-ENV VLLM_TARGET_DEVICE=rocm
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+rocm.csrc.build"
 
 RUN --mount=type=bind,source=pyproject.toml,target=${COMMON_WORKDIR}/vllm/pyproject.toml \
@@ -296,11 +306,10 @@ RUN --mount=type=bind,source=pyproject.toml,target=${COMMON_WORKDIR}/vllm/pyproj
 
 # Build the full vLLM ROCm wheel by reusing the native extension wheel from
 # csrc-build. This stage still rebuilds for Python/package changes, but skips
-# the expensive HIP/C++ compile when native inputs are unchanged.
-FROM fetch_vllm AS build_vllm
-ARG COMMON_WORKDIR
-ENV VLLM_TARGET_DEVICE=rocm
-
+# the expensive dependency installation and HIP/C++ compilation when their
+# respective inputs are unchanged.
+FROM build_vllm_dependencies AS build_vllm
+COPY --from=fetch_vllm ${COMMON_WORKDIR}/vllm ${COMMON_WORKDIR}/vllm
 COPY --from=csrc-build ${COMMON_WORKDIR}/vllm/dist /precompiled-wheels
 
 # Drop the pre-built Rust artifacts into the source tree. setup.py detects
@@ -308,9 +317,7 @@ COPY --from=csrc-build ${COMMON_WORKDIR}/vllm/dist /precompiled-wheels
 COPY --from=rust-build ${COMMON_WORKDIR}/vllm/vllm/vllm-rs ${COMMON_WORKDIR}/vllm/vllm/vllm-rs
 COPY --from=rust-build ${COMMON_WORKDIR}/vllm/vllm/_rust_*.so ${COMMON_WORKDIR}/vllm/vllm/
 
-RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    cd vllm \
-    && uv pip install --system -r requirements/rocm.txt \
+RUN cd "${COMMON_WORKDIR}/vllm" \
     && export VLLM_USE_PRECOMPILED=1 \
     && export VLLM_PRECOMPILED_WHEEL_LOCATION="$(ls /precompiled-wheels/*.whl)" \
     && export VLLM_DOCKER_BUILD_CONTEXT=1 \
@@ -325,6 +332,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements /requirements
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/scripts/benchmark_helion_kernels.py /scripts/benchmark_helion_kernels.py
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
@@ -641,6 +649,7 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/requirements /requir
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/examples /examples
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/scripts/benchmark_helion_kernels.py /scripts/benchmark_helion_kernels.py
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu

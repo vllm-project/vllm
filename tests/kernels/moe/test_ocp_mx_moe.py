@@ -1014,6 +1014,83 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
     check_accuracy(ref, out, atol=0, rtol=0.3, percent=0.8)
 
 
+@pytest.mark.parametrize(
+    ("backend_name", "interleaves_weights"),
+    [
+        ("FLASHINFER_CUTLASS_MXFP4_MXFP8", False),
+        ("FLASHINFER_CUTLASS_MXFP4_BF16", True),
+    ],
+)
+@pytest.mark.skipif(not has_flashinfer(), reason="flashinfer is required")
+def test_convert_standard_mxfp4_weights_for_flashinfer_cutlass(
+    monkeypatch, backend_name, interleaves_weights
+):
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        convert_weight_to_mxfp4_moe_kernel_format,
+    )
+
+    w13 = torch.arange(16, dtype=torch.uint8).reshape(1, 4, 4)
+    w2 = torch.arange(8, dtype=torch.uint8).reshape(1, 4, 2)
+    w13_scale = torch.arange(8, dtype=torch.uint8).reshape(1, 4, 2)
+    w2_scale = torch.arange(4, dtype=torch.uint8).reshape(1, 4, 1)
+    w13_bias = torch.arange(4, dtype=torch.float32).reshape(1, 4)
+    w2_bias = torch.arange(4, dtype=torch.float32).reshape(1, 4)
+    interleaved_weights = []
+    interleaved_scales = []
+
+    def record_weight_interleave(weight, quant_type):
+        assert quant_type == "fp4"
+        interleaved_weights.append(weight.clone())
+        return weight
+
+    def record_scale_interleave(scale):
+        interleaved_scales.append(scale.clone())
+        return scale
+
+    monkeypatch.setattr("flashinfer.block_scale_interleave", record_scale_interleave)
+    monkeypatch.setattr(
+        "flashinfer.fused_moe.interleave_moe_weights_for_sm90_mixed_gemm",
+        record_weight_interleave,
+    )
+    monkeypatch.setattr(
+        "flashinfer.fused_moe.interleave_moe_scales_for_sm90_mixed_gemm",
+        record_scale_interleave,
+    )
+    converted = convert_weight_to_mxfp4_moe_kernel_format(
+        getattr(Mxfp4MoeBackend, backend_name),
+        types.SimpleNamespace(),
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        w13_bias,
+        w2_bias,
+    )
+
+    expected_w13 = torch.cat([w13[:, 2:], w13[:, :2]], dim=1)
+    expected_w13_scale = torch.cat([w13_scale[:, 2:], w13_scale[:, :2]], dim=1)
+    torch.testing.assert_close(converted[0], expected_w13)
+    torch.testing.assert_close(converted[1], w2)
+    torch.testing.assert_close(converted[2], expected_w13_scale)
+    torch.testing.assert_close(converted[3], w2_scale)
+    expected_w13_bias = torch.cat([w13_bias[:, 2:], w13_bias[:, :2]], dim=1).to(
+        torch.bfloat16
+    )
+    torch.testing.assert_close(converted[4], expected_w13_bias)
+    torch.testing.assert_close(converted[5], w2_bias.to(torch.bfloat16))
+
+    if interleaves_weights:
+        assert len(interleaved_weights) == 2
+        torch.testing.assert_close(interleaved_weights[0], expected_w13)
+        torch.testing.assert_close(interleaved_weights[1], w2)
+    else:
+        assert not interleaved_weights
+    assert len(interleaved_scales) == 2
+    torch.testing.assert_close(interleaved_scales[0], expected_w13_scale)
+    torch.testing.assert_close(interleaved_scales[1], w2_scale)
+
+
 @pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("num_tokens", [1, 128])
@@ -1203,8 +1280,8 @@ ROCM_BACKEND_CONFIGS = {
         "requires_gfx950": False,
     },
     "AITER_MXFP4_BF16": {
-        "activation": "SILU",
-        "rtol": 1.0,
+        "activation": "SWIGLUOAI",
+        "rtol": 0.1,
         "percent": 0.7,
         "requires_aiter": True,
         "requires_gfx950": True,
@@ -1337,6 +1414,13 @@ def test_rocm_mxfp4_moe_oracle(
     w2_quant = w2_quant_2d.reshape(num_experts, hidden_size, -1)
     w2_scale = w2_scale_2d.reshape(num_experts, hidden_size, -1)
 
+    # AITER conversion mutates checkpoint-format weights and scales in place.
+    # Preserve their original layout for the reference calculation below.
+    w13_quant_ref = w13_quant.clone()
+    w13_scale_ref = w13_scale.clone()
+    w2_quant_ref = w2_quant.clone()
+    w2_scale_ref = w2_scale.clone()
+
     w13_bias = torch.randn(
         num_experts, 2 * intermediate_size, dtype=dtype, device=device
     )
@@ -1405,7 +1489,6 @@ def test_rocm_mxfp4_moe_oracle(
             mxfp4_backend=backend,
             experts_cls=experts_cls,
             routing_tables=None,
-            layer=None,
         )
 
         # Create inputs
@@ -1453,10 +1536,10 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Dequantize weights for reference computation
     w13_dq = upcast_from_mxfp(
-        w13_quant.view(torch.uint8), w13_scale, torch.bfloat16, axis=-1
+        w13_quant_ref.view(torch.uint8), w13_scale_ref, torch.bfloat16, axis=-1
     )
     w2_dq = upcast_from_mxfp(
-        w2_quant.view(torch.uint8), w2_scale, torch.bfloat16, axis=-1
+        w2_quant_ref.view(torch.uint8), w2_scale_ref, torch.bfloat16, axis=-1
     )
 
     # Determine activation type and layout

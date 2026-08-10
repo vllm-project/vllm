@@ -25,12 +25,6 @@ MOE_LAYER_ROUTER_GATE_SUFFIXES = {
 }
 
 
-def is_layer_moe_router_gate(prefix: str) -> bool:
-    if not prefix:
-        return False
-    return prefix.rsplit(".", 1)[-1] in MOE_LAYER_ROUTER_GATE_SUFFIXES
-
-
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,
@@ -222,13 +216,46 @@ direct_register_custom_op(
 )
 
 
+# Above this weight size, oneDNN's onednn_mm consistently matches or beats
+# the SGL AMX kernel once M grows past decode-sized batches, and is within
+# noise of it at decode-sized M -- so larger weights default to oneDNN
+# rather than SGL. 1 MiB comfortably covers MoE router/gate weights (e.g.
+# (2048, 128) .. (2880, 32) bf16/fp16, 180-720 KiB) while staying well below
+# any dense qkv/o_proj/gate_up/down/lm_head projection in practice. This
+# threshold is derived from bf16/fp16 unquantized dense-GEMM benchmarks only,
+# so it does not apply to the int8 scaled_mm path below.
+_CPU_SGL_GEMM_MAX_WEIGHT_BYTES = 1 * 1024 * 1024
+
+
 def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
-    return (
-        torch.cpu._is_amx_tile_supported()
-        and (dtype in (torch.bfloat16, torch.int8))
-        and k % 32 == 0
-        and n % 16 == 0
-    )
+    if not torch.cpu._is_amx_tile_supported() or dtype not in (
+        torch.bfloat16,
+        torch.float16,
+        torch.int8,
+    ):
+        return False
+    if dtype == torch.float16 and not torch.cpu._is_amx_fp16_supported():
+        # AMX-BF16/INT8 (amx_tile) and AMX-FP16 are separate CPU ISA
+        # extensions -- e.g. Sapphire/Emerald Rapids expose the former but
+        # not the latter -- and can_use_brgemm<at::Half> (gemm.h) always
+        # attempts brgemm for fp16 regardless of M, so this needs its own
+        # capability check rather than piggybacking on amx_tile.
+        return False
+    if dtype == torch.int8:
+        # int8_scaled_mm_with_quant requires the packed weight to stay int8
+        # (gemm_int8.cpp); convert_weight_packed's N < TILE_N fallback
+        # returns a float32 tensor instead (gemm.cpp), which would trip
+        # that check, so N must be a full TILE_N tile here.
+        return k % 32 == 0 and n % 16 == 0
+    if n * k * dtype.itemsize > _CPU_SGL_GEMM_MAX_WEIGHT_BYTES:
+        return False
+    if n < 16:
+        # convert_weight_packed transposes to fp32 instead of VNNI-packing
+        # when N < TILE_N (gemm.cpp), and weight_packed_linear detects that
+        # (via the packed weight's dtype) and routes to its fp32/brgemm
+        # fallback kernel -- no N/K alignment required in that regime.
+        return True
+    return k % 32 == 0 and n % 16 == 0
 
 
 def dispatch_cpu_unquantized_gemm(
@@ -294,7 +321,14 @@ def dispatch_cpu_unquantized_gemm(
         )
         return
 
-    if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
+    # Small weights (e.g. MoE router/gate projections, where N is the expert
+    # count rather than a hidden-size-scaled dimension) never reach oneDNN's
+    # compute-bound regime, no matter how large the batch gets: SGL's lower
+    # per-call dispatch overhead wins consistently across the full measured
+    # M range. Larger dense projections (qkv/o_proj/gate_up/down/lm_head)
+    # cross over to favoring oneDNN once batch size grows past decode-sized
+    # M, so they keep using oneDNN below.
+    if check_cpu_sgl_kernel(N, K, dtype):
         packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
         if getattr(layer, "bias", None) is not None:
             bias_f32 = layer.bias.to(torch.float32)
@@ -309,7 +343,8 @@ def dispatch_cpu_unquantized_gemm(
             "CPU unquantized GEMM dispatch: using sgl-kernel weight_packed_linear"
         )
         return
-    elif (
+
+    if (
         ops._supports_onednn
         and current_platform.get_cpu_architecture() != CpuArchEnum.POWERPC
     ):
