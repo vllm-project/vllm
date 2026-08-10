@@ -729,10 +729,13 @@ class DiffusionGemmaRequestStates:
             max_num_reqs, canvas_length, hidden_size, dtype=torch.float32, device=device
         )
 
-    def init_canvas(self, slot_indices_np: np.ndarray) -> None:
-        """Initialize canvas with random tokens for the given slots."""
-        n = slot_indices_np.shape[0]
-        self.canvas[slot_indices_np] = torch.randint(
+    def init_canvas(self, slot_indices: torch.Tensor) -> None:
+        """Initialize canvas with random tokens for the given slots.
+
+        `slot_indices` must already be on device to avoid a cpu->gpu sync.
+        """
+        n = slot_indices.shape[0]
+        self.canvas[slot_indices] = torch.randint(
             0,
             self.vocab_size,
             (n, self.canvas_length),
@@ -1149,11 +1152,15 @@ class DiffusionSampler:
         ps = input_batch.idx_mapping_np[prefill_indices_np[done_prefill_np]]
         if len(ps) == 0:
             return
-        states.init_canvas(ps)
-        self.req_states.draft_tokens[ps, : self.canvas_length] = states.canvas[ps]
+        # Move the slot indices across once, up front: indexing a device
+        # tensor with a numpy array copies them over synchronously each time.
         ps_gpu = async_copy_to_gpu(
             ps.astype(np.int64), device=states.is_encoder_phase.device
         )
+        states.init_canvas(ps_gpu)
+        self.req_states.draft_tokens[ps_gpu, : self.canvas_length] = states.canvas[
+            ps_gpu
+        ]
         states.is_encoder_phase.index_fill_(0, ps_gpu, False)
 
     def _handle_prefill(
