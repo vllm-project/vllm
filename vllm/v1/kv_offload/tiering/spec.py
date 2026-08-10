@@ -18,7 +18,12 @@ Configuration via kv_connector_extra_config:
     registered via CachePolicyFactory
   - secondary_tiers: (optional) List of secondary tier configurations
     Each secondary tier config is a dict with:
-      - type: (required) Type of secondary tier (e.g., "example", "storage", "network")
+      - type: (required) Type of secondary tier (e.g., "example", "fs",
+        "p2p", "obj"), or the class name of an out-of-tree
+        SecondaryTierManager paired with module_path.
+      - module_path: (optional) Python import path to load 'type' from
+        when it names an out-of-tree SecondaryTierManager not registered
+        via SecondaryTierFactory.register_tier()
       - Additional tier-specific parameters are passed directly to the tier
         constructor. See each tier's documentation for supported parameters.
 
@@ -34,6 +39,18 @@ Example configuration:
         }
     ]
 }
+
+Example out-of-tree tier configuration:
+{
+    "cpu_bytes_to_use": 10737418240,
+    "secondary_tiers": [
+        {
+            "type": "MyCustomTier",
+            "module_path": "my_package.my_module",
+            "custom_param": "value"
+        }
+    ]
+}
 """
 
 from typing import Any
@@ -44,6 +61,8 @@ from typing_extensions import override
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
+    OffloadingCounterMetadata,
+    OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
@@ -86,10 +105,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of total blocking time spent querying secondary "
-                    "tiers for a request, accumulated from first lookup until "
-                    "the request is allocated or finishes, in seconds."
+                    "Histogram of blocking time spent in a per-block tier lookup "
+                    "that resolved as a hit or miss, labeled by tier, in seconds."
                 ),
+                labelnames=("tier",),
                 buckets=(
                     0.00001,
                     0.00005,
@@ -108,10 +127,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of wall-clock time from a request's first deferred "
-                    "secondary-tier lookup until the request is allocated or "
-                    "finishes, in seconds."
+                    "Histogram of wall-clock time from a per-block tier lookup "
+                    "first returning retry until that same tier lookup resolves "
+                    "as a hit or miss, labeled by tier, in seconds."
                 ),
+                labelnames=("tier",),
                 buckets=(
                     0.0001,
                     0.0005,
@@ -126,6 +146,100 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     10,
                 ),
             )
+        )
+        metrics[TieringOffloadingMetrics.READ_BYTES] = OffloadingCounterMetadata(
+            documentation=(
+                "Total bytes read from secondary tiers into the primary tier, "
+                "labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.READ_TIME] = OffloadingCounterMetadata(
+            documentation=(
+                "Total time spent reading from secondary tiers into the primary "
+                "tier, in seconds, labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.WRITE_BYTES] = OffloadingCounterMetadata(
+            documentation=(
+                "Total bytes written from the primary tier to secondary tiers, "
+                "labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.WRITE_TIME] = OffloadingCounterMetadata(
+            documentation=(
+                "Total time spent writing from the primary tier to secondary "
+                "tiers, in seconds, labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of failed secondary-tier promotion jobs, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.CASCADE_JOB_FAILURES] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of failed secondary-tier cascade jobs, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.BLOCK_QUERIES] = OffloadingCounterMetadata(
+            documentation=(
+                "Number of block lookup queries sent to a tier, labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.BLOCK_HITS] = OffloadingCounterMetadata(
+            documentation="Number of block lookup hits in a tier, labeled by tier.",
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of promotion attempts that failed because the "
+                    "primary tier could not allocate space."
+                ),
+            )
+        )
+        metrics[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Current fraction of primary-tier space used by writes from "
+                    "secondary tiers, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Current fraction of primary-tier space used by reads to "
+                    "secondary tiers, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Number of active secondary-tier promotion jobs, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS] = OffloadingGaugeMetadata(
+            documentation=(
+                "Number of active secondary-tier cascade jobs, labeled by tier."
+            ),
+            labelnames=("tier",),
         )
         secondary_tier_configs = extra_config.get("secondary_tiers", [])
         if not isinstance(secondary_tier_configs, list):
@@ -168,31 +282,38 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             TieringOffloadingManager instance
         """
         if not self._manager:
-            # Create scheduler-side SharedOffloadRegion (rank=None) so the
-            # primary tier can eagerly create a memoryview over _base.
-            scheduler_mmap = SharedOffloadRegion(
-                engine_id=self._engine_id,
-                num_blocks=self.num_blocks,
-                rank=None,
-                kv_bytes_per_block=self.kv_bytes_per_chunk,
-                cpu_page_size=self.cpu_page_size_per_worker,
-            )
-            self._scheduler_mmap = scheduler_mmap
+            if int(self.extra_config.get("store_threshold", 0)) >= 2:
+                raise ValueError(
+                    "store_threshold is not supported for TieringOffloadingSpec"
+                )
 
-            # Create primary tier (CPU-based)
-            primary_tier = CPUPrimaryTierOffloadingManager(
-                num_blocks=self.num_blocks,
-                cache_policy=self.eviction_policy,
-                cache_policy_module_path=self.cache_policy_module_path,
-                enable_events=self.kv_events_config.enable_kv_cache_events,
-                mmap_region=scheduler_mmap,
-            )
-
-            # Create secondary tiers
-            primary_kv_view = primary_tier.get_kv_memoryview()
+            scheduler_mmap: SharedOffloadRegion | None = None
+            primary_tier: CPUPrimaryTierOffloadingManager | None = None
             secondary_tiers = []
-            for i, tier_config in enumerate(self.secondary_tier_configs):
-                try:
+            try:
+                # Create scheduler-side SharedOffloadRegion (rank=None) so the
+                # primary tier can eagerly create a memoryview over _base.
+                scheduler_mmap = SharedOffloadRegion(
+                    engine_id=self._engine_id,
+                    num_blocks=self.num_blocks,
+                    rank=None,
+                    kv_bytes_per_block=self.kv_bytes_per_chunk,
+                    cpu_page_size=self.cpu_page_size_per_worker,
+                )
+                self._scheduler_mmap = scheduler_mmap
+
+                # Create primary tier (CPU-based)
+                primary_tier = CPUPrimaryTierOffloadingManager(
+                    num_blocks=self.num_blocks,
+                    cache_policy=self.eviction_policy,
+                    cache_policy_module_path=self.cache_policy_module_path,
+                    enable_events=self.kv_events_config.enable_kv_cache_events,
+                    mmap_region=scheduler_mmap,
+                )
+
+                # Create secondary tiers
+                primary_kv_view = primary_tier.get_kv_memoryview()
+                for i, tier_config in enumerate(self.secondary_tier_configs):
                     tier = SecondaryTierFactory.create_secondary_tier(
                         tier_config, primary_kv_view, self
                     )
@@ -202,26 +323,42 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                         i,
                         tier.tier_type,
                     )
-                except Exception as e:
-                    logger.error(
-                        "Failed to create secondary tier from config index %i: %s",
-                        i,
-                        e,
-                    )
-                    raise
 
-            # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
-            # get_worker(). Secondary tier transfers are handled by the
-            # secondary tier managers and need no additional workers here.
-            tiering_manager = TieringOffloadingManager(
-                primary_tier=primary_tier,
-                secondary_tiers=secondary_tiers,
-            )
-            if int(self.extra_config.get("store_threshold", 0)) >= 2:
-                raise ValueError(
-                    "store_threshold is not supported for TieringOffloadingSpec"
+                # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
+                # get_worker(). Secondary tier transfers are handled by the
+                # secondary tier managers and need no additional workers here.
+                tiering_manager = TieringOffloadingManager(
+                    primary_tier=primary_tier,
+                    secondary_tiers=secondary_tiers,
                 )
-            self._manager = tiering_manager
+                self._manager = tiering_manager
+            except Exception:
+                for tier in reversed(secondary_tiers):
+                    try:
+                        tier.shutdown()
+                    except Exception:
+                        logger.exception(
+                            "Failed to shut down secondary tier during "
+                            "initialization cleanup"
+                        )
+                if primary_tier is not None:
+                    try:
+                        primary_tier.shutdown()
+                    except Exception:
+                        logger.exception(
+                            "Failed to shut down primary tier during "
+                            "initialization cleanup"
+                        )
+                elif scheduler_mmap is not None:
+                    try:
+                        scheduler_mmap.cleanup()
+                    except Exception:
+                        logger.exception(
+                            "Failed to clean up scheduler mmap during "
+                            "initialization cleanup"
+                        )
+                self._scheduler_mmap = None
+                raise
 
             logger.info(
                 "Created TieringOffloadingManager with primary tier "
@@ -256,9 +393,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             kv_bytes_per_block=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
-        return CPUOffloadingWorker(
-            kv_caches=kv_caches,
-            blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks,
-            mmap_region=worker_mmap,
-        )
+        try:
+            return CPUOffloadingWorker(
+                kv_caches=kv_caches,
+                blocks_per_chunk=self.blocks_per_chunk,
+                num_cpu_blocks=self.num_blocks,
+                mmap_region=worker_mmap,
+            )
+        except Exception:
+            worker_mmap.cleanup()
+            raise
