@@ -20,7 +20,10 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import fill_mm_prefix_query_ranges
+from vllm.v1.attention.backends.utils import (
+    fill_mm_prefix_query_ranges,
+    resolve_kv_cache_layout,
+)
 
 
 def _fa4_available() -> bool:
@@ -585,6 +588,7 @@ def test_mm_prefix_kv_cache_path(head_size: int):
         device=DEVICE,
         num_blocks=2048,
         common_attn_metadata=common,
+        layout=resolve_kv_cache_layout(),
         randomize_blocks=True,
     )
 
