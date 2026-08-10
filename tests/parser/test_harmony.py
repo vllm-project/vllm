@@ -3,24 +3,28 @@
 
 import json
 from collections.abc import Sequence
+from typing import Any, Literal
 
 import pytest
 from openai_harmony import (
     Conversation,
-    HarmonyError,
     Message,
     RenderConversationConfig,
     Role,
 )
 from transformers import AutoTokenizer
+from xgrammar import Grammar
+from xgrammar.testing import _is_grammar_accept_string
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.harmony import HarmonyParser
 from vllm.parser.parser_manager import ParserManager
+from vllm.sampling_params import StructuredOutputsParams
 
 REASONING_MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -49,6 +53,15 @@ def chat_request():
         model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": "Hello"}],
     )
+
+
+@pytest.fixture
+def malformed_msgs_str() -> list[str]:
+    return [
+        "<|channel|>analysis<|message|>thinking<|end|>",
+        "<|start|>assistant<|channel|>commentary<|message|>thinking<|end|>",
+        '<|start|>assistant<|channel|>final {"answer": "hi"}<|return|>',
+    ]
 
 
 def encode_output(harmony_str: str) -> list[int]:
@@ -131,13 +144,22 @@ def tool_call_entries(delta_message) -> list[tuple[int, str | None, str | None]]
     ]
 
 
+def assert_parser_is_reset(harmony_parser: HarmonyParser):
+    assert harmony_parser._parser is None
+    assert harmony_parser._num_processed_messages == 0
+    assert harmony_parser._current_message_tokens == []
+
+
 class TestFlush:
     def test_flush(self, harmony_parser):
         harmony_parser.process_chunk(
             encode_output("<|channel|>analysis<|message|>Think")
         )
 
-        flushed = harmony_parser.flush()
+        flushed_segments = harmony_parser.flush()
+        assert flushed_segments is not None
+        assert len(flushed_segments) == 1
+        flushed = flushed_segments[0]
 
         assert flushed is not None
         assert flushed.channel == "analysis"
@@ -145,15 +167,27 @@ class TestFlush:
         assert flushed.delta == ""
         assert flushed.completed_message is not None
         assert get_text(flushed.completed_message) == "Think"
-        assert harmony_parser._parser is None
+        assert_parser_is_reset(harmony_parser)
 
-    def test_flush_raises_and_resets_on_non_terminal_eos(self, harmony_parser):
-        harmony_parser.process_chunk(encode_output("<|channel|>analysis"))
+    def test_flush_recovers_invalid_output(self, harmony_parser, malformed_msgs_str):
+        for msg_str in malformed_msgs_str[:-1]:
+            chunk = harmony_parser.process_chunk(encode_output(msg_str))
+            assert "".join(segment.delta for segment in chunk.segments) == "thinking"
 
-        with pytest.raises(HarmonyError):
-            harmony_parser.flush()
+        last_msg_str = malformed_msgs_str[-1]
+        harmony_parser.process_chunk(encode_output(last_msg_str))
+        flushed_segments = harmony_parser.flush()
+        assert len(flushed_segments) == 2
+        delta_segment = flushed_segments[0]
+        message_segment = flushed_segments[1]
 
-        assert harmony_parser._parser is None
+        assert delta_segment.channel == "final"
+        assert delta_segment.recipient is None
+        assert delta_segment.delta == last_msg_str
+        assert message_segment.channel == "final"
+        assert message_segment.recipient is None
+        assert get_text(message_segment.completed_message) == last_msg_str
+        assert_parser_is_reset(harmony_parser)
 
 
 class TestParse:
@@ -364,7 +398,7 @@ class TestParse:
         assert reasoning is None
         assert content == "I'm in the middle of answering"
         assert tool_calls is None
-        assert harmony_parser._parser is None
+        assert_parser_is_reset(harmony_parser)
 
     def test_interrupted_reasoning_first_message(self, harmony_parser, chat_request):
         reasoning, content, tool_calls = harmony_parser.parse(
@@ -378,7 +412,7 @@ class TestParse:
         assert reasoning == "I'm in the middle of thinking"
         assert content is None
         assert tool_calls is None
-        assert harmony_parser._parser is None
+        assert_parser_is_reset(harmony_parser)
 
     def test_truncated_output(self, harmony_parser, chat_request):
         reasoning, content, tool_calls = harmony_parser.parse(
@@ -394,24 +428,23 @@ class TestParse:
         assert reasoning == "I'm thinking."
         assert content == "I'm in the middle of answering"
         assert tool_calls is None
-        assert harmony_parser._parser is None
+        assert_parser_is_reset(harmony_parser)
 
-    def test_malformed_final_recovers_raw_content(self, harmony_parser, chat_request):
-        raw_output = (
-            "<|channel|>analysis<|message|>thinking<|end|>"
-            '<|start|>assistant<|channel|>final {"answer": "hi"}<|return|>'
-        )
+    def test_malformed_msgs_recovers_raw_content(
+        self, harmony_parser, chat_request, malformed_msgs_str
+    ):
+        combined_output = "".join(malformed_msgs_str)
 
         reasoning, content, tool_calls = harmony_parser.parse(
-            raw_output,
+            "",
             chat_request,
-            model_output_token_ids=encode_output(raw_output),
+            model_output_token_ids=encode_output(combined_output),
         )
 
-        assert content == raw_output
-        assert reasoning is None
+        assert reasoning == "thinking"
+        assert content == "thinking\n" + malformed_msgs_str[-1]
         assert tool_calls is None
-        assert harmony_parser._parser is None
+        assert_parser_is_reset(harmony_parser)
 
     @pytest.mark.parametrize(
         ("harmony_str", "expected_content"),
@@ -489,7 +522,7 @@ class TestParseDelta:
         assert second_delta is not None
         assert second_delta.content == "Answer"
         assert second_delta.reasoning is None
-        assert parser._parser is None
+        assert_parser_is_reset(parser)
 
     def test_multi_token(self, gpt_oss_tokenizer, chat_request):
         parser = HarmonyParser(gpt_oss_tokenizer)
@@ -506,25 +539,33 @@ class TestParseDelta:
         assert delta.reasoning is None
         assert not delta.tool_calls
 
-    def test_malformed_final_recovers_raw_content(
-        self, gpt_oss_tokenizer, chat_request
+    def test_malformed_msgs_recovers_raw_content(
+        self, gpt_oss_tokenizer, chat_request, malformed_msgs_str
     ):
         parser = HarmonyParser(gpt_oss_tokenizer)
 
-        delta = parser.parse_delta(
-            delta_text='final {"answer": "hi"}',
-            delta_token_ids=encode_output(
-                '<|channel|>final {"answer": "hi"}<|return|>'
-            ),
+        for msg_str in malformed_msgs_str[:-1]:
+            delta = parser.parse_delta(
+                delta_text="",
+                delta_token_ids=encode_output(msg_str),
+                request=chat_request,
+                finished=False,
+            )
+            assert delta.reasoning or delta.content == "thinking"
+            assert not delta.tool_calls
+
+        last_delta = parser.parse_delta(
+            delta_text="",
+            delta_token_ids=encode_output(malformed_msgs_str[-1]),
             request=chat_request,
             finished=True,
         )
 
-        assert delta is not None
-        assert delta.content == 'final {"answer": "hi"}'
-        assert delta.reasoning is None
-        assert not delta.tool_calls
-        assert parser._parser is None
+        assert last_delta is not None
+        assert last_delta.content == malformed_msgs_str[-1]
+        assert last_delta.reasoning is None
+        assert not last_delta.tool_calls
+        assert_parser_is_reset(parser)
 
     @pytest.mark.parametrize("tool_channel", ["commentary", "analysis"])
     def test_tool_call_split_across_deltas(
@@ -821,3 +862,335 @@ class TestProcessChunk:
             ("analysis", "One"),
             ("final", "Two"),
         ]
+
+
+class TestAdjustRequest:
+    REQUEST_TEXT = "Hello"
+    TOOL_TYPE = "function"
+    TOOL_1_NAME = "get_user_location"
+    TOOL_2_NAME = "get_weather"
+    TOOLS = [
+        {
+            "name": TOOL_1_NAME,
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+        {
+            "name": TOOL_2_NAME,
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    ]
+    OUTPUT_SCHEMA = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+
+    ANALYSIS = "<|channel|>analysis<|message|>analysis message<|end|><|start|>assistant"
+    COMMENTARY = (
+        "<|channel|>commentary<|message|>commentary message<|end|><|start|>assistant"
+    )
+    TOOL_CALL_1 = (
+        ANALYSIS + f"<|channel|>commentary to=functions.{TOOL_1_NAME} json<|message|>"
+        "{}<|call|>"
+    )
+    TOOL_CALL_2 = (
+        ANALYSIS + f"<|channel|>commentary to=functions.{TOOL_2_NAME} json<|message|>"
+        '{"city": "Tokyo"}<|call|>'
+    )
+    FINAL_JSON_SCHEMA = (
+        ANALYSIS
+        + '<|channel|>final <|constrain|>json<|message|>{"answer": "Tokyo"}<|end|>'
+    )
+    FINAL_JSON_OBJECT = (
+        ANALYSIS
+        + '<|channel|>final <|constrain|>json<|message|>{"city": "Tokyo"}<|end|>'
+    )
+    FINAL_TEXT_ONLY = ANALYSIS + "<|channel|>final<|message|>any<|end|>"
+    FINAL_REGEX = ANALYSIS + "<|channel|>final<|message|>regex<|end|>"
+    FINAL_CHOICE = ANALYSIS + "<|channel|>final<|message|>choice1<|end|>"
+    FINAL_GRAMMAR = ANALYSIS + "<|channel|>final<|message|>grammar<|end|>"
+    FINAL_STRUCTURAL_TAG = ANALYSIS + "<|channel|>final<|message|>tag content<|end|>"
+    ADMISSION_SAMPLES = (
+        "COMMENTARY",
+        "TOOL_CALL_1",
+        "TOOL_CALL_2",
+        "FINAL_JSON_SCHEMA",
+        "FINAL_JSON_OBJECT",
+        "FINAL_TEXT_ONLY",
+        "FINAL_REGEX",
+        "FINAL_CHOICE",
+        "FINAL_GRAMMAR",
+        "FINAL_STRUCTURAL_TAG",
+    )
+
+    @staticmethod
+    def _build_request(
+        request_kind: Literal["chat", "responses"],
+        tool_choice: str = "none",
+        strict_tools: bool = False,
+        response_format_type: str | None = None,
+        structured_outputs: StructuredOutputsParams | None = None,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        data: dict[str, Any] = {
+            "model": REASONING_MODEL_NAME,
+        }
+        if request_kind == "chat":
+            data["messages"] = [
+                {
+                    "role": "user",
+                    "content": TestAdjustRequest.REQUEST_TEXT,
+                }
+            ]
+        else:
+            data["input"] = TestAdjustRequest.REQUEST_TEXT
+
+        if request_kind == "chat":
+            data["tools"] = [
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "function": {"strict": strict_tools, **tool_def},
+                }
+                for tool_def in TestAdjustRequest.TOOLS
+            ]
+            data["tool_choice"] = (
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "function": {"name": TestAdjustRequest.TOOL_2_NAME},
+                }
+                if tool_choice == "named"
+                else tool_choice
+            )
+        else:
+            data["tools"] = [
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "strict": strict_tools,
+                    **tool_def,
+                }
+                for tool_def in TestAdjustRequest.TOOLS
+            ]
+            data["tool_choice"] = (
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "name": TestAdjustRequest.TOOL_2_NAME,
+                }
+                if tool_choice == "named"
+                else tool_choice
+            )
+
+        if response_format_type == "json_schema":
+            schema_format = {
+                "name": "answer_format",
+                "schema": TestAdjustRequest.OUTPUT_SCHEMA,
+                "strict": True,
+            }
+            if request_kind == "chat":
+                data["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": schema_format,
+                }
+            else:
+                data["text"] = {
+                    "format": {
+                        "type": "json_schema",
+                        **schema_format,
+                    }
+                }
+        elif response_format_type == "json_object":
+            if request_kind == "chat":
+                data["response_format"] = {"type": "json_object"}
+            else:
+                data["text"] = {"format": {"type": "json_object"}}
+
+        if structured_outputs is not None:
+            data["structured_outputs"] = structured_outputs
+
+        if request_kind == "chat":
+            return ChatCompletionRequest.model_validate(data)
+        return ResponsesRequest.model_validate(data)
+
+    @staticmethod
+    def _assert_format_cleared(
+        adjusted_request: ChatCompletionRequest | ResponsesRequest,
+    ) -> None:
+        if isinstance(adjusted_request, ResponsesRequest):
+            assert adjusted_request.text is None or adjusted_request.text.format is None
+        else:
+            assert adjusted_request.response_format is None
+
+        structured_outputs = adjusted_request.structured_outputs
+        assert structured_outputs is not None
+        assert structured_outputs.structural_tag is not None
+        assert structured_outputs.all_non_structural_tag_constraints_none()
+
+    @classmethod
+    def _assert_structured_outputs_admission(
+        cls,
+        adjusted_request: ChatCompletionRequest | ResponsesRequest,
+        expected_admission: Sequence[str],
+    ) -> None:
+        structured_outputs = adjusted_request.structured_outputs
+        assert structured_outputs is not None
+        assert structured_outputs.structural_tag is not None
+        assert structured_outputs.all_non_structural_tag_constraints_none()
+
+        grammar = Grammar.from_structural_tag(structured_outputs.structural_tag)
+        expected_admission_set = set(expected_admission)
+
+        for sample_name in cls.ADMISSION_SAMPLES:
+            admitted = _is_grammar_accept_string(
+                grammar,
+                getattr(cls, sample_name),
+                require_termination=False,
+            )
+            should_admit = sample_name in expected_admission_set
+            assert admitted is should_admit, (
+                f"Expected structured_outputs admission for {sample_name} "
+                f"to be {should_admit}, got {admitted}."
+            )
+
+    @pytest.mark.parametrize("request_kind", ["chat", "responses"])
+    @pytest.mark.parametrize(
+        ("request_kwargs", "expected_admission"),
+        [
+            (
+                {"tool_choice": "auto", "strict_tools": True},
+                [
+                    "COMMENTARY",
+                    "TOOL_CALL_1",
+                    "TOOL_CALL_2",
+                    "FINAL_JSON_SCHEMA",
+                    "FINAL_JSON_OBJECT",
+                    "FINAL_TEXT_ONLY",
+                    "FINAL_REGEX",
+                    "FINAL_CHOICE",
+                    "FINAL_GRAMMAR",
+                    "FINAL_STRUCTURAL_TAG",
+                ],
+            ),
+            (
+                {"tool_choice": "required"},
+                ["COMMENTARY", "TOOL_CALL_1", "TOOL_CALL_2"],
+            ),
+            (
+                {"tool_choice": "named"},
+                ["COMMENTARY", "TOOL_CALL_2"],
+            ),
+            (
+                {"response_format_type": "json_schema"},
+                ["FINAL_JSON_SCHEMA"],
+            ),
+            (
+                {"response_format_type": "json_object"},
+                ["FINAL_JSON_SCHEMA", "FINAL_JSON_OBJECT"],
+            ),
+            (
+                {"structured_outputs": StructuredOutputsParams(json=OUTPUT_SCHEMA)},
+                ["FINAL_JSON_SCHEMA"],
+            ),
+            (
+                {"structured_outputs": StructuredOutputsParams(json_object=True)},
+                ["FINAL_JSON_SCHEMA", "FINAL_JSON_OBJECT"],
+            ),
+            (
+                {"structured_outputs": StructuredOutputsParams(regex=r"regex")},
+                ["FINAL_REGEX"],
+            ),
+            (
+                {
+                    "structured_outputs": StructuredOutputsParams(
+                        choice=["choice1", "choice2"]
+                    )
+                },
+                ["FINAL_CHOICE"],
+            ),
+            (
+                {
+                    "structured_outputs": StructuredOutputsParams(
+                        grammar='root ::= "grammar"'
+                    )
+                },
+                ["FINAL_GRAMMAR"],
+            ),
+            (
+                {
+                    "structured_outputs": StructuredOutputsParams(
+                        structural_tag=json.dumps(
+                            {
+                                "type": "structural_tag",
+                                "format": {
+                                    "type": "json_schema",
+                                    "json_schema": OUTPUT_SCHEMA,
+                                },
+                            }
+                        )
+                    )
+                },
+                ["FINAL_JSON_SCHEMA"],
+            ),
+            (
+                {
+                    "structured_outputs": StructuredOutputsParams(
+                        structural_tag=json.dumps(
+                            {
+                                "type": "structural_tag",
+                                "structures": [
+                                    {
+                                        "begin": "<tag>",
+                                        "schema": {"type": "object"},
+                                        "end": "</tag>",
+                                    }
+                                ],
+                                "triggers": ["<tag>"],
+                            }
+                        )
+                    )
+                },
+                [
+                    # Legacy triggered tags allow free text until a trigger, so
+                    # unconstrained final-channel payloads are also admitted.
+                    "FINAL_TEXT_ONLY",
+                    "FINAL_REGEX",
+                    "FINAL_CHOICE",
+                    "FINAL_GRAMMAR",
+                    "FINAL_STRUCTURAL_TAG",
+                ],
+            ),
+        ],
+        ids=[
+            "tool_auto_strict",
+            "tool_required",
+            "tool_named",
+            "response_format_json_schema",
+            "response_format_json_object",
+            "structured_outputs_json",
+            "structured_outputs_json_object",
+            "structured_outputs_regex",
+            "structured_outputs_choice",
+            "structured_outputs_grammar",
+            "structured_outputs_structural_tag_modern",
+            "structured_outputs_structural_tag_legacy",
+        ],
+    )
+    def test_adjust_request(
+        self,
+        harmony_parser,
+        request_kind,
+        request_kwargs,
+        expected_admission,
+    ):
+        request = self._build_request(request_kind, **request_kwargs)
+        adjusted_request = harmony_parser.adjust_request(request)
+        self._assert_format_cleared(adjusted_request)
+        self._assert_structured_outputs_admission(
+            adjusted_request,
+            expected_admission,
+        )

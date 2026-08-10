@@ -36,6 +36,14 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_b
 from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
 
 
+class _FakeModelArchConfig(list):
+    """Stand-in for ModelArchitectureConfig's per-layer indexing."""
+
+    @property
+    def total_num_hidden_layers(self) -> int:
+        return len(self)
+
+
 def _make_gemma4_vllm_config(
     *,
     backend: AttentionBackendEnum | None = None,
@@ -45,8 +53,13 @@ def _make_gemma4_vllm_config(
     return SimpleNamespace(
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(
-                head_dim=head_dim,
-                global_head_dim=global_head_dim,
+                layer_types=["sliding_attention", "full_attention"],
+            ),
+            model_arch_config=_FakeModelArchConfig(
+                [
+                    SimpleNamespace(head_size=head_dim),
+                    SimpleNamespace(head_size=global_head_dim),
+                ]
             ),
             hf_config=SimpleNamespace(canvas_length=256),
             override_generation_config={},
@@ -698,6 +711,7 @@ def test_non_causal_autoselect_backend():
         "fp8_ds_mla",
         "fp8_inc",
         "nvfp4",
+        "nvfp4_4over6",
         "fp8_per_token_head",
         "int8_per_token_head",
     ],
@@ -716,8 +730,11 @@ def test_flash_attn_accepts_handled_fp8_variants(
 ):
     """FlashAttentionBackend must accept the two fp8 dtypes it can actually
     handle: 'fp8' (alias for fp8_e4m3fn) and 'fp8_e4m3'."""
-    import vllm.v1.attention.backends.flash_attn as fa_mod
+    import vllm.v1.attention.backends.fa_utils as fa_utils_mod
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
-    monkeypatch.setattr(fa_mod.current_platform, "is_xpu", lambda: True)
+    # The fp8 decision is made in fa_utils, using its own current_platform
+    # binding, so patch is_xpu there (not on flash_attn's) to stay robust to
+    # import order across earlier tests that patch vllm.platforms.current_platform.
+    monkeypatch.setattr(fa_utils_mod.current_platform, "is_xpu", lambda: True)
     assert FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)

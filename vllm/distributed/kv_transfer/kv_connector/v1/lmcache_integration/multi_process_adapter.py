@@ -430,7 +430,7 @@ class LMCacheMPWorkerAdapter:
 
     @_lmcache_nvtx_annotate
     def submit_store_request(
-        self, request_id: str, op: LoadStoreOp, event: torch.Event
+        self, request_id: str, op: LoadStoreOp, event: torch.cuda.Event
     ):
         """
         Submit a KV cache store request to LMCache
@@ -464,7 +464,7 @@ class LMCacheMPWorkerAdapter:
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
-        self, request_id: str, op: LoadStoreOp, event: torch.Event
+        self, request_id: str, op: LoadStoreOp, event: torch.cuda.Event
     ):
         """
         Submit a KV cache retrieve request to LMCache
@@ -501,7 +501,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: torch.Event,
+        event: torch.cuda.Event,
     ):
         """
         Submit a batched store request to LMCache
@@ -550,7 +550,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: torch.Event,
+        event: torch.cuda.Event,
     ):
         """
         Submit a batched retrieve request to LMCache

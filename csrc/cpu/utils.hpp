@@ -40,12 +40,10 @@ struct VecTypeTrait<c10::BFloat16> {
   using vec_t = vec_op::BF16Vec16;
 };
 
-#if !defined(__powerpc__)
 template <>
 struct VecTypeTrait<c10::Half> {
   using vec_t = vec_op::FP16Vec16;
 };
-#endif
 
 struct Counter {
   std::atomic<int64_t> counter;
@@ -76,14 +74,14 @@ inline int64_t get_available_l2_size() {
     if (l2_cache_size == 0) {
       l2_cache_size = 256 * 1024;
     }
-    return static_cast<int64_t>(l2_cache_size) >> 1;  // use 50% of L2 cache
+    return static_cast<int64_t>(l2_cache_size) >> 1;
   }();
   return size;
 #else
   static int64_t size = []() {
     auto caps = at::cpu::get_cpu_capabilities();
     const uint32_t l2_cache_size = caps.at("l2_cache_size").toInt();
-    return l2_cache_size >> 1;  // use 50% of L2 cache
+    return l2_cache_size >> 1;
   }();
   return size;
 #endif

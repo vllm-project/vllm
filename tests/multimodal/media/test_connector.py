@@ -6,6 +6,7 @@ import mimetypes
 import os
 import shutil
 import time
+from io import BytesIO
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import aiohttp
@@ -112,6 +113,34 @@ async def test_fetch_image_base64(
 
 
 @pytest.mark.asyncio
+async def test_fetch_image_keep_original_mode():
+    """media_io_kwargs can disable the default RGB conversion."""
+    # RGBA image: opaque black pixel on a fully transparent background
+    rgba_image = Image.new("RGBA", (4, 4), (0, 0, 0, 0))
+    rgba_image.putpixel((2, 2), (0, 0, 0, 255))
+    buffer = BytesIO()
+    rgba_image.save(buffer, "PNG")
+    data_url = (
+        f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
+    )
+
+    # Default behavior: RGBA is composited onto a white background
+    default_image = MediaConnector().fetch_image(data_url)
+    assert default_image.mode == "RGB"
+    assert default_image.getpixel((0, 0)) == (255, 255, 255)
+    assert default_image.getpixel((2, 2)) == (0, 0, 0)
+
+    # image_mode=None via media_io_kwargs: original mode is preserved
+    connector = MediaConnector(media_io_kwargs={"image": {"image_mode": None}})
+    image_sync = connector.fetch_image(data_url)
+    image_async = await connector.fetch_image_async(data_url)
+    for image in (image_sync, image_async):
+        assert image.mode == "RGBA"
+        assert image.getpixel((0, 0)) == (0, 0, 0, 0)
+        assert image.getpixel((2, 2)) == (0, 0, 0, 255)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_fetch_image_local_files(image_url: str):
     connector = MediaConnector()
@@ -194,6 +223,44 @@ async def test_fetch_image_local_files_with_space_in_name(image_url: str):
             pytest.fail("Failed to fetch image with space in name: {}".format(e))
         # Check that the images are equal
         assert not ImageChops.difference(image_sync, image_async).getbbox()
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_data_url_with_params():
+    """RFC 2397 allows parameters between the mediatype and the base64
+    marker; they must not be rejected or leak into the media type."""
+    connector = MediaConnector()
+
+    image = Image.new("RGB", (4, 4), color=(255, 0, 0))
+    with NamedTemporaryFile(suffix=".png") as f:
+        image.save(f.name)
+        base64_image = base64.b64encode(f.read()).decode("utf-8")
+
+    data_url = f"data:image/png;charset=utf-8;base64,{base64_image}"
+    image_sync = connector.fetch_image(data_url)
+    image_async = await connector.fetch_image_async(data_url)
+    assert _image_equals(image_sync, image_async)
+
+
+def test_fetch_image_data_url_malformed():
+    connector = MediaConnector()
+
+    with pytest.raises(ValueError, match="missing ','"):
+        connector.fetch_image("data:image/png;base64")
+
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:text/plain,hello")
+
+    # ";base64" requires the ";"; here "base64" is a (bogus) media type.
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:base64,aGVsbG8=")
+
+    # Strict RFC 2397 grammar: lowercase "base64", no whitespace.
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:image/png;BASE64,aGVsbG8=")
+
+    with pytest.raises(NotImplementedError, match="base64"):
+        connector.fetch_image("data:image/png; base64,aGVsbG8=")
 
 
 @pytest.mark.asyncio

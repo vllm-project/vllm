@@ -49,6 +49,44 @@ def hf_fs() -> "huggingface_hub.HfFileSystem":
     )
 
 
+def resolve_revision(
+    repo_id: str,
+    revision: str | None = None,
+    token: str | bool | None = None,
+) -> str | None:
+    """Best-effort attempt to resolve a Hub revision to a commit hash.
+
+    Resolving the commit hash once prevents repeated HTTP calls downstream and
+    avoids races if the branch moves while the model is loading.
+
+    `HfApi.resolve_revision` returns a `ResolvedRevision`: a `str` equal to the
+    requested revision that also carries the commit hash, so downstream error
+    messages stay readable and offline loads reuse the cached `refs/` entry.
+
+    Returns:
+        The resolved revision, or `revision` unchanged if it cannot be resolved
+        (local path, ModelScope, or any Hub error).
+    """
+    if Path(repo_id).exists() or envs.VLLM_USE_MODELSCOPE:
+        return revision
+
+    try:
+        return hf_api().resolve_revision(
+            repo_id,
+            revision=revision,
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            token=token,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to resolve revision for %s; falling back to %s.",
+            repo_id,
+            revision,
+            exc_info=True,
+        )
+        return revision
+
+
 _R = TypeVar("_R")
 
 
@@ -229,10 +267,11 @@ def get_model_path(model: str | Path, revision: str | None = None):
     if os.path.exists(model):
         return model
     assert huggingface_hub.constants.HF_HUB_OFFLINE
-    common_kwargs = {
-        "local_files_only": huggingface_hub.constants.HF_HUB_OFFLINE,
-        "revision": revision,
-    }
+    common_kwargs = dict(
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        ignore_patterns="*",
+        revision=revision,
+    )
 
     if envs.VLLM_USE_MODELSCOPE:
         from modelscope.hub.snapshot_download import snapshot_download
