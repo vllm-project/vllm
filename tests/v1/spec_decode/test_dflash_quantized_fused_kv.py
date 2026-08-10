@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.linear import QKVParallelLinear
@@ -99,6 +100,34 @@ def _make_fp8_qkv(scale_mode: str = "per_tensor"):
 def _dequant_kv_weight(attn):
     """Call the model's method (self is unused)."""
     return DFlashQwen3Model._dequant_kv_weight(None, attn)
+
+
+def test_fused_projection_matches_per_layer(dist_init, fp8_vllm_config):
+    """Output-level check: the fused KV GEMM (one F.linear over the dequantized
+    fused weight, as precompute_and_store_context_kv runs) must produce the
+    same K/V as projecting each layer's quantized KV rows separately."""
+    qkvs = [_make_fp8_qkv("per_tensor"), _make_fp8_qkv("per_tensor")]
+    attns = [SimpleNamespace(qkv_proj=q, q_size=Q_SIZE, kv_size=KV_SIZE)
+             for q in qkvs]
+
+    num_ctx = 6
+    normed = torch.randn(num_ctx, HIDDEN, dtype=torch.bfloat16, device="cuda")
+
+    # Fused path: concatenate the dequantized KV rows into one weight.
+    fused = torch.cat([_dequant_kv_weight(a) for a in attns], dim=0)
+    fused_out = F.linear(normed, fused)  # [num_ctx, n_layers * 2 * KV_SIZE]
+
+    # Per-layer path: dequantize each layer's KV rows (pre-process layout, as
+    # loaded from the checkpoint) and project separately.
+    per_layer_out = []
+    for a in attns:
+        proj = a.qkv_proj
+        w_kv = (proj.weight[Q_SIZE:].to(torch.bfloat16)
+                * proj.weight_scale.max().to(torch.bfloat16))
+        per_layer_out.append(F.linear(normed, w_kv))
+    per_layer_out = torch.cat(per_layer_out, dim=-1)
+
+    torch.testing.assert_close(fused_out, per_layer_out, rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.parametrize("scale_mode", ["per_tensor", "per_shard"])
