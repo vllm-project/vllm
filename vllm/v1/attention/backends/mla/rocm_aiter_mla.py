@@ -308,10 +308,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         from aiter import dtypes, get_mla_metadata_info_v1
 
-        # For num_attention_heads < 16 (e.g. kimi-k2.5 head=8 with TP8),
-        # make sure get_mla_metadata_info_v1 / get_mla_metadata_v1 are consistent
-        # with the actual tensor shape passed to mla_decode_fwd.
-        self._num_attention_heads = max(16, self.num_heads)
+        # Keep metadata sizing consistent with the padded tensor shape passed
+        # to mla_decode_fwd.
+        self._num_attention_heads = AiterMLAHelper.get_actual_mla_num_heads(
+            self.num_heads
+        )
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
@@ -835,14 +836,15 @@ def _expand_page_indices_kernel(
 
 class AiterMLAHelper:
     """
-    AITER MLA persistent (asm) decode requires num_heads >= 16. Head counts
-    < 16 are padded up to exactly 16: divisors of 16 by repeat_interleave,
-    other counts (e.g. 12 heads/rank at TP8, 6 at TP16) by tiling the query
-    heads and slicing to 16. Non-divisor padded decodes take the asm path;
-    divisors and max_qo_len > 1 small-head verify still use Gluon.
+    AITER MLA persistent (asm) decode requires a multiple of 16 heads. Unaligned
+    head counts through 128 are padded to the next multiple of 16 by tiling the
+    query heads and slicing to the padded size. Small divisors of 16 retain the
+    existing repeat_interleave and strided-unpad behavior. Aligned counts are
+    passed through without copies.
     """
 
     _AITER_MIN_MLA_HEADS: Final = 16
+    _AITER_MAX_PADDED_MLA_HEADS: Final = 128
     # Largest qlen the padded gqa=16 asm decode has a bf16 persistent kernel
     # for. Above it only the non-persistent qseqlen=8 entry exists, and the
     # fold that reaches a persistent one is gfx950-only.
@@ -852,48 +854,48 @@ class AiterMLAHelper:
     @staticmethod
     def check_num_heads_validity(num_heads: int):
         assert AiterMLAHelper.is_valid_num_heads(num_heads), (
-            "ROCM AITER MLA requires 1-15 heads (padded to 16 for asm "
-            "persistent decode; exact divisors of 16 may keep Gluon) or a "
-            f"multiple of 16 heads, but got {num_heads}.\n"
+            "ROCM AITER MLA requires a positive multiple of 16 heads, or an "
+            "unaligned head count up to 128 (padded to the next multiple of "
+            f"16), but got {num_heads}.\n"
             f"Try adjusting tensor_parallel_size value."
         )
 
     @staticmethod
     def is_valid_num_heads(num_heads: int) -> bool:
-        return num_heads > 0 and (
-            num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
-            or num_heads % AiterMLAHelper._AITER_MIN_MLA_HEADS == 0
+        return (
+            num_heads > 0
+            and num_heads not in AiterMLAHelper._AITER_UNSUPPORTED_HEADS
+            and (
+                num_heads <= AiterMLAHelper._AITER_MAX_PADDED_MLA_HEADS
+                or num_heads % AiterMLAHelper._AITER_MIN_MLA_HEADS == 0
+            )
         )
 
     @staticmethod
     def get_actual_mla_num_heads(num_heads: int) -> int:
-        return max(num_heads, AiterMLAHelper._AITER_MIN_MLA_HEADS)
+        m = AiterMLAHelper._AITER_MIN_MLA_HEADS
+        return -(-num_heads // m) * m
 
     @staticmethod
     def get_mla_padded_q(num_heads: int, q: torch.Tensor) -> torch.Tensor:
-        m = AiterMLAHelper._AITER_MIN_MLA_HEADS
-        if num_heads >= m:
+        m = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+        if num_heads == m:
             return q
         if m % num_heads == 0:
             return q.repeat_interleave(m // num_heads, dim=1)
-        # Non-divisor head counts (e.g. 12 heads/rank at TP8, 6 at TP16) cannot
-        # be padded by repeat_interleave. Tile the query heads and slice to
-        # exactly m; this reaches m for any 0 < num_heads < m (unlike a single
-        # append, which under-pads when num_heads < m - num_heads). MLA
-        # attention is independent per query head over the shared KV, so the
-        # padding heads cannot affect heads [0:num_heads]; they are sliced back
-        # off in get_mla_unpadded_o.
+        # Non-divisor head counts cannot be padded by repeat_interleave. Tile
+        # the query heads and slice to exactly m. MLA attention is independent
+        # per query head over the shared KV, so padding heads cannot affect
+        # heads [0:num_heads]; they are sliced back off the output.
         reps = -(-m // num_heads)  # ceil(m / num_heads)
-        # Slicing a tiled tensor down to m yields a non-contiguous view whenever
-        # reps * num_heads > m (the common case: TP8 12->24->16, TP16 6->18->16).
-        # The asm persistent decode reads q as a packed [tokens, m, head_dim]
-        # buffer, so materialize a contiguous copy. No-op when already contiguous.
+        # Slicing a tiled tensor yields a non-contiguous view. The asm decode
+        # reads q as packed [tokens, m, head_dim], so materialize it.
         return q.repeat(1, reps, 1)[:, :m, :].contiguous()
 
     @staticmethod
     def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:
-        m = AiterMLAHelper._AITER_MIN_MLA_HEADS
-        if num_heads >= m:
+        m = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+        if num_heads == m:
             return o
         if m % num_heads == 0:
             return o[:, :: m // num_heads, :]
