@@ -84,10 +84,6 @@ class ActiveECConnector(ECConnector):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
-        if scheduler_output.ec_connector_metadata is None:
-            # Nothing for the EC connector to do this step.
-            return ModelRunnerOutput.with_ec_conn_output_only(None)
-
         # EC send/recv even if no work to do.
         with self.maybe_get_output(scheduler_output) as ec_connector_output:
             pass
