@@ -62,7 +62,10 @@ impl Error {
             | Self::InvalidRepetitionDetection { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
-            | Self::Llm(LlmError::EmptyPromptTokenIds { .. }) => true,
+            | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
+            | Self::Llm(LlmError::EngineCoreClient(
+                EngineCoreError::InvalidDataParallelRank { .. },
+            )) => true,
             _ => false,
         }
     }
