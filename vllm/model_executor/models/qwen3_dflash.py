@@ -23,10 +23,12 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
-    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -438,70 +440,6 @@ class DFlashQwen3Model(nn.Module):
             embeds = torch.where(is_mask, self.mask_embedding.to(embeds.dtype), embeds)
         return embeds
 
-    def _dequant_kv_weight(self, attn: nn.Module) -> torch.Tensor:
-        """Return the KV rows of the qkv projection weight, dequantized to the
-        activation dtype (BF16).
-
-        Quantized ``qkv_proj`` layers keep their weight in a packed, scheme
-        specific layout (e.g. ``float8_e4m3fn`` for FP8), so slicing the raw
-        ``.weight`` and feeding it to the fused ``F.linear`` in
-        ``_project_context_kv`` bypasses the quant method and produces a dtype
-        mismatch (BF16 activations vs FP8 weights) or silently wrong values.
-        Dequantizing here keeps the fused-KV GEMM correct for quantized
-        drafters.
-        """
-        proj = attn.qkv_proj
-        if isinstance(proj.quant_method, UnquantizedLinearMethod):
-            return proj.weight[attn.q_size:]
-
-        method_name = proj.quant_method.__class__.__name__
-        if method_name != "Fp8LinearMethod":
-            raise NotImplementedError(
-                "DFlash fused-KV projection does not support quantized "
-                f"qkv_proj with scheme '{method_name}'."
-            )
-
-        # FP8 weights are stored as [out, in] before
-        # ``process_weights_after_loading`` (which is when
-        # ``_build_fused_kv_buffers`` runs during ``load_weights``) and as
-        # [in, out] afterwards (e.g. when buffers are built lazily during a
-        # dummy run).  Normalize to [out, in] so the KV rows (the output dim)
-        # are selected regardless of the processing state.
-        w = proj.weight
-        if w.shape == (proj.input_size_per_partition,
-                       proj.output_size_per_partition):
-            w = w.t()
-        elif w.shape != (proj.output_size_per_partition,
-                         proj.input_size_per_partition):
-            raise NotImplementedError(
-                f"Unexpected FP8 weight layout {tuple(w.shape)} for "
-                f"{proj.__class__.__name__} (in="
-                f"{proj.input_size_per_partition}, "
-                f"out={proj.output_size_per_partition})."
-            )
-
-        w_kv = w[attn.q_size:]  # [2 * kv_size, hidden] fp8
-        w_bf16 = w_kv.to(torch.bfloat16)
-        # Match ``Fp8LinearMethod``'s own dequant path: cast the scale to BF16
-        # so the product stays in the activation dtype.
-        scale = proj.weight_scale.to(torch.bfloat16)
-        if scale.dim() == 0 or scale.numel() == 1:
-            # Per-tensor (post-processing collapses the QKV shard scales to
-            # one).
-            return w_bf16 * scale
-        if scale.shape[0] == proj.output_size_per_partition:
-            # Per-channel: one scale per output row ([out] or [out, 1]).
-            return w_bf16 * scale[attn.q_size:].squeeze(-1).unsqueeze(1)
-        # Per-shard per-tensor (Q/K/V each carry their own scalar scale, e.g.
-        # a checkpoint that quantized q_proj/k_proj/v_proj separately).  Build
-        # a per-row scale for the KV shards.
-        kv_scales = []
-        for i, width in enumerate(proj.output_partition_sizes):
-            if i == 0:
-                continue  # skip the Q shard
-            kv_scales.append(scale[i].expand(width))
-        return w_bf16 * torch.cat(kv_scales).unsqueeze(1)
-
     def _build_context_kv_buffers(
         self,
         layers_attn: list[nn.Module],
@@ -510,10 +448,18 @@ class DFlashQwen3Model(nn.Module):
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size].
-        # Dequantize quantized qkv weights to the activation dtype so the
+        # Dequantize quantized qkv weights to the activation dtype (the
+        # canonical helper returns the weights in [out, in] layout) so the
         # fused ``F.linear`` in ``_project_context_kv`` works for quantized
-        # drafters.
-        kv_weights = [self._dequant_kv_weight(a) for a in layers_attn]
+        # drafters.  The buffers are built lazily on first use (after
+        # ``process_weights_after_loading``), so quantized weights are in
+        # their final layout and every quant scheme is supported.
+        kv_weights = [
+            get_and_maybe_dequant_weights(
+                a.qkv_proj, out_dtype=torch.bfloat16
+            )[a.q_size:]
+            for a in layers_attn
+        ]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
@@ -632,10 +578,9 @@ class DFlashQwen3Model(nn.Module):
         the computation runs, and no K/V is written to cache.
         """
         if not hasattr(self, "_num_attn_layers"):
-            logger.warning_once(
-                "DFlash buffer initialization was skipped. If dummy weights are not "
-                "in use, this may indicate an error in weight loading."
-            )
+            # Build the fused-KV buffers on first use.  This runs after the
+            # loader has called ``process_weights_after_loading``, so quantized
+            # weights are in their final layout.
             self._build_fused_kv_buffers()
 
         num_ctx = context_states.shape[0]
@@ -881,7 +826,12 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
-        self.model._build_fused_kv_buffers()
+        # NOTE: fused-KV buffers are intentionally NOT built here.  They are
+        # built lazily on first use in ``precompute_and_store_context_kv``,
+        # after the loader has run ``process_weights_after_loading`` on every
+        # layer, so that ``get_and_maybe_dequant_weights`` sees quantized
+        # weights in their final layout (this is required for the fused-KV
+        # path to support quantized drafters).
 
     def _read_mask_embedding(self) -> torch.Tensor | None:
         """Checks for an override mask embedding in `mask_embedding.pt` and returns it.
