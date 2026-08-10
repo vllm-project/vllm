@@ -2,8 +2,8 @@ group: Samplers Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: Samplers Test (FlashInfer)
-  key: samplers-test-flashinfer-intel
+- label: Samplers Test (XPU Kernel)
+  key: samplers-test-xpu-kernel-intel
   timeout_in_minutes: 40
   device: intel_gpu
   agent_tags:
@@ -22,8 +22,9 @@ steps:
   - tests/samplers
   - tests/conftest.py
   - vllm/entrypoints/generate/beam_search
+  # Remove VLLM_DISABLE_COMPILE_CACHE=1 once intel/intel-xpu-backend-for-triton#7682 is fixed
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers'
+      VLLM_XPU_USE_SAMPLER_KERNEL=1 VLLM_DISABLE_COMPILE_CACHE=1 pytest -v -s samplers'

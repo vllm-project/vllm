@@ -28,7 +28,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
-    KimiGatedDeltaNetAttention,
+    KimiGatedDeltaNetAttention as KimiLinearGatedDeltaNetAttention,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
@@ -61,6 +61,8 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
+from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -141,17 +143,22 @@ def _apply_attn_res(
     proj: ReplicatedLinear,
     norm: RMSNorm,
     num_valid_blocks: int,
+    *,
+    delta: torch.Tensor | None = None,
+    output_norm: RMSNorm | None = None,
+    block_write_idx: int = -1,
 ) -> torch.Tensor:
-    if num_valid_blocks <= 0:
-        return prefix_sum
-
     return attn_res(
         prefix_sum,
+        delta,
         block_residual,
         norm.weight,
         proj.weight.squeeze(0),
+        None if output_norm is None else output_norm.weight,
         num_valid_blocks,
+        block_write_idx,
         norm.variance_epsilon,
+        0.0 if output_norm is None else output_norm.variance_epsilon,
     )
 
 
@@ -210,7 +217,10 @@ class KimiMoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.gate.e_score_correction_bias = nn.Parameter(torch.empty(num_experts))
+        # Preserve FP32 checkpoint values and match FP32 router logits.
+        self.gate.e_score_correction_bias = nn.Parameter(
+            torch.empty(num_experts, dtype=torch.float32)
+        )
 
         if self.num_shared_experts is not None:
             shared_intermediate_size = moe_intermediate_size * self.num_shared_experts
@@ -280,6 +290,7 @@ class KimiMoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
+            runner_cls=ROCmLatentMoERunner if self.use_latent_moe else None,
         )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
@@ -469,11 +480,22 @@ class KimiDecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         if config.is_kda_layer(layer_idx):
-            self.self_attn = KimiGatedDeltaNetAttention(
-                config,
-                vllm_config,
-                prefix=f"{prefix}.self_attn",
-            )
+            # Kimi-K3 sets use_full_rank_gate and uses the ROCm-specific K3 KDA
+            # layer; Kimi-Linear keeps the shared low-rank-gate implementation.
+            kda_config = config.linear_attn_config
+            assert kda_config is not None
+            if kda_config.get("use_full_rank_gate", False):
+                self.self_attn = KimiK3DeltaAttention(
+                    config,
+                    vllm_config,
+                    prefix=f"{prefix}.self_attn",
+                )
+            else:
+                self.self_attn = KimiLinearGatedDeltaNetAttention(
+                    config,
+                    vllm_config,
+                    prefix=f"{prefix}.self_attn",
+                )
         else:
             qk_nope_head_dim = config.qk_nope_head_dim
             qk_rope_head_dim = config.qk_rope_head_dim
@@ -607,19 +629,20 @@ class KimiDecoderLayer(nn.Module):
             self.self_attention_res_proj,
             self.self_attention_res_norm,
             self.prev_valid_blocks,
+            output_norm=self.input_layernorm,
+            block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
         )
 
         if self.is_block_write_layer:
-            block_residual[:, self.block_write_idx, :].copy_(prefix_sum)
             prefix_sum = None
 
-        hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self._run_self_attn(positions, hidden_states)
 
-        if prefix_sum is not None:
-            prefix_sum = prefix_sum + hidden_states
-        else:
+        if prefix_sum is None:
             prefix_sum = hidden_states
+            prefix_delta = None
+        else:
+            prefix_delta = hidden_states
 
         mlp_valid_blocks = self.prev_valid_blocks + (
             1 if self.is_block_write_layer else 0
@@ -630,9 +653,10 @@ class KimiDecoderLayer(nn.Module):
             self.mlp_res_proj,
             self.mlp_res_norm,
             mlp_valid_blocks,
+            delta=prefix_delta,
+            output_norm=self.post_attention_layernorm,
         )
 
-        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         prefix_sum = prefix_sum + hidden_states
         return prefix_sum, block_residual
