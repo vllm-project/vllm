@@ -39,10 +39,15 @@ def sync_cudagraph_and_dp_padding(
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     dist.all_reduce(tensor, group=group)
 
-    # Under FT scale-down, dead ranks never write their column; keep its
-    # zero out of the min-aggregated cg_mode row.
-    for r in dp_group.dead_dp_ranks:
-        tensor[1][r] = torch.iinfo(torch.int32).max
+    # Under FT scale-down, dead ranks never write their column. Keep the
+    # zeros out of the min-aggregated cg_mode row, and fill the
+    # uniform-token-count row with the row max (the agreed value when
+    # alive ranks agree; disagreement degrades to None anyway) so the
+    # equality check below is not failed by dead columns.
+    if dead_dp_ranks := dp_group.dead_dp_ranks:
+        dead_cols = sorted(dead_dp_ranks)
+        tensor[1, dead_cols] = torch.iinfo(torch.int32).max
+        tensor[2, dead_cols] = tensor[2].max()
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
