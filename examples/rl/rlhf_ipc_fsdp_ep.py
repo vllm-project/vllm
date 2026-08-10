@@ -4,33 +4,20 @@
 RLHF with FSDP2 training and vLLM expert-parallel inference using **CUDA IPC**
 weight transfer and **packed** tensors.
 
-Multi-rank version of `rlhf_http_ipc.py`: the inference side is a single
-`vllm serve` process with data parallelism (DP=4, TP=1, expert parallel), and
-the trainer is 4 FSDP2 Ray actors colocated on the same 4 physical GPUs.
+Multi-rank version of `rlhf_http_ipc.py`: the trainer is 4 FSDP2 Ray actors
+colocated with a data-parallel `vllm serve` on the same 4 physical GPUs.
 
 4-GPU layout (single node), all colocated:
   Training  — 4 GPUs, PyTorch FSDP2 (fully_shard), as Ray actors
   Inference — the same 4 GPUs, `vllm serve --data-parallel-size 4 -tp 1
               --enable-expert-parallel` (EP_SIZE = TP x DP = 4)
 
-Ray is used only to place and drive the *training* ranks. The inference side is
-an ordinary server, so `--data-parallel-size 4` replaces what would otherwise be
-four hand-managed `LLM` actors coordinating through `VLLM_DP_*` env vars, and a
-single `HTTPVLLMWeightSyncClient` replaces a four-handle fan-out: the API
-server's DP client already broadcasts each weight-transfer RPC to every engine
-core.
+IPC requires the trainer and the server to sit on the same GPUs, so the script
+reserves the training GPUs through Ray first, asks Ray which ones it got, and
+pins the server to exactly those with `--device-ids`.
 
-**Colocation.** IPC pairs the two sides by physical GPU *UUID*, not by rank
-index: every trainer rank contributes `{gpu_uuid: handle}`, rank 0 merges them,
-and each worker looks up its own UUID. So the requirement is that the set of
-trainer GPUs matches the set of server GPUs — the ordering is irrelevant. This
-script reserves the training GPUs through Ray first, asks Ray which physical
-GPUs it got, and pins the server to exactly those with `--device-ids`. That is
-robust on a node with more GPUs than this example uses.
-
-**Memory.** Both sides share each GPU, so the server is capped with
-`--gpu-memory-utilization` and the weights are moved out of the way for the
-transfer itself:
+Both sides share each GPU, so the server is capped with
+`--gpu-memory-utilization` and its weights are moved aside for the transfer:
 
   1. `/sleep?level=1`             — offload server weights to CPU, drop KV cache
   2. `/wake_up?tags=weights`      — weights back on GPU, KV cache still free
@@ -130,21 +117,11 @@ class FSDPTrainWorker:
         return self.rank
 
     def get_gpu_ids(self):
-        """Physical GPU id(s) Ray assigned to this worker.
-
-        The server is pinned to exactly these GPUs, which is what makes the
-        IPC handles resolvable on both sides.
-        """
+        """Physical GPU id(s) Ray assigned to this worker."""
         return ray.get_gpu_ids()
 
     def setup_engine(self, base_url: str):
-        """Build the trainer IPC engine on every FSDP rank.
-
-        Called on all ranks: rank 0 becomes the sender (it drives the server and
-        performs the IPC init handshake, which ships the `packed` wire param);
-        the other ranks only join the IPC handle all-gather during
-        `send_weights`.
-        """
+        """Build the trainer IPC engine. Called on every FSDP rank."""
         self.engine = WeightTransferTrainerFactory.trainer_init(
             init_info=IPCTrainerInitInfo(
                 rank=self.rank,  # FSDP rank; sender is 0
@@ -156,12 +133,7 @@ class FSDPTrainWorker:
         )
 
     def gather_and_broadcast_weights_ipc(self):
-        """All-gather full params across FSDP ranks; rank 0 sends to vLLM.
-
-        Called on all ranks concurrently. `send_weights` gathers each param and
-        contributes to the IPC handle all-gather on every rank; only rank 0 (the
-        sender) drives start/update/finish on the inference side.
-        """
+        """Send the current weights to vLLM. Called on every FSDP rank."""
         self.engine.send_weights()
 
 
@@ -178,8 +150,7 @@ def start_vllm_server(model_path: str, device_ids: str) -> subprocess.Popen:
         "--data-parallel-size",
         str(INFERENCE_DP_SIZE),
         "--enable-expert-parallel",
-        # Pins the server to the same physical GPUs as the training ranks. DP
-        # rank i takes device_ids[i * TP : (i + 1) * TP].
+        # Pins the server to the same physical GPUs as the training ranks.
         "--device-ids",
         device_ids,
         "--enable-sleep-mode",
@@ -224,11 +195,7 @@ def start_vllm_server(model_path: str, device_ids: str) -> subprocess.Popen:
 
 
 def generate_completions(client: OpenAI, prompts: list[str]) -> list[str]:
-    """Generate completions via the OpenAI HTTP API.
-
-    The server load-balances across its DP ranks, so the caller does not shard
-    the prompt list itself.
-    """
+    """Generate completions via the OpenAI HTTP API."""
     results = []
     for prompt in prompts:
         response = client.completions.create(
@@ -280,9 +247,8 @@ def main():
     fsdp_master_addr = get_ip()
     fsdp_master_port = get_open_port()
 
-    # Launch the FSDP training workers first so Ray reserves their GPUs, then
-    # pin the server to those same physical GPUs. IPC needs the two sets to
-    # match; letting Ray choose first works on any node size.
+    # Launch the training workers first so Ray reserves their GPUs; the server
+    # is then pinned to those same physical GPUs.
     fsdp_workers = [
         FSDPTrainWorker.remote(
             local_model_path,
@@ -318,8 +284,6 @@ def main():
         print_generations("BEFORE weight sync (dummy weights):", PROMPTS, outputs)
 
         # --- Weight transfer ---
-        # Every FSDP rank builds an engine; rank 0 drives the server for all DP
-        # ranks through one HTTP client.
         print("[transfer] Initializing IPC weight transfer (all FSDP ranks)...")
         ray.get([w.setup_engine.remote(BASE_URL) for w in fsdp_workers])
 
@@ -329,8 +293,6 @@ def main():
         print("[sync] Waking weights (KV cache stays free)...")
         wake_up_engine(BASE_URL, tags=["weights"])
 
-        # All FSDP ranks participate in the IPC handle all-gather; rank 0's
-        # engine additionally drives start/update/finish on the server.
         print("[sync] Packed IPC transfer FSDP -> vLLM...")
         ray.get([w.gather_and_broadcast_weights_ipc.remote() for w in fsdp_workers])
         print("[sync] Weight transfer complete.")

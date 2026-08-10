@@ -4,30 +4,23 @@
 RLHF weight syncing against a `vllm serve` HTTP server, using CUDA IPC for the
 data plane.
 
-Same shape as `rlhf_http_nccl.py` — a plain `vllm serve` process plus an
-`HTTPVLLMWeightSyncClient` — but IPC shares GPU memory directly instead of
-copying over the wire, so the trainer and the server must sit on the **same
-GPU**. Memory has to be divided between them up front: the server is started
-with `--gpu-memory-utilization 0.5` to leave room for the training model.
-
   * OpenAI-compatible API for inference requests
   * HTTP endpoints for the weight-transfer control plane
   * CUDA IPC handles for the weight data plane
 
-1-GPU layout (single node): both the server (TP=1) and the training model live
-on GPU 0. IPC pairs the two sides by physical GPU UUID, so a multi-GPU server
-would need one colocated trainer rank per GPU — see `rlhf_ipc_fsdp_ep.py`.
+1-GPU layout (single node): IPC shares GPU memory directly, so the server (TP=1)
+and the training model both live on GPU 0. The server is started with
+`--gpu-memory-utilization 0.5` to leave room for the training model.
 
-The script launches the server itself (and prints the exact command it runs, so
-you can copy it), then:
+The script starts the server itself, then:
 
   1. Generate over HTTP → gibberish (server started with dummy weights).
   2. Pause generation, sync real weights trainer → server over IPC, resume.
   3. Generate again → sensible output.
 
-IPC handles are pickled and base64-encoded for HTTP transport, so both sides
-need `VLLM_ALLOW_INSECURE_SERIALIZATION=1` (this script sets it for itself and
-for the server it spawns).
+IPC handles are pickled for HTTP transport, so both sides need
+`VLLM_ALLOW_INSECURE_SERIALIZATION=1`; this script sets it for itself and for
+the server it spawns.
 
 Run:
     $ python examples/rl/rlhf_http_ipc.py
@@ -174,7 +167,7 @@ def main():
         print_generations("BEFORE weight sync (dummy weights):", PROMPTS, outputs)
 
         # IPC needs no data-plane rendezvous; `trainer_init` only ships the
-        # must-agree `packed` flag to the server so it decodes as we encode.
+        # `packed` flag, which the server must decode with.
         print("[transfer] Initializing IPC weight transfer...")
         engine = WeightTransferTrainerFactory.trainer_init(
             init_info=IPCTrainerInitInfo(rank=0, packed=False),  # rank 0 = sender
@@ -184,8 +177,7 @@ def main():
 
         pause_generation(BASE_URL)
 
-        # One call drives start_weight_update / update_weights /
-        # finish_weight_update; for IPC, update_weights *is* the transfer.
+        # Drives start_weight_update / update_weights / finish_weight_update.
         print("[sync] Sharing weights via CUDA IPC...")
         engine.send_weights()
         print("[sync] Weight transfer complete.")

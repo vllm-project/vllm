@@ -4,25 +4,16 @@
 RLHF weight syncing against a `vllm serve` HTTP server, using NCCL for the
 data plane.
 
-This is the standard shape for weight transfer: the inference side is a plain
-`vllm serve` process configured with nothing but a backend name, and the trainer
-drives it through `HTTPVLLMWeightSyncClient`. The trainer never touches vLLM
-internals — it only holds a URL.
-
   * OpenAI-compatible API for inference requests
   * HTTP endpoints for the weight-transfer control plane
   * NCCL for the weight data plane
 
 3-GPU layout (single node):
   Inference — GPUs 0-1, `vllm serve` with TP=2 and fp8 quantization
-  Training  — GPU 2, a plain Hugging Face model in this process
+  Training  — GPU 2, a bf16 Hugging Face model in this process
+              (the server quantizes to fp8 as it loads)
 
-The trainer holds bf16 weights while the server runs fp8: weights are quantized
-on the fly as the server loads them, so the two sides do not need matching
-dtypes.
-
-The script launches the server itself (and prints the exact command it runs, so
-you can copy it), then:
+The script starts the server itself, then:
 
   1. Generate over HTTP → gibberish (server started with dummy weights).
   2. Pause generation, sync real weights trainer → server over NCCL, resume.
@@ -56,9 +47,7 @@ SERVER_PORT = 8000
 BASE_URL = f"http://localhost:{SERVER_PORT}"
 
 INFERENCE_TP_SIZE = 2
-# Physical GPUs for the server; the trainer takes the next one. `--device-ids`
-# pins placement without CUDA_VISIBLE_DEVICES, so both sides keep full topology
-# visibility and the trainer can address its GPU by its real index.
+# Physical GPUs for the server; the trainer takes the next one.
 SERVER_DEVICE_IDS = "0,1"
 TRAINER_DEVICE = "cuda:2"
 
@@ -176,9 +165,7 @@ def main():
         outputs = generate_completions(client, MODEL_NAME, PROMPTS)
         print_generations("BEFORE weight sync (dummy weights):", PROMPTS, outputs)
 
-        # The transfer NCCL group is the trainer (rank 0) plus every inference
-        # worker, so ask the server how many workers it has rather than
-        # hard-coding it.
+        # The transfer NCCL group is the trainer plus every inference worker.
         world_size = get_world_size(BASE_URL) + 1
         master_address = get_ip()
         master_port = get_open_port()
@@ -187,10 +174,9 @@ def main():
             f"world_size={world_size} (1 trainer + {world_size - 1} vLLM workers)"
         )
 
-        # `trainer_init` drives the full handshake: it calls the server's
-        # init_weight_transfer_engine (via the HTTP client) on a worker thread
-        # while opening the trainer's NCCL endpoint, so both ends rendezvous
-        # together — no manual threading needed here.
+        # `trainer_init` drives the handshake: it initializes the server's
+        # transfer engine while opening the trainer's own NCCL endpoint, so both
+        # ends rendezvous together.
         engine = WeightTransferTrainerFactory.trainer_init(
             init_info=NCCLTrainerInitInfo(
                 master_address=master_address,
@@ -205,8 +191,8 @@ def main():
 
         pause_generation(BASE_URL)
 
-        # One call drives start_weight_update / update_weights /
-        # finish_weight_update over HTTP, concurrent with the NCCL broadcast.
+        # Drives start_weight_update / update_weights / finish_weight_update,
+        # concurrent with the NCCL broadcast.
         print("[sync] Broadcasting weights via NCCL...")
         engine.send_weights()
         print("[sync] Weight broadcast complete.")
