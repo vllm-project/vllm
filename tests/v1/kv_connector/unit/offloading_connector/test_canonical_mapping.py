@@ -396,6 +396,30 @@ def test_fail_closed_cases():
     assert _try_mapping(KVCacheSpec(block_size=4), None, _ctx(0, tp=4, total=8)) is None
 
 
+def _packed_nhd_quant_cache(spec) -> torch.Tensor:
+    """The per-token-head packed form: each (token, head) row is padded so
+    its fp32 scale sits inline after the quantized data."""
+    scale_pad = 4 // spec.dtype.itemsize
+    inner = 2 * (spec.head_size + scale_pad)
+    return torch.zeros(
+        NUM_BLOCKS, spec.block_size, spec.num_kv_heads, inner, dtype=torch.int8
+    ).permute(0, 2, 1, 3)
+
+
+def test_per_token_head_packed_rows_certify():
+    """Padded packed rows carry their scales inline, so head-shard fragments
+    stay self-contained and portable; the page must span the scale carve
+    (unpadded_page_size_bytes), matching the worker's offload refs."""
+    spec = _full_spec(kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD)
+    cache = _packed_nhd_quant_cache(spec)
+    per_rank = [_mapping(spec, cache, _ctx(rank=r, tp=2)) for r in range(2)]
+    mapping = per_rank[0]
+    assert mapping.parallelism_agnostic
+    assert mapping.local_page_size_bytes == spec.unpadded_page_size_bytes
+    assert mapping.canonical_page_size_bytes == 2 * spec.unpadded_page_size_bytes
+    _verify_tiling("quant", per_rank)
+
+
 def test_opaque_fallback_places_page_whole():
     mapping = _opaque_fallback_mapping(1024, 4, 2)
     assert mapping.canonical_page_size_bytes == 4096

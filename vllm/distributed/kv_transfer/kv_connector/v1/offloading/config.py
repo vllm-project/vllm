@@ -188,17 +188,18 @@ def build_offloading_config(
                 )
             if not isinstance(spec, AttentionSpec):
                 return False
-            if spec.kv_quant_mode.is_per_token_head:
-                return False
             if type(spec) is MLAAttentionSpec:
                 return (
-                    spec.compress_ratio == 1
+                    not spec.kv_quant_mode.is_per_token_head
+                    and spec.compress_ratio == 1
                     and spec.real_page_size_bytes % spec.block_size == 0
                 )
             if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
                 return False
             if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
                 return False
+            # Per-token-head quant is fine: its packed rows carry their
+            # scales inline, so head-shard fragments stay self-contained
             return total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
 
         is_parallelism_agnostic = (

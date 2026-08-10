@@ -155,11 +155,16 @@ def _packed_kv_regions(
     num_head_shards: int,
     cp_size: int,
 ) -> list[ByteRegion] | None:
-    """K and V adjacent per (token, head), in NHD or HND stride order."""
+    """K and V adjacent per (token, head), in NHD or HND stride order.
+
+    The inner dim is taken from the tensor: per-token-head quant pads it so
+    each (token, head) row carries its own inline scale, which makes the row
+    a self-contained, shard-portable unit. unpadded_page_size_bytes accounts
+    for the scale carve, so the size check below stays exact."""
     bs, heads = spec.block_size, spec.num_kv_heads
     elem = kv_cache.element_size()
-    head_elems = 2 * spec.head_size
-    if heads * bs * head_elems * elem != spec.real_page_size_bytes:
+    head_elems = kv_cache.shape[3]
+    if heads * bs * head_elems * elem != spec.unpadded_page_size_bytes:
         return None
     _, head_stride, token_stride, inner_stride = kv_cache.stride()
     if inner_stride != 1:
@@ -203,7 +208,9 @@ def _split_kv_regions(
     """K and V in separate page halves, in NHD or HND stride order."""
     bs, heads, head_size = spec.block_size, spec.num_kv_heads, spec.head_size
     elem = kv_cache.element_size()
-    if 2 * bs * heads * head_size * elem != spec.real_page_size_bytes:
+    # unpadded covers inline per-token-head scales, which split forms cannot
+    # carry per row; those fall through to the opaque fallback
+    if 2 * bs * heads * head_size * elem != spec.unpadded_page_size_bytes:
         return None
     _, half_stride, token_stride, head_stride, inner_stride = kv_cache.stride()
     if inner_stride != 1 or half_stride != bs * heads * head_size:
@@ -254,7 +261,10 @@ def _attention_byte_regions(
     """Byte regions of an attention page, given this rank's head shard.
     None when the physical layout is not recognized (fail closed)."""
     bs, heads, head_size = spec.block_size, spec.num_kv_heads, spec.head_size
-    if tuple(kv_cache.shape) == (num_blocks, heads, bs, 2 * head_size):
+    if kv_cache.ndim == 4 and tuple(kv_cache.shape[:3]) == (num_blocks, heads, bs):
+        # The inner dim may differ from 2*head_size when per-(token, head)
+        # scales are padded inline (or int4 packs two values per byte);
+        # _packed_kv_regions validates it against the unpadded page size
         return _packed_kv_regions(kv_cache, spec, head_shard, num_head_shards, cp_size)
     if tuple(kv_cache.shape) == (num_blocks, 2, bs, heads, head_size):
         return _split_kv_regions(kv_cache, spec, head_shard, num_head_shards, cp_size)
@@ -271,7 +281,10 @@ def _layer_mapping(
     if not isinstance(spec, AttentionSpec):
         return None
     bs = spec.block_size
-    page = spec.real_page_size_bytes
+    # The offloaded span per block: equals real_page_size_bytes except for
+    # per-token-head quant, where it also covers the inline scale carve —
+    # matching CanonicalKVCacheRef.page_size_bytes on the worker side.
+    page = spec.unpadded_page_size_bytes
     if ctx.cp_size > 1 and (ctx.interleave > bs or bs % ctx.interleave):
         return None
 
@@ -294,7 +307,7 @@ def _layer_mapping(
             parallelism_agnostic=ctx.cp_size == 1,
         )
 
-    if spec.kv_quant_mode.is_per_token_head or not isinstance(kv_cache, torch.Tensor):
+    if not isinstance(kv_cache, torch.Tensor):
         return None
     total, tp = ctx.total_kv_heads, ctx.tp_size
     if spec.num_kv_heads != max(1, total // tp):
