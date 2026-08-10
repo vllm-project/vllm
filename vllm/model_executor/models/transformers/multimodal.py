@@ -75,8 +75,19 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def _is_image_model(self) -> bool:
         return hasattr(self.get_hf_processor(), "image_processor")
 
-    def _is_video_model(self) -> bool:
-        return hasattr(self.get_hf_processor(), "video_processor")
+    def _get_supported_modalities(self) -> list[str]:
+        modalities = []
+        if self._is_audio_model():
+            modalities.append("audio")
+        if self._is_image_model():
+            modalities.append("image")
+        if not modalities:
+            raise ValueError(
+                f"{type(self.get_hf_processor()).__name__} exposes neither an image "
+                "processor nor an audio processor, so the Transformers modeling "
+                "backend cannot serve this model as multi-modal."
+            )
+        return modalities
 
     def _get_audio_token_id(self) -> int:
         processor = self.get_hf_processor()
@@ -108,32 +119,16 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return super().get_data_parser()
 
     def get_supported_mm_limits(self):
-        limits = {}
-        if self._is_audio_model():
-            limits["audio"] = None
-        if self._is_image_model():
-            limits["image"] = None
-        if not limits:
-            raise ValueError(
-                f"Unable to detect a supported modality on "
-                f"{type(self.get_hf_processor()).__name__}. "
-                "Checked `_is_audio_model` and `_is_image_model`."
-            )
-        return limits
+        return dict.fromkeys(self._get_supported_modalities())
 
     def get_mm_max_tokens_per_item(self, seq_len, mm_counts):
-        result = {}
-        if self._is_audio_model():
-            result["audio"] = self.get_max_audio_tokens()
-        if self._is_image_model():
-            result["image"] = self.get_max_image_tokens()
-        if not result:
-            raise ValueError(
-                f"Unable to detect a supported modality on "
-                f"{type(self.get_hf_processor()).__name__}. "
-                "Checked `_is_audio_model` and `_is_image_model`."
-            )
-        return result
+        modalities = self._get_supported_modalities()
+        max_tokens = {}
+        if "audio" in modalities:
+            max_tokens["audio"] = self.get_max_audio_tokens()
+        if "image" in modalities:
+            max_tokens["image"] = self.get_max_image_tokens()
+        return max_tokens
 
     def get_max_audio_tokens(self) -> int:
         config = self.get_hf_config()
