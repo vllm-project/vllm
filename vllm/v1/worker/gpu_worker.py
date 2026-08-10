@@ -852,6 +852,13 @@ class Worker(WorkerBase):
         # intra-op parallelism.
         set_torch_threads_for_runtime()
 
+        if self.compilation_config.persistent_cache_enabled:
+            # FlashInfer JIT/autotuning and CUDA-graph capture have now finished.
+            # Publish their filesystem artifacts at the first durable boundary.
+            from vllm.compilation.persistent_cache import publish_registered_caches
+
+            publish_registered_caches()
+
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,

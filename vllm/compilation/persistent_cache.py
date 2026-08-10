@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Opt-in remote persistence for vLLM's torch compilation cache."""
 
+import atexit
 import hashlib
 import importlib.metadata
 import json
 import os
 import platform
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -22,7 +24,8 @@ logger = init_logger(__name__)
 _BUCKET = "s3://eric-alcaide-dev/vllm_cache"
 _ENDPOINT = "https://storage.eu-north1.nebius.cloud"
 _REGION = "eu-north1"
-_SCHEMA = 1
+_SCHEMA = 2
+_REGISTERED_CACHES: dict[str, tuple["PersistentCompileCache", dict[str, Path]]] = {}
 
 
 def _package_version(name: str) -> str | None:
@@ -124,7 +127,15 @@ def manifest_key(manifest: dict[str, Any]) -> str:
 
 
 class PersistentCompileCache:
-    """Securely restore and publish one rank's compilation artifacts."""
+    """Securely restore and publish one rank's compilation artifacts.
+
+    Besides vLLM's torch compile directory, a bundle contains FlashInfer's JIT
+    products (including ``fused_moe_trtllm_sm100``) and vLLM's FlashInfer
+    autotuner results (including MoE and dense ``fp4_gemm`` profiles). CUDA
+    graph executables themselves are process-local CUDA objects and cannot be
+    serialized; their compilation inputs and exact capture configuration are
+    persisted/keyed so capture is repeatable without recompilation/autotuning.
+    """
 
     def __init__(self, key: str, rank: int, dp_rank: int, prefix: str) -> None:
         safe_prefix = hashlib.sha256(prefix.encode()).hexdigest()[:16]
@@ -149,8 +160,24 @@ class PersistentCompileCache:
             stderr=subprocess.PIPE,
         )
 
-    def restore(self, destination: str) -> bool:
-        Path(destination).mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def cache_roots(torch_compile_dir: str) -> dict[str, Path]:
+        flashinfer_jit = Path.home() / ".cache" / "flashinfer"
+        flashinfer_autotune = (
+            Path(os.environ["VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR"]).expanduser()
+            if os.getenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR")
+            else Path(os.environ.get("VLLM_CACHE_ROOT", Path.home() / ".cache/vllm"))
+            / "flashinfer_autotune_cache"
+        )
+        return {
+            "torch_compile": Path(torch_compile_dir),
+            "flashinfer_jit": flashinfer_jit,
+            "flashinfer_autotune": flashinfer_autotune,
+        }
+
+    def restore(self, roots: str | dict[str, Path]) -> bool:
+        if isinstance(roots, str):
+            roots = {"torch_compile": Path(roots)}
         with tempfile.TemporaryDirectory(prefix="vllm-compile-cache-") as tmp:
             archive = os.path.join(tmp, "cache.tar.gz")
             result = self._aws("cp", self.uri, archive, "--only-show-errors")
@@ -162,16 +189,22 @@ class PersistentCompileCache:
                 return False
             try:
                 with tarfile.open(archive, "r:gz") as tar:
-                    root = Path(destination).resolve()
+                    staging = (Path(tmp) / "extracted").resolve()
+                    staging.mkdir()
                     for member in tar.getmembers():
-                        target = (root / member.name).resolve()
-                        if root not in target.parents and target != root:
+                        target = (staging / member.name).resolve()
+                        if staging not in target.parents and target != staging:
                             raise ValueError("cache archive contains an unsafe path")
                         if member.issym() or member.islnk():
                             raise ValueError("cache archive contains a link")
                         if not (member.isfile() or member.isdir()):
                             raise ValueError("cache archive contains a special file")
-                    tar.extractall(destination)
+                    tar.extractall(staging)
+                for name, destination in roots.items():
+                    source = staging / "roots" / name
+                    if source.is_dir():
+                        destination.mkdir(parents=True, exist_ok=True)
+                        shutil.copytree(source, destination, dirs_exist_ok=True)
             except (OSError, tarfile.TarError, ValueError):
                 logger.warning(
                     "Ignoring invalid persistent compile cache artifact", exc_info=True
@@ -180,16 +213,38 @@ class PersistentCompileCache:
         logger.info("Persistent compile cache hit; restored compiled artifacts")
         return True
 
-    def publish(self, source: str) -> bool:
+    def publish(self, roots: str | dict[str, Path]) -> bool:
+        if isinstance(roots, str):
+            roots = {"torch_compile": Path(roots)}
         with tempfile.TemporaryDirectory(prefix="vllm-compile-cache-") as tmp:
             archive = os.path.join(tmp, "cache.tar.gz")
             with tarfile.open(archive, "w:gz") as tar:
-                for path in sorted(Path(source).rglob("*")):
-                    if path.is_file() and not path.is_symlink():
-                        tar.add(path, arcname=path.relative_to(source), recursive=False)
+                for name, source in sorted(roots.items()):
+                    if not source.is_dir():
+                        continue
+                    for path in sorted(source.rglob("*")):
+                        if path.is_file() and not path.is_symlink():
+                            relative = path.relative_to(source)
+                            tar.add(
+                                path,
+                                arcname=Path("roots") / name / relative,
+                                recursive=False,
+                            )
             result = self._aws("cp", archive, self.uri, "--only-show-errors")
         if result.returncode != 0:
             logger.warning("Failed to upload persistent compile cache artifact")
             return False
         logger.info("Uploaded persistent compile cache artifact")
         return True
+
+    def publish_at_exit(self, roots: dict[str, Path]) -> None:
+        """Register for post-warmup and normal-process-exit publication."""
+        if self.uri not in _REGISTERED_CACHES:
+            _REGISTERED_CACHES[self.uri] = (self, roots)
+            atexit.register(self.publish, roots)
+
+
+def publish_registered_caches() -> None:
+    """Publish after model warmup, FlashInfer autotuning, and graph capture."""
+    for cache, roots in _REGISTERED_CACHES.values():
+        cache.publish(roots)

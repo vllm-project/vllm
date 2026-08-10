@@ -84,7 +84,13 @@ def test_compile_cache_cli_flags_are_mutually_exclusive():
 
 
 def test_manifest_is_deterministic_and_isolates_mismatch():
-    assert manifest_key(_manifest()) == manifest_key(_manifest())
+    manifest = _manifest()
+    assert manifest["limits"] == {
+        "max_num_batched_tokens": 8192,
+        "max_num_seqs": 64,
+        "scheduler_hash": "hash",
+    }
+    assert manifest_key(manifest) == manifest_key(_manifest())
     assert manifest_key(_manifest("main")) != manifest_key(_manifest("v2"))
 
 
@@ -114,11 +120,24 @@ def test_upload_then_cache_hit_reuses_artifact(tmp_path):
         return SimpleNamespace(returncode=0)
 
     with patch.object(cache, "_aws", side_effect=fake_aws):
-        assert cache.publish(str(source)) is True
+        roots = {
+            "torch_compile": source,
+            "flashinfer_jit": source,
+            "flashinfer_autotune": source,
+        }
+        assert cache.publish(roots) is True
         destination = tmp_path / "destination"
-        assert cache.restore(str(destination)) is True
+        assert cache.restore({"torch_compile": destination}) is True
 
     assert (destination / "artifact.bin").read_bytes() == b"compiled"
+
+
+def test_runtime_cache_roots_cover_observed_nvfp4_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "vllm"))
+    roots = PersistentCompileCache.cache_roots(str(tmp_path / "torch_compile_cache"))
+    assert roots["torch_compile"].name == "torch_compile_cache"
+    assert roots["flashinfer_jit"] == Path.home() / ".cache/flashinfer"
+    assert roots["flashinfer_autotune"] == tmp_path / "vllm/flashinfer_autotune_cache"
 
 
 def test_restore_rejects_path_traversal(tmp_path):

@@ -1093,7 +1093,9 @@ class VllmBackend:
             persistent_cache = PersistentCompileCache(
                 manifest_key(manifest), rank, dp_rank, self.prefix
             )
-            persistent_cache.restore(local_cache_dir)
+            persistent_roots = persistent_cache.cache_roots(local_cache_dir)
+            persistent_cache.restore(persistent_roots)
+            persistent_cache.publish_at_exit(persistent_roots)
         else:
             os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
@@ -1247,7 +1249,7 @@ class VllmBackend:
         time_before_saving = time.perf_counter()
         self.compiler_manager.save_to_file()
         if persistent_cache is not None:
-            persistent_cache.publish(local_cache_dir)
+            persistent_cache.publish(persistent_roots)
         elapsed = time.perf_counter() - time_before_saving
         if elapsed > 1:
             logger.info_once(
