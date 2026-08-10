@@ -92,6 +92,28 @@ class Lfm2ToolParser(ToolParser):
             request.skip_special_tokens = False
         return request
 
+    @staticmethod
+    def _salvage_tool_calls(call_nodes):
+        """Convert call nodes individually, skipping ones that fail.
+
+        A single unconvertible call (unsupported argument shape) used to
+        abort the whole list comprehension, dropping every parseable
+        sibling call in the block. Skipping is deterministic on the text,
+        so streaming chunks stay index-consistent.
+
+        Raises:
+            UnexpectedAstError: If no call in the block is convertible.
+        """
+        tool_calls = []
+        for node in call_nodes:
+            try:
+                tool_calls.append(handle_single_tool(node))
+            except UnexpectedAstError as e:
+                logger.warning("Skipping unconvertible tool call: %s", e)
+        if not tool_calls:
+            raise UnexpectedAstError("No convertible tool call in the block")
+        return tool_calls
+
     # Rename for readability. This is NOT a tool id.
     @property
     def current_tool_index(self) -> int:
@@ -225,10 +247,7 @@ class Lfm2ToolParser(ToolParser):
                 and parsed.elts
                 and all(isinstance(e, ast.Call) for e in parsed.elts)
             ):
-                tool_calls = [
-                    handle_single_tool(e)  # type: ignore
-                    for e in parsed.elts
-                ]
+                tool_calls = self._salvage_tool_calls(parsed.elts)
                 if kw_renamed:
                     tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
                 return ExtractedToolCallInformation(
@@ -372,10 +391,7 @@ class Lfm2ToolParser(ToolParser):
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
                 raise UnexpectedAstError("Tool output must be a list of function calls")
-            tool_calls = [
-                handle_single_tool(e)  # type: ignore
-                for e in parsed.elts
-            ]
+            tool_calls = self._salvage_tool_calls(parsed.elts)
             if kw_renamed:
                 tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
 

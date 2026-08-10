@@ -431,6 +431,27 @@ def test_empty_tool_call_block(body: str, lfm2_tokenizer: TokenizerLike):
     assert len(reconstructor.tool_calls) == 0
 
 
+@pytest.mark.parametrize("streaming", [True, False])
+def test_bad_sibling_call_does_not_drop_good_calls(
+    streaming: bool, lfm2_tokenizer: TokenizerLike
+):
+    """One unconvertible call (bytes argument) used to abort the whole
+    conversion, dropping every parseable sibling call in the block."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}, bad(x=b'z')]{TOOL_CALL_END}"
+    )
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=streaming,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
 def test_whitespace_after_start_token(lfm2_tokenizer: TokenizerLike):
     """Whitespace between <|tool_call_start|> and the opening bracket must
     not break parsing. The streaming path used to feed the indented text to
