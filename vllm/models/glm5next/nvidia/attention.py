@@ -33,10 +33,48 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.utils import maybe_disable_graph_partition
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
+
+# Shared torch.compile config for the indexer's small-kernel leaves. The MLA
+# indexer runs under breakable-CG (CompilationMode.NONE), which blocks FX-graph
+# fusion of the surrounding eager ops; carving each cluster into its own
+# @torch.compile leaf (backend==inductor) still fuses them. Matches the
+# grouped_topk / _cast_sigmoid leaf pattern.
+_INDEXER_COMPILE = dict(
+    dynamic=True,
+    backend=current_platform.simple_compile_backend,
+    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
+)
+
+
+@torch.compile(**_INDEXER_COMPILE)
+def _fused_indexer_k_norm(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, dim: int, eps: float
+) -> torch.Tensor:
+    # Fuse fp32 cast + layer_norm + cast-back (was 3 kernels) into one.
+    return F.layer_norm(x.float(), (dim,), weight, bias, eps).type_as(x)
+
+
+@torch.compile(**_INDEXER_COMPILE)
+def _fused_indexer_weight_scale(
+    weights: torch.Tensor, q_scale: torch.Tensor, scale: float
+) -> torch.Tensor:
+    # Fuse the weight-scaling muls (was 2 kernels) into one. `scale` folds
+    # softmax_scale (head_dim**-0.5) and n_head**-0.5 into a single constant.
+    return (weights.unsqueeze(-1) * q_scale * scale).squeeze(-1)
+
+
+@torch.compile(**_INDEXER_COMPILE)
+def _pad_indexer_heads(x: torch.Tensor, pad: int) -> torch.Tensor:
+    # DeepGEMM MQA-logits needs num_heads in {32,64}; zero-pad the head dim.
+    # Fuse new_zeros + cat (was 2 kernels) into one. Pad values are zero (exact
+    # in fp8 e4m3 and zero-weight in the logits sum), so numerically a no-op.
+    return torch.cat([x, x.new_zeros(x.shape[0], pad, *x.shape[2:])], dim=1)
 
 
 class Glm5NextIndexerCache(DeepseekV32IndexerCache):
@@ -272,7 +310,9 @@ class Indexer(nn.Module):
         k = kw[:, : self.head_dim]
         weights = kw[:, self.head_dim :]
 
-        k = self.k_norm(k)
+        k = _fused_indexer_k_norm(
+            k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps
+        )
 
         if self.rope_dim > 0:
             q_pe, q_nope = torch.split(
@@ -309,10 +349,9 @@ class Indexer(nn.Module):
         q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
         q_scale = q_scale.view(-1, self.n_head, 1)
 
-        weights = (
-            weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
+        weights = _fused_indexer_weight_scale(
+            weights, q_scale, self.softmax_scale * self.n_head**-0.5
         )
-        weights = weights.squeeze(-1)
 
         # kpool: per-token gate score driving the softmax-weighted pool. Computed
         # from the same hidden_states that produced `k`, so it stays token-aligned.
@@ -326,12 +365,8 @@ class Indexer(nn.Module):
         # zero-weight padded heads contribute exactly nothing.
         if self.n_head < 32:
             pad = 32 - self.n_head
-            q_fp8 = torch.cat(
-                [q_fp8, q_fp8.new_zeros(q_fp8.shape[0], pad, self.head_dim)], dim=1
-            )
-            weights = torch.cat(
-                [weights, weights.new_zeros(weights.shape[0], pad)], dim=1
-            )
+            q_fp8 = _pad_indexer_heads(q_fp8, pad)
+            weights = _pad_indexer_heads(weights, pad)
 
         return self.indexer_op(
             hidden_states,
