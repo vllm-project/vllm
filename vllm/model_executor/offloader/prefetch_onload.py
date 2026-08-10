@@ -18,7 +18,7 @@ from vllm.model_executor.offloader.prefetch_diagnostics import (
 )
 from vllm.model_executor.offloader.prefetch_helpers import nvtx_range
 from vllm.model_executor.offloader.prefetch_tail_copy import (
-    TAIL_PREFETCH_H2D_CHUNK_BYTES,
+    PREFETCH_H2D_CHUNK_BYTES,
     TailCopyJob,
     TensorCopyItem,
     iter_chunked_tensor_views,
@@ -66,23 +66,30 @@ def run_onload_to_static(
     See :meth:`_ModuleOffloader.start_onload_to_static` for the full contract.
     """
     in_capture = torch.cuda.is_current_stream_capturing()
+    log_stats = should_log_transfer_stats()
+    comm_aware = module_offloader.comm_aware
+    use_paced_chunks = (
+        (allow_paced_chunking or comm_aware) and not in_capture and not log_stats
+    )
 
     with nvtx_range(
         "weight_offload.h2d_copy "
         f"unit={module_offloader.layer_idx} "
+        f"position={getattr(module_offloader, 'module_index', -1)} "
         f"slot={module_offloader._buffer_slot_idx} "
-        f"capture={int(in_capture)} paced={int(allow_paced_chunking)}"
+        f"bytes={getattr(module_offloader, '_h2d_bytes_per_prefetch', 0)} "
+        f"segments={len(getattr(module_offloader, '_copy_segments', ()))} "
+        f"capture={int(in_capture)} paced={int(use_paced_chunks)} "
+        f"comm_aware={int(comm_aware)}"
     ):
         module_offloader.wait_until_copy_done_event_recorded()
         module_offloader._copy_done_event_recorded.clear()
         module_offloader._copy_thread_error = None
 
-        log_stats = should_log_transfer_stats()
         copy_and_record = _make_copy_recorder(
             module_offloader, in_capture=in_capture, log_stats=log_stats
         )
 
-        use_paced_chunks = allow_paced_chunking and not in_capture and not log_stats
         paced_copy_items: list[TensorCopyItem] = []
 
         def copy_or_defer(dst: torch.Tensor, src: torch.Tensor, num_bytes: int) -> None:
@@ -90,9 +97,7 @@ def run_onload_to_static(
                 copy_and_record(dst, src, num_bytes)
                 return
             paced_copy_items.extend(
-                iter_chunked_tensor_views(
-                    dst, src, num_bytes, TAIL_PREFETCH_H2D_CHUNK_BYTES
-                )
+                iter_chunked_tensor_views(dst, src, num_bytes, PREFETCH_H2D_CHUNK_BYTES)
             )
 
         # Fork: record event on compute stream, copy_stream waits on it.
@@ -107,16 +112,20 @@ def run_onload_to_static(
                 offloader.ensure_cpu_master_freshness()
 
             if module_offloader.uses_slab_buffers and module_offloader._use_slab_copy:
-                cpu_slab = module_offloader._cpu_slab
                 gpu_slab = module_offloader._gpu_slab
-                assert cpu_slab is not None and gpu_slab is not None
-                assert not should_pin_memory() or cpu_slab.is_pinned(), (
-                    "CPU slab is not pinned! "
-                    "non_blocking=True H2D copy from non-pinned memory "
-                    "causes stream synchronization that breaks "
-                    "event-based fork synchronization."
-                )
-                copy_or_defer(gpu_slab, cpu_slab, cpu_slab.numel())
+                assert gpu_slab is not None
+                for chunk in module_offloader._cpu_slab_chunks:
+                    cpu_chunk = chunk.data
+                    assert not should_pin_memory() or cpu_chunk.is_pinned(), (
+                        "CPU slab chunk is not pinned! "
+                        "non_blocking=True H2D copy from non-pinned memory "
+                        "causes stream synchronization that breaks "
+                        "event-based fork synchronization."
+                    )
+                    gpu_chunk = gpu_slab[
+                        chunk.offset_bytes : chunk.offset_bytes + cpu_chunk.numel()
+                    ]
+                    copy_or_defer(gpu_chunk, cpu_chunk, cpu_chunk.numel())
             elif module_offloader.uses_slab_buffers:
                 for name in module_offloader._slab_param_names:
                     p = module_offloader._param_offloaders[name]
