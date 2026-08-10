@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+from collections.abc import Iterable
 from math import prod
 from typing import TYPE_CHECKING
 
@@ -9,7 +10,11 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    is_shared_expert_quant_fse_compatible,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -40,8 +45,58 @@ from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+    from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
+
+
+def resolve_fused_shared_expert_fusion(
+    quant_config: "QuantizationConfig | None",
+    prefix: str,
+    shared_expert_name: str = "shared_experts",
+) -> bool:
+    """Resolve whether AITER fused shared-expert execution is enabled.
+
+    Args:
+        quant_config: Model quantization configuration.
+        prefix: MoE module prefix.
+        shared_expert_name: Shared-expert module name under ``prefix``.
+
+    Returns:
+        Whether AITER fused shared experts are enabled.
+
+    Raises:
+        ValueError: If requested shared-expert fusion is quantization-incompatible.
+    """
+    fse_requested = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+    fse_compatible, fse_reason = (
+        is_shared_expert_quant_fse_compatible(
+            quant_config,
+            f"{prefix}.experts",
+            f"{prefix}.{shared_expert_name}",
+        )
+        if fse_requested
+        else (True, None)
+    )
+    is_fused_shared_expert_enabled = fse_requested and fse_compatible
+    if fse_requested and not is_fused_shared_expert_enabled:
+        raise ValueError(
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
+            f"cannot be enabled: {fse_reason}."
+        )
+    return is_fused_shared_expert_enabled
+
+
+def resolve_model_fused_shared_expert_fusion(
+    moe_layers: Iterable[object],
+) -> bool:
+    """Resolve one fused-shared-expert state for a model's MoE layers."""
+    enabled = [
+        getattr(layer, "is_fused_shared_expert_enabled", False) for layer in moe_layers
+    ]
+    if len(set(enabled)) > 1:
+        raise ValueError("Shared-expert FSE must be enabled for all MoE layers.")
+    return any(enabled)
 
 
 @triton.jit

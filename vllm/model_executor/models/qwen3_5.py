@@ -29,13 +29,15 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.utils import (
+    resolve_model_fused_shared_expert_fusion,
+)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -78,7 +80,6 @@ from .qwen3_next import (
     Qwen3NextModel,
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
-    _is_shared_expert_fse_compatible,
 )
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
@@ -274,8 +275,9 @@ class Qwen3_5Model(Qwen3NextModel):
         if "moe" in self.config.model_type:
             weights = maybe_fuse_shared_experts(
                 weights,
-                enabled=rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-                and _is_shared_expert_fse_compatible(self.quant_config),
+                enabled=resolve_model_fused_shared_expert_fusion(
+                    layer.mlp for layer in self.layers
+                ),
                 n_routed_experts=self.config.num_experts,
                 n_shared_experts=1,
                 ckpt_prefix="mlp.shared_expert",

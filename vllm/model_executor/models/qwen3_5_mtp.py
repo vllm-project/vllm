@@ -7,11 +7,13 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.utils import (
+    resolve_model_fused_shared_expert_fusion,
+)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -27,7 +29,6 @@ from vllm.model_executor.models.qwen3_5 import (
 from vllm.model_executor.models.qwen3_next import (
     QwenNextMixtureOfExperts,
     _all_gather_hidden_and_residual,
-    _is_shared_expert_fse_compatible,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig
@@ -186,9 +187,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights,
-            enabled=rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-            and _is_shared_expert_fse_compatible(
-                get_current_vllm_config().quant_config
+            enabled=resolve_model_fused_shared_expert_fusion(
+                layer.mlp for layer in self.layers
             ),
             n_routed_experts=getattr(self.config, "num_experts", 0),
             n_shared_experts=1,

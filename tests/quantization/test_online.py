@@ -37,6 +37,9 @@ from vllm.model_executor.layers.quantization.online.nvfp4 import (
     _quantize_moe_weight_to_nvfp4,
 )
 from vllm.model_executor.layers.quantization.utils import quant_utils
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    is_shared_expert_quant_fse_compatible,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
@@ -57,6 +60,41 @@ else:
 
 
 DEVICE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    ("targets", "expected"),
+    [
+        (
+            {
+                r"re:.*mlp\.shared_expert.*": "mxfp4",
+                r"re:.*mlp\.experts.*": "mxfp4",
+            },
+            True,
+        ),
+        (
+            {
+                r"re:.*mlp\.shared_expert.*": "mxfp4",
+                r"re:.*mlp\.experts.*": "fp8_per_tensor",
+            },
+            False,
+        ),
+        ({r"re:.*mlp\.shared_expert.*": "mxfp4"}, False),
+        ({r"re:.*mlp\.experts.*": "mxfp4"}, True),
+    ],
+)
+def test_online_targets_shared_expert_fse_compatibility(
+    targets: dict[str, str], expected: bool
+) -> None:
+    quant_config = OnlineQuantizationConfig(QuantizationConfigArgs(targets=targets))
+
+    enabled, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_expert",
+    )
+    assert enabled is expected
+    assert (reason is None) is expected
 
 
 @pytest.mark.skipif(

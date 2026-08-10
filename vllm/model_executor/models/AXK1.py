@@ -46,6 +46,10 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    resolve_fused_shared_expert_fusion,
+    resolve_model_fused_shared_expert_fusion,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -154,10 +158,10 @@ class AXK1MoE(nn.Module):
         )
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        self.is_fusion_moe_shared_experts_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
+            quant_config, prefix
         )
-        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
+        if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -801,8 +805,8 @@ class AXK1Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        rocm_aiter_moe_shared_expert_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        rocm_aiter_moe_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+            layer.mlp for layer in self.layers if isinstance(layer.mlp, AXK1MoE)
         )
         stacked_params_mapping: list[tuple[str, str, int | str]] = [
             # (param_name, shard_name, shard_id)

@@ -8,7 +8,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -18,9 +17,12 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe.utils import (
+    resolve_fused_shared_expert_fusion,
+    resolve_model_fused_shared_expert_fusion,
+)
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
@@ -73,29 +75,7 @@ from .utils import (
     maybe_prefix,
 )
 
-logger = init_logger(__name__)
-
 KVCache = tuple[torch.Tensor, torch.Tensor]
-
-
-def _is_shared_expert_fse_compatible(quant_config) -> bool:
-    """Check if shared expert can be fused with routed experts.
-
-    FSE requires that shared and routed expert weights use the same
-    quantization format. Returns False when the shared expert is
-    excluded from quantization (e.g. float32 shared in an MXFP4 model)
-    or has a different quant spec than routed experts.
-    """
-    if quant_config is None:
-        return True
-    # Quark stores its full config dict in quant_config.quant_config
-    raw_config = getattr(quant_config, "quant_config", None)
-    if not isinstance(raw_config, dict):
-        return True
-    exclude = raw_config.get("exclude", [])
-    if not exclude:
-        return True
-    return not any("shared_expert." in str(e) for e in exclude)
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
@@ -151,15 +131,15 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.shared_expert_gate",
         )
 
-        _fse_requested = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        _fse_enabled = _fse_requested and _is_shared_expert_fse_compatible(quant_config)
-        if _fse_requested and not _fse_enabled:
-            logger.warning(
-                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-                "shared expert has a different quantization spec than routed "
-                "experts. Falling back to non-fused shared expert path."
-            )
-        if _fse_enabled or config.shared_expert_intermediate_size <= 0:
+        self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
+            quant_config,
+            prefix,
+            shared_expert_name="shared_expert",
+        )
+        if (
+            self.is_fused_shared_expert_enabled
+            or config.shared_expert_intermediate_size <= 0
+        ):
             self.shared_expert = None
         else:
             self.shared_expert = Qwen3NextMLP(
@@ -714,6 +694,9 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights,
+            enabled=resolve_model_fused_shared_expert_fusion(
+                layer.mlp for layer in self.layers
+            ),
             n_routed_experts=getattr(self.config, "num_experts", 0),
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",

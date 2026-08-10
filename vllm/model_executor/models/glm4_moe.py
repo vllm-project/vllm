@@ -39,11 +39,14 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    resolve_fused_shared_expert_fusion,
+    resolve_model_fused_shared_expert_fusion,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -71,8 +74,6 @@ from .utils import (
     maybe_prefix,
     skip_spec_layers,
 )
-
-logger = init_logger(__name__)
 
 
 class Glm4MoeMLP(nn.Module):
@@ -165,12 +166,11 @@ class Glm4MoE(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
-        # AITER fused shared-expert (FSE) gate; mirrors the deepseek_v2.py
-        # pattern (see Glm4MoE / MoERunner wiring there).
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        self.is_fusion_moe_shared_experts_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
+            quant_config, prefix
         )
+        self.is_fusion_moe_shared_experts_enabled = self.is_fused_shared_expert_enabled
 
         if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
             self.shared_experts = None
@@ -494,6 +494,9 @@ class Glm4MoeModel(nn.Module):
             skip_spec_layers(weights, self.config),
             n_routed_experts=self.config.n_routed_experts,
             n_shared_experts=self.config.n_shared_experts or 1,
+            enabled=resolve_model_fused_shared_expert_fusion(
+                layer.mlp for layer in self.layers if isinstance(layer.mlp, Glm4MoE)
+            ),
         )
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
