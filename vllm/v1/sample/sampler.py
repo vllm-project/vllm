@@ -130,10 +130,21 @@ class Sampler(nn.Module):
                 raw_logprobs, num_logprobs, token_ids=sampled
             )
 
-        # If we have both num_logprobs and logprob_token_ids, prefer
-        # logprob_token_ids as it's more specific
-        if logprob_token_ids_tensors is not None and num_logprobs is not None:
-            logprobs_tensors = logprob_token_ids_tensors
+        # If we have both num_logprobs and logprob_token_ids in the batch,
+        # merge the specific-token rows into the top-k result per request,
+        # since requests without logprob_token_ids still expect their top-k
+        # logprobs. The num_logprobs == -1 case (spec-decode bonus tokens)
+        # requires the full-vocab tensor; never narrow it.
+        if logprob_token_ids_tensors is not None and (
+            num_logprobs is not None and num_logprobs > 0
+        ):
+            assert logprobs_tensors is not None
+            assert sampling_metadata.logprob_token_ids is not None
+            logprobs_tensors = self.merge_specific_token_logprobs(
+                logprobs_tensors,
+                logprob_token_ids_tensors,
+                sampling_metadata.logprob_token_ids,
+            )
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
@@ -223,6 +234,32 @@ class Sampler(nn.Module):
             logprobs=gathered_logprobs,
             selected_token_ranks=token_ranks,
         )
+
+    @staticmethod
+    def merge_specific_token_logprobs(
+        topk_tensors: LogprobsTensors,
+        specific_tensors: LogprobsTensors,
+        logprob_token_ids: dict[int, list[int]],
+    ) -> LogprobsTensors:
+        """Merge specific-token rows into the batch's top-k logprobs result.
+
+        Requests listed in ``logprob_token_ids`` get their requested-token
+        rows; all other requests keep their top-k rows. Columns past a
+        row's true content stay padding (token id 0, logprob -inf) and are
+        never read downstream.
+        """
+        batch_size, topk_cols = topk_tensors.logprobs.shape
+        spec_cols = specific_tensors.logprobs.shape[1]
+        num_cols = max(topk_cols, spec_cols)
+        out_ids = topk_tensors.logprob_token_ids.new_zeros((batch_size, num_cols))
+        out_lps = topk_tensors.logprobs.new_full((batch_size, num_cols), -float("inf"))
+        out_ids[:, :topk_cols] = topk_tensors.logprob_token_ids
+        out_lps[:, :topk_cols] = topk_tensors.logprobs
+        rows = sorted(logprob_token_ids)
+        out_ids[rows, :spec_cols] = specific_tensors.logprob_token_ids[rows]
+        out_lps[rows, :spec_cols] = specific_tensors.logprobs[rows]
+        # Both inputs contain the same sampled-token ranks.
+        return LogprobsTensors(out_ids, out_lps, topk_tensors.selected_token_ranks)
 
     @staticmethod
     def apply_temperature(
