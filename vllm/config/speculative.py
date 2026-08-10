@@ -1458,7 +1458,7 @@ class SpeculativeConfig:
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
     def use_dflash(self) -> bool:
-        return self.method == "dflash"
+        return self.method in ("dflash", "dspark")
 
     def use_dspark(self) -> bool:
         return self.method == "dspark"
