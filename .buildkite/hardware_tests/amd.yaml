@@ -72,7 +72,7 @@ steps:
       - bash .buildkite/scripts/rocm/smoke-test-image.sh
     env:
       DOCKER_BUILDKIT: "1"
-      BUILDKIT_PROGRESS: "tty"
+      BUILDKIT_PROGRESS: "plain"
       TERM: "xterm-256color"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"

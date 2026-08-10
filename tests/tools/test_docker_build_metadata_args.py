@@ -309,6 +309,42 @@ def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
         assert expected in ci_bake
 
 
+def test_rocm_rust_cache_repair_requires_runtime_marker(tmp_path: Path) -> None:
+    command = f"""
+source {shlex.quote(str(CI_BAKE_ROCM))}
+SCRIPT_TMP_DIR={shlex.quote(str(tmp_path))}
+TARGET=test
+BAKE_TARGETS=(test)
+ROCM_RUST_CACHE_REPAIR_ON_MISS=1
+BUILDKIT_PROGRESS=plain
+docker() {{ printf '%s\n' "${{BUILD_OUTPUT}}"; }}
+repair_rocm_rust_cache() {{ echo REPAIRED; }}
+BUILD_OUTPUT="RUN printf 'VLLM_ROCM_RUST_BUILD_%s\\n' EXECUTED"; run_bake
+BUILD_OUTPUT=VLLM_ROCM_RUST_BUILD_EXECUTED; run_bake
+"""
+    result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("REPAIRED") == 1
+
+
+def test_rocm_triton_archive_is_pinned_before_source_inputs() -> None:
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
+    commit = "0f380657dbf3ee86eb57558ff71df24f03b5d4e7"
+    checksum = "3bf25681b3e22ce9eb8160e5161fc3d18a6a58e7c9c1ac806d55dc0b786ed3b3"
+    add = f"ADD --checksum=sha256:{checksum}"
+    assert "VLLM_ROCM_RUST_BUILD_EXECUTED" not in dockerfile
+    assert f"https://codeload.github.com/ROCm/triton/tar.gz/{commit}" in dockerfile
+    assert f"triton-{commit}/python/triton_kernels" in dockerfile
+    assert "ENV TRITON_KERNELS_SRC_DIR=/opt/rocm-triton-kernels" in dockerfile
+    assert (
+        dockerfile.index("FROM build_vllm_dependencies AS csrc-build")
+        < dockerfile.index(add)
+        < dockerfile.index("COPY setup.py")
+    )
+    cmake = (REPO_ROOT / "cmake/external_projects/triton_kernels.cmake").read_text()
+    assert f'set(TRITON_KERNELS_TAG "{commit}")' in cmake
+
+
 def test_rocm_ci_uses_owned_canonical_context_without_mutating_source(
     tmp_path: Path,
 ) -> None:

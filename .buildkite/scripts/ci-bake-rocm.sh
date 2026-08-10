@@ -46,6 +46,8 @@ BAKE_FILES=()
 BAKE_ALLOW_ARGS=()
 BAKE_TARGETS=()
 DEPENDENCY_CACHE_TARGETS=()
+ROCM_RUST_BUILD_MARKER="VLLM_ROCM_RUST_BUILD_EXECUTED"
+ROCM_RUST_CACHE_REPAIR_ON_MISS=0
 
 cleanup() {
     if [[ -n "${SCRIPT_TMP_DIR}" && -d "${SCRIPT_TMP_DIR}" ]]; then
@@ -2054,13 +2056,13 @@ should_export_content_cache_ref() {
             return 1
             ;;
         missing|"")
-            if remote_image_exists "${trusted_ref}"; then
-                echo "${cache_name} trusted content cache exists; not exporting ${cache_ref}"
+            if registry_ref_exists_with_retry imagetools "${trusted_ref}"; then
+                echo "${cache_name} trusted content cache is visible; not exporting ${cache_ref}"
                 return 1
             fi
             if [[ "${cache_ref}" != "${trusted_ref}" ]] \
-                && remote_image_exists "${cache_ref}"; then
-                echo "${cache_name} scoped content cache exists; not re-exporting ${cache_ref}"
+                && registry_ref_exists_with_retry imagetools "${cache_ref}"; then
+                echo "${cache_name} scoped content cache is visible; not re-exporting ${cache_ref}"
                 return 1
             fi
             echo "${cache_name} content cache missing; will export ${cache_ref}"
@@ -2088,6 +2090,8 @@ write_rocm_cache_override() {
     local -a export_wheel_cache_to=()
     local export_csrc_cache=1
     local export_rust_cache=1
+
+    ROCM_RUST_CACHE_REPAIR_ON_MISS=0
 
     if ! uses_rocm_csrc_cache && ! uses_rocm_rust_cache; then
         return 0
@@ -2143,6 +2147,11 @@ write_rocm_cache_override() {
             )
         else
             export_rust_cache=0
+            if [[ "${content_cache_export_mode}" == "missing" ]]; then
+                # Registry visibility does not prove the Rust vertex is usable.
+                # If it executes, run_bake repairs the writable content ref.
+                ROCM_RUST_CACHE_REPAIR_ON_MISS=1
+            fi
         fi
     fi
 
@@ -2242,6 +2251,27 @@ EOF
 
     BAKE_FILES+=(-f "${CSRC_CACHE_OVERRIDE_PATH}")
     echo "Appended ROCm cache override with non-fatal registry exports"
+}
+
+rocm_rust_build_executed() {
+    grep -Fq "${ROCM_RUST_BUILD_MARKER}" "$1"
+}
+
+repair_rocm_rust_cache() {
+    local cache_to="type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF},mode=${ROCM_RUST_CACHE_TO_MODE:-max},ignore-error=false"
+
+    echo "--- :arrows_counterclockwise: Repairing ROCm Rust cache after compile miss"
+    echo "Cache ref: ${ROCM_RUST_CONTENT_CACHE_REF}"
+    if docker buildx bake \
+        "${BAKE_ALLOW_ARGS[@]}" \
+        "${BAKE_FILES[@]}" \
+        --set "rust-rocm-ci.cache-to=${cache_to}" \
+        --progress plain \
+        rust-rocm-ci; then
+        echo "ROCm Rust cache repair completed"
+    else
+        echo "+++ :warning: ROCm Rust cache repair failed; preserving the successful build" >&2
+    fi
 }
 
 extract_dependency_pins() {
@@ -2560,17 +2590,35 @@ seed_dependency_caches_if_needed() {
 
 run_bake() {
     local confirmation_ref="${IMAGE_TAG:-}"
+    local progress_mode="${BUILDKIT_PROGRESS:-plain}"
+    local progress_log="${SCRIPT_TMP_DIR}/buildkit-progress.log"
+    local -a build_command=(
+        docker buildx bake
+        "${BAKE_ALLOW_ARGS[@]}"
+        "${BAKE_FILES[@]}"
+        --progress "${progress_mode}"
+        "${BAKE_TARGETS[@]}"
+    )
 
     if is_ci_base_target && [[ -n "${CI_BASE_IMAGE_TAG_BUILD_REF:-}" ]]; then
         confirmation_ref="${CI_BASE_IMAGE_TAG_BUILD_REF}"
     fi
 
     echo "--- :docker: Building ${TARGET}"
-    docker buildx bake \
-        "${BAKE_ALLOW_ARGS[@]}" \
-        "${BAKE_FILES[@]}" \
-        --progress "${BUILDKIT_PROGRESS:-plain}" \
-        "${BAKE_TARGETS[@]}"
+    if [[ "${ROCM_RUST_CACHE_REPAIR_ON_MISS}" == "1" \
+        && "${progress_mode}" == "plain" ]]; then
+        "${build_command[@]}" 2>&1 | tee "${progress_log}" || return $?
+        if rocm_rust_build_executed "${progress_log}"; then
+            repair_rocm_rust_cache
+        else
+            echo "ROCm Rust build step was cached"
+        fi
+    else
+        if [[ "${ROCM_RUST_CACHE_REPAIR_ON_MISS}" == "1" ]]; then
+            echo "Automatic ROCm Rust cache repair requires plain progress; continuing with ${progress_mode}"
+        fi
+        "${build_command[@]}"
+    fi
 
     if is_ci_base_target; then
         if ! confirm_remote_image_push "${confirmation_ref}"; then
