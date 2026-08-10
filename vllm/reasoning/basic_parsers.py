@@ -118,39 +118,70 @@ class BaseThinkingReasoningParser(ReasoningParser):
         # Check if start token is present in previous or delta.
         # Keep compatibility with models that don't generate start tokens.
         if self.start_token_id in previous_token_ids:
-            if self.end_token_id in delta_token_ids:
-                # start token in previous, end token in delta,
-                # extract reasoning content
-                end_index = delta_text.find(self.end_token)
-                reasoning = delta_text[:end_index]
-                content = delta_text[end_index + len(self.end_token) :]
-                return DeltaMessage(
-                    reasoning=reasoning, content=content if content else None
-                )
-            elif self.end_token_id in previous_token_ids:
-                # start token in previous, end token in previous,
-                # reasoning content continues
-                return DeltaMessage(content=delta_text)
+            if self.end_token_id in current_token_ids:
+                if self.end_token in previous_text:
+                    # start token in previous, end token in previous text,
+                    # reasoning content continues as content
+                    return DeltaMessage(content=delta_text)
+                elif self.end_token in current_text:
+                    # end token just appeared in visible text
+                    end_index = delta_text.find(self.end_token)
+                    if end_index != -1:
+                        reasoning = delta_text[:end_index]
+                        content = delta_text[end_index + len(self.end_token) :]
+                    else:
+                        start_of_end = current_text.find(self.end_token)
+                        reasoning_tail_len = start_of_end - len(previous_text)
+                        reasoning = delta_text[:reasoning_tail_len] if reasoning_tail_len > 0 else ""
+                        content = delta_text[reasoning_tail_len + len(self.end_token) :]
+                    return DeltaMessage(
+                        reasoning=reasoning if reasoning else None,
+                        content=content if content else None
+                    )
+                else:
+                    # end token in IDs, but text is held back by stop buffer
+                    return DeltaMessage(reasoning=delta_text)
             else:
-                # start token in previous, no end token in previous or delta,
+                # start token in previous, no end token in current,
                 # reasoning content continues
                 return DeltaMessage(reasoning=delta_text)
         elif self.start_token_id in delta_token_ids:
             if self.end_token_id in delta_token_ids:
-                # start token in delta, end token in delta,
-                # extract reasoning content
-                start_index = delta_text.find(self.start_token)
-                end_index = delta_text.find(self.end_token)
-                reasoning = delta_text[start_index + len(self.start_token) : end_index]
-                content = delta_text[end_index + len(self.end_token) :]
-                return DeltaMessage(
-                    reasoning=reasoning, content=content if content else None
-                )
+                if self.end_token in current_text:
+                    start_index = delta_text.find(self.start_token)
+                    end_index = delta_text.find(self.end_token)
+                    if start_index != -1 and end_index != -1:
+                        reasoning = delta_text[start_index + len(self.start_token) : end_index]
+                        content = delta_text[end_index + len(self.end_token) :]
+                    else:
+                        start_of_start = current_text.find(self.start_token)
+                        start_of_end = current_text.find(self.end_token)
+                        reasoning_start = max(0, start_of_start + len(self.start_token) - len(previous_text)) if start_of_start != -1 else 0
+                        reasoning_end = max(0, start_of_end - len(previous_text)) if start_of_end != -1 else len(delta_text)
+                        reasoning = delta_text[reasoning_start:reasoning_end]
+                        content = delta_text[reasoning_end + len(self.end_token) :] if start_of_end != -1 else ""
+                    return DeltaMessage(
+                        reasoning=reasoning if reasoning else None,
+                        content=content if content else None
+                    )
+                else:
+                    # end token not visible yet
+                    start_index = delta_text.find(self.start_token)
+                    if start_index != -1:
+                        return DeltaMessage(reasoning=delta_text[start_index + len(self.start_token) :])
+                    else:
+                        start_of_start = current_text.find(self.start_token)
+                        start_in_delta = max(0, start_of_start + len(self.start_token) - len(previous_text)) if start_of_start != -1 else 0
+                        return DeltaMessage(reasoning=delta_text[start_in_delta:])
             else:
-                # start token in delta, no end token in delta,
-                # reasoning content continues
-                return DeltaMessage(reasoning=delta_text)
-        else:
+                # start token in delta, no end token
+                start_index = delta_text.find(self.start_token)
+                if start_index != -1:
+                    return DeltaMessage(reasoning=delta_text[start_index + len(self.start_token) :])
+                else:
+                    start_of_start = current_text.find(self.start_token)
+                    start_in_delta = max(0, start_of_start + len(self.start_token) - len(previous_text)) if start_of_start != -1 else 0
+                    return DeltaMessage(reasoning=delta_text[start_in_delta:])
             # not find thinking start token
             return DeltaMessage(content=delta_text)
 
