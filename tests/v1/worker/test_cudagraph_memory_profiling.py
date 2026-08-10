@@ -1767,6 +1767,7 @@ def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch)
     builder = Builder()
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.device = torch.device("cpu")
+    runner.is_encoder_only = False
     runner.cudagraph_manager = FakeCudaGraphManager()
     runner.lora_config = None
     runner.maybe_setup_dummy_loras = lambda lora_config: null_context()
