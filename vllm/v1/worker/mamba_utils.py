@@ -755,8 +755,7 @@ class MambaSpecDecodeGPUContext:
         """
         if self.is_initialized:
             return
-        # Populating the metadata tensors below is a series of scalar
-        # writes into device-side tensors, i.e. blocking H2D copies.
+        # This only runs once per worker.
         with gpu_sync_allowed():
             self._populate_metadata(
                 kv_cache_config,
