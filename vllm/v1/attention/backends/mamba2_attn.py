@@ -7,7 +7,6 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -153,12 +152,13 @@ class Mamba2AttentionMetadataBuilder(
         if common.num_prefills > 0:
             prep_initial_states = False
             if common.has_initial_states_p is not None:
-                # TODO: avoid this sync by either always running the torch.where
-                # in mamba_mixer2.py (dropping the prep_initial_states gate), or
-                # plumbing a CPU-side num_computed_tokens once the deprecated
-                # CommonAttentionMetadata._num_computed_tokens_cpu migration lands.
-                with gpu_sync_allowed():
-                    prep_initial_states = torch.any(common.has_initial_states_p).item()
+                # Same condition as `has_initial_states_p`, but derived from CPU
+                # data so it needs no D2H. `seq_lens_cpu_upper_bound` is precise
+                # for prefill rows, which is all this slice covers.
+                num_computed_tokens_p_cpu, _ = self._prefill_cpu_metadata(
+                    common, common_attn_metadata
+                )
+                prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
 
             cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
                 self._build_chunk_metadata_tensors(
