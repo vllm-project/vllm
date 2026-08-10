@@ -15,6 +15,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -208,7 +211,21 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         self, layers_attn: list[nn.Module], has_bias: bool
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
-        self._fused_k_weight = torch.cat([a.k_proj.weight for a in layers_attn], dim=0)
+        # Dequantize quantized k_proj weights to the activation dtype (the
+        # canonical helper returns the weights in [out, in] layout) so the
+        # fused ``F.linear`` in ``_project_context_kv`` works for quantized
+        # drafters.  The buffers are built lazily on first use (after
+        # ``process_weights_after_loading``), so quantized weights are in
+        # their final layout and every quant scheme is supported.
+        self._fused_k_weight = torch.cat(
+            [
+                get_and_maybe_dequant_weights(
+                    a.k_proj, out_dtype=torch.bfloat16
+                )
+                for a in layers_attn
+            ],
+            dim=0,
+        )
         self._fused_k_bias: torch.Tensor | None = (
             torch.cat([a.k_proj.bias for a in layers_attn], dim=0) if has_bias else None
         )
@@ -306,5 +323,7 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
                     p = params[name]
                     getattr(p, "weight_loader", default_weight_loader)(p, w)
                     loaded.add(name)
-        self.model._build_fused_kv_buffers()
+        # The fused-KV buffers are built lazily on first use (after the loader
+        # has called ``process_weights_after_loading``), so quantized weights
+        # are in their final layout.
         return loaded

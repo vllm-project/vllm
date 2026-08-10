@@ -22,7 +22,7 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, QKVParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
@@ -118,6 +118,122 @@ def test_fused_projection_matches_per_layer(dist_init, fp8_vllm_config):
         [F.linear(normed, _kv_rows(a.qkv_proj)) for a in attns], dim=-1)
 
     torch.testing.assert_close(fused_out, per_layer_out, rtol=1e-5, atol=1e-6)
+
+
+def _make_fp8_k_proj():
+    """FP8-serialized k_proj (gemma4_dspark shape: no qkv split, k_eq_v)."""
+    quant_config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="dynamic",
+    )
+    k_proj = ColumnParallelLinear(
+        input_size=HIDDEN,
+        output_size=KV_SIZE,
+        bias=False,
+        quant_config=quant_config,
+        prefix="test.k_proj",
+    ).cuda()
+    w_bf16 = torch.randn(KV_SIZE, HIDDEN, dtype=torch.bfloat16, device="cuda")
+    scale = w_bf16.abs().max() / 448.0
+    k_proj.weight.data.copy_((w_bf16 / scale).to(torch.float8_e4m3fn))
+    k_proj.weight_scale.data.copy_(scale)
+    return k_proj
+
+
+def _attn_stub(proj, proj_attr="qkv_proj"):
+    """Minimal attention-layer stub exposing what the buffer builders read."""
+    return SimpleNamespace(
+        **{proj_attr: proj},
+        q_size=Q_SIZE,
+        kv_size=KV_SIZE,
+        head_dim=HEAD_DIM,
+        num_kv_heads=KV_HEADS,
+        k_norm=SimpleNamespace(weight=torch.randn(HEAD_DIM, device="cuda")),
+        q_norm=SimpleNamespace(variance_epsilon=1e-6),
+    )
+
+
+def test_laguna_fused_kv_quantized(dist_init, fp8_vllm_config):
+    """DFlashLagunaModel (stacked per-layer `torch.bmm` variant) builds a BF16
+    fused-KV buffer from quantized qkv projections and projects identically to
+    the per-layer quantized computation."""
+    from vllm.model_executor.models.laguna_dflash import DFlashLagunaModel
+
+    qkvs = [_make_fp8_qkv(), _make_fp8_qkv()]
+    for qkv in qkvs:
+        qkv.quant_method.process_weights_after_loading(qkv)
+    attns = [_attn_stub(q) for q in qkvs]
+
+    model = object.__new__(DFlashLagunaModel)
+    torch.nn.Module.__init__(model)
+    model.hidden_norm = SimpleNamespace(
+        weight=torch.randn(HIDDEN, device="cuda"))
+    model._rms_norm_eps = 1e-6
+    model.layers = [
+        SimpleNamespace(input_layernorm=SimpleNamespace(
+            weight=torch.randn(HIDDEN, device="cuda")))
+        for _ in attns
+    ]
+    model._build_context_kv_buffers(attns, has_bias=False)
+
+    assert model._kv_weights.dtype == torch.bfloat16
+    assert model._kv_weights.shape == (NUM_LAYERS, 2 * KV_SIZE, HIDDEN)
+
+    num_ctx = 5
+    ctx = torch.randn(num_ctx, HIDDEN, dtype=torch.bfloat16, device="cuda")
+    all_k, all_v = model._project_context_kv(ctx, num_ctx, NUM_LAYERS,
+                                             KV_HEADS, HEAD_DIM)
+
+    # Per-layer truth over the same normed inputs.
+    normed = torch.empty((NUM_LAYERS, num_ctx, HIDDEN), dtype=ctx.dtype,
+                         device=ctx.device)
+    ops.rms_norm(normed, ctx.unsqueeze(0).expand(NUM_LAYERS, -1, -1),
+                 model._input_layernorm_weights, model._rms_norm_eps)
+    per_layer = torch.stack([
+        F.linear(normed[i], _kv_rows(a.qkv_proj)) for i, a in enumerate(attns)
+    ], dim=0)
+    ref = (per_layer.view(NUM_LAYERS, num_ctx, 2, KV_HEADS, HEAD_DIM)
+           .permute(2, 0, 1, 3, 4).contiguous())
+    torch.testing.assert_close(all_k, ref[0], rtol=0, atol=0)
+    torch.testing.assert_close(all_v, ref[1], rtol=0, atol=0)
+
+
+def test_gemma4_fused_kv_quantized(dist_init, fp8_vllm_config):
+    """Gemma4DSparkModel (k_proj, k_eq_v) builds a BF16 fused K buffer from a
+    quantized k_proj and projects identically to the per-layer quantized
+    computation."""
+    from vllm.model_executor.models.gemma4_dspark import Gemma4DSparkModel
+
+    k_projs = [_make_fp8_k_proj(), _make_fp8_k_proj()]
+    for kp in k_projs:
+        kp.quant_method.process_weights_after_loading(kp)
+    attns = [_attn_stub(kp, proj_attr="k_proj") for kp in k_projs]
+
+    model = object.__new__(Gemma4DSparkModel)
+    torch.nn.Module.__init__(model)
+    model.hidden_norm = SimpleNamespace(
+        weight=torch.randn(HIDDEN, device="cuda"))
+    model._rms_norm_eps = 1e-6
+    model._build_context_kv_buffers(attns, has_bias=False)
+
+    assert model._fused_k_weight.dtype == torch.bfloat16
+    assert model._fused_k_weight.shape == (NUM_LAYERS * KV_SIZE, HIDDEN)
+
+    num_ctx = 5
+    ctx = torch.randn(num_ctx, HIDDEN, dtype=torch.bfloat16, device="cuda")
+    all_k, _ = model._project_context_kv(ctx, num_ctx, NUM_LAYERS, KV_HEADS,
+                                         HEAD_DIM)
+
+    # Per-layer truth over the same normed inputs.
+    normed = torch.empty_like(ctx)
+    ops.rms_norm(normed, ctx, model._hidden_norm_weight, model._rms_norm_eps)
+    per_layer = F.linear(normed, torch.cat([
+        get_and_maybe_dequant_weights(a.k_proj, out_dtype=torch.bfloat16)
+        for a in attns
+    ], dim=0))
+    ref = (per_layer.view(num_ctx, NUM_LAYERS, KV_HEADS, HEAD_DIM)
+           .permute(1, 0, 2, 3).contiguous())
+    torch.testing.assert_close(all_k, ref, rtol=0, atol=0)
 
 
 # ---------------------------------------------------------------------------

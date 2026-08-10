@@ -19,6 +19,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -155,8 +158,21 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         layers_attn: list[nn.Module],
         has_bias: bool,
     ) -> None:
+        # KV projection weights: [num_layers, 2 * kv_size, hidden_size].
+        # Dequantize quantized qkv weights to the activation dtype (the
+        # canonical helper returns the weights in [out, in] layout) so the
+        # fused ``torch.bmm`` in ``_project_context_kv`` works for quantized
+        # drafters.  The buffers are built lazily on first use (after
+        # ``process_weights_after_loading``), so quantized weights are in
+        # their final layout and every quant scheme is supported.
         self._kv_weights = torch.stack(
-            [a.qkv_proj.weight[a.q_size :] for a in layers_attn], dim=0
+            [
+                get_and_maybe_dequant_weights(
+                    a.qkv_proj, out_dtype=torch.bfloat16
+                )[a.q_size :]
+                for a in layers_attn
+            ],
+            dim=0,
         ).contiguous()
         if has_bias:
             self._kv_biases: torch.Tensor | None = torch.stack(
@@ -338,5 +354,7 @@ class DFlashLagunaForCausalLM(nn.Module, SupportsEagle3):
         loaded_weight_names = loader.load_weights(model_weights.items())
         loaded_weight_names.add("lm_head.weight")
         loaded_weight_names.add("model.embed_tokens.weight")
-        self.model._build_fused_kv_buffers()
+        # The fused-KV buffers are built lazily on first use (after the loader
+        # has called ``process_weights_after_loading``), so quantized weights
+        # are in their final layout.
         return loaded_weight_names

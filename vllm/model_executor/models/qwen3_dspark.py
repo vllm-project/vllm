@@ -233,4 +233,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             skip_substrs.append("draft_id_to_target_id")
         loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
         loader.load_weights(model_weights.items())
-        self.model._build_fused_kv_buffers()
+        # The fused-KV buffers are built lazily on first use (after the loader
+        # has called ``process_weights_after_loading``), so quantized weights
+        # are in their final layout.
