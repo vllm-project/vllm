@@ -43,7 +43,6 @@ transformers==5.14.1
 tokenizers==0.22.2
 schemathesis>=4.0.0 # Required for openai schema test.
 # quantization
-bitsandbytes==0.49.2
 buildkite-test-collector==0.1.9
 torch-abi-audit # CI check for PyTorch stable ABI compliance
 
@@ -57,7 +56,7 @@ grpcio-reflection==1.78.0
 arctic-inference == 0.1.1; platform_machine == "x86_64" # Required for suffix decoding test
 numba == 0.65.0 # Required for N-gram speculative decoding
 runai-model-streamer[s3,gcs,azure]==0.15.7
-fastsafetensors>=0.3.2
+fastsafetensors>=0.3.3
 instanttensor>=0.1.9; platform_machine == "x86_64"
 decord==0.6.0; platform_machine == "x86_64"
 # terratorch is temporarily disabled while PyPI has the `lightning` package
