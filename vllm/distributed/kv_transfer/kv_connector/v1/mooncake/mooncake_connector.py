@@ -2148,21 +2148,31 @@ def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
         return False
 
     # In hybrid or external LB mode,
-    # each instance should have its own bootstrap server.
+    # each DP rank launches its own bootstrap server on a unique port.
     if parallel_config.local_engines_only:
-        # Supervised multi-port external LB: the supervisor sets
-        # data_parallel_size_local=1 per child, so rank_local is always 0.
-        # Use data_parallel_start_rank to elect one owner per node.
-        if parallel_config.data_parallel_start_rank is not None:
-            return (
-                parallel_config.data_parallel_index
-                == parallel_config.data_parallel_start_rank
-            )
-        return parallel_config.data_parallel_rank_local == 0
+        return True
 
     # In internal LB mode,
     # only the first data-parallel engine should launch the bootstrap server.
     return parallel_config.data_parallel_index == 0
+
+
+def _get_bootstrap_port(parallel_config) -> int:
+    """Return the bootstrap server port for the current DP rank.
+
+    In external/hybrid LB mode each DP rank gets its own port, offset
+    above the side-channel port range to avoid collisions.
+    Side channels occupy ``dp_size * tp_size`` ports starting at the
+    base, so bootstrap servers start at
+    ``base + dp_size * tp_size + dp_index``.
+    """
+    base = envs.VLLM_MOONCAKE_BOOTSTRAP_PORT
+    if parallel_config.local_engines_only:
+        offset = (
+            parallel_config.data_parallel_size * parallel_config.tensor_parallel_size
+        )
+        return base + offset + parallel_config.data_parallel_index
+    return base
 
 
 def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
@@ -2181,5 +2191,5 @@ def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
         host = parallel_config.master_addr
     else:
         host = parallel_config.data_parallel_master_ip
-    port = envs.VLLM_MOONCAKE_BOOTSTRAP_PORT
+    port = _get_bootstrap_port(parallel_config)
     return (host, port)

@@ -120,7 +120,7 @@ def _build_vllm_dp_server_args(
     child_args.data_parallel_rank = (
         infer_multi_port_external_lb_start_rank(args) + local_rank
     )
-    child_args.data_parallel_start_rank = infer_multi_port_external_lb_start_rank(args)
+    child_args.data_parallel_start_rank = None
     child_args.data_parallel_size_local = 1
     child_args.data_parallel_external_lb = True
     child_args.data_parallel_hybrid_lb = False

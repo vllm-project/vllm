@@ -11,7 +11,6 @@ import pytest
 import torch
 import zmq.asyncio
 
-from vllm import envs
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
@@ -25,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    _get_bootstrap_port,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
 )
@@ -589,7 +589,8 @@ def _make_bootstrap_vllm_config(
     local_engines_only: bool = False,
     data_parallel_rank_local: int = 0,
     data_parallel_index: int = 0,
-    data_parallel_start_rank: int | None = None,
+    data_parallel_size: int = 1,
+    tensor_parallel_size: int = 1,
     nnodes_within_dp: int = 1,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -597,7 +598,8 @@ def _make_bootstrap_vllm_config(
             local_engines_only=local_engines_only,
             data_parallel_rank_local=data_parallel_rank_local,
             data_parallel_index=data_parallel_index,
-            data_parallel_start_rank=data_parallel_start_rank,
+            data_parallel_size=data_parallel_size,
+            tensor_parallel_size=tensor_parallel_size,
             nnodes_within_dp=nnodes_within_dp,
             master_addr="model-parallel-master",
             data_parallel_master_ip="data-parallel-master",
@@ -610,23 +612,22 @@ def _make_bootstrap_vllm_config(
         "tp_rank",
         "pp_rank",
         "local_engines_only",
-        "data_parallel_rank_local",
         "data_parallel_index",
         "expected",
     ),
     [
-        (1, 0, False, 0, 0, False),
-        (0, 1, False, 0, 0, False),
-        (0, 0, True, 0, 1, True),
-        (0, 0, True, 1, 0, False),
-        (0, 0, False, 0, 0, True),
-        (0, 0, False, 0, 1, False),
+        (1, 0, False, 0, False),
+        (0, 1, False, 0, False),
+        (0, 0, True, 0, True),
+        (0, 0, True, 5, True),
+        (0, 0, False, 0, True),
+        (0, 0, False, 1, False),
     ],
     ids=[
         "nonzero_tp_rank",
         "nonzero_pp_rank",
-        "local_engine_rank_zero",
-        "local_engine_nonzero_rank",
+        "external_lb_first_dp_rank",
+        "external_lb_any_dp_rank",
         "internal_lb_first_dp_engine",
         "internal_lb_nonzero_dp_engine",
     ],
@@ -635,13 +636,11 @@ def test_should_launch_bootstrap_server_selects_single_owner(
     tp_rank: int,
     pp_rank: int,
     local_engines_only: bool,
-    data_parallel_rank_local: int,
     data_parallel_index: int,
     expected: bool,
 ):
     vllm_config = _make_bootstrap_vllm_config(
         local_engines_only=local_engines_only,
-        data_parallel_rank_local=data_parallel_rank_local,
         data_parallel_index=data_parallel_index,
     )
     with (
@@ -660,75 +659,77 @@ def test_should_launch_bootstrap_server_selects_single_owner(
 
 
 @pytest.mark.parametrize(
-    ("data_parallel_index", "data_parallel_start_rank", "expected"),
+    ("dp_size", "tp_size", "dp_index", "local_engines_only", "expected_port"),
     [
-        (0, 0, True),
-        (1, 0, False),
-        (7, 0, False),
-        (8, 8, True),
-        (9, 8, False),
-        (15, 8, False),
+        (16, 1, 0, True, 8998 + 16 + 0),
+        (16, 1, 8, True, 8998 + 16 + 8),
+        (16, 1, 15, True, 8998 + 16 + 15),
+        (8, 4, 0, True, 8998 + 32 + 0),
+        (8, 4, 3, True, 8998 + 32 + 3),
+        (1, 1, 0, False, 8998),
     ],
     ids=[
-        "node0_first_child_launches",
-        "node0_second_child_skips",
-        "node0_last_child_skips",
-        "node1_first_child_launches",
-        "node1_second_child_skips",
-        "node1_last_child_skips",
+        "dp16_tp1_rank0",
+        "dp16_tp1_rank8",
+        "dp16_tp1_rank15",
+        "dp8_tp4_rank0",
+        "dp8_tp4_rank3",
+        "internal_lb_single_port",
     ],
 )
-def test_should_launch_bootstrap_server_supervised_external_lb(
-    data_parallel_index: int,
-    data_parallel_start_rank: int,
-    expected: bool,
+def test_get_bootstrap_port_per_dp_rank(
+    dp_size: int,
+    tp_size: int,
+    dp_index: int,
+    local_engines_only: bool,
+    expected_port: int,
 ):
-    """Supervised external-LB sets data_parallel_size_local=1 for each child,
-    so data_parallel_rank_local is always 0. The bootstrap server must be
-    elected using data_parallel_start_rank instead."""
     vllm_config = _make_bootstrap_vllm_config(
-        local_engines_only=True,
-        data_parallel_rank_local=0,
-        data_parallel_index=data_parallel_index,
-        data_parallel_start_rank=data_parallel_start_rank,
+        local_engines_only=local_engines_only,
+        data_parallel_size=dp_size,
+        tensor_parallel_size=tp_size,
+        data_parallel_index=dp_index,
     )
-    with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
-            "mooncake_connector.get_tensor_model_parallel_rank",
-            return_value=0,
-        ),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
-            "mooncake_connector.get_pp_group"
-        ) as mock_pp_group,
-    ):
-        mock_pp_group.return_value.rank_in_group = 0
-        assert should_launch_bootstrap_server(vllm_config) is expected
+    assert _get_bootstrap_port(vllm_config.parallel_config) == expected_port
 
 
 @pytest.mark.parametrize(
-    ("local_engines_only", "nnodes_within_dp", "expected_host"),
+    (
+        "local_engines_only",
+        "nnodes_within_dp",
+        "dp_index",
+        "dp_size",
+        "tp_size",
+        "expected_host",
+        "expected_port",
+    ),
     [
-        (True, 2, "127.0.0.1"),
-        (False, 2, "model-parallel-master"),
-        (False, 1, "data-parallel-master"),
+        (True, 2, 3, 8, 1, "127.0.0.1", 8998 + 8 + 3),
+        (False, 2, 0, 1, 1, "model-parallel-master", 8998),
+        (False, 1, 0, 1, 1, "data-parallel-master", 8998),
     ],
     ids=["local_engine", "multi_node_tp_or_pp", "single_node_internal_lb"],
 )
 def test_get_mooncake_bootstrap_addr_selects_expected_host(
     local_engines_only: bool,
     nnodes_within_dp: int,
+    dp_index: int,
+    dp_size: int,
+    tp_size: int,
     expected_host: str,
+    expected_port: int,
 ):
     vllm_config = _make_bootstrap_vllm_config(
         local_engines_only=local_engines_only,
         nnodes_within_dp=nnodes_within_dp,
+        data_parallel_index=dp_index,
+        data_parallel_size=dp_size,
+        tensor_parallel_size=tp_size,
     )
 
     assert get_mooncake_bootstrap_addr(vllm_config) == (
         expected_host,
-        envs.VLLM_MOONCAKE_BOOTSTRAP_PORT,
+        expected_port,
     )
 
 

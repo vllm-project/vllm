@@ -138,10 +138,6 @@ class ParallelConfig:
     ``__post_init__`` further bounds this by ``data_parallel_size``."""
     data_parallel_rank_local: int | None = None
     """Local rank of the data parallel group, set only in SPMD mode."""
-    data_parallel_start_rank: int | None = None
-    """Global DP rank of the first engine on this node. Set by the DP
-    supervisor so that per-node singletons (e.g. Mooncake bootstrap server)
-    can elect exactly one owner per node."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
@@ -790,7 +786,6 @@ class ParallelConfig:
             # Derived/runtime topology, networking, or launch details
             "data_parallel_rank",
             "data_parallel_rank_local",
-            "data_parallel_start_rank",
             "data_parallel_size_local",
             "data_parallel_index",
             "data_parallel_backend",
