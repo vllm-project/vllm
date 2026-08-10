@@ -199,23 +199,15 @@ class AttentionBackend(ABC):
 
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
-        """Adjust the layer's KV cache spec for this backend's kernels.
+        """Adjust the layer's KV cache spec for this backend's kernels. Used when the
+        kernels want KV packed in a specific way.
 
-        NOTE: temporary compatibility API. Today the Attention layer builds the
-        spec from the model config and the backend only gets to adjust it
-        post-hoc; the end state is for the backend to build and return the
-        spec directly, at which point this hook goes away.
+        NOTE: temporary compatibility API. Today the Attention layer builds the spec
+        from the model config and the backend only gets to adjust it post-hoc; the end
+        state is for the backend to build and return the spec directly, at which point
+        this hook goes away.
 
         (see: https://github.com/vllm-project/vllm/issues/42449)
-
-        A backend overrides this to publish what only it knows: packing fields
-        it owns (``num_head_slots`` / ``state_content_bytes`` for its cache
-        dtypes) or a backend-specific spec subclass. Return an
-        ``AttentionSpec``; changing the concrete subclass is allowed, changing
-        model-derived fields is not. The base implementation is a no-op:
-        packing is backend-specific (e.g. TRITON_ATTN owns the per-token-head
-        layouts, FLASHINFER owns NVFP4), and layers publish model-owned
-        formats at spec construction.
         """
         return spec
 
