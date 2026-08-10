@@ -153,9 +153,9 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         )
 
         if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+            from vllm._aiter_ops import rocm_aiter_ops
 
-            batched_gemm_a16wfp4(
+            rocm_aiter_ops.batched_gemm_a16wfp4(
                 x, self.W_V, self.W_V_scale, out_view, transpose_bm=True, prequant=True
             )
         elif self.is_aiter_triton_fp8_bmm_enabled:
