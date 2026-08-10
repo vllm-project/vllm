@@ -4,6 +4,7 @@
 
 import json
 import os
+from argparse import BooleanOptionalAction
 
 import pytest
 import yaml
@@ -388,6 +389,27 @@ def test_load_config_file_empty(tmp_path):
     processed_args = parser.load_config_file(str(config_file_path))
 
     assert processed_args == []
+
+
+def test_load_config_file_false_store_true_dropped(tmp_path):
+    """False values for store_true flags are silently dropped (correct)."""
+    config_data = {
+        "enable-feature": False,
+        "port": 8000,
+    }
+
+    config_file_path = tmp_path / "config.yaml"
+    with open(config_file_path, "w") as config_file:
+        yaml.dump(config_data, config_file)
+
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--enable-feature", action=BooleanOptionalAction)
+    parser.add_argument("--port", type=int)
+
+    processed_args = parser.load_config_file(str(config_file_path))
+
+    assert "--enable-feature" not in processed_args
+    assert "--no-enable-feature" in processed_args
 
 
 def test_load_config_file_nested(tmp_path):
