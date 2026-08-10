@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
-    is_flashinfer_bf16_gemm_supported,
+    is_flashinfer_cutedsl_bf16_gemm_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -105,23 +105,9 @@ _FlashInferBf16RuntimeCheck = Callable[
 
 @dataclass(frozen=True)
 class _FlashInferBf16Backend:
-    vllm_backend: str
+    flashinfer_backend: str
     is_supported: Callable[[], bool]
     can_implement: _FlashInferBf16RuntimeCheck
-
-
-def _is_flashinfer_cutedsl_bf16_supported() -> bool:
-    if not is_flashinfer_bf16_gemm_supported("cute-dsl"):
-        return False
-    try:
-        from flashinfer.cute_dsl.utils import is_cute_dsl_available
-        from flashinfer.utils import is_sm100a_supported
-    except (ImportError, ModuleNotFoundError):
-        return False
-    try:
-        return is_cute_dsl_available() and is_sm100a_supported(torch.device("cuda"))
-    except (RuntimeError, TypeError, ValueError):
-        return False
 
 
 def _can_use_flashinfer_cutedsl_bf16(
@@ -172,20 +158,20 @@ def _can_use_flashinfer_cutedsl_bf16(
 
 
 _FLASHINFER_BF16_BACKENDS = {
-    "cute-dsl": _FlashInferBf16Backend(
-        vllm_backend="flashinfer_cutedsl",
-        is_supported=_is_flashinfer_cutedsl_bf16_supported,
+    "flashinfer_cutedsl": _FlashInferBf16Backend(
+        flashinfer_backend="cute-dsl",
+        is_supported=is_flashinfer_cutedsl_bf16_gemm_supported,
         can_implement=_can_use_flashinfer_cutedsl_bf16,
     ),
 }
 
 
-def _get_flashinfer_bf16_backend(backend: str) -> _FlashInferBf16Backend:
-    backend_spec = _FLASHINFER_BF16_BACKENDS.get(backend)
+def _get_flashinfer_bf16_backend(vllm_backend: str) -> _FlashInferBf16Backend:
+    backend_spec = _FLASHINFER_BF16_BACKENDS.get(vllm_backend)
     if backend_spec is None:
         supported = ", ".join(sorted(_FLASHINFER_BF16_BACKENDS))
         raise ValueError(
-            f"Unsupported FlashInfer BF16 backend {backend!r}; "
+            f"Unsupported vLLM FlashInfer BF16 backend {vllm_backend!r}; "
             f"supported backends: {supported}"
         )
     return backend_spec
@@ -196,9 +182,9 @@ def cuda_flashinfer_bf16_gemm_impl(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
     pdl: bool,
-    backend: str,
+    vllm_backend: str,
 ) -> torch.Tensor:
-    backend_spec = _get_flashinfer_bf16_backend(backend)
+    backend_spec = _get_flashinfer_bf16_backend(vllm_backend)
     if not backend_spec.can_implement(x, weight, bias):
         return torch.nn.functional.linear(x, weight, bias)
 
@@ -210,7 +196,7 @@ def cuda_flashinfer_bf16_gemm_impl(
         weight.t(),
         bias,
         pdl,
-        backend,
+        backend_spec.flashinfer_backend,
     )
     return out_2d.view(*x.shape[:-1], n)
 
@@ -220,7 +206,7 @@ def cuda_flashinfer_bf16_gemm_fake(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
     pdl: bool,
-    backend: str,
+    vllm_backend: str,
 ) -> torch.Tensor:
     return x.new_empty((*x.shape[:-1], weight.shape[0]))
 
@@ -231,7 +217,7 @@ def cuda_flashinfer_bf16_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
     *,
-    backend: str,
+    vllm_backend: str,
     pdl: bool,
 ) -> torch.Tensor:
     return torch.ops.vllm.cuda_flashinfer_bf16_gemm(
@@ -239,7 +225,7 @@ def cuda_flashinfer_bf16_gemm(
         weight,
         bias,
         pdl,
-        backend,
+        vllm_backend,
     )
 
 
@@ -538,62 +524,36 @@ def cpu_unquantized_gemm(
     return layer.cpu_linear(x, weight, bias)
 
 
-def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
+def dispatch_unquantized_gemm(
+    linear_backend: str = "auto",
+) -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
-    else:
+    elif not current_platform.is_cuda():
         return default_unquantized_gemm
 
-
-def _get_configured_linear_backend() -> str:
-    from vllm.config import get_current_vllm_config_or_none
-
-    config = get_current_vllm_config_or_none()
-    if config is None:
-        return "auto"
-    return config.kernel_config.linear_backend
-
-
-def _get_configured_flashinfer_bf16_backend(
-    vllm_backend: str,
-) -> tuple[str, _FlashInferBf16Backend] | None:
-    for backend, backend_spec in _FLASHINFER_BF16_BACKENDS.items():
-        if backend_spec.vllm_backend == vllm_backend:
-            return backend, backend_spec
-    return None
-
-
-def select_unquantized_gemm_impl(
-    configured_linear_backend: str | None = None,
-) -> Callable[..., torch.Tensor]:
-    gemm_impl = dispatch_unquantized_gemm()
-    if not current_platform.is_cuda():
-        return gemm_impl
-
-    vllm_backend = configured_linear_backend or _get_configured_linear_backend()
-    configured_backend = _get_configured_flashinfer_bf16_backend(vllm_backend)
-    if configured_backend is None:
-        return gemm_impl
-    flashinfer_backend, backend_spec = configured_backend
+    backend_spec = _FLASHINFER_BF16_BACKENDS.get(linear_backend)
+    if backend_spec is None:
+        return default_unquantized_gemm
 
     if not backend_spec.is_supported():
         logger.warning_once(
             "--linear-backend=%s requested FlashInfer mm_bf16 backend %r, "
             "but it is unavailable on the current hardware or environment; "
             "using automatic selection for unquantized linear layers.",
-            vllm_backend,
-            flashinfer_backend,
+            linear_backend,
+            backend_spec.flashinfer_backend,
         )
-        return gemm_impl
+        return default_unquantized_gemm
 
     logger.info_once(
         "Using FlashInfer %s for eligible unquantized BF16 GEMMs.",
-        flashinfer_backend,
+        backend_spec.flashinfer_backend,
     )
     return functools.partial(
         cuda_flashinfer_bf16_gemm,
-        backend=flashinfer_backend,
+        vllm_backend=linear_backend,
         pdl=current_platform.is_arch_support_pdl(),
     )

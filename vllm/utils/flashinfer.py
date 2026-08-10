@@ -119,6 +119,22 @@ def is_flashinfer_bf16_gemm_supported(
         return False
 
 
+@functools.cache
+def is_flashinfer_cutedsl_bf16_gemm_supported() -> bool:
+    """Return whether the CuTeDSL BF16 dense GEMM backend is available."""
+    if not is_flashinfer_bf16_gemm_supported("cute-dsl"):
+        return False
+    try:
+        from flashinfer.cute_dsl.utils import is_cute_dsl_available
+        from flashinfer.utils import is_sm100a_supported
+    except (ImportError, ModuleNotFoundError):
+        return False
+    try:
+        return is_cute_dsl_available() and is_sm100a_supported(torch.device("cuda"))
+    except (RuntimeError, TypeError, ValueError):
+        return False
+
+
 def _missing(*_: Any, **__: Any) -> NoReturn:
     """Placeholder for unavailable FlashInfer backend."""
     raise RuntimeError(
@@ -1082,6 +1098,7 @@ __all__ = [
     "flashinfer_bf16_mm",
     "has_flashinfer_bf16_gemm",
     "is_flashinfer_bf16_gemm_supported",
+    "is_flashinfer_cutedsl_bf16_gemm_supported",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",

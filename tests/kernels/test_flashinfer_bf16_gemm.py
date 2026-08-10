@@ -6,13 +6,14 @@ import torch
 import torch.nn.functional as F
 
 from vllm.model_executor.layers import utils as layer_utils
+from vllm.utils.flashinfer import is_flashinfer_cutedsl_bf16_gemm_supported
 
 
 @pytest.fixture(scope="module", autouse=True)
 def require_flashinfer_bf16_cutedsl() -> None:
     if not torch.accelerator.is_available():
         pytest.skip("CUDA is required")
-    if not layer_utils._is_flashinfer_cutedsl_bf16_supported():
+    if not is_flashinfer_cutedsl_bf16_gemm_supported():
         pytest.skip("FlashInfer BF16 cute-dsl backend is unavailable")
 
 
@@ -41,7 +42,7 @@ def test_flashinfer_bf16_cutedsl_correctness(
     )
 
     actual = layer_utils.cuda_flashinfer_bf16_gemm_impl(
-        x, weight, bias, pdl, "cute-dsl"
+        x, weight, bias, pdl, "flashinfer_cutedsl"
     )
     expected = F.linear(x, weight, bias)
 
@@ -58,7 +59,7 @@ def test_flashinfer_bf16_custom_op_dynamic_compile() -> None:
             layer,
             x,
             weight,
-            backend="cute-dsl",
+            vllm_backend="flashinfer_cutedsl",
             pdl=False,
         )
 
@@ -86,7 +87,7 @@ def test_flashinfer_bf16_custom_op_cuda_graph_replay() -> None:
             x,
             weight,
             bias,
-            backend="cute-dsl",
+            vllm_backend="flashinfer_cutedsl",
             pdl=False,
         )
 

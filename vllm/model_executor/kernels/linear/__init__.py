@@ -324,7 +324,7 @@ def _filter_kernels_by_backend(
     backend_kernels = _LINEAR_BACKEND_KERNEL_MAP.get(backend, set())
     filtered = [kernel for kernel in kernels if kernel in backend_kernels]
     if not filtered:
-        logger.info_once(
+        logger.warning_once(
             "--linear-backend=%s has no kernel for this linear layer type; "
             "using automatic selection for that layer type.",
             backend,
