@@ -357,7 +357,7 @@ class PCPManager:
 
         local_to_global_batch_req_idx_np = np.fromiter(
             (segment.global_batch_req_idx for segment in local_segments),
-            dtype=np.int32,
+            dtype=np.intp,
             count=num_local_reqs,
         )
         local_start_pos_np = np.fromiter(
@@ -654,19 +654,20 @@ def maybe_build_pcp_manager(
     supports_mm_inputs: bool,
     req_states: RequestState,
     block_tables: BlockTables,
+    cls: type[PCPManager] = PCPManager,
 ) -> PCPManager | None:
     parallel_config = vllm_config.parallel_config
     pcp_size = parallel_config.prefill_context_parallel_size
     if pcp_size <= 1:
         return None
 
-    PCPManager.validate_config(vllm_config, supports_mm_inputs)
+    cls.validate_config(vllm_config, supports_mm_inputs)
 
     pcp_rank = get_pcp_group().rank_in_group
     dcp_size = parallel_config.decode_context_parallel_size
     dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
 
-    return PCPManager(
+    return cls(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
         device=device,
