@@ -196,6 +196,7 @@ pub struct BenchConfig {
     pub speed_bench_config: SpeedBenchConfig,
     pub speed_bench_category: Option<String>,
     pub speed_bench_max_input_len: Option<usize>,
+    pub speed_bench_output_len: usize,
     pub hf_split: Option<String>,
     pub hf_subset: Option<String>,
     pub hf_output_len: Option<usize>,
@@ -727,6 +728,7 @@ impl BenchConfig {
             speed_bench_config: args.speed_bench_config,
             speed_bench_category: args.speed_bench_category.clone(),
             speed_bench_max_input_len: args.speed_bench_max_input_len,
+            speed_bench_output_len: args.speed_bench_output_len,
             hf_split: args.hf_split.clone(),
             hf_subset: args.hf_subset.clone(),
             hf_output_len: args.hf_output_len,
@@ -879,6 +881,22 @@ mod tests {
             "--model",
             "test-model",
         ]
+    }
+
+    #[test]
+    fn test_speed_bench_flags_match_python() {
+        let args = parse_args(vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--speed-bench-dataset-subset",
+            "throughput_8k",
+        ]);
+        assert!(matches!(
+            args.speed_bench_config,
+            crate::cli::SpeedBenchConfig::Throughput8k
+        ));
+        assert_eq!(args.speed_bench_output_len, 4096);
     }
 
     #[test]

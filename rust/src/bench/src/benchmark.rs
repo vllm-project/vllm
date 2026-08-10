@@ -527,12 +527,11 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     downloaded.as_str()
                 }
             };
-            let output_len = config.sharegpt_output_len.unwrap_or(config.random_output_len);
             crate::datasets::speed_bench::load_speed_bench_dataset(
                 tok,
                 path,
                 config.num_prompts,
-                output_len,
+                config.speed_bench_output_len,
                 config.seed,
                 &config.request_id_prefix,
                 config.speed_bench_category.as_deref(),
