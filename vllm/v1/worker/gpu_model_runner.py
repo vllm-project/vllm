@@ -4247,7 +4247,7 @@ class GPUModelRunner(
                 # their own to report and must not touch encoder_cache.
                 if has_ec_transfer() and get_pp_group().is_first_rank:
                     ec_output = self.ec_connector_no_forward(
-                        scheduler_output, self.vllm_config, self.encoder_cache
+                        scheduler_output, self.encoder_cache
                     )
                     output = ModelRunnerOutput.with_ec_conn_output(
                         output, ec_output.ec_connector_output
