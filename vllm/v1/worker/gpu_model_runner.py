@@ -7915,6 +7915,7 @@ class GPUModelRunner(
                     with set_current_vllm_config(self.vllm_config):
                         indexes = backend.indexes_kv_by_block_stride()
                     spec = replace(spec, indexes_kv_by_block_stride=indexes)
+                    spec = backend.customize_spec(spec)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec

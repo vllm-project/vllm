@@ -19,7 +19,7 @@ Per-head per-position slot layout:
 import contextlib
 import functools
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 import torch
@@ -136,6 +136,21 @@ class TurboQuantAttentionBackend(AttentionBackend):
         "turboquant_k3v4_nc",
         "turboquant_3bit_nc",
     ]
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """TurboQuant packs K+V into one slot per head."""
+        if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_turboquant:
+            return spec
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            TurboQuantConfig,
+        )
+
+        # KVQuantMode member names mirror the preset strings.
+        tq = TurboQuantConfig.from_cache_dtype(
+            spec.kv_quant_mode.name.lower(), spec.head_size
+        )
+        return replace(spec, state_content_bytes=tq.slot_size_aligned)
 
     @staticmethod
     def get_name() -> str:

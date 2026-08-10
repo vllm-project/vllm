@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
-    from vllm.v1.kv_cache_interface import KVCacheSpec, KVQuantMode
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, KVQuantMode
 
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
@@ -196,6 +196,28 @@ class AttentionBackend(ABC):
             if block_size % supported_size == 0:
                 return True
         return False
+
+    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """Adjust the layer's KV cache spec for this backend's kernels.
+
+        NOTE: temporary compatibility API. Today the Attention layer builds the
+        spec from the model config and the backend only gets to adjust it
+        post-hoc; the end state is for the backend to build and return the
+        spec directly, at which point this hook goes away.
+
+        (see: https://github.com/vllm-project/vllm/issues/42449)
+
+        A backend overrides this to publish what only it knows: packing fields
+        it owns (``num_head_slots`` / ``state_content_bytes`` for its cache
+        dtypes) or a backend-specific spec subclass. Return an
+        ``AttentionSpec``; changing the concrete subclass is allowed, changing
+        model-derived fields is not. The base implementation is a no-op:
+        packing is backend-specific (e.g. TRITON_ATTN owns the per-token-head
+        layouts, FLASHINFER owns NVFP4), and layers publish model-owned
+        formats at spec construction.
+        """
+        return spec
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:

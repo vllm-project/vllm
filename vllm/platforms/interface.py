@@ -809,23 +809,18 @@ class Platform:
             # when all attention layers are TQ. With mixed skip+TQ the skip
             # layers still use the standard layout — take max so mamba
             # padding covers the largest actual page.
-            from vllm.model_executor.layers.quantization.turboquant.config import (
-                TurboQuantConfig,
+            from vllm.v1.attention.backends.turboquant_attn import (
+                TurboQuantAttentionBackend,
             )
-            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
 
-            tq_cfg = TurboQuantConfig.from_cache_dtype(
-                cache_config.cache_dtype, model_config.get_head_size()
-            )
-            tq_page = TQFullAttentionSpec(
+            tq_spec = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
-                head_size_v=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
-                tq_slot_size=tq_cfg.slot_size_aligned,
-            ).page_size_bytes
+            )
+            tq_page = TurboQuantAttentionBackend.customize_spec(tq_spec).page_size_bytes
             if cache_config.kv_cache_dtype_skip_layers:
                 skip_page = FullAttentionSpec(
                     block_size=1,
