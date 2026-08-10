@@ -86,8 +86,6 @@ class EngineCoreClient(ABC):
     * AsyncMPClient: ZMQ + background proc EngineCore w/ asyncio (for AsyncLLM)
     """
 
-    resources: "BackgroundResources"
-
     @staticmethod
     def make_client(
         multiprocess_mode: bool,
@@ -427,7 +425,7 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
-    resources: list[Shutdownable| None] = None
+    resources: list[Shutdownable| None] | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
@@ -504,10 +502,8 @@ class BackgroundResources:
         if self.resources is not None:
             for resource in self.resources:
                 if resource is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         resource.shutdown()
-                    except Exception:
-                        pass
 
         logger.debug_once("[shutdown] MPClient: background resource cleanup complete")
 

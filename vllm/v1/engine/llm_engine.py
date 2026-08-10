@@ -30,7 +30,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest, PauseMode
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.core_client import EngineCoreClient, MPClient
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -133,8 +133,9 @@ class LLMEngine:
                     self, LLMEngine._cleanup_instance_caches, model
                 )
 
-        self.paged_shm_server = maybe_start_paged_shm_server(self.model_config)
-        self.engine_core.resources.append(self.paged_shm_server)
+        if isinstance(self.engine_core, MPClient):
+            self.paged_shm_server = maybe_start_paged_shm_server(self.model_config)
+            self.engine_core.resources.append(self.paged_shm_server)
 
         if self.external_launcher_dp:
             # If we use DP in external launcher mode, we reuse the

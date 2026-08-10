@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from typing import Any
 
 import torch
 
+from vllm.config import ModelConfig
 from vllm.inputs import MultiModalInput
-
-from ...config import ModelConfig
-from ...multimodal.inputs import (
+from vllm.multimodal.inputs import (
     MultiModalFieldElem,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
+
 from .client import PagedShmClient
 from .client_async import AsyncPagedShmClient
 
@@ -40,13 +39,18 @@ def format_size(
     return f"{size:.{decimal_places}f} {units[exponent]}"
 
 
-class PagedShmMMInputs:
+class PagedShmTensorIPC:
     def __init__(self, model_config: ModelConfig, pin: bool = False):
-        self.pin = pin
+        self.is_paged_shm_enabled = False
         self.multimodal_config = model_config.multimodal_config
+        if self.multimodal_config is None:
+            return
+
         self.is_paged_shm_enabled = self.multimodal_config.is_paged_shm_enabled()
         if not self.is_paged_shm_enabled:
             return
+
+        self.pin = pin
         self.block_size = self.multimodal_config.paged_shm_block_size
         self.client_async: AsyncPagedShmClient | None = None
         self.client_sync: PagedShmClient | None = None
@@ -73,9 +77,8 @@ class PagedShmMMInputs:
 
     def _write(self, elem: MultiModalFieldElem):
         data = elem.data
-        if isinstance(data, torch.Tensor):
-            if data.nbytes > self.block_size:
-                print(format_size(data.nbytes))
+        if isinstance(data, torch.Tensor) and data.nbytes > self.block_size:
+            print(format_size(data.nbytes))
 
     def _traversal(self, obj: Any):
         if isinstance(obj, dict):
