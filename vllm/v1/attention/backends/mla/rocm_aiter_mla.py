@@ -26,7 +26,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
@@ -949,6 +949,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         from aiter import flash_attn_varlen_func
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
+
+        # The asm a8w8 decode kernels take a pre-quantized fp8 query + q_scale.
+        self.supports_quant_query_input = is_quantized_kv_cache(kv_cache_dtype)
 
         # FP8 MLA prefill kernel imports (lazy, only when enabled).
         # Auto-enabled on gfx950 when AITER ships the kernels.

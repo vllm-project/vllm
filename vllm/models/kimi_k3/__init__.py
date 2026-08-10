@@ -14,14 +14,17 @@ from vllm.platforms import current_platform
 # The NVIDIA branch is the static default that type-checkers see; the ROCm
 # branch overrides it at runtime (kept type-compatible via type: ignore).
 if TYPE_CHECKING or not current_platform.is_rocm():
+    from .nvidia.dspark_mla import K3DSparkForCausalLM
     from .nvidia.model import KimiK3ForConditionalGeneration, KimiLinearForCausalLM
     from .nvidia.mtp import KimiK3MTP
 else:
+    from .amd.dspark_mla import K3DSparkForCausalLM  # type: ignore[assignment]
     from .amd.linear import KimiLinearForCausalLM  # type: ignore[assignment]
     from .amd.model import KimiK3ForConditionalGeneration  # type: ignore[assignment]
     from .amd.mtp import KimiK3MTP  # type: ignore[assignment]
 
 __all__ = [
+    "K3DSparkForCausalLM",
     "KimiK3ForConditionalGeneration",
     "KimiK3MTP",
     "KimiLinearForCausalLM",
