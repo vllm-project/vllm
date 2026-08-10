@@ -44,6 +44,27 @@ vllm-bench --backend vllm --base-url http://127.0.0.1:8000 \
 
 ## Install
 
+### Container
+
+Build the standalone benchmark image from the repository root:
+
+```bash
+docker build -f docker/Dockerfile.bench -t vllm-bench .
+```
+
+Run it against a reachable vLLM server:
+
+```bash
+docker run --rm vllm-bench \
+  --backend vllm --base-url http://host.docker.internal:8000 \
+  --model <model-name> --dataset-name random \
+  --random-input-len 1024 --random-output-len 128 \
+  --num-prompts 1000 --max-concurrency 200
+```
+
+The image runs as a non-root user. Mount a writable directory at `/work` when
+saving benchmark results.
+
 ### Prebuilt binaries (Linux)
 
 ```bash
