@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -614,87 +615,74 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
     assert not _parallelism_agnostic(kv_cache_groups)
 
 
-def test_canonical_layout_widens_parallelism_agnostic_to_mla():
-    """The canonical layout dedups the TP-replicated MLA latent into one
-    portable copy, so the gate admits MLA — but only when canonical_layout
-    is requested."""
-    mla_groups = [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))]
-    assert not _parallelism_agnostic(mla_groups)
-    assert _parallelism_agnostic(mla_groups, canonical=True)
+_SWA_SPEC = SlidingWindowSpec(
+    block_size=16,
+    num_kv_heads=4,
+    head_size=128,
+    dtype=torch.float32,
+    sliding_window=128,
+)
+_SWA_MLA_SPEC = SlidingWindowMLASpec(
+    block_size=16,
+    num_kv_heads=1,
+    head_size=576,
+    dtype=torch.float32,
+    sliding_window=128,
+)
 
-    # Mamba hybrids stay out: their state layers can only derive opaque
-    # (exact-topology) mappings
-    mamba_groups = list(_make_mamba_hybrid_kv_cache_config().kv_cache_groups)
-    assert not _parallelism_agnostic(mamba_groups, canonical=True)
+
+def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
+    """GLM-5.2/DSv3.2-style wrapper: same-type specs, differing page sizes."""
+    names = [f"l{i}" for i in range(len(specs))]
+    return KVCacheGroupSpec(
+        names,
+        UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=dict(zip(names, specs))),
+    )
 
 
-def test_canonical_layout_certifies_attention_hybrids():
-    """Hybrid attention models (full + sliding-window groups, e.g. gpt-oss)
-    certify group by group under the canonical layout; every layer's bytes
-    are head-shard fragments regardless of its window."""
-    hybrid_groups = [
-        KVCacheGroupSpec(["l0"], _full_attention_spec()),
-        KVCacheGroupSpec(
-            ["l1"],
-            SlidingWindowSpec(
-                block_size=16,
-                num_kv_heads=4,
-                head_size=128,
-                dtype=torch.float32,
-                sliding_window=128,
-            ),
+@pytest.mark.parametrize(
+    ("kv_cache_groups", "certified"),
+    [
+        pytest.param(
+            [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))],
+            True,
+            id="mla-latent",
         ),
-    ]
-    assert not _parallelism_agnostic(hybrid_groups)
-    assert _parallelism_agnostic(hybrid_groups, canonical=True)
-
-    # DSv4-style sliding-window MLA is not a head-sharded layout; stays out
-    swa_mla = SlidingWindowMLASpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=576,
-        dtype=torch.float32,
-        sliding_window=128,
-    )
-    assert not _parallelism_agnostic(
-        [KVCacheGroupSpec(["l0"], swa_mla)], canonical=True
-    )
-
-
-def test_canonical_layout_certifies_uniform_type_wrapper():
-    """GLM-5.2/DSv3.2-style groups wrap same-type specs with different page
-    sizes (MLA plus its DSA indexer cache) in UniformTypeKVCacheSpecs; the
-    gate must look through the wrapper like the mapping derivation does."""
-
-    def uniform_groups(indexer_spec) -> list[KVCacheGroupSpec]:
-        return [
-            KVCacheGroupSpec(
-                ["mla_layer", "indexer_layer"],
-                UniformTypeKVCacheSpecs(
-                    block_size=16,
-                    kv_cache_specs={
-                        "mla_layer": _mla_spec(head_size=576),
-                        "indexer_layer": indexer_spec,
-                    },
-                ),
-            )
-        ]
-
-    mla_wrapped = uniform_groups(_mla_spec(head_size=128))
-    assert not _parallelism_agnostic(mla_wrapped)
-    assert _parallelism_agnostic(mla_wrapped, canonical=True)
-
-    # one uncertifiable inner spec poisons the wrapper
-    swa_mla_wrapped = uniform_groups(
-        SlidingWindowMLASpec(
-            block_size=16,
-            num_kv_heads=1,
-            head_size=576,
-            dtype=torch.float32,
-            sliding_window=128,
-        )
-    )
-    assert not _parallelism_agnostic(swa_mla_wrapped, canonical=True)
+        pytest.param(
+            [
+                KVCacheGroupSpec(["l0"], _full_attention_spec()),
+                KVCacheGroupSpec(["l1"], _SWA_SPEC),
+            ],
+            True,
+            id="attention-hybrid",
+        ),
+        pytest.param(
+            [KVCacheGroupSpec(["l0"], _SWA_MLA_SPEC)],
+            False,
+            id="swa-mla",
+        ),
+        pytest.param(
+            list(_make_mamba_hybrid_kv_cache_config().kv_cache_groups),
+            False,
+            id="mamba-hybrid",
+        ),
+        pytest.param(
+            [_uniform_group(_mla_spec(head_size=576), _mla_spec(head_size=128))],
+            True,
+            id="uniform-mla-wrapper",
+        ),
+        pytest.param(
+            [_uniform_group(_mla_spec(head_size=576), _SWA_MLA_SPEC)],
+            False,
+            id="uniform-uncertifiable-inner",
+        ),
+    ],
+)
+def test_canonical_layout_gate(kv_cache_groups, certified):
+    """The canonical layout certifies portability group by group; none of
+    these shapes are portable in the direct layout."""
+    assert not _parallelism_agnostic(kv_cache_groups)
+    assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
 
 
 def test_canonical_layout_certifies_v2_model_runner():
