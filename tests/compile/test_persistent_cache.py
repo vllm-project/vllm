@@ -30,7 +30,11 @@ def _config(revision="main"):
             model="org/model",
             revision=revision,
             code_revision=None,
+            hf_config=SimpleNamespace(
+                _commit_hash="resolved-main", to_dict=lambda: {"layers": 2}
+            ),
             dtype=torch.float16,
+            override_attention_dtype=None,
             quantization="fp8",
             max_model_len=4096,
             hash=f"model-{revision}",
@@ -48,8 +52,8 @@ def _config(revision="main"):
             max_num_seqs=64,
         ),
         compilation_config=_Hashable(),
-        attention_config=_Hashable(),
-        kernel_config=_Hashable(),
+        attention_config=_Hashable(backend="FLASH_ATTN"),
+        kernel_config=_Hashable(moe_backend="CUTLASS"),
     )
 
 

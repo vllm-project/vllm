@@ -5,6 +5,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import platform
 import subprocess
 import tarfile
 import tempfile
@@ -45,6 +46,10 @@ def build_cache_manifest(
     cache = vllm_config.cache_config
     scheduler = vllm_config.scheduler_config
     compilation = vllm_config.compilation_config
+    hf_config = model.hf_config.to_dict()
+    hf_config_hash = hashlib.sha256(
+        json.dumps(hf_config, sort_keys=True, default=str).encode()
+    ).hexdigest()
     capability = (
         torch.cuda.get_device_capability() if torch.cuda.is_available() else None
     )
@@ -56,7 +61,10 @@ def build_cache_manifest(
             "identity": model.model,
             "revision": model.revision,
             "code_revision": model.code_revision,
+            "resolved_revision": getattr(model.hf_config, "_commit_hash", None),
+            "hf_config_hash": hf_config_hash,
             "dtype": str(model.dtype),
+            "attention_dtype": str(model.override_attention_dtype),
             "quantization": model.quantization,
             "max_model_len": model.max_model_len,
             "model_hash": model.compute_hash(),
@@ -79,7 +87,9 @@ def build_cache_manifest(
             "config_hash": cache.compute_hash(),
         },
         "backends": {
+            "attention": str(vllm_config.attention_config.backend),
             "attention_hash": vllm_config.attention_config.compute_hash(),
+            "moe": str(vllm_config.kernel_config.moe_backend),
             "kernel_hash": vllm_config.kernel_config.compute_hash(),
         },
         "toolchain": {
@@ -87,8 +97,13 @@ def build_cache_manifest(
             "gpu_capability": capability,
             "cuda": torch.version.cuda,
             "torch": torch.__version__,
+            "cudnn": torch.backends.cudnn.version(),
+            "triton": _package_version("triton"),
             "vllm": vllm_version,
             "flashinfer": _package_version("flashinfer-python"),
+            "python_abi": platform.python_implementation()
+            + "-"
+            + platform.python_version(),
         },
         "compilation": {
             "config_hash": compilation.compute_hash(),
