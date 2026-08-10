@@ -103,6 +103,35 @@ def _make_store_sending_thread(
     return thread
 
 
+def _queue_store_request(
+    thread: mooncake_store_worker.KVCacheStoreSendingThread,
+    request: ReqMeta,
+) -> mooncake_store_worker._StoreRequestJob:
+    thread.add_request(request)
+    return thread.request_queue.get_nowait()
+
+
+def _run_store_request(
+    thread: mooncake_store_worker.KVCacheStoreSendingThread,
+    request: ReqMeta,
+) -> mooncake_store_worker._StoreRequestJob:
+    job = _queue_store_request(thread, request)
+    thread._handle_request(job)
+    return job
+
+
+def _offload_partial_tail(
+    thread: mooncake_store_worker.KVCacheStoreSendingThread,
+    request: ReqMeta,
+) -> bool:
+    job = _queue_store_request(thread, request)
+    try:
+        return thread._maybe_offload_partial_tail(request, job.epoch)
+    finally:
+        thread.dec_stored_request(request.req_id, job.epoch)
+        thread.request_queue.task_done()
+
+
 def _make_store_recving_thread(
     store: MagicMock,
     *,
@@ -162,6 +191,16 @@ def _make_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMeta:
         token_len_chunk=32,
         block_ids=([0, 1],),
         block_hashes=block_hashes,
+        can_save=True,
+    )
+
+
+def _make_empty_store_req(req_id: str) -> ReqMeta:
+    return ReqMeta(
+        req_id=req_id,
+        token_len_chunk=0,
+        block_ids=([],),
+        block_hashes=[],
         can_save=True,
     )
 
@@ -385,27 +424,25 @@ def test_store_sending_thread_skips_request_during_cpu_pressure():
     ]
     thread = _make_store_sending_thread(store)
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    req_a_job = _run_store_request(
+        thread, _make_store_req("req-a", [b"a0", b"a1"])
+    )
 
     assert thread._store_pressure_active is True
-    assert "req-a" in thread._skip_store_requests
+    assert ("req-a", req_a_job.epoch) in thread._skip_store_requests
     assert store.batch_put_from_multi_buffers.call_count == 1
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a2", b"a3"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a2", b"a3"]))
 
     assert store.batch_put_from_multi_buffers.call_count == 1
 
-    thread.add_stored_request("req-b")
-    thread._handle_request(_make_store_req("req-b", [b"b0", b"b1"]))
+    _run_store_request(thread, _make_store_req("req-b", [b"b0", b"b1"]))
 
     assert thread._store_pressure_active is False
-    assert "req-a" not in thread._skip_store_requests
+    assert ("req-a", req_a_job.epoch) not in thread._skip_store_requests
     assert store.batch_put_from_multi_buffers.call_count == 2
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a4", b"a5"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a4", b"a5"]))
 
     assert store.batch_put_from_multi_buffers.call_count == 3
 
@@ -418,8 +455,7 @@ def test_store_sending_thread_records_mooncake_metrics():
     stats = MooncakeStoreConnectorStats()
     thread._record_operation_cb = stats.record_operation
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
     assert len(stats.data["save_exists"]) == 1
     assert stats.data["save_exists"][0]["num_keys"] == 2
@@ -497,17 +533,16 @@ def test_store_sending_thread_delta_saves_only_new_full_attention_chunks():
     store.batch_put_from_multi_buffers.return_value = [256, 256]
     thread = _make_store_sending_thread(store)
 
-    thread.add_stored_request("req-a")
-    thread._saved_offset["req-a"] = 32
-    thread._handle_request(
-        ReqMeta(
+    request = ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         )
-    )
+    job = _queue_store_request(thread, request)
+    thread._saved_offset[(request.req_id, job.epoch)] = 32
+    thread._handle_request(job)
 
     keys = store.batch_is_exist.call_args.args[0]
     assert keys == [
@@ -523,17 +558,16 @@ def test_store_sending_thread_delta_strides_with_local_phase():
     store.batch_put_from_multi_buffers.return_value = [256]
     thread = _make_store_sending_thread(store, tp_rank=0, put_step=2)
 
-    thread.add_stored_request("req-a")
-    thread._saved_offset["req-a"] = 16
-    thread._handle_request(
-        ReqMeta(
+    request = ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         )
-    )
+    job = _queue_store_request(thread, request)
+    thread._saved_offset[(request.req_id, job.epoch)] = 16
+    thread._handle_request(job)
 
     keys = store.batch_is_exist.call_args.args[0]
     assert keys == [
@@ -550,8 +584,8 @@ def test_tp_sharded_group_saves_every_block_on_every_rank():
     thread = _make_store_sending_thread(store, tp_rank=0, put_step=2)
     thread.group_put_steps = [1]
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(
+    _run_store_request(
+        thread,
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
@@ -573,30 +607,28 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
 
     # Under pressure the request is skipped without persisting anything, so the
     # saved offset stays at 0.
-    thread._store_pressure_active = True
-    thread._skip_store_requests.add("req-a")
-
-    thread.add_stored_request("req-a")
-    thread._handle_request(
-        ReqMeta(
+    request = ReqMeta(
             req_id="req-a",
             token_len_chunk=16,
             block_ids=([0],),
             block_hashes=[b"a0"],
             can_save=True,
         )
-    )
+    job = _queue_store_request(thread, request)
+    thread._store_pressure_active = True
+    thread._skip_store_requests.add((request.req_id, job.epoch))
+    thread._handle_request(job)
 
     store.batch_is_exist.assert_not_called()
-    assert thread._saved_offset.get("req-a", 0) == 0
+    assert thread._saved_offset.get((request.req_id, job.epoch), 0) == 0
 
     thread._store_pressure_active = False
     thread._skip_store_requests.clear()
 
     # The next batch resumes from offset 0, re-covering the chunk skipped under
     # pressure (chunk 0) rather than losing it.
-    thread.add_stored_request("req-a")
-    thread._handle_request(
+    _run_store_request(
+        thread,
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
@@ -660,7 +692,7 @@ def test_partial_tail_offload_skips_null_source_blocks():
     store.batch_put_from_multi_buffers.return_value = [256, 256]
     thread = _make_partial_tail_send_thread(store)
 
-    assert thread._maybe_offload_partial_tail(_make_partial_tail_req([0, 2, 3]))
+    assert _offload_partial_tail(thread, _make_partial_tail_req([0, 2, 3]))
 
     keys, addrs, _sizes, _replicate_config = (
         store.batch_put_from_multi_buffers.call_args.args
@@ -684,7 +716,7 @@ def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
         supports_group_ids=True,
     )
 
-    assert thread._maybe_offload_partial_tail(_make_partial_tail_req([1, 2, 3]))
+    assert _offload_partial_tail(thread, _make_partial_tail_req([1, 2, 3]))
 
     keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
     assert keys == [
@@ -701,11 +733,12 @@ def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
 def test_partial_tail_offload_honors_active_pressure_gate():
     store = MagicMock()
     thread = _make_partial_tail_send_thread(store)
+    request = _make_partial_tail_req([1, 2, 3])
+    job = _queue_store_request(thread, request)
     thread._store_pressure_active = True
-    thread._skip_store_requests.add("req-a")
-    thread.add_stored_request("req-a")
+    thread._skip_store_requests.add((request.req_id, job.epoch))
 
-    thread._handle_request(_make_partial_tail_req([1, 2, 3]))
+    thread._handle_request(job)
 
     store.batch_is_exist.assert_not_called()
     store.batch_put_from_multi_buffers.assert_not_called()
@@ -717,17 +750,15 @@ def test_partial_tail_put_failure_activates_pressure_gate():
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.return_value = [256, -200, 256]
     thread = _make_partial_tail_send_thread(store)
-    thread.add_stored_request("req-a")
 
-    thread._handle_request(_make_partial_tail_req([1, 2, 3]))
+    job = _run_store_request(thread, _make_partial_tail_req([1, 2, 3]))
 
     assert thread._store_pressure_active is True
-    assert thread._skip_store_requests == {"req-a"}
-    assert thread._saved_offset.get("req-a", 0) == 0
+    assert thread._skip_store_requests == {("req-a", job.epoch)}
+    assert thread._saved_offset.get(("req-a", job.epoch), 0) == 0
     assert thread.stored_requests["req-a"] == 0
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_partial_tail_req([1, 2, 3]))
+    _run_store_request(thread, _make_partial_tail_req([1, 2, 3]))
     assert store.batch_put_from_multi_buffers.call_count == 1
 
 
@@ -737,17 +768,16 @@ def test_store_sending_thread_delta_start_rank_saves_second_local_chunk():
     store.batch_put_from_multi_buffers.return_value = [256, 256]
     thread = _make_store_sending_thread(store, tp_rank=1, put_step=2)
 
-    thread.add_stored_request("req-a")
-    thread._saved_offset["req-a"] = 16
-    thread._handle_request(
-        ReqMeta(
+    request = ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         )
-    )
+    job = _queue_store_request(thread, request)
+    thread._saved_offset[(request.req_id, job.epoch)] = 16
+    thread._handle_request(job)
 
     keys = store.batch_is_exist.call_args.args[0]
     assert keys == [
@@ -790,17 +820,16 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
         token_databases=[db_full, db_masked],
     )
 
-    thread.add_stored_request("req-a")
-    thread._saved_offset["req-a"] = 32
-    thread._handle_request(
-        ReqMeta(
+    request = ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         )
-    )
+    job = _queue_store_request(thread, request)
+    thread._saved_offset[(request.req_id, job.epoch)] = 32
+    thread._handle_request(job)
 
     keys = store.batch_is_exist.call_args.args[0]
     full_hashes = [k.rsplit("@", 1)[-1] for k in keys if "@group:0" in k]
@@ -845,8 +874,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
         coord=coord,
         token_databases=[db0, db1],
     )
-    thread.add_stored_request("req-a")
-    thread._handle_request(
+    _run_store_request(thread,
         ReqMeta(
             req_id="req-a",
             token_len_chunk=48,
@@ -881,15 +909,13 @@ def test_store_sending_thread_only_skips_on_no_available_handle():
     ]
     thread = _make_store_sending_thread(store)
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
     assert thread._store_pressure_active is False
-    assert "req-a" not in thread._skip_store_requests
+    assert not thread._skip_store_requests
     assert store.batch_put_from_multi_buffers.call_count == 1
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a2", b"a3"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a2", b"a3"]))
 
     assert store.batch_put_from_multi_buffers.call_count == 2
 
@@ -901,9 +927,11 @@ def test_store_sending_thread_releases_pin_on_batch_is_exist_failure():
     store.batch_is_exist.side_effect = RuntimeError("mooncake down")
     thread = _make_store_sending_thread(store)
 
-    thread.add_stored_request("req-a")
+    job = _queue_store_request(
+        thread, _make_store_req("req-a", [b"a0", b"a1"])
+    )
     with pytest.raises(RuntimeError):
-        thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+        thread._handle_request(job)
 
     assert thread.stored_requests["req-a"] == 0
     store.batch_put_from_multi_buffers.assert_not_called()
@@ -917,10 +945,159 @@ def test_store_sending_thread_releases_pin_on_batch_put_failure():
     store.batch_put_from_multi_buffers.side_effect = RuntimeError("rdma error")
     thread = _make_store_sending_thread(store)
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
     assert thread.stored_requests["req-a"] == 0
+
+
+def test_store_request_normal_epoch_completes_and_cleans_up():
+    thread = _make_store_sending_thread(MagicMock())
+    request = _make_empty_store_req("normal")
+
+    thread.add_request(request)
+    assert thread.get_stored_request_state(request.req_id) == (1, 1)
+
+    job = thread.request_queue.get_nowait()
+    thread._handle_request(job)
+
+    assert job.epoch == 1
+    assert thread.get_stored_request_state(request.req_id) == (0, 1)
+    assert thread.delete_finished_stored_request(
+        request.req_id, expected_epoch=job.epoch
+    )
+    assert thread.get_stored_request_state(request.req_id) == (None, None)
+
+
+def test_queued_stale_store_job_does_not_decrement_reused_request_id():
+    thread = _make_store_sending_thread(MagicMock())
+    request = _make_empty_store_req("queued-aba")
+
+    thread.add_request(request)
+    assert thread.delete_finished_stored_request(request.req_id)
+    thread.add_request(request)
+    assert thread.get_stored_request_state(request.req_id) == (1, 2)
+
+    stale_job = thread.request_queue.get_nowait()
+    thread._handle_request(stale_job)
+    assert stale_job.epoch == 1
+    assert thread.get_stored_request_state(request.req_id) == (1, 2)
+
+    current_job = thread.request_queue.get_nowait()
+    thread._handle_request(current_job)
+    assert current_job.epoch == 2
+    assert thread.get_stored_request_state(request.req_id) == (0, 2)
+
+
+def test_active_stale_store_completion_does_not_decrement_new_epoch():
+    thread = _make_store_sending_thread(MagicMock())
+    request = _make_empty_store_req("active-aba")
+
+    old_job = _queue_store_request(thread, request)
+    assert thread.delete_finished_stored_request(request.req_id)
+    new_job = _queue_store_request(thread, request)
+    assert (old_job.epoch, new_job.epoch) == (1, 2)
+
+    assert not thread.dec_stored_request(request.req_id, old_job.epoch)
+    assert thread.get_stored_request_state(request.req_id) == (1, 2)
+
+    assert thread.dec_stored_request(request.req_id, new_job.epoch)
+    assert thread.get_stored_request_state(request.req_id) == (0, 2)
+
+
+def test_stale_store_job_cannot_mutate_new_epoch_auxiliary_state():
+    thread = _make_store_sending_thread(MagicMock())
+    request = _make_empty_store_req("state-aba")
+
+    old_job = _queue_store_request(thread, request)
+    thread._record_saved(request.req_id, old_job.epoch, 128)
+    assert thread._saved_offset[(request.req_id, old_job.epoch)] == 128
+
+    assert thread.delete_finished_stored_request(request.req_id)
+    new_job = _queue_store_request(thread, request)
+    assert new_job.epoch == 2
+
+    thread._record_saved(request.req_id, old_job.epoch, 256)
+    assert (request.req_id, old_job.epoch) not in thread._saved_offset
+    assert thread._mark_request_skipped_for_pressure(request.req_id, old_job.epoch)
+    assert (request.req_id, old_job.epoch) not in thread._skip_store_requests
+    assert not thread._clear_store_pressure(request.req_id, old_job.epoch)
+
+    stale_event = MagicMock()
+    assert not thread._update_kv_event_if_current(
+        request.req_id, old_job.epoch, [stale_event]
+    )
+    assert thread.get_kv_events() == []
+
+    current_event = MagicMock()
+    assert thread._update_kv_event_if_current(
+        request.req_id, new_job.epoch, [current_event]
+    )
+    assert thread.get_kv_events() == [current_event]
+
+    assert not thread.delete_finished_stored_request(
+        request.req_id, expected_epoch=old_job.epoch
+    )
+    assert thread.get_stored_request_state(request.req_id) == (1, new_job.epoch)
+
+
+def test_deferred_finished_sending_is_bound_to_store_epoch():
+    thread = _make_store_sending_thread(MagicMock())
+    store_worker = object.__new__(mooncake_store_worker.MooncakeStoreWorker)
+    store_worker.kv_send_thread = thread
+    store_worker.finished_store_req = {}
+    empty_meta = SimpleNamespace(preempted_req_ids=set())
+    request = _make_empty_store_req("deferred-aba")
+
+    thread.add_request(request)
+    assert (
+        store_worker._get_and_clear_finished_sending(
+            {request.req_id}, empty_meta
+        )
+        == set()
+    )
+    assert store_worker.finished_store_req == {request.req_id: 1}
+
+    first_job = thread.request_queue.get_nowait()
+    thread._handle_request(first_job)
+    assert store_worker._get_and_clear_finished_sending(set(), empty_meta) == {
+        request.req_id
+    }
+    assert store_worker.finished_store_req == {}
+    assert thread.get_stored_request_state(request.req_id) == (None, None)
+
+    thread.add_request(request)
+    assert (
+        store_worker._get_and_clear_finished_sending(
+            {request.req_id}, empty_meta
+        )
+        == set()
+    )
+    assert store_worker.finished_store_req == {request.req_id: 2}
+
+    preempt_meta = SimpleNamespace(preempted_req_ids={request.req_id})
+    assert (
+        store_worker._get_and_clear_finished_sending(set(), preempt_meta) == set()
+    )
+    assert store_worker.finished_store_req == {}
+
+    thread.add_request(request)
+    assert thread.get_stored_request_state(request.req_id) == (1, 3)
+
+    stale_job = thread.request_queue.get_nowait()
+    thread._handle_request(stale_job)
+    assert stale_job.epoch == 2
+    assert thread.get_stored_request_state(request.req_id) == (1, 3)
+
+    current_job = thread.request_queue.get_nowait()
+    thread._handle_request(current_job)
+    assert current_job.epoch == 3
+    assert thread.get_stored_request_state(request.req_id) == (0, 3)
+    assert (
+        store_worker._get_and_clear_finished_sending(
+            {request.req_id}, empty_meta
+        )
+        == {request.req_id}
+    )
 
 
 def test_store_recving_thread_reports_failed_block_ids():
@@ -991,8 +1168,7 @@ def test_store_sending_thread_passes_replicate_config_when_preferred_segment_set
     replicate_config = SimpleNamespace(preferred_segment="10.0.0.7:50053")
     thread = _make_store_sending_thread(store, replicate_config=replicate_config)
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
     assert store.batch_put_from_multi_buffers.call_count == 1
     call_args = store.batch_put_from_multi_buffers.call_args.args
@@ -1010,8 +1186,7 @@ def test_store_sending_thread_passes_default_replicate_config_when_no_preferred_
     replicate_config = SimpleNamespace()
     thread = _make_store_sending_thread(store, replicate_config=replicate_config)
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
     assert store.batch_put_from_multi_buffers.call_count == 1
     call_args = store.batch_put_from_multi_buffers.call_args.args
@@ -1067,8 +1242,7 @@ def test_store_sending_thread_sets_group_ids_when_enabled():
         supports_group_ids=True,
     )
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
     assert store.batch_put_from_multi_buffers.call_count == 1
     keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
@@ -1092,8 +1266,7 @@ def test_store_sending_thread_leaves_group_ids_unchanged_when_flag_disabled():
         supports_group_ids=True,
     )
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
     assert store.batch_put_from_multi_buffers.call_count == 1
     assert store.batch_put_from_multi_buffers.call_args.args[3] is replicate_config
@@ -1112,8 +1285,7 @@ def test_store_sending_thread_leaves_group_ids_unchanged_when_unsupported():
         supports_group_ids=False,
     )
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
     assert store.batch_put_from_multi_buffers.call_count == 1
     assert store.batch_put_from_multi_buffers.call_args.args[3] is replicate_config
@@ -1180,8 +1352,7 @@ def test_store_sending_thread_group_id_excludes_physical_sharding():
         supports_group_ids=True,
     )
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
     keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
     assert keys == [
@@ -1210,8 +1381,7 @@ def test_store_sending_thread_multiple_segments_share_logical_group_id():
         supports_group_ids=True,
     )
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
     keys, addrs, sizes, config = store.batch_put_from_multi_buffers.call_args.args
     assert keys == [
@@ -1260,8 +1430,7 @@ def test_store_sending_thread_group_ids_share_across_kv_cache_groups():
         supports_group_ids=True,
     )
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_multi_group_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_multi_group_store_req("req-a", [b"a0", b"a1"]))
 
     keys, addrs, sizes, config = store.batch_put_from_multi_buffers.call_args.args
     assert keys == [
@@ -1296,8 +1465,7 @@ def test_store_sending_thread_group_ids_follow_missing_key_filter():
         supports_group_ids=True,
     )
 
-    thread.add_stored_request("req-a")
-    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+    _run_store_request(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
     keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
     assert keys == ["test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131"]
@@ -1866,8 +2034,7 @@ def test_store_sending_thread_clamps_token_len_to_lcm():
     # token_len_chunk=33 clamps to 32 → 2 chunks (not 3 with a partial 1-token chunk).
     thread = _make_store_sending_thread(store)
 
-    thread.add_stored_request("r0")
-    thread._handle_request(
+    _run_store_request(thread,
         ReqMeta(
             req_id="r0",
             token_len_chunk=33,
@@ -1905,8 +2072,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
         store, coord=coord, token_databases=[db], block_size=64
     )
 
-    thread.add_stored_request("r0")
-    thread._handle_request(
+    _run_store_request(thread,
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,
@@ -1982,8 +2148,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
     )
 
     hs = [bytes([i + 1]) * 4 for i in range(8)]
-    thread.add_stored_request("r0")
-    thread._handle_request(
+    _run_store_request(thread,
         ReqMeta(
             req_id="r0",
             token_len_chunk=64,
@@ -2057,17 +2222,16 @@ def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
     )
 
     hs = [bytes([i + 1]) * 4 for i in range(8)]
-    thread.add_stored_request("r0")
-    thread._saved_offset["r0"] = 32
-    thread._handle_request(
-        ReqMeta(
+    request = ReqMeta(
             req_id="r0",
             token_len_chunk=64,
             block_ids=([0, 1], list(range(8))),
             block_hashes=hs,
             can_save=True,
         )
-    )
+    job = _queue_store_request(thread, request)
+    thread._saved_offset[(request.req_id, job.epoch)] = 32
+    thread._handle_request(job)
 
     keys = store.batch_put_from_multi_buffers.call_args.args[0]
     full_hashes = [k.rsplit("@", 1)[-1] for k in keys if "@group:0" in k]
@@ -2128,8 +2292,7 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     thread.enable_kv_event = True
 
     hs = [bytes([i + 1]) * 4 for i in range(4)]
-    thread.add_stored_request("r0")
-    thread._handle_request(
+    _run_store_request(thread,
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,

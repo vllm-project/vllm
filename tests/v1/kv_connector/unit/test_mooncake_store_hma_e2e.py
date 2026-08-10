@@ -37,6 +37,27 @@ from vllm.v1.kv_cache_interface import (
 )
 
 
+def _run_store_request(
+    thread: KVCacheStoreSendingThread, request: ReqMeta
+) -> mooncake_store_worker._StoreRequestJob:
+    thread.add_request(request)
+    job = thread.request_queue.get_nowait()
+    thread._handle_request(job)
+    return job
+
+
+def _offload_partial_tail(
+    thread: KVCacheStoreSendingThread, request: ReqMeta
+) -> bool:
+    thread.add_request(request)
+    job = thread.request_queue.get_nowait()
+    try:
+        return thread._maybe_offload_partial_tail(request, job.epoch)
+    finally:
+        thread.dec_stored_request(request.req_id, job.epoch)
+        thread.request_queue.task_done()
+
+
 class _DictStore:
     """In-memory MooncakeDistributedStore stand-in."""
 
@@ -229,11 +250,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
         block_hashes=hs,
         can_save=True,
     )
-    send_thread.add_stored_request("r0")
-    # Put the request in the queue so task_done() doesn't underflow.
-    send_thread.request_queue.put(save_req)
-    req = send_thread.request_queue.get()
-    send_thread._handle_request(req)
+    _run_store_request(send_thread, save_req)
 
     # Point worker.store at the dict store (the worker constructor captured
     # the MagicMock; replace with the real dict store for lookup).
@@ -430,7 +447,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         partial_tail_offloads=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_partial_tail(req)
+    _offload_partial_tail(send, req)
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]
@@ -501,10 +518,8 @@ def test_offload_syncs_event_before_put():
         partial_tail_offloads=[(1, 7, 12)],
     )
     req.current_event = event
-    send.add_stored_request("r1")
 
-    send.request_queue.put(req)
-    send._handle_request(send.request_queue.get())
+    _run_store_request(send, req)
     assert send.request_queue.qsize() == 0
     assert store._data
     assert send.stored_requests["r1"] == 0
@@ -578,7 +593,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         partial_tail_offloads=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_partial_tail(req)
+    _offload_partial_tail(send, req)
 
     # FA (block 4): full blocks ending at 4, 8 and 12, keyed by their normal
     # block-end hashes; mamba (block 16): the partial boundary block under

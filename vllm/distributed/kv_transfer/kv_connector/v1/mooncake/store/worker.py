@@ -474,6 +474,12 @@ class KVTransferThread(threading.Thread):
         return events
 
 
+@dataclass(frozen=True)
+class _StoreRequestJob:
+    request: ReqMeta
+    epoch: int
+
+
 class KVCacheStoreSendingThread(KVTransferThread):
     """Background thread for storing KV cache blocks to the store."""
 
@@ -516,54 +522,135 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         # Pause store requests when CPU/disk offloading is under pressure.
         self._store_pressure_active = False
-        self._skip_store_requests: set[str] = set()
+        self._skip_store_requests: set[tuple[str, int]] = set()
 
         # Per-request high-water mark of tokens actually persisted; the next
         # batch resumes here, so pressure-skipped or failed ranges are retried.
-        self._saved_offset: dict[str, int] = {}
+        self._saved_offset: dict[tuple[str, int], int] = {}
 
-    def add_stored_request(self, req_id: str):
+        # A request ID can be reused after preemption while an older store job
+        # is still in flight. Scope all async bookkeeping to its lifecycle.
+        self._next_store_epoch = 0
+        self._store_request_epochs: dict[str, int] = {}
+
+    def add_request(self, request: ReqMeta) -> None:
+        req_id = request.req_id
         with self.done_task_lock:
+            epoch = self._store_request_epochs.get(req_id)
+            if epoch is None:
+                self._next_store_epoch += 1
+                epoch = self._next_store_epoch
+                self._store_request_epochs[req_id] = epoch
             self.stored_requests[req_id] += 1
+            self.request_queue.put(_StoreRequestJob(request, epoch))
 
-    def dec_stored_request(self, req_id: str):
+    def get_stored_request_state(
+        self, req_id: str
+    ) -> tuple[int | None, int | None]:
         with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
+            return (
+                self.stored_requests.get(req_id),
+                self._store_request_epochs.get(req_id),
+            )
 
-    def delete_finished_stored_request(self, req_id: str):
+    def is_current_store_job(self, req_id: str, job_epoch: int) -> bool:
         with self.done_task_lock:
-            if req_id in self.stored_requests:
-                del self.stored_requests[req_id]
-            self._skip_store_requests.discard(req_id)
-            self._saved_offset.pop(req_id, None)
+            return (
+                req_id in self.stored_requests
+                and self._store_request_epochs.get(req_id) == job_epoch
+            )
 
-    def _record_saved(self, req_id: str, token_len: int) -> None:
-        # Guard on liveness so a concurrent finish/preempt pop isn't recreated.
+    def dec_stored_request(self, req_id: str, job_epoch: int) -> bool:
         with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self._saved_offset[req_id] = token_len
+            if self._store_request_epochs.get(req_id) != job_epoch:
+                self._skip_store_requests.discard((req_id, job_epoch))
+                self._saved_offset.pop((req_id, job_epoch), None)
+                return False
+            remaining = self.stored_requests.get(req_id)
+            if remaining is None or remaining <= 0:
+                logger.error(
+                    "Invalid Mooncake store job count for request %s "
+                    "(epoch=%d, count=%s)",
+                    req_id,
+                    job_epoch,
+                    remaining,
+                )
+                return False
+            self.stored_requests[req_id] = remaining - 1
+            return True
 
-    def _should_skip_request(self, req_id: str) -> bool:
+    def delete_finished_stored_request(
+        self, req_id: str, expected_epoch: int | None = None
+    ) -> bool:
         with self.done_task_lock:
-            return self._store_pressure_active and req_id in self._skip_store_requests
+            current_epoch = self._store_request_epochs.get(req_id)
+            if current_epoch is None or (
+                expected_epoch is not None and current_epoch != expected_epoch
+            ):
+                return False
+            self.stored_requests.pop(req_id, None)
+            self._store_request_epochs.pop(req_id, None)
+            self._skip_store_requests.discard((req_id, current_epoch))
+            self._saved_offset.pop((req_id, current_epoch), None)
+            return True
 
-    def _mark_request_skipped_for_pressure(self, req_id: str) -> bool:
+    def _get_saved_offset(self, req_id: str, job_epoch: int) -> int | None:
         with self.done_task_lock:
-            already_skipped = req_id in self._skip_store_requests
+            if self._store_request_epochs.get(req_id) != job_epoch:
+                return None
+            return self._saved_offset.get((req_id, job_epoch), 0)
+
+    def _record_saved(self, req_id: str, job_epoch: int, token_len: int) -> None:
+        with self.done_task_lock:
+            if self._store_request_epochs.get(req_id) == job_epoch:
+                self._saved_offset[(req_id, job_epoch)] = token_len
+
+    def _should_skip_request(self, req_id: str, job_epoch: int) -> bool:
+        with self.done_task_lock:
+            if self._store_request_epochs.get(req_id) != job_epoch:
+                return True
+            return self._store_pressure_active and (
+                req_id,
+                job_epoch,
+            ) in self._skip_store_requests
+
+    def _mark_request_skipped_for_pressure(
+        self, req_id: str, job_epoch: int
+    ) -> bool:
+        with self.done_task_lock:
+            if self._store_request_epochs.get(req_id) != job_epoch:
+                return True
+            request_key = (req_id, job_epoch)
+            already_skipped = request_key in self._skip_store_requests
             self._store_pressure_active = True
-            self._skip_store_requests.add(req_id)
+            self._skip_store_requests.add(request_key)
         return already_skipped
 
-    def _clear_store_pressure(self) -> bool:
+    def _clear_store_pressure(self, req_id: str, job_epoch: int) -> bool:
         with self.done_task_lock:
+            if self._store_request_epochs.get(req_id) != job_epoch:
+                return False
             if not self._store_pressure_active and not self._skip_store_requests:
                 return False
             self._store_pressure_active = False
             self._skip_store_requests.clear()
         return True
 
-    def _maybe_offload_partial_tail(self, req_meta: ReqMeta) -> bool:
+    def _update_kv_event_if_current(
+        self, req_id: str, job_epoch: int, events: list[BlockStored]
+    ) -> bool:
+        with self.done_task_lock:
+            if (
+                req_id not in self.stored_requests
+                or self._store_request_epochs.get(req_id) != job_epoch
+            ):
+                return False
+            self.update_kv_event(events)
+            return True
+
+    def _maybe_offload_partial_tail(
+        self, req_meta: ReqMeta, job_epoch: int
+    ) -> bool:
         """Offload the request's sub-block partial tail (its last prompt hash
         boundary) so a later request can hit the sub-block prefix.
 
@@ -604,7 +691,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         group_ids: list[str] | None = (
             [] if self.enable_group_semantics and self.supports_group_ids else None
         )
-        saved = self._saved_offset.get(req_meta.req_id, 0)
+        saved = self._get_saved_offset(req_meta.req_id, job_epoch)
+        if saved is None:
+            return False
         for g_idx, db in enumerate(self.token_databases):
             group_blocks = req_meta.block_ids[g_idx]
             # Distribute across ranks by the same rule as normal chunks.
@@ -683,6 +772,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if req_meta.current_event is not None:
             # Fence the CoW block copy enqueued earlier this step.
             req_meta.current_event.synchronize()
+        if not self.is_current_store_job(req_meta.req_id, job_epoch):
+            return False
         if group_ids is not None:
             assert len(group_ids) == len(keys)
             self.replicate_config.group_ids = group_ids
@@ -727,17 +818,19 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 failed_codes,
             )
             if MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes:
-                self._mark_request_skipped_for_pressure(req_meta.req_id)
+                self._mark_request_skipped_for_pressure(req_meta.req_id, job_epoch)
             return False
 
-        if self._clear_store_pressure():
+        if self._clear_store_pressure(req_meta.req_id, job_epoch):
             logger.info(
                 "Mooncake CPU/disk offloading pressure cleared after a "
                 "successful partial-tail batch"
             )
         return True
 
-    def _handle_request(self, req_meta: ReqMeta):
+    def _handle_request(self, job: _StoreRequestJob):
+        req_meta = job.request
+        job_epoch = job.epoch
         # Cache hits are always a multiple of ``lcm_block_size`` tokens, which
         # is also ``store_mask``'s precondition.
         lcm_block_size = self.coord.lcm_block_size
@@ -746,7 +839,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         req_id = req_meta.req_id
         current_event = req_meta.current_event
 
-        if req_id not in self.stored_requests:
+        if not self.is_current_store_job(req_id, job_epoch):
             self.request_queue.task_done()
             return
 
@@ -754,7 +847,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # so the scheduler can release the GPU blocks it pinned for this
         # request (via `delay_free_blocks`) even when the store path raises.
         try:
-            if self._should_skip_request(req_id):
+            if self._should_skip_request(req_id, job_epoch):
                 logger.debug(
                     "Skipping Mooncake store for request %s while CPU/disk "
                     "offloading is under pressure",
@@ -765,7 +858,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             # Offload the sub-block partial tail (independent of the normal
             # block-aligned save, which may be skipped this step).
             if req_meta.partial_tail_offloads is not None and not (
-                self._maybe_offload_partial_tail(req_meta)
+                self._maybe_offload_partial_tail(req_meta, job_epoch)
             ):
                 return
 
@@ -773,7 +866,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return
 
             # Resume from where this rank left off; only the new suffix is saved.
-            save_start = self._saved_offset.get(req_id, 0)
+            save_start = self._get_saved_offset(req_id, job_epoch)
+            if save_start is None:
+                return
 
             # Within each lcm region only per-spec relevant chunks are loaded
             # (e.g., SWA or linear attn), so mask out irrelevant chunks
@@ -808,7 +903,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     group_indices.append(g_idx)
 
             if not keys:
-                self._record_saved(req_id, token_len)
+                self._record_saved(req_id, job_epoch, token_len)
                 return
 
             # Check which blocks already exist (dedup)
@@ -834,7 +929,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ]
 
             if not missing_indices:
-                self._record_saved(req_id, token_len)
+                self._record_saved(req_id, job_epoch, token_len)
                 return
 
             if len(missing_indices) != len(keys):
@@ -916,6 +1011,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             if current_event is not None:
                 current_event.synchronize()
+            if not self.is_current_store_job(req_id, job_epoch):
+                return
 
             if group_ids is not None:
                 assert len(group_ids) == len(keys)
@@ -954,7 +1051,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     if (
                         MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes
-                        and not self._mark_request_skipped_for_pressure(req_id)
+                        and not self._mark_request_skipped_for_pressure(
+                            req_id, job_epoch
+                        )
                     ):
                         logger.warning(
                             "Detected Mooncake CPU/disk offloading pressure "
@@ -964,8 +1063,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             req_id,
                         )
                 else:
-                    self._record_saved(req_id, token_len)
-                    if self._clear_store_pressure():
+                    self._record_saved(req_id, job_epoch, token_len)
+                    if self._clear_store_pressure(req_id, job_epoch):
                         logger.info(
                             "Mooncake CPU/disk offloading pressure cleared "
                             "after a successful store batch"
@@ -982,9 +1081,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 logger.error("Failed to put key %s, error: %s", keys, e)
 
             if self.enable_kv_event and stored_events:
-                self.update_kv_event(stored_events)
+                self._update_kv_event_if_current(
+                    req_id, job_epoch, stored_events
+                )
         finally:
-            self.dec_stored_request(req_id)
+            self.dec_stored_request(req_id, job_epoch)
             self.request_queue.task_done()
 
 
@@ -1348,7 +1449,7 @@ class MooncakeStoreWorker:
         self.kv_recv_threads: list[KVCacheStoreRecvingThread] = []
         self.num_recv_threads = max(1, envs.VLLM_MOONCAKE_LOAD_RECV_THREADS)
         self.recv_request_queue: queue.Queue[ReqMeta] = queue.Queue()
-        self.finished_store_req: set[str] = set()
+        self.finished_store_req: dict[str, int] = {}
         self._kv_connector_stats_lock = threading.Lock()
         self.kv_connector_stats = MooncakeStoreConnectorStats()
 
@@ -1670,7 +1771,6 @@ class MooncakeStoreWorker:
                     continue
                 request.current_event = current_event
                 assert self.kv_send_thread is not None
-                self.kv_send_thread.add_stored_request(request.req_id)
                 self.kv_send_thread.add_request(request)
 
         # Check completion of previously queued transfers
@@ -1736,24 +1836,33 @@ class MooncakeStoreWorker:
         finished_sending: set[str] = set()
 
         for req_id in meta.preempted_req_ids:
+            self.finished_store_req.pop(req_id, None)
             self.kv_send_thread.delete_finished_stored_request(req_id)
 
-        for req_id in self.kv_send_thread.stored_requests.copy():
-            if (
-                self.kv_send_thread.stored_requests[req_id] == 0
-                and req_id in self.finished_store_req
-            ):
-                self.finished_store_req.remove(req_id)
-                finished_sending.add(req_id)
-                self.kv_send_thread.delete_finished_stored_request(req_id)
+        for req_id, finished_epoch in list(self.finished_store_req.items()):
+            req_remain_jobs, current_epoch = (
+                self.kv_send_thread.get_stored_request_state(req_id)
+            )
+            if current_epoch != finished_epoch:
+                self.finished_store_req.pop(req_id, None)
+            elif req_remain_jobs == 0:
+                self.finished_store_req.pop(req_id, None)
+                if self.kv_send_thread.delete_finished_stored_request(
+                    req_id, expected_epoch=finished_epoch
+                ):
+                    finished_sending.add(req_id)
 
         for req_id in finished_req_ids:
-            req_remain_jobs = self.kv_send_thread.stored_requests.get(req_id)
-            if req_remain_jobs == 0:
-                finished_sending.add(req_id)
-                self.kv_send_thread.delete_finished_stored_request(req_id)
-            elif req_remain_jobs is not None:
-                self.finished_store_req.add(req_id)
+            req_remain_jobs, current_epoch = (
+                self.kv_send_thread.get_stored_request_state(req_id)
+            )
+            if req_remain_jobs == 0 and current_epoch is not None:
+                if self.kv_send_thread.delete_finished_stored_request(
+                    req_id, expected_epoch=current_epoch
+                ):
+                    finished_sending.add(req_id)
+            elif req_remain_jobs is not None and current_epoch is not None:
+                self.finished_store_req[req_id] = current_epoch
 
         return finished_sending
 
