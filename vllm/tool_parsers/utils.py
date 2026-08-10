@@ -558,6 +558,15 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
         )
         raise UnexpectedAstError("Invalid tool call name")
     function_name = _ast_callable_dotted_name(call.func)
+    if call.args:
+        # Only keyword arguments carry parameter names; positional values
+        # used to be dropped silently, emitting a successful-looking call
+        # whose arguments were missing. Reject instead.
+        logger.warning(
+            "Tool call has positional arguments: %s",
+            ast.dump(call),
+        )
+        raise UnexpectedAstError("Tool call arguments must be keyword arguments")
     arguments = {}
     for keyword in call.keywords:
         if keyword.arg is None:

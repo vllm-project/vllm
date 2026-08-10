@@ -478,6 +478,30 @@ def test_non_finite_argument_call_skipped(
         _json.loads(call.function.arguments)
 
 
+@pytest.mark.parametrize("streaming", [True, False])
+def test_positional_argument_call_not_silently_corrupted(
+    streaming: bool, lfm2_tokenizer: TokenizerLike
+):
+    """get_weather('Paris', unit='celsius') used to silently drop 'Paris'
+    and emit a successful call with only {"unit": "celsius"} — a wrong
+    execution instead of a visible failure. The call is rejected; a
+    keyword-only sibling still comes through."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}, "
+        f"get_weather('Paris', unit='celsius')]{TOOL_CALL_END}"
+    )
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=streaming,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
 def test_whitespace_after_start_token(lfm2_tokenizer: TokenizerLike):
     """Whitespace between <|tool_call_start|> and the opening bracket must
     not break parsing. The streaming path used to feed the indented text to

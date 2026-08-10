@@ -642,6 +642,23 @@ class TestContainsBrokenStringLiteral:
         assert contains_broken_string_literal(text) is broken
 
 
+class TestHandleSingleToolPositionalArgs:
+    # Positional values carry no parameter name; they used to be dropped
+    # silently, emitting a successful-looking call with missing arguments
+    # (worse than a visible failure).
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "[get_weather('Paris')]",
+            "[get_weather('Paris', unit='celsius')]",
+            "[f(*['a', 'b'])]",
+        ],
+    )
+    def test_positional_arguments_raise(self, expr):
+        with pytest.raises(UnexpectedAstError):
+            handle_single_tool(_first_call(expr))
+
+
 class TestHandleSingleToolKwargsUnpack:
     # **-unpacking is ast.keyword(arg=None); arguments[None] serialized as a
     # literal "null" key. Dict literals merge with later-binding-wins
