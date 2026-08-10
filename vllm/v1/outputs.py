@@ -204,6 +204,40 @@ class RoutedExpertsLists(NamedTuple):
     slot_mapping: np.ndarray
 
 
+class IndexerTopkTensors(NamedTuple):
+    """Device-side indexer topk indices, mirrors :class:`RoutedExpertsTensors`."""
+
+    topk_data: torch.Tensor
+    slot_mapping: torch.Tensor
+
+    def to_cpu_nonblocking(self) -> "IndexerTopkTensors":
+        if self.topk_data.device.type == "cpu":
+            return self
+        topk_data = torch.empty_like(self.topk_data, device="cpu", pin_memory=True)
+        slot_mapping = torch.empty_like(
+            self.slot_mapping, device="cpu", pin_memory=True
+        )
+        topk_data.copy_(self.topk_data, non_blocking=True)
+        slot_mapping.copy_(self.slot_mapping, non_blocking=True)
+        return IndexerTopkTensors(
+            topk_data,
+            slot_mapping,
+        )
+
+    def tolists(self) -> "IndexerTopkLists":
+        return IndexerTopkLists(
+            self.topk_data.cpu().numpy(),
+            self.slot_mapping.cpu().numpy(),
+        )
+
+
+class IndexerTopkLists(NamedTuple):
+    """CPU-side indexer topk, consumed by :meth:`IndexerTopkManager.store_batch`."""
+
+    topk_data: np.ndarray
+    slot_mapping: np.ndarray
+
+
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
 PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor | None]
@@ -306,6 +340,8 @@ class ModelRunnerOutput:
     # its slot buffer via ``slot_buffer[slot_mapping] = routing_data``.
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
+
+    indexer_topk: IndexerTopkLists | None = None
 
     @staticmethod
     def with_kv_conn_output_only(

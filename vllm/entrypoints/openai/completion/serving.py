@@ -578,9 +578,15 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 if output.routed_experts is not None:
                     buf = io.BytesIO()
                     np.save(buf, output.routed_experts)
-                    routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
+                    routed_experts_b64 = base64.b64encode(buf.getbuffer()).decode(
                         "ascii"
                     )
+
+                indexer_topk_b64 = None
+                if output.indexer_topk is not None:
+                    buf = io.BytesIO()
+                    np.save(buf, output.indexer_topk)
+                    indexer_topk_b64 = base64.b64encode(buf.getbuffer()).decode("ascii")
 
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
@@ -596,6 +602,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
+                    indexer_topk=indexer_topk_b64,
                 )
                 choices.append(choice_data)
 

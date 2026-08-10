@@ -668,6 +668,21 @@ class Worker(WorkerBase):
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
 
+        if self.model_config.enable_return_indexer_topk:
+            from vllm.model_executor.layers.sparse_attn_indexer_capturer import (
+                create_indexer_topk_capturer,
+            )
+
+            self.model_runner.indexer_topk_capturer = (  # type: ignore[attr-defined]
+                create_indexer_topk_capturer(
+                    self.model_runner.model,
+                    self.model_config.hf_text_config,
+                    self.model_runner.scheduler_config.max_num_batched_tokens,
+                    self.model_runner.kv_cache_config,
+                    self.model_runner.device,
+                )
+            )
+
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
         # allocator and are not discarded during sleep/wake cycles.

@@ -28,6 +28,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsManager,
 )
+from vllm.model_executor.layers.sparse_attn_indexer_capturer import (
+    IndexerTopkManager,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
@@ -339,6 +342,17 @@ class Scheduler(SchedulerInterface):
             # so update_from_output can read slot data even if a later
             # schedule() frees the blocks (async scheduling race).
             self._re_block_ids: dict[str, list[int]] = {}
+
+        self.enable_return_indexer_topk = (
+            vllm_config.model_config.enable_return_indexer_topk
+        )
+
+        if self.enable_return_indexer_topk:
+            self.indexer_topk_mgr = IndexerTopkManager(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+            )
+            self._it_block_ids: dict[str, list[int]] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -1352,9 +1366,18 @@ class Scheduler(SchedulerInterface):
                 }
             )
 
-        # Clear the finished and preempted request IDs.
-        # NOTE: We shouldn't just clear() here because it will also affect
-        # the scheduler output.
+        if self.enable_return_indexer_topk:
+            gid = self.indexer_topk_mgr.attn_gid
+            self._it_block_ids.update(
+                {
+                    rid: self.kv_cache_manager.get_blocks(rid).get_block_ids()[gid]
+                    for rid in num_scheduled_tokens
+                }
+            )
+
+        # Clear the finished request IDs.
+        # NOTE: We shouldn't do self.finished_req_ids.clear() here because
+        # it will also affect the scheduler output.
         self.finished_req_ids = set()
         self.reset_preempted_req_ids = set()
 
@@ -1721,6 +1744,20 @@ class Scheduler(SchedulerInterface):
                 routing_offsets[rid] = offset
                 offset += num_scheduled_tokens[rid]
 
+        indexer_topk_data = None
+        indexer_topk_offsets: dict[str, int] = {}
+        if (
+            self.enable_return_indexer_topk
+            and model_runner_output.indexer_topk is not None
+        ):
+            it = model_runner_output.indexer_topk
+            self.indexer_topk_mgr.store_batch(it.topk_data, it.slot_mapping)
+            indexer_topk_data = it.topk_data
+            offset = 0
+            for rid in model_runner_output.req_ids:
+                indexer_topk_offsets[rid] = offset
+                offset += num_scheduled_tokens[rid]
+
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -1899,6 +1936,25 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.estimate_cached_tokens(request)
                     )
 
+            indexer_topk = None
+            if self.enable_return_indexer_topk and indexer_topk_data is not None:
+                sp = request.sampling_params
+                indexer_topk = self.indexer_topk_mgr.get_request_topk(
+                    topk_data=indexer_topk_data,
+                    req_offset=indexer_topk_offsets[req_id],
+                    num_tokens_scheduled=num_tokens_scheduled,
+                    new_token_ids=new_token_ids,
+                    num_output_tokens_before=num_output_tokens_before,
+                    block_ids=self._it_block_ids.get(req_id, []),
+                    num_prompt_tokens=request.num_prompt_tokens,
+                    indexer_topk_prompt_start=(
+                        sp.indexer_topk_prompt_start if sp is not None else 0
+                    ),
+                    scheduled_spec_token_ids=scheduled_spec_token_ids,
+                )
+                if num_output_tokens_before == 0:
+                    self._it_block_ids.pop(req_id, None)
+
             finish_reason = None
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
@@ -1943,6 +1999,7 @@ class Scheduler(SchedulerInterface):
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
+                        indexer_topk=indexer_topk,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )
@@ -2314,6 +2371,8 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
+        if self.enable_return_indexer_topk:
+            self._it_block_ids.pop(request.request_id, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
         # EC Connector: mirror the KV hook. The contract requires firing
