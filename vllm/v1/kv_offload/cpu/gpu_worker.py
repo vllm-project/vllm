@@ -307,7 +307,7 @@ class SingleDirectionOffloadingHandler:
         self.src_blocks_per_chunk = 1 if self.gpu_to_cpu else blocks_per_chunk
         self.dst_blocks_per_chunk = blocks_per_chunk if self.gpu_to_cpu else 1
 
-# Per (group, ref) static copy plans for the canonical layout
+        # Per (group, ref) static copy plans for the canonical layout
         self._canonical_copy_plans: list[list[CopyPlan]] | None = (
             [
                 [_build_copy_plan(ref, gpu_to_cpu) for ref in layer_refs]
