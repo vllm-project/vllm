@@ -32,6 +32,7 @@ def test_ppl(
         mm_processor_kwargs=mm_processor_kwargs,
     )
 
+
 @pytest.mark.parametrize("model_info", MODELS[:1])
 def test_pshm(hf_runner, vllm_runner, model_info: GenerateModelInfo):
     vqa_ppl_test(

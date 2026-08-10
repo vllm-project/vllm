@@ -204,6 +204,9 @@ class AsyncPagedShmClient(_AsyncBaseClient):
         if multimodal_config is None:
             return None
 
+        if not multimodal_config.is_paged_shm_enabled():
+            return None
+
         return cls(address=multimodal_config.paged_shm_server_address, pin=pin)
 
     # ------------------------------------------------------------------

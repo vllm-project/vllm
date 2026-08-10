@@ -74,6 +74,8 @@ class PagedShmTensorIPC:
         if not self.is_paged_shm_enabled:
             return None
 
+        assert self.client_sync is not None
+
         elements: list[MultiModalFieldElem] = []
 
         def _func(elem: MultiModalFieldElem):
@@ -98,6 +100,8 @@ class PagedShmTensorIPC:
             return None
 
         for elem, item in zip(elements, alloc):
+            assert isinstance(elem.data, torch.Tensor)
+
             elem.shm_object = ShmTensor(
                 dtype=str(elem.data.dtype).removeprefix("torch."),
                 shape=tuple(elem.data.shape),

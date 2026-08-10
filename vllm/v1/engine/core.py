@@ -1646,11 +1646,15 @@ class EngineCoreProc(EngineCore):
     ):
         """Input socket IO thread."""
 
-        pshm_client = PagedShmClient.from_model_config(self.vllm_config.model_config, pin=True)
+        pshm_client = PagedShmClient.from_model_config(
+            self.vllm_config.model_config, pin=True
+        )
 
         # Msgpack serialization decoding with optional tensor IPC receiver.
         add_request_decoder = MsgpackDecoder(
-            EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver, pshm_client=pshm_client
+            EngineCoreRequest,
+            oob_tensor_provider=self.tensor_ipc_receiver,
+            pshm_client=pshm_client,
         )
         generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
 

@@ -35,7 +35,7 @@ from vllm.multimodal.inputs import (
     NestedTensors,
 )
 from vllm.renderers.paged_shm.client import PagedShmClient
-from vllm.renderers.paged_shm.types import AllocatedShmItem, ShmTensor
+from vllm.renderers.paged_shm.types import ShmTensor
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.utils import tensor_data
 
@@ -290,7 +290,7 @@ class MsgpackEncoder:
                 None if elem.data is None else self._encode_nested_tensors(elem.data)
             ),
             "field": self._encode_mm_field(elem.field),
-            "shm_object": None if elem.shm_object is None else asdict(elem.shm_object)
+            "shm_object": None if elem.shm_object is None else asdict(elem.shm_object),
         }
 
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
@@ -444,11 +444,13 @@ class MsgpackDecoder:
         )
 
     def _decode_mm_field_elem(self, obj: dict[str, Any]) -> MultiModalFieldElem:
-        shm_object_dict: ShmTensor | None = obj.get("shm_object", None)
+        shm_object_dict: dict | None = obj.get("shm_object")
         if shm_object_dict is not None:
             item = ShmTensor(**shm_object_dict)
             assert self.pshm_client is not None
-            tensor = self.pshm_client.read(item.uuid, item.blocks, device="cuda:0")
+            tensor = self.pshm_client.read(
+                item.uuid, item.size, item.blocks, device="cuda:0"
+            )
             torch_dtype = getattr(torch, item.dtype)
             obj["data"] = tensor.view(torch_dtype).view(item.shape)
         elif obj["data"] is not None:
