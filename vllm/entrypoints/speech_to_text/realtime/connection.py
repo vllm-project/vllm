@@ -745,10 +745,17 @@ class RealtimeConnection:
             final_delta, final_text = transcript.finalize()
             if final_delta:
                 await self.send(TranscriptionDelta(delta=final_delta))
-            logger.info(
+            logger.debug(
                 "QWEN3_ASR_RT_FRESH_REQUEST_DONE request_id=%s segments_started=%d "
                 "prompt_tokens=%d completion_tokens=%d rejected_candidates=%d "
                 "final_text=%r",
+                request_id or "-",
+                segments_started,
+                prompt_tokens_total,
+                completion_tokens_total,
+                transcript.rejected_candidates,
+                final_text,
+            )
                 request_id or "-",
                 segments_started,
                 prompt_tokens_total,
