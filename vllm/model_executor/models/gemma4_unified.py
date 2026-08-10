@@ -30,6 +30,7 @@ from transformers.models.gemma4_unified.processing_gemma4_unified import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import VideoDummyOptions
 from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.gemma4_mm import (
     _SUPPORTED_SOFT_TOKENS,
@@ -424,8 +425,10 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         No audio tower: the per-frame raw features are passed straight
         through the multimodal embedder, then padding is stripped.
         """
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features, input_features_mask = batch_audio_features(
+            audio_input["input_features_padded"],
+            audio_input["input_features_mask"],
+        )
 
         target_dtype = self.embed_audio.embedding_projection.weight.dtype
         audio_features = self.embed_audio(input_features.to(target_dtype))
