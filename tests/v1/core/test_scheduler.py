@@ -2655,6 +2655,59 @@ def test_scheduler_plugin_candidate_window_bounds_reordering(
     assert selection.request is requests[1]
 
 
+@pytest.mark.parametrize("policy", ["fcfs", "priority"])
+@pytest.mark.skip_global_cleanup
+def test_scheduler_plugin_candidate_window_avoids_full_queue_materialization(
+    policy: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        BUILTIN_SCHEDULER_PLUGINS,
+        _PriorityScorePlugin.name,
+        _PriorityScorePlugin,
+    )
+    profile = SchedulerPluginProfile(
+        scores=[SchedulerPluginSpec(name=_PriorityScorePlugin.name)],
+        candidate_window=2,
+    )
+    manager = SchedulerPluginManager(policy, profile)
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    requests = create_requests(num_requests=10)
+    for request in requests:
+        request.priority = 0
+        waiting.add_request(request)
+
+    if isinstance(waiting, FCFSRequestQueue):
+        monkeypatch.setattr(
+            type(waiting),
+            "__iter__",
+            Mock(side_effect=AssertionError("full queue iteration")),
+        )
+    else:
+
+        class _NoSliceList(list[Request]):
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    raise AssertionError("full heap copy")
+                return super().__getitem__(index)
+
+        assert isinstance(waiting, PriorityRequestQueue)
+        waiting._heap = _NoSliceList(waiting._heap)
+
+    selection = manager.select_candidate(
+        waiting,
+        skipped,
+        block_size=16,
+        token_budget=128,
+        encoder_budget=0,
+        num_running_requests=0,
+    )
+
+    assert selection is not None
+    assert selection.request is requests[0]
+
+
 @pytest.mark.skip_global_cleanup
 def test_all_filtered_candidates_remain_queued(
     monkeypatch: pytest.MonkeyPatch,

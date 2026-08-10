@@ -161,8 +161,8 @@ class SchedulerPluginManager:
 
         now = time.time() if now is None else now
         ordered = self.queue_sort_plugin.order_candidates(
-            tuple(waiting), tuple(skipped)
-        )[: self.candidate_window]
+            waiting, skipped, self.candidate_window
+        )
         if not ordered:
             return None
         if ordered[0].request.status == RequestStatus.PREEMPTED:

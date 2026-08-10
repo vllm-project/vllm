@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -80,10 +80,11 @@ class QueueSortPlugin(SchedulerPlugin, ABC):
     @abstractmethod
     def order_candidates(
         self,
-        waiting: Sequence["Request"],
-        skipped: Sequence["Request"],
+        waiting: "RequestQueue",
+        skipped: "RequestQueue",
+        limit: int,
     ) -> list[CandidateSelection]:
-        """Return immutable candidates in base QueueSort order."""
+        """Return up to ``limit`` candidates in base QueueSort order."""
         raise NotImplementedError
 
 

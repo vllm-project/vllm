@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import heapq
+from itertools import islice
 from typing import TYPE_CHECKING
 
 from vllm.v1.core.sched.plugins.interface import (
@@ -15,7 +17,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator
 
     from vllm.v1.core.sched.request_queue import RequestQueue
     from vllm.v1.request import Request
@@ -47,13 +49,21 @@ class FCFSSchedulerPlugin(QueueSortPlugin, PreemptionPlugin):
 
     def order_candidates(
         self,
-        waiting: "Sequence[Request]",
-        skipped: "Sequence[Request]",
+        waiting: "RequestQueue",
+        skipped: "RequestQueue",
+        limit: int,
     ) -> list[CandidateSelection]:
-        return [
-            *(CandidateSelection(request, WaitingQueue.SKIPPED) for request in skipped),
-            *(CandidateSelection(request, WaitingQueue.WAITING) for request in waiting),
-        ]
+        candidates = (
+            CandidateSelection(request, WaitingQueue.SKIPPED)
+            for request in skipped.iter_requests(limit)
+        )
+        ordered = list(islice(candidates, limit))
+        remaining = limit - len(ordered)
+        ordered.extend(
+            CandidateSelection(request, WaitingQueue.WAITING)
+            for request in waiting.iter_requests(remaining)
+        )
+        return ordered
 
 
 class PrioritySchedulerPlugin(QueueSortPlugin, PreemptionPlugin):
@@ -84,11 +94,21 @@ class PrioritySchedulerPlugin(QueueSortPlugin, PreemptionPlugin):
 
     def order_candidates(
         self,
-        waiting: "Sequence[Request]",
-        skipped: "Sequence[Request]",
+        waiting: "RequestQueue",
+        skipped: "RequestQueue",
+        limit: int,
     ) -> list[CandidateSelection]:
-        candidates = [
-            *(CandidateSelection(request, WaitingQueue.WAITING) for request in waiting),
-            *(CandidateSelection(request, WaitingQueue.SKIPPED) for request in skipped),
-        ]
-        return sorted(candidates, key=lambda candidate: candidate.request)
+        def selections(
+            queue: "RequestQueue", queue_name: WaitingQueue
+        ) -> "Iterator[CandidateSelection]":
+            return (
+                CandidateSelection(request, queue_name)
+                for request in queue.iter_requests(limit)
+            )
+
+        candidates = heapq.merge(
+            selections(waiting, WaitingQueue.WAITING),
+            selections(skipped, WaitingQueue.SKIPPED),
+            key=lambda candidate: candidate.request,
+        )
+        return list(islice(candidates, limit))
