@@ -106,13 +106,22 @@ class GuidanceBackend(StructuredOutputBackend):
             )
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        so_params=None,
     ) -> StructuredOutputGrammar:
+        disable_any_whitespace = self.disable_any_whitespace or (
+            so_params is not None and so_params.disable_any_whitespace
+        )
+        disable_additional_properties = self.disable_additional_properties or (
+            so_params is not None and so_params.disable_additional_properties
+        )
         self.serialized_grammar = serialize_guidance_grammar(
             request_type,
             grammar_spec,
-            self.disable_any_whitespace,
-            self.disable_additional_properties,
+            disable_any_whitespace,
+            disable_additional_properties,
         )
 
         ll_matcher = llguidance.LLMatcher(

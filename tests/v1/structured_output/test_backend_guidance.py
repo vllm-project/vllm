@@ -231,3 +231,45 @@ def test_mistral_tokenizer_compile_grammar(
     grammar = backend.compile_grammar(request_type, grammar_spec)
     assert grammar is not None
     assert not grammar.is_terminated()
+
+
+@pytest.mark.parametrize("per_request_flag", [True, False])
+def test_per_request_disable_any_whitespace(per_request_flag):
+    """Per-request StructuredOutputsParams.disable_any_whitespace must be
+    honored by the backend instead of being silently ignored (issue #19945).
+    """
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(tokenizer=TOKENIZER),
+        structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
+    )
+    structured_output_manager = StructuredOutputManager(vllm_config)
+
+    sampling_params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            json='{"type": "object"}',
+            disable_any_whitespace=per_request_flag,
+        ),
+    )
+    sampling_params.structured_outputs._backend = "guidance"
+    sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
+
+    request = Request(
+        "test_request",
+        prompt_token_ids=tokenizer.encode("json:"),
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    structured_output_manager.grammar_init(request)
+    while not request.structured_output_request._check_grammar_completion():
+        continue
+    grammar = request.structured_output_request.grammar
+
+    spaced = tokenizer.encode('{ "a": "b" }')
+    if per_request_flag:
+        # Whitespace-free grammar must reject the spaced form...
+        assert grammar.validate_tokens(spaced) != spaced
+        # ...while the compact form stays accepted.
+        assert grammar.accept_tokens(request.request_id, tokenizer.encode('{"a":"b"}'))
+    else:
+        assert grammar.accept_tokens(request.request_id, spaced)
