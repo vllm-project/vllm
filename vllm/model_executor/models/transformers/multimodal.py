@@ -475,6 +475,21 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs),
         )
 
+        # Bypassing `_maybe_apply_prompt_updates` also bypasses its validation.
+        # `_validate_mm_placeholders` can't be reused because it is typed for the
+        # `PlaceholderFeaturesInfo` the prompt update machinery produces.
+        mm_item_counts = mm_items.get_all_counts()
+        self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
+        for modality, item_count in mm_item_counts.items():
+            num_placeholders = len(mm_placeholders.get(modality, []))
+            if num_placeholders != item_count:
+                raise RuntimeError(
+                    f"Expected there to be {item_count} prompt placeholders "
+                    f"corresponding to {item_count} {modality} items, but instead "
+                    f"found {num_placeholders} prompt placeholders! Make sure the "
+                    "prompt contains a placeholder token for each item."
+                )
+
         return mm_input(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
