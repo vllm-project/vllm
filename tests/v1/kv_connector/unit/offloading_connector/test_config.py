@@ -661,6 +661,36 @@ def test_canonical_layout_certifies_v2_model_runner():
     ).parallel.is_parallelism_agnostic
 
 
+def test_prefer_cross_layer_blocks_yields_to_canonical_layout():
+    """Canonical mappings are certified per layer, so the connector must not
+    steer the runner into cross-layer allocation when canonical_layout is
+    requested — otherwise uniform-attention models on the v1 runner refuse
+    to start."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+        OffloadingConnector,
+    )
+
+    kv_cache_config = _make_kv_cache_config()
+    connector_module = "vllm.distributed.kv_transfer.kv_connector.v1"
+
+    def make_connector(extra_config: dict[str, Any] | None) -> OffloadingConnector:
+        with (
+            patch(f"{connector_module}.offloading_connector.OffloadingSpecFactory"),
+            patch(
+                f"{connector_module}.offloading_connector.OffloadingConnectorScheduler"
+            ),
+        ):
+            return OffloadingConnector(
+                _make_vllm_config(extra_config=extra_config),
+                KVConnectorRole.SCHEDULER,
+                kv_cache_config,
+            )
+
+    assert make_connector(None).prefer_cross_layer_blocks
+    assert not make_connector({"canonical_layout": True}).prefer_cross_layer_blocks
+
+
 def test_parallelism_agnostic_disabled_on_v2_model_runner():
     config = _make_vllm_config()
     config.use_v2_model_runner = True
