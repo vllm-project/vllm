@@ -170,9 +170,8 @@ class Glm4MoE(nn.Module):
         self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
             quant_config, prefix
         )
-        self.is_fusion_moe_shared_experts_enabled = self.is_fused_shared_expert_enabled
 
-        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
+        if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -206,9 +205,7 @@ class Glm4MoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             router_logits_dtype=torch.float32,
             n_shared_experts=(
-                config.n_shared_experts
-                if self.is_fusion_moe_shared_experts_enabled
-                else None
+                config.n_shared_experts if self.is_fused_shared_expert_enabled else None
             ),
         )
 

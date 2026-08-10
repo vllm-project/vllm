@@ -24,6 +24,7 @@ from vllm.model_executor.models.qwen3_next import (
     Qwen3NextDecoderLayer,
     Qwen3NextModel,
     Qwen3NextRMSNorm,
+    Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
     _all_gather_hidden_and_residual,
 )
@@ -159,7 +160,9 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         weights = maybe_fuse_shared_experts(
             weights,
             enabled=resolve_model_fused_shared_expert_fusion(
-                layer.mlp for layer in self.layers
+                layer.mlp
+                for layer in self.layers
+                if isinstance(layer.mlp, Qwen3NextSparseMoeBlock)
             ),
             n_routed_experts=self.config.num_experts,
             n_shared_experts=1,

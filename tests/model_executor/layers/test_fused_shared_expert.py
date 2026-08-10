@@ -23,7 +23,9 @@ def test_resolve_fused_shared_expert_fusion_skips_compatibility_when_disabled(
     monkeypatch.setattr(
         fused_moe_utils,
         "is_shared_expert_quant_fse_compatible",
-        lambda *_: pytest.fail("compatibility must not be checked when FSE is disabled"),
+        lambda *_: pytest.fail(
+            "compatibility must not be checked when FSE is disabled"
+        ),
     )
 
     assert not fused_moe_utils.resolve_fused_shared_expert_fusion(
@@ -92,11 +94,11 @@ def test_resolve_model_fused_shared_expert_fusion_requires_consistent_layers() -
     disabled_layer = SimpleNamespace(is_fused_shared_expert_enabled=False)
 
     assert fused_moe_utils.resolve_model_fused_shared_expert_fusion([enabled_layer])
-    assert not fused_moe_utils.resolve_model_fused_shared_expert_fusion([disabled_layer])
+    assert not fused_moe_utils.resolve_model_fused_shared_expert_fusion(
+        [disabled_layer]
+    )
     assert not fused_moe_utils.resolve_model_fused_shared_expert_fusion([])
-    with pytest.raises(
-        NotImplementedError, match="1 enabled and 1 disabled layers"
-    ):
+    with pytest.raises(NotImplementedError, match="1 enabled and 1 disabled layers"):
         fused_moe_utils.resolve_model_fused_shared_expert_fusion(
             [enabled_layer, disabled_layer]
         )
@@ -119,7 +121,10 @@ def test_quark_shared_expert_fse_compatibility(
     if expected:
         assert reason is None
     else:
-        assert reason == "Quark excludes shared experts at model.layers.0.mlp.shared_expert"
+        assert (
+            reason
+            == "Quark excludes shared experts at model.layers.0.mlp.shared_expert"
+        )
 
 
 def test_non_quark_shared_expert_fse_is_incompatible() -> None:

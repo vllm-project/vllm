@@ -342,7 +342,6 @@ class DeepseekV2MoE(nn.Module):
         self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
             quant_config, prefix
         )
-        self.is_fusion_moe_shared_experts_enabled = self.is_fused_shared_expert_enabled
         if (
             self.is_rocm_aiter_moe_enabled
             and self.gate.e_score_correction_bias is not None
@@ -351,7 +350,7 @@ class DeepseekV2MoE(nn.Module):
             # Accumulates in fp32; avoids bf16->fp32 cast.
             self.gate.set_out_dtype(self.gate.weight.dtype)
 
-        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
+        if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -388,7 +387,7 @@ class DeepseekV2MoE(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
             reduce_results=reduce_results,
             n_shared_experts=config.n_shared_experts
-            if self.is_fusion_moe_shared_experts_enabled
+            if self.is_fused_shared_expert_enabled
             else None,
             router_logits_dtype=self.gate.out_dtype,
         )

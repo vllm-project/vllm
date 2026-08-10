@@ -695,7 +695,9 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         weights = maybe_fuse_shared_experts(
             weights,
             enabled=resolve_model_fused_shared_expert_fusion(
-                layer.mlp for layer in self.layers
+                layer.mlp
+                for layer in self.layers
+                if isinstance(layer.mlp, Qwen3NextSparseMoeBlock)
             ),
             n_routed_experts=getattr(self.config, "num_experts", 0),
             n_shared_experts=1,
