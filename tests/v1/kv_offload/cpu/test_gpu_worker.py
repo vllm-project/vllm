@@ -195,7 +195,7 @@ def test_transfer(
             assert finished[0].success
             assert finished[0].transfer_size == (
                 len(gpu_blocks)
-                * sum([x.page_size_bytes for x in handler.kv_cache_groups_data_refs[0]])
+                * sum([x.page_size_bytes for x in handler.layer_refs_per_group[0]])
             )
             assert finished[0].transfer_time > 0
             assert finished[0].transfer_time < (time.time() - start_time)
@@ -409,7 +409,7 @@ def test_transfer_multi_group(
             expected_bytes = sum(
                 group_size * sum([x.page_size_bytes for x in data_refs])
                 for group_size, data_refs in zip(
-                    group_sizes, handler.kv_cache_groups_data_refs
+                    group_sizes, handler.layer_refs_per_group
                 )
             )
             assert finished[0].transfer_size == expected_bytes
