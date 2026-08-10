@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -36,6 +37,52 @@ from vllm.utils.import_utils import (
     has_mori,
     has_nixl_ep,
 )
+
+
+@dataclass(frozen=True)
+class FlashInferOneSidedDispatchLayout:
+    x_bytes_per_token: int
+    x_sf_bytes_per_token: int
+
+
+def flashinfer_one_sided_dispatch_layout(
+    hidden_dim: int, quant_config: FusedMoEQuantConfig
+) -> FlashInferOneSidedDispatchLayout:
+    """Return the one-sided activation payload layout."""
+    if quant_config.quant_dtype is None:
+        return FlashInferOneSidedDispatchLayout(hidden_dim * 2, 0)
+    if quant_config.quant_dtype == "nvfp4":
+        scale_elems = hidden_dim // 16
+        return FlashInferOneSidedDispatchLayout(hidden_dim // 2, scale_elems)
+    if quant_config.quant_dtype == "mxfp8":
+        align = quant_config.mx_alignment
+        padded_k = (
+            ((hidden_dim + align - 1) // align) * align if align > 0 else hidden_dim
+        )
+        scale_elems = padded_k // 32
+        return FlashInferOneSidedDispatchLayout(hidden_dim, scale_elems)
+    if (
+        quant_config.use_fp8_w8a8
+        and quant_config.quant_dtype == current_platform.fp8_dtype()
+        and quant_config.block_shape == [128, 128]
+    ):
+        if hidden_dim % 128 != 0:
+            raise NotImplementedError(
+                "flashinfer_nvlink_one_sided native 128x128 block-fp8 dispatch "
+                f"requires hidden_dim divisible by 128; got {hidden_dim}"
+            )
+        scale_elems = hidden_dim // 128
+        scale_bytes = scale_elems * torch.float32.itemsize
+        return FlashInferOneSidedDispatchLayout(hidden_dim, scale_bytes)
+    raise NotImplementedError(
+        "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
+        "native E4M3+FP32-scale 128x128 block-fp8, and bf16 "
+        "(quant_dtype=None) today; got "
+        f"quant_dtype={quant_config.quant_dtype!r}, "
+        f"use_fp8_w8a8={quant_config.use_fp8_w8a8!r}, "
+        f"block_shape={quant_config.block_shape!r}"
+    )
+
 
 logger = init_logger(__name__)
 
@@ -282,34 +329,17 @@ def maybe_make_prepare_finalize(
         max_num_tokens = (
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
-        if quant_config.quant_dtype is None:
-            dispatch_dtype_bytes_per_elem = 2
-            dispatch_scale_bytes_per_token = 0
-        elif quant_config.quant_dtype == "nvfp4":
-            dispatch_dtype_bytes_per_elem = 0
-            dispatch_scale_bytes_per_token = moe.hidden_dim // 16
-        elif quant_config.quant_dtype == "mxfp8":
-            dispatch_dtype_bytes_per_elem = 1
-            align = quant_config.mx_alignment
-            if align > 0:
-                padded_k = ((moe.hidden_dim + align - 1) // align) * align
-            else:
-                padded_k = moe.hidden_dim
-            dispatch_scale_bytes_per_token = padded_k // 32
-        else:
-            raise NotImplementedError(
-                "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
-                "and bf16 (quant_dtype=None) today; got "
-                f"quant_dtype={quant_config.quant_dtype!r}"
-            )
+        dispatch_layout = flashinfer_one_sided_dispatch_layout(
+            moe.hidden_dim, quant_config
+        )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
             max_num_tokens=max_num_tokens,
             top_k=moe.experts_per_token,
             num_experts=moe.num_experts,
             hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
-            dispatch_dtype_bytes_per_elem=dispatch_dtype_bytes_per_elem,
-            dispatch_scale_bytes_per_token=dispatch_scale_bytes_per_token,
+            x_bytes_per_token=dispatch_layout.x_bytes_per_token,
+            x_sf_bytes_per_token=dispatch_layout.x_sf_bytes_per_token,
         )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:

@@ -130,7 +130,7 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "mori_high_throughput":        {None,         "fp8", "modelopt_fp8"},
     "mori_low_latency":            {None,         "fp8", "modelopt_fp8"},
     "flashinfer_nvlink_two_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
-    "flashinfer_nvlink_one_sided": {None,                                "modelopt_fp4"}, # noqa: E501
+    "flashinfer_nvlink_one_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "deepep_low_latency":          {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "deepep_high_throughput":      {None, "fp8_blocked", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
     "nixl_ep":                     {None, "fp8_blocked", "modelopt_fp8"},
