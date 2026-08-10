@@ -420,9 +420,9 @@ _FUSION_CONFIGS = [
 @pytest.mark.parametrize("use_shuffle_kv_layout", ["1", "0"])
 @pytest.mark.parametrize(
     "kv_stride_order",
-    # FA/unified use the 4D packed cache (num_blocks, num_kv_heads, block_size,
-    # 2*head_size); no separate K/V dim to permute.
-    [pytest.param((0, 1, 2, 3), id="packed_4d")],
+    # Allocate in whatever order the backend's get_kv_cache_shape reports
+    # (separate K/V head-group planes under AITER, packed content otherwise).
+    [pytest.param((0, 1, 2, 3), id="natural_order")],
 )
 @pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
 @pytest.mark.parametrize("block_size", [16, 32, 64])

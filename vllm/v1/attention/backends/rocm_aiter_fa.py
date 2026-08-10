@@ -710,6 +710,20 @@ class AiterFlashAttentionMetadataBuilder(
         return False
 
 
+def _use_separate_kv_head_groups() -> bool:
+    """K and V in separate page halves, each a token-major head group.
+
+    The AITER fused QK-norm+RoPE+cache kernel addresses each side as
+    block_id * stride(0) + token * (H*hs) + head * hs and asserts per-side
+    contiguity within a block, which the packed content layout cannot satisfy
+    (splitting it leaves the head dim strided). The shuffle-layout variant uses
+    its own x-packed interior and keeps the packed content dim.
+    """
+    return (
+        rocm_aiter_ops.is_enabled() and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+    )
+
+
 class AiterFlashAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
 
@@ -771,6 +785,9 @@ class AiterFlashAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
+        if _use_separate_kv_head_groups():
+            # Two block-contiguous token-major sides: (B, 2, N, H*hs).
+            return (num_blocks, 2, block_size, num_kv_heads * head_size)
         # K and V are packed into the content dim: logical (B, H, N, 2*hs).
         return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
@@ -821,6 +838,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.sinks = sinks
+        self.separate_kv_head_groups = _use_separate_kv_head_groups()
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -1036,8 +1054,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape =
-                [num_blocks, 2, block_size, num_kv_heads, head_size]
+            kv_cache: shape = see get_kv_cache_shape; either the separate
+                split layout [num_blocks, 2, block_size,
+                num_kv_heads * head_size] or the packed content layout
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -1387,6 +1407,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.separate_kv_head_groups:
+            # (B, 2, N, H*hs) -> ((B, N, H, hs), (B, N, H, hs)), each side
+            # contiguous within a block as the AITER fused kernel requires.
+            key_cache, value_cache = kv_cache.unbind(1)
+            shape = (*key_cache.shape[:-1], self.num_kv_heads, self.head_size)
+            return key_cache.view(shape), value_cache.view(shape)
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
@@ -1453,12 +1479,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        # Only fuse when shuffle layout is off; the shuffle write path uses a
-        # dedicated cache update, mirroring fused_rope_kvcache_supported.
-        return (
-            rocm_aiter_ops.is_enabled()
-            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-        )
+        # The fused kernel requires each side to be contiguous within a block,
+        # which only the split layout provides.
+        return self.separate_kv_head_groups
 
     def do_qk_norm_rope_kvcache_update(
         self,

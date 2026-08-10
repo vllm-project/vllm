@@ -243,6 +243,19 @@ def _split_kv_regions(
     return None
 
 
+def _aiter_separate_kv_head_groups() -> bool:
+    """Whether ROCm AITER is allocating K and V in separate page halves."""
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return False
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return (
+        rocm_aiter_ops.is_enabled() and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+    )
+
+
 def _attention_byte_regions(
     kv_cache: torch.Tensor,
     spec: AttentionSpec,
@@ -254,6 +267,27 @@ def _attention_byte_regions(
     """Byte regions of an attention page, given this rank's head shard.
     None when the physical layout is not recognized (fail closed)."""
     bs, heads, head_size = spec.block_size, spec.num_kv_heads, spec.head_size
+    if _aiter_separate_kv_head_groups() and tuple(kv_cache.shape) == (
+        num_blocks,
+        2,
+        bs,
+        heads * head_size,
+    ):
+        # ROCm AITER split layout: the same bytes as the 5-D form above with the
+        # head group flattened into the content dim. At heads == 2 the shape
+        # *and* strides are identical to the packed form below, so the layout
+        # is unknowable from the tensor alone -- fail closed instead of
+        # guessing. TODO: slice_for_tp_transfer (see the KV-layout RFC) will
+        # carry layout identity so it no longer has to be inferred here.
+        if heads == 2 or kv_cache.stride(-1) != 1:
+            return None
+        return _split_kv_regions(
+            kv_cache.unflatten(-1, (heads, head_size)),
+            spec,
+            head_shard,
+            num_head_shards,
+            cp_size,
+        )
     if tuple(kv_cache.shape) == (num_blocks, heads, bs, 2 * head_size):
         return _packed_kv_regions(kv_cache, spec, head_shard, num_head_shards, cp_size)
     if tuple(kv_cache.shape) == (num_blocks, 2, bs, heads, head_size):

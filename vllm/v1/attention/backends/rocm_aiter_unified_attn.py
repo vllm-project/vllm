@@ -26,6 +26,16 @@ from vllm.v1.attention.backends.rocm_attn import (
 logger = init_logger(__name__)
 
 
+def _use_separate_kv_head_groups() -> bool:
+    """K and V in separate page halves, each a token-major head group.
+
+    The AITER fused QK-norm+RoPE+cache kernel asserts that each side is
+    contiguous within a block, which the packed content layout cannot satisfy.
+    This backend is NHD-only, so the shuffle layout does not apply here.
+    """
+    return rocm_aiter_ops.is_enabled()
+
+
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -87,6 +97,9 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
+        if _use_separate_kv_head_groups():
+            # Two block-contiguous token-major sides: (B, 2, N, H*hs).
+            return (num_blocks, 2, block_size, num_kv_heads * head_size)
         # K and V are packed into the content dim: logical (B, H, N, 2*hs).
         return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
@@ -147,10 +160,17 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         self.unified_attention = unified_attention
         self.supports_quant_query_input = True
+        self.separate_kv_head_groups = _use_separate_kv_head_groups()
 
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.separate_kv_head_groups:
+            # (B, 2, N, H*hs) -> ((B, N, H, hs), (B, N, H, hs)), each side
+            # contiguous within a block as the AITER fused kernel requires.
+            key_cache, value_cache = kv_cache.unbind(1)
+            shape = (*key_cache.shape[:-1], self.num_kv_heads, self.head_size)
+            return key_cache.view(shape), value_cache.view(shape)
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
@@ -172,8 +192,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape =
-                [num_blocks, 2, block_size, num_kv_heads, head_size]
+            kv_cache: shape = see get_kv_cache_shape; either the separate
+                split layout [num_blocks, 2, block_size,
+                num_kv_heads * head_size] or the packed content layout
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -312,7 +334,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         return rocm_aiter_ops.is_enabled()
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        # The fused kernel requires each side to be contiguous within a block,
+        # which only the split layout provides.
+        return self.separate_kv_head_groups
 
     def do_qk_norm_rope_kvcache_update(
         self,
