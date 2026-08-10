@@ -1429,6 +1429,44 @@ async fn api_key_auth_accepts_matching_bearer_token_on_guarded_route() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn api_key_auth_accepts_matching_x_api_key_on_guarded_route() {
+    let (mut app, _engine_task) = test_app_with_api_keys(vec!["secret".to_string()]).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("x-api-key", "secret")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn api_key_auth_rejects_wrong_x_api_key_on_guarded_route() {
+    let (mut app, _engine_task) = test_app_with_api_keys(vec!["secret".to_string()]).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("x-api-key", "wrong")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn api_key_auth_allows_options_without_token() {
     let (mut app, _engine_task) = test_app_with_api_keys(vec!["secret".to_string()]).await;
     let response = app
