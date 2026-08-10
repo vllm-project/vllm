@@ -561,7 +561,7 @@ class FlexibleArgumentParser(ArgumentParser):
         config: dict[str, Any] = {}
         try:
             with open(file_path) as config_file:
-                config = yaml.safe_load(config_file)
+                config = yaml.safe_load(config_file) or {}
         except Exception as ex:
             logger.error(
                 "Unable to read the config file at %s. Check path correctness",

@@ -379,6 +379,17 @@ def test_load_config_file(tmp_path):
     os.remove(str(config_file_path))
 
 
+def test_load_config_file_empty(tmp_path):
+    """Test that an empty YAML config file is treated as an empty config."""
+    config_file_path = tmp_path / "empty_config.yaml"
+    config_file_path.write_text("")
+
+    parser = FlexibleArgumentParser()
+    processed_args = parser.load_config_file(str(config_file_path))
+
+    assert processed_args == []
+
+
 def test_load_config_file_nested(tmp_path):
     """Test that nested dicts in YAML config are converted to JSON strings."""
     config_data = {
