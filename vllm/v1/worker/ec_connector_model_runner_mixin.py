@@ -53,10 +53,12 @@ class ECConnectorModelRunnerMixin:
         encoder_cache: dict[str, torch.Tensor],
         **kwargs,
     ) -> AbstractContextManager[ECConnectorOutput | None]:
-        if scheduler_output.ec_connector_metadata is None or not has_ec_transfer():
-            return nullcontext()
-        return ECConnectorModelRunnerMixin._get_ec_connector_output(
-            scheduler_output, encoder_cache, **kwargs
+        return (
+            ECConnectorModelRunnerMixin._get_ec_connector_output(
+                scheduler_output, encoder_cache, **kwargs
+            )
+            if has_ec_transfer() and scheduler_output.ec_connector_metadata is not None
+            else nullcontext()
         )
 
     # This context manager must be used within an active forward context.
