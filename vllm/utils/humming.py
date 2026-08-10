@@ -12,6 +12,8 @@ import importlib
 from typing import Any
 
 _EXPORTS: dict[str, str] = {
+    "HummingMethod": "humming.layer:HummingMethod",
+    "HummingLayerMeta": "humming.layer:HummingLayerMeta",
     "dtypes": "humming.dtypes",
     "DataType": "humming.dtypes:DataType",
     "GemmType": "humming.config:GemmType",

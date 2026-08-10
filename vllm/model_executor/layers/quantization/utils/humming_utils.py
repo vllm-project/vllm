@@ -1018,7 +1018,15 @@ def convert_to_humming_moe_kernel_format(
             weight_schema = BaseWeightSchema.from_config(quant_config)
 
         if input_schema is None:
-            input_quant_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {}
+            # VLLM_HUMMING_INPUT_QUANT_CONFIG does not reach the EngineCore/worker
+            # subprocesses (present on the API-server process only), so it reads as
+            # empty here and the MoE silently falls back to unquantized bf16
+            # activations (W4A16). Default to block-FP8 group-128 to keep the
+            # intended W4A8 path when the env var is absent.
+            input_quant_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {
+                "dtype": "float8e4m3",
+                "group_size": 128,
+            }
             if humming_is_layer_skipped(input_quant_config, layer.layer_name):
                 input_schema = HummingInputSchema()
             else:

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 from enum import Enum
 from typing import TYPE_CHECKING, Literal, Union
 
@@ -1803,9 +1804,18 @@ def make_mxfp4_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     mxfp4_backend: Mxfp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    layer: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
+
+    # Humming experts require the owning layer in their constructor; other
+    # experts classes don't accept it. Forward it only when the signature has it.
+    layer_kwargs = (
+        {"layer": layer}
+        if "layer" in inspect.signature(experts_cls.__init__).parameters
+        else {}
+    )
 
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -1824,6 +1834,7 @@ def make_mxfp4_moe_kernel(
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(
+            **layer_kwargs,
             moe_config=moe_config,
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
@@ -1831,6 +1842,7 @@ def make_mxfp4_moe_kernel(
         )
     else:
         experts = experts_cls(
+            **layer_kwargs,
             moe_config=moe_config,
             quant_config=moe_quant_config,
         )
