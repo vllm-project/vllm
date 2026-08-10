@@ -1251,7 +1251,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         A no-op unless this rank runs the EC connector: the connector is the
         no-op one unless an encoder cache exists.
         """
-        return ModelRunnerOutput.attach_ec_conn_output(
+        return ModelRunnerOutput.with_ec_conn_output(
             output,
             self.ec_connector.no_forward(scheduler_output).ec_connector_output,
         )
@@ -1410,7 +1410,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_ids = None
 
         if self.is_encoder_only:
-            return ModelRunnerOutput.attach_ec_conn_output(
+            return ModelRunnerOutput.with_ec_conn_output(
                 make_empty_encoder_model_runner_output(scheduler_output),
                 ec_connector_output,
             )
@@ -1561,7 +1561,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # is_last_pp_rank early return in execute_model above), but may have
             # produced ec_connector_output on the first PP rank -- pass it through.
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
-            return ModelRunnerOutput.attach_ec_conn_output(output, ec_connector_output)
+            return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
@@ -1698,7 +1698,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
-            return ModelRunnerOutput.attach_ec_conn_output(
+            return ModelRunnerOutput.with_ec_conn_output(
                 ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output),
                 ec_connector_output,
             )

@@ -344,7 +344,7 @@ class ModelRunnerOutput:
         return output
 
     @staticmethod
-    def attach_ec_conn_output(
+    def with_ec_conn_output(
         output: "ModelRunnerOutput",
         ec_connector_output: ECConnectorOutput | None,
     ) -> "ModelRunnerOutput":

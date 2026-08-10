@@ -4212,10 +4212,10 @@ class GPUModelRunner(
                     encoder_cache=self.encoder_cache,
                 ) as ec_connector_output:
                     self._execute_mm_encoder(scheduler_output)
-                # attach_ec_conn_output tests is_empty(), so it must run after
+                # with_ec_conn_output tests is_empty(), so it must run after
                 # the context manager's finally block has populated
                 # ec_connector_worker_meta.
-                return ModelRunnerOutput.attach_ec_conn_output(
+                return ModelRunnerOutput.with_ec_conn_output(
                     make_empty_encoder_model_runner_output(scheduler_output),
                     ec_connector_output,
                 )
@@ -4249,7 +4249,7 @@ class GPUModelRunner(
                     ec_output = self.ec_connector_no_forward(
                         scheduler_output, self.vllm_config, self.encoder_cache
                     )
-                    output = ModelRunnerOutput.attach_ec_conn_output(
+                    output = ModelRunnerOutput.with_ec_conn_output(
                         output, ec_output.ec_connector_output
                     )
                 return output
@@ -4580,7 +4580,7 @@ class GPUModelRunner(
             # outputs -- this rank never has a "real" ModelRunnerOutput of its
             # own (see the is_last_rank early return in execute_model above).
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
-            return ModelRunnerOutput.attach_ec_conn_output(output, ec_connector_output)
+            return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Unpack ephemeral state.
         (
