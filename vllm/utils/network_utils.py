@@ -136,6 +136,22 @@ def get_file_store_init_method() -> str:
     return f"file://{tempfile.gettempdir()}/vllm_dist_{uuid4().hex}"
 
 
+def aiter_requires_tcp_store() -> bool:
+    """AITER custom all-reduce requires a pure-TCP default store (its IPC
+    metadata exchange asserts on ``TCPStore``); the file:// rendezvous yields a
+    ``FileStore`` and trips that assertion. Prefer the TCP rendezvous
+    (pre-#50999) for ROCm + AITER custom AR until AITER accepts FileStore.
+    """
+    import vllm.envs as envs
+    from vllm.platforms import current_platform
+
+    return (
+        current_platform.is_rocm()
+        and envs.VLLM_ROCM_USE_AITER
+        and envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
+    )
+
+
 def get_tcp_uri(ip: str, port: int) -> str:
     if is_valid_ipv6_address(ip):
         return f"tcp://[{ip}]:{port}"
