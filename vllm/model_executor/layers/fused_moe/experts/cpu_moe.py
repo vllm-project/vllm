@@ -11,8 +11,7 @@ import os
 
 import torch
 
-# Set VLLM_CPU_MOE_FP8_W8A8=1 to enable the FP8 W8A8 MoE path on CPU
-# (stage-1 FP8×FP8 GEMM). Defaults to W8A16 to match the upstream baseline.
+# Set VLLM_CPU_MOE_FP8_W8A8=1 to enable the FP8 W8A8 MoE path on CPU.
 # Mirrors SGLang's SGLANG_DEEPSEEK_FP8A8 env-var selection approach.
 _CPU_MOE_FP8_W8A8: bool = os.getenv("VLLM_CPU_MOE_FP8_W8A8", "0") == "1"
 
@@ -1420,11 +1419,7 @@ def prepare_fp8_w8a8_moe_layer_for_cpu(
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Prepack FP8 W8A8 MoE weights for CPU kernel.
-
-    w13 uses float8_linear_prepack_cpu (FP8×FP8 AMX GEMM).
-    w2 uses convert_weight_packed (BF16×FP8 W8A16 stage-2 path).
-    """
+    """Prepack FP8 W8A8 MoE weights for CPU kernel."""
     E = w13.size(0)
 
     packed_w13_list = []
@@ -1454,11 +1449,7 @@ def prepare_fp8_w8a8_moe_layer_for_cpu(
 
 
 class CPUExpertsFp8W8A8(mk.FusedMoEExpertsMonolithic):
-    """CPU FP8 W8A8 block-quantized monolithic MoE experts.
-
-    Stage 1: FP8×FP8 GEMM via AMX (hidden_states quantized to FP8 on-the-fly).
-    Stage 2: BF16×FP8 GEMM (W8A16 path, activation is BF16 after SiLU).
-    """
+    """CPU FP8 W8A8 block-quantized monolithic MoE experts."""
 
     def __init__(
         self,
@@ -1569,10 +1560,6 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
-            select_experts,
-        )
-
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,

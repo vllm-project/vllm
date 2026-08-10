@@ -2288,6 +2288,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
         "VLLM_CPU_KVCACHE_SPACE",
         "VLLM_CPU_MOE_PREPACK",
+        "VLLM_CPU_MOE_FP8_W8A8",
         "VLLM_ZENTORCH_WEIGHT_PREPACK",
         "VLLM_TEST_FORCE_LOAD_FORMAT",
         "VLLM_ENABLE_CUDA_COMPATIBILITY",

@@ -231,8 +231,6 @@ def backend_to_kernel_cls(
         return [XPUExpertsFp8, XPUExpertsMxFp8, XPUExpertsBlockFp8]
 
     elif backend == Fp8MoeBackend.CPU:
-        # For block-quant FP8: W8A8 when VLLM_CPU_MOE_FP8_W8A8=1 (CPUExpertsFp8W8A8),
-        # otherwise W8A16 (CPUExpertsFp8).
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             CPUExpertsFp8,
             CPUExpertsFp8W8A8,
@@ -551,7 +549,7 @@ def convert_to_fp8_moe_kernel_format(
             prepare_fp8_w8a8_moe_layer_for_cpu,
         )
 
-        # Block quant: W8A8 when VLLM_CPU_MOE_FP8_W8A8=1, else W8A16.
+        # W8A8 when VLLM_CPU_MOE_FP8_W8A8=1, else W8A16.
         if _use_fp8_w8a8_moe():
             w13, w13_scale, w2, w2_scale = prepare_fp8_w8a8_moe_layer_for_cpu(
                 w13, w2, w13_scale, w2_scale
@@ -605,7 +603,6 @@ def make_fp8_moe_quant_config(
     a method of the modular kernel itself.
     """
 
-    # CPU: block quant uses W8A8 when VLLM_CPU_MOE_FP8_W8A8=1, else W8A16.
     if fp8_backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             _use_fp8_w8a8_moe,

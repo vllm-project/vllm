@@ -1885,7 +1885,7 @@ def scaled_fp8_quant(
 
     if current_platform.is_cpu():
         # CPU does not implement static/dynamic_scaled_fp8_quant; use native
-        # PyTorch math instead (same approach as sglang's requantize_with_max_scale_cpu).
+        # PyTorch math instead.
         fp8_max = torch.finfo(out_dtype).max
         x = input.float()
         if scale is None:

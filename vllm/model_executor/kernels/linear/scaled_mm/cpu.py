@@ -327,16 +327,7 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
 
 class CPUFp8BlockScaledMMW8A8Kernel(Fp8BlockScaledMMLinearKernel):
-    """FP8 W8A8 block-quantized GEMM with dynamic per-token activation quant on CPU.
-
-    Block-quantized weights (e.g. 128×128 blocks) are prepacked via
-    float8_linear_prepack_cpu for AMX-FP8 BRGEMM.  Activations are
-    quantized per-token dynamically inside fp8_scaled_mm_with_quant.
-    Falls back to AMX-BF16 on hardware without native AMX-FP8.
-
-    This kernel takes priority over CPUFp8BlockScaledMMKernel (W8A16) when
-    the W8A8 ops are available.
-    """
+    """FP8 W8A8 block-quantized GEMM with dynamic per-token activation quant on CPU."""
 
     # Activation quant is done inside fp8_scaled_mm_with_quant;
     # the base class must not apply a second quant step.
@@ -467,12 +458,7 @@ class CPUFp8BlockScaledMMW8A8Kernel(Fp8BlockScaledMMLinearKernel):
 
 
 class CPUFp8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    """FP8 W8A8 GEMM with dynamic per-token activation quantization on CPU.
-
-    Uses AMX-FP8 (or BF16 fallback) for native FP8xFP8 computation.
-    Adapted from sglang's float8_linear / fp8_scaled_mm_with_quant.
-    Supports per-tensor static and per-token dynamic activation quantization.
-    """
+    """FP8 W8A8 GEMM with dynamic per-token activation quantization on CPU."""
 
     @classmethod
     def is_supported(

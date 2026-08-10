@@ -584,6 +584,11 @@ if (ENABLE_X86_ISA)
     # For AMX kernels
     target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
 
+    if("$ENV{VLLM_CPU_FP8_BRGEMM}" STREQUAL "1")
+        message(STATUS "Enabling macro: VLLM_CPU_FP8_BRGEMM")
+        target_compile_definitions(_C PRIVATE VLLM_CPU_FP8_BRGEMM)
+    endif()
+
     # AVX512F 
     define_extension_target(
         _C_AVX512
