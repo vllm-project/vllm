@@ -995,6 +995,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
+        max_transformers_version="5.14.1",
+        transformers_version_reason={
+            "vllm": (
+                "Remote video processor code imports "
+                "`BASE_VIDEO_PROCESSOR_DOCSTRING`, removed in Transformers 5.15."
+            )
+        },
+    ),
+    "InternS2MobiusForConditionalGeneration": _HfExamplesInfo(
+        "internlm/Intern-S2-Mobius",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "InternS2PreviewForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S2-Preview",
@@ -1681,6 +1693,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer_mode="inkling",
         trust_remote_code=True,
         max_model_len=4096,
+    ),
+    "InternS2MobiusMTP": _HfExamplesInfo(
+        "internlm/Intern-S2-Mobius",
+        trust_remote_code=True,
+        speculative_model="internlm/Intern-S2-Mobius",
+        is_available_online=False,
     ),
     "KimiK3MTPModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
