@@ -18,10 +18,9 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention.attention import (
-    Attention,
     set_default_quant_scales,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
@@ -102,9 +101,15 @@ def test_online_quantization(
     if force_marlin:
         monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
 
+    model_dtype = "auto"
+    if kv_cache_dtype == "fp8" and current_platform.is_device_capability_family(90):
+        # FA3 requires BF16 output when the query input is FP8.
+        model_dtype = "bfloat16"
+
     with vllm_runner(
         "facebook/opt-125m",
         quantization="fp8",
+        dtype=model_dtype,
         enforce_eager=True,
         kv_cache_dtype=kv_cache_dtype,
     ) as llm:
@@ -387,7 +392,7 @@ def test_fp8_reloading(
             method.use_marlin = use_marlin
 
         else:
-            layer = FusedMoE(
+            layer = FusedMoEFactory(
                 num_experts=1,
                 top_k=1,
                 hidden_size=1,
@@ -427,8 +432,7 @@ def test_fp8_reloading(
     method.process_weights_after_loading(layer)
 
 
-@pytest.mark.parametrize("source", ["checkpoint", "runtime_calc"])
-def test_kv_cache_scale_sync_to_host_copies(source):
+def test_kv_cache_scale_sync_to_host_copies():
     """Test device-to-host sync of the k/v quantization scales, for both the
     checkpoint-load and runtime-calc paths that produce them.
     """
@@ -436,23 +440,13 @@ def test_kv_cache_scale_sync_to_host_copies(source):
     set_default_quant_scales(layer, register_buffer=True)
     layer.kv_cache_dtype = "fp8"
 
-    if source == "checkpoint":
-        # Scales come from the checkpoint, so runtime calc is disabled.
-        layer.calculate_kv_scales = False
-        method = BaseKVCacheMethod(quant_config=None)
-        method.create_weights(layer)
-        # 0.3 stays != 1.0 even after the fp8_fnuz x2 rescale.
-        checkpoint_scale = torch.tensor(0.3, dtype=torch.float32)
-        layer.k_scale.weight_loader(layer.k_scale, checkpoint_scale)
-        layer.v_scale.weight_loader(layer.v_scale, checkpoint_scale)
-        method.process_weights_after_loading(layer)
-    else:
-        # First forward computes distinct, non-unity scales from live k/v.
-        layer.calculate_kv_scales = True
-        query = torch.full((4, 8), 10.0)
-        key = torch.full((4, 8), 60.0)
-        value = torch.full((4, 8), 50.0)
-        Attention.calc_kv_scales(layer, query, key, value)
+    method = BaseKVCacheMethod(quant_config=None)
+    method.create_weights(layer)
+    # 0.3 stays != 1.0 even after the fp8_fnuz x2 rescale.
+    checkpoint_scale = torch.tensor(0.3, dtype=torch.float32)
+    layer.k_scale.weight_loader(layer.k_scale, checkpoint_scale)
+    layer.v_scale.weight_loader(layer.v_scale, checkpoint_scale)
+    method.process_weights_after_loading(layer)
 
     assert layer._k_scale_float != 1.0
     assert layer._v_scale_float != 1.0

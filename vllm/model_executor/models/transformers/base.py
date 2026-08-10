@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend base class."""
 
+import os
 from collections.abc import Callable, Iterable
 from itertools import chain
 from operator import attrgetter
@@ -40,9 +41,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
+    MLAAttention,
 )
+from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import MoERunner
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
@@ -52,23 +55,27 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.fuser import BaseFuser, Fusers
+from vllm.model_executor.models.transformers.fusers import MLAFuser
 from vllm.model_executor.models.transformers.utils import (
+    attrsetter,
     can_enable_torch_compile,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
+    named_state,
     replace_conv_class,
+    replace_embedding_class,
     replace_linear_class,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    extract_layer_index,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel
@@ -76,17 +83,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
-
-
-class ScaledVocabParallelEmbedding(VocabParallelEmbedding):
-    """`VocabParallelEmbedding` that scales its output."""
-
-    def __init__(self, *args, embed_scale: float, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.embed_scale = embed_scale
-
-    def forward(self, input_: torch.Tensor) -> torch.Tensor:
-        return super().forward(input_) * self.embed_scale
 
 
 class Base(
@@ -104,6 +100,7 @@ class Base(
         super().__init__()
         logger.info("Using Transformers modeling backend.")
 
+        self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
         self.text_config = self.config.get_text_config()
         self.cache_config = vllm_config.cache_config
@@ -128,6 +125,9 @@ class Base(
         self.packed_modules_mapping: dict[str, list[str]] = {}
         """Fused module -> constituent projections, populated by `recursive_replace`
         for the quantization machinery and loaders (e.g. bitsandbytes)."""
+        self.fusers: dict[str, BaseFuser] = {}
+        """Module qualname -> the fuser applied to it, populated
+        by `recursive_replace` for `create_attention_instances`."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
         self._target_class: type[nn.Module] = nn.Module
@@ -169,27 +169,15 @@ class Base(
         # Input embeddings
         input_embeddings = self.model.get_input_embeddings()
         if not isinstance(input_embeddings, PPMissingLayer):
-            names = ("embedding_size", "hidden_size")
-            embedding_dim = getattr_iter(self.text_config, names, None)
-            assert embedding_dim is not None
-            embedding_kwargs = dict(
-                num_embeddings=self.text_config.vocab_size,
-                embedding_dim=embedding_dim,
-                org_num_embeddings=self.text_config.vocab_size,
-                quant_config=self.quant_config,
+            self.model.set_input_embeddings(
+                replace_embedding_class(input_embeddings, self.quant_config)
             )
-            embed_scale = getattr(input_embeddings, "embed_scale", None)
-            if embed_scale is not None:
-                # Some models scale embeddings inside the input embedding layer
-                new_input_embeddings = ScaledVocabParallelEmbedding(
-                    **embedding_kwargs, embed_scale=float(embed_scale)
-                )
-            else:
-                new_input_embeddings = VocabParallelEmbedding(**embedding_kwargs)
-            self.model.set_input_embeddings(new_input_embeddings)
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
+
+        # Upcast weights Transformers always keeps in fp32
+        self.keep_in_fp32(self.model)
 
         # Pipeline parallel intermediate tensors
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -357,7 +345,7 @@ class Base(
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
-            logger.warning(
+            logger.warning_once(
                 "%s does not define a pipeline parallel plan. The Transformers "
                 "modeling backend will infer the split from the layers of %s in order "
                 "of declaration and keep parameter-free modules on every rank. This "
@@ -366,16 +354,6 @@ class Base(
                 type(module),
                 tip,
             )
-
-        def attrsetter(attr: str) -> Callable[[object, object], None]:
-            """Set a possibly nested attribute, like the inverse of attrgetter."""
-            parent, _, name = attr.rpartition(".")
-
-            def setter(obj: object, value: object):
-                attr_parent = attrgetter(parent)(obj) if parent else obj
-                setattr(attr_parent, name, value)
-
-            return setter
 
         module_lists = []
         module_list_idx = None
@@ -452,10 +430,12 @@ class Base(
         # Prefix the patterns because we always start from `self.model`
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
         # Detect fusable patterns once per module class (cached, so this is cheap)
-        fusers = Fusers(self.model, self.model_config)
+        fusers = Fusers(self.model, self.vllm_config)
 
         def register_fusion(fuser: BaseFuser, prefix: str):
             """Register a fused layer's mappings just before it is built."""
+            self.fusers[prefix] = fuser
+
             orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
             self.hf_to_vllm_mapper.orig_to_new_stacked.update(orig_to_new_stacked)
 
@@ -503,9 +483,7 @@ class Base(
                     new_module = replace_conv_class(child_module)
                 elif (fuser := fusers[child_module]) is not None:
                     register_fusion(fuser, qual_name)
-                    new_module = fuser.fuse(
-                        child_module, qual_name, self.model_config, self.quant_config
-                    )
+                    new_module = fuser.fuse(child_module, qual_name, self.vllm_config)
                     logger.info_once(fuser.info(child_name))
                     _recursive_replace(new_module, prefix=qual_name)
                 elif not isinstance(child_module, MoERunner):
@@ -523,13 +501,92 @@ class Base(
         """
         Create `Attention` instances to inform KV cache allocation.
         """
+        mla_fusers = {}
+        attention_instances = {}
         text_config = self.text_config
+        attn_cls = self._get_attn_cls()
 
-        num_heads = self.model_config.get_num_attention_heads(self.parallel_config)
-        head_size = self.model_config.get_head_size()
-        num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
+        # kv_lora_rank indicates that this is an MLA model
+        if getattr(text_config, "kv_lora_rank", None) is not None:
+            mla_fusers = {
+                extract_layer_index(prefix): (prefix, fuser)
+                for prefix, fuser in self.fusers.items()
+                if isinstance(fuser, MLAFuser)
+            }
+            if attn_cls is MLAAttention:
+                text_config._attn_implementation = "vllm_mla"
+            else:
+                # MLA model not using MLAAttention: recompute head_size for full attn
+                qk_nope_head_dim = getattr(text_config, "qk_nope_head_dim", 0)
+                qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
+                if qk_head_dim := qk_nope_head_dim + qk_rope_head_dim:
+                    self.model_config.model_arch_config.head_size = qk_head_dim
+
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
 
+        pp_rank = self.pp_group.rank_in_group
+        pp_size = self.pp_group.world_size
+        start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
+
+        for i in range(start, end):
+            # `[i]` is the whole-model config unless the checkpoint is
+            # heterogeneous, in which case it is this layer's own geometry.
+            arch_config = self.model_config.model_arch_config[i]
+            num_heads = self.model_config.get_num_attention_heads(
+                self.parallel_config, arch_config
+            )
+            head_size = arch_config.head_size
+            # Default to Llama scale, maybe updated in vllm_attention_forward
+            scale = head_size**-0.5
+            num_kv_heads = self.model_config.get_num_kv_heads(
+                self.parallel_config, arch_config
+            )
+
+            kwargs = dict(
+                num_heads=num_heads,
+                scale=scale,
+                cache_config=self.cache_config,
+                quant_config=self.quant_config,
+                prefix=f"{i}.attn",
+            )
+
+            if attn_cls is MLAAttention:
+                prefix, fuser = mla_fusers[i]
+                mla_module = self.get_submodule(prefix)
+                dims = get_mla_dims(self.model_config)
+                kwargs.update(
+                    scale=mla_module.scaling,
+                    qk_nope_head_dim=dims.qk_nope_head_dim,
+                    qk_rope_head_dim=dims.qk_rope_head_dim,
+                    v_head_dim=dims.v_head_dim,
+                    q_lora_rank=dims.q_lora_rank,
+                    kv_lora_rank=dims.kv_lora_rank,
+                    kv_b_proj=mla_module.get_submodule(fuser.kv_b_proj_name),
+                )
+            else:
+                kwargs.update(
+                    head_size=head_size,
+                    num_kv_heads=num_kv_heads,
+                    logits_soft_cap=logits_soft_cap,
+                )
+
+                # Handle interleaved sliding window attention
+                if (
+                    hasattr(text_config, "layer_types")
+                    and text_config.layer_types[i] == "sliding_attention"
+                ):
+                    kwargs["per_layer_sliding_window"] = text_config.sliding_window
+
+            attn_instance = attn_cls(**kwargs)
+            if attn_cls is MLAAttention:
+                # Attach MLA attn_instance to mla_module so it appears in
+                # model.named_modules() and runs its process_weights_after_loading
+                mla_module._vllm_mla_attn = attn_instance
+            attention_instances[i] = attn_instance
+        return attention_instances
+
+    def _get_attn_cls(self) -> type[AttentionLayerBase]:
+        """Return the `Attention` class to use for this model's layers."""
         # In encoder models, the attention layers will have `is_causal=False`
         is_encoder = lambda module: not getattr(module, "is_causal", True)
         has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
@@ -538,44 +595,18 @@ class Base(
         # found in a text only model, we assume the whole model is an encoder model
         if has_encoder(self.model) and not is_multimodal(self.config):
             self.check_version("5.0.0", "encoder models support")
-            attn_type = AttentionType.ENCODER_ONLY
-        else:
-            attn_type = AttentionType.DECODER
-
-        pp_rank = self.pp_group.rank_in_group
-        pp_size = self.pp_group.world_size
-        start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
-
-        attention_instances = {}
-        for i in range(start, end):
-            # Handle interleaved sliding window attention
-            per_layer_sliding_window = None
-            if (
-                hasattr(self.config, "layer_types")
-                and self.config.layer_types[i] == "sliding_attention"
-            ):
-                per_layer_sliding_window = self.config.sliding_window
-
-            attn_cls = (
-                EncoderOnlyAttention
-                if attn_type == AttentionType.ENCODER_ONLY
-                else Attention
+            return EncoderOnlyAttention
+        if self.model_config.use_mla:
+            self.check_version("5.15.0.dev0", "optimized MLA support")
+            if any(isinstance(fuser, MLAFuser) for fuser in self.fusers.values()):
+                return MLAAttention
+            logger.warning_once(
+                "This model uses MLA but `MLAFuser` failed to match and/or fuse any "
+                "MLA attention layers. Falling back to full attention with a padded "
+                "`value` head dimension."
             )
-            attention_instances[i] = attn_cls(
-                num_heads=num_heads,
-                head_size=head_size,
-                # NOTE: We use Llama scale as default, if it's set by
-                # Transformers, it's updated in vllm_attention_forward
-                scale=head_size**-0.5,
-                num_kv_heads=num_kv_heads,
-                cache_config=self.cache_config,
-                quant_config=self.quant_config,
-                logits_soft_cap=logits_soft_cap,
-                per_layer_sliding_window=per_layer_sliding_window,
-                prefix=f"{i}.attn",
-                attn_type=attn_type,
-            )
-        return attention_instances
+            os.environ["VLLM_MLA_DISABLE"] = "1"
+        return Attention
 
     def init_parameters(self, module: nn.Module, dtype: torch.dtype | None = None):
         """
@@ -587,22 +618,35 @@ class Base(
             self.model: "PreTrainedModel" = AutoModel.from_config(...)
         ```
         """
+        dtype = dtype or self.model_config.dtype
+        device = self.device_config.device
 
-        def _init_parameters(module: nn.Module, dtype: torch.dtype | None):
+        def _init_parameters(module: nn.Module):
             for name, param in module.named_parameters(recurse=False):
-                if param.device == torch.device("meta"):
-                    new_param = nn.Parameter(
-                        torch.empty_like(
-                            param.data,
-                            dtype=dtype or self.model_config.dtype,
-                            device=self.device_config.device,
-                        )
-                    )
-                    setattr(module, name, new_param)
+                # Already on device, nothing to do
+                if param.device != torch.device("meta"):
+                    continue
+                # Already a vLLM parameter, nothing to do
+                if hasattr(param, "weight_loader"):
+                    continue
+                data = torch.empty_like(param.data, dtype=dtype, device=device)
+                setattr(module, name, nn.Parameter(data=data))
             for child in module.children():
-                _init_parameters(child, dtype)
+                _init_parameters(child)
 
-        _init_parameters(module, dtype)
+        _init_parameters(module)
+
+    def keep_in_fp32(self, module: nn.Module):
+        """Honor `_keep_in_fp32_modules_strict` as `from_pretrained` would."""
+        if self.model_config.dtype not in (torch.float16, torch.bfloat16):
+            return
+        fragments = getattr(module, "_keep_in_fp32_modules_strict", None)
+        if not fragments:
+            return
+        pattern = re.compile("|".join(re.escape(f) for f in fragments))
+        for name, tensor in named_state(module):
+            if not hasattr(tensor, "weight_loader") and pattern.search(name):
+                tensor.data = tensor.data.to(torch.float32)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings()(input_ids)

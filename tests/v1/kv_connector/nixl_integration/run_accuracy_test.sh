@@ -83,6 +83,11 @@ DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
 ENFORCE_EAGER=${ENFORCE_EAGER:-1}
 # Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
+# Pin concurrent prefiller and non-DP decoder engines to separate internal
+# port windows. DP decoder ranks retain their existing internal port selection.
+PREFILLER_INTERNAL_PORT_BASE=${PREFILLER_INTERNAL_PORT_BASE:-20000}
+DECODER_INTERNAL_PORT_BASE=${DECODER_INTERNAL_PORT_BASE:-30000}
+INTERNAL_PORT_STRIDE=${INTERNAL_PORT_STRIDE:-100}
 
 # Resolve the repository root from the script location instead of `.git`.
 # The ROCm CI image copies `/vllm-workspace` without the Git metadata, so
@@ -93,7 +98,7 @@ GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
 
 # Trap the SIGINT signal (triggered by Ctrl+C)
-trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
+trap 'kill $(jobs -pr) 2>/dev/null || true' SIGINT SIGTERM EXIT
 
 # Waits for vLLM to start.
 wait_for_server() {
@@ -105,10 +110,20 @@ wait_for_server() {
 }
 
 # Function to clean up previous instances
+wait_for_gpu_memory_release() {
+  if [[ "$SMI_BIN" == *"rocm"* ]]; then
+    PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_rocm_memory_to_settle; wait_for_rocm_memory_to_settle()"
+  fi
+}
+
 cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
-  pkill -f "vllm serve" || true
+  pkill -f "toy_proxy_server.py" || true
+  pkill -TERM -f "vllm serve" || true
+  sleep 3
+  pkill -9 -f "vllm serve" || true
   sleep 2
+  wait_for_gpu_memory_release
 }
 
 get_num_gpus() {
@@ -127,6 +142,7 @@ get_num_gpus() {
 # Function to run tests for a specific model
 run_tests_for_model() {
   local model_name=$1
+  cleanup_instances
   echo "================================"
   echo "Testing model: $model_name"
   echo "================================"
@@ -154,12 +170,14 @@ run_tests_for_model() {
     PORT=$((8100 + i))
     # Calculate side channel port. Avoid clash with with TP workers.
     SIDE_CHANNEL_PORT=$((5559 + i))
+    INTERNAL_PORT=$((PREFILLER_INTERNAL_PORT_BASE + i * INTERNAL_PORT_STRIDE))
 
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
+    VLLM_PORT=$INTERNAL_PORT \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
@@ -208,12 +226,21 @@ run_tests_for_model() {
     PORT=$((8200 + i))
     # Calculate side channel port
     SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE))
+    INTERNAL_PORT=$((DECODER_INTERNAL_PORT_BASE + i * INTERNAL_PORT_STRIDE))
+    # For non-DP mode, set VLLM_PORT to pin the internal port;
+    # For DP mode, set VLLM_DP_MASTER_PORT instead to avoid race condition.
+    if [[ -z "${DP_EP:-}" ]]; then
+      DECODER_INTERNAL_PORT_ENV="VLLM_PORT=$INTERNAL_PORT"
+    else
+      DECODER_INTERNAL_PORT_ENV="VLLM_DP_MASTER_PORT=$INTERNAL_PORT"
+    fi
 
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
+    $DECODER_INTERNAL_PORT_ENV \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
@@ -290,7 +317,6 @@ run_tests_for_model() {
 
   # Clean up before running next model
   cleanup_instances
-  sleep 3
 }
 
 # Run tests for each model
