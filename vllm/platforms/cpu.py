@@ -68,6 +68,10 @@ class CpuPlatform(Platform):
         return [torch.bfloat16, torch.float16, torch.float32]
 
     @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return "cpu"
 
