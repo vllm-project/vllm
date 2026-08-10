@@ -431,3 +431,63 @@ def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
 
     # Tail values past num_decodes: zero-filled padding for cudagraph capture.
     assert torch.all(out.block_idx_last_scheduled_token_prev_step[num_decodes:] == 0)
+
+
+def test_mamba_get_block_table_tensor_align_mode_oob_clamp():
+    """Regression test for https://github.com/vllm-project/vllm/issues/42084
+
+    In mamba_cache_mode='align' with speculative decoding, sequences with
+    seq_len near max_model_len caused indices_to_gather to exceed the block
+    table column count, triggering a CUDA device-side assert in torch.gather.
+
+    The fix adds .clamp_(max=block_table.shape[1] - 1) to indices_to_gather
+    before the gather call.
+    """
+    from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    block_size = 16
+    max_model_len = 256
+    num_speculative_blocks = 2  # simulates speculative decoding
+    num_requests = 3
+    device = torch.device("cpu")
+
+    # Block table sized as align mode: cdiv(max_model_len, block_size) cols
+    # (no extra speculative columns — that's what causes the OOB in align mode)
+    num_cols = max_model_len // block_size  # = 16
+    block_table = torch.randint(
+        1, 100, (num_requests, num_cols), dtype=torch.int32, device=device
+    )
+
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_speculative_blocks,
+    )
+
+    # seq_lens near max_model_len: start_index = (seq_len-1) // block_size
+    # will be at or near the last column; adding num_speculative_blocks
+    # pushes indices_to_gather past the end without the fix.
+    seq_lens = torch.tensor(
+        [max_model_len, max_model_len - 1, max_model_len - block_size],
+        dtype=torch.int32,
+        device=device,
+    )
+
+    # Before the fix this would raise:
+    #   torch.AcceleratorError: CUDA error: device-side assert triggered
+    # (or an index error on CPU). With the fix it must return without error.
+    result = mamba_get_block_table_tensor(
+        block_table, seq_lens, spec, mamba_cache_mode="align"
+    )
+
+    # Output shape: (#requests, 1 + num_speculative_blocks)
+    assert result.shape == (num_requests, 1 + num_speculative_blocks)
+
+    # All gathered indices must have been valid columns in block_table,
+    # i.e. every value in result must appear in block_table (no OOB read).
+    # The clamp ensures we never read past column num_cols - 1.
+    assert result.max().item() <= block_table.max().item()
+    assert result.min().item() >= block_table.min().item()
