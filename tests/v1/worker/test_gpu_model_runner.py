@@ -46,6 +46,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.block_table import (
+    MultiGroupBlockTable,
+    SlotMappingMode,
+    get_block_table_width,
+)
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
@@ -519,7 +524,8 @@ def test_update_states_request_resumed(model_runner, dist_init):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_get_nans_in_logits(model_runner, dist_init):
+def test_get_nans_in_logits(model_runner, dist_init, monkeypatch):
+    monkeypatch.setattr(gpu_model_runner_module.envs, "VLLM_RAISE_ON_LOGIT_NANS", False)
     req_ids = ("req_0", "req_1")
 
     scheduler_output = _schedule_new_request(*req_ids)
@@ -1378,6 +1384,29 @@ def test_hybrid_block_table_initialization():
         block_table.block_table.np[req_index, : len(expected_kernel_blocks)],
         expected_kernel_blocks,
     )
+
+
+def test_get_block_table_width_aligns_to_128_tokens():
+    assert get_block_table_width(1875, 64) == 1876
+
+
+def test_get_block_table_width_splits_virtual_blocks():
+    assert get_block_table_width(235, 256, 64) == 940
+
+
+def test_mamba_state_table_width_is_not_aligned():
+    block_tables = MultiGroupBlockTable(
+        max_num_reqs=1,
+        max_num_batched_tokens=1,
+        pin_memory=False,
+        device=torch.device("cpu"),
+        block_sizes=[39664],
+        kernel_block_sizes=[39664],
+        max_num_blocks=[1],
+        slot_mapping_modes=[SlotMappingMode.NONE],
+    )
+
+    assert block_tables[0].max_num_blocks_per_req == 1
 
 
 def test_input_batch_with_kernel_block_sizes():

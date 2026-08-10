@@ -67,6 +67,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
+    SupportsMRoPE,
     SupportsPP,
     _require_is_multimodal,
 )
@@ -108,7 +109,11 @@ class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
 
 class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3_5MoeConfig)
+        # transformers 5.x renames the top-level Qwen3.5-MoE config class to
+        # Qwen3_5MoeTextConfig for text-only models, while transformers ≤4.x
+        # returns Qwen3_5MoeConfig (the multimodal wrapper).  Accept both so
+        # that vLLM works regardless of which transformers version is installed.
+        return self.ctx.get_hf_config((Qwen3_5MoeConfig, Qwen3_5MoeTextConfig))
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
@@ -282,8 +287,10 @@ class Qwen3_5Model(Qwen3NextModel):
 class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
+    IsHybrid,
     SupportsEagle3,
     SupportsLoRA,
+    SupportsMRoPE,
     SupportsPP,
 ):
     packed_modules_mapping = {
@@ -297,6 +304,13 @@ class Qwen3_5ForCausalLMBase(
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
+
+    # Some community text-only checkpoints keep the extraneous
+    # `model.language_model.` prefix inherited from the VL training stack.
+    # Strip it so both prefixed and clean checkpoints load correctly.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"model.language_model.": "model."},
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config
@@ -361,6 +375,45 @@ class Qwen3_5ForCausalLMBase(
 
         return hidden_states
 
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls, vllm_config: "VllmConfig"
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_text_config
+        tp_size = parallel_config.tensor_parallel_size
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            tp_size,
+            hf_config.linear_num_key_heads,
+            hf_config.linear_num_value_heads,
+            hf_config.linear_key_head_dim,
+            hf_config.linear_value_head_dim,
+            hf_config.linear_conv_kernel_dim,
+            num_spec,
+        )
+
+    @classmethod
+    def get_mamba_state_copy_func(
+        cls,
+    ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -372,7 +425,15 @@ class Qwen3_5ForCausalLMBase(
             self,
             skip_prefixes=["mtp."],
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[object],
+    ) -> tuple[torch.Tensor, int]:
+        positions = torch.arange(len(input_tokens), dtype=torch.long)
+        return positions.unsqueeze(0).expand(3, -1), 0
 
 
 class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):

@@ -11,6 +11,7 @@ import msgspec
 import numpy as np
 import torch
 
+from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -90,6 +91,7 @@ class EngineCoreReadyResponse:
     # KV cache capacity (None for encoder-only/attention-free models).
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
+    kv_events_config: KVEventsConfig | None = None
 
 
 class EngineCoreRequest(
@@ -142,6 +144,8 @@ class EngineCoreRequest(
     # request_finished hook. Used to free P-side prefill blocks when a
     # KV-transfer request is rejected on the D node before engine admission.
     abort_immediately: bool = False
+
+    session_id: str | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
