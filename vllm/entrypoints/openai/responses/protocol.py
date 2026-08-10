@@ -49,6 +49,35 @@ from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning as OpenAIReasoning
 
 
+from openai_harmony import Message as OpenAIHarmonyMessage
+from pydantic import (
+    Field,
+    ValidationError,
+    field_serializer,
+    model_validator,
+)
+
+from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
+from vllm.entrypoints.openai.deepseek_v4_chat_kwargs import (
+    apply_deepseek_v4_chat_kwargs,
+)
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.exceptions import VLLMValidationError
+from vllm.logger import init_logger
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
+from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
+
 class Reasoning(OpenAIReasoning):
     """`Reasoning`, widened to accept DeepSeek's `max` effort tier.
 
@@ -71,31 +100,7 @@ class Reasoning(OpenAIReasoning):
     effort: (  # type: ignore[assignment]
         Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
     ) = None
-from openai_harmony import Message as OpenAIHarmonyMessage
-from pydantic import (
-    Field,
-    ValidationError,
-    field_serializer,
-    model_validator,
-)
 
-from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-)
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
-from vllm.exceptions import VLLMValidationError
-from vllm.logger import init_logger
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
-from vllm.sampling_params import (
-    RequestOutputKind,
-    SamplingParams,
-    StructuredOutputsParams,
-)
-from vllm.utils import random_uuid
-
-logger = init_logger(__name__)
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
@@ -387,6 +392,31 @@ class ResponsesRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
     }
+
+    def apply_chat_template_kwargs(
+        self,
+        chat_template_kwargs: dict[str, Any],
+        *,
+        model_config: ModelConfig | None = None,
+    ) -> dict[str, Any]:
+        """Normalise DeepSeek-V4 thinking state, as `/v1/chat/completions` does.
+
+        Without this the two endpoints disagreed about the same model: with no
+        thinking kwarg, `DeepSeekV4Tokenizer.apply_chat_template` defaults
+        thinking **on** while `DeepSeekV4ReasoningParser` defaults it **off**
+        and selects `IdentityReasoningParser`. The model reasoned and the
+        reasoning, with a bare ``</think>``, was returned inside
+        ``output_text`` as though it were the answer.
+
+        `reasoning.effort` has already been folded into ``enable_thinking`` by
+        `build_chat_params` when the request carried one, so an explicit
+        ``effort: "none"`` still switches thinking off here.
+        """
+        return apply_deepseek_v4_chat_kwargs(
+            chat_template_kwargs,
+            model_name=self.model,
+            model_config=model_config,
+        )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
         """Normalize request constraints into ``StructuredOutputsParams``."""

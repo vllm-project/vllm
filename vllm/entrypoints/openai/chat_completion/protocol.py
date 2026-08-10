@@ -23,6 +23,10 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.openai.deepseek_v4_chat_kwargs import (
+    apply_deepseek_v4_chat_kwargs,
+    is_deepseek_v4_model,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     DeltaMessage,
@@ -621,17 +625,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
 
     def _is_deepseek_v4_model(self, model_config: ModelConfig | None = None) -> bool:
-        hf_config = getattr(model_config, "hf_config", None)
-        if getattr(hf_config, "model_type", None) == "deepseek_v4":
-            return True
-
-        architectures = getattr(hf_config, "architectures", None) or ()
-        if any("deepseekv4" in str(arch).replace("_", "").lower()
-               for arch in architectures):
-            return True
-
-        model = (self.model or "").lower().replace("_", "-")
-        return "deepseek-v4" in model
+        return is_deepseek_v4_model(self.model, model_config)
 
     def apply_chat_template_kwargs(
         self,
@@ -645,23 +639,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
         request field, while vLLM's DeepSeek tokenizer consumes it as a chat
         template kwarg. Keep the translation at the protocol boundary so the
         tokenizer and reasoning parser see the same effective state.
+
+        The body lives in ``deepseek_v4_chat_kwargs`` so that
+        ``ResponsesRequest`` derives thinking state identically; deriving it
+        separately is what let the two endpoints disagree.
         """
-        chat_template_kwargs = dict(chat_template_kwargs)
-        if not self._is_deepseek_v4_model(model_config):
-            return chat_template_kwargs
-
-        if self.thinking is not None:
-            enabled = self.thinking.type == "enabled"
-            chat_template_kwargs["thinking"] = enabled
-            chat_template_kwargs["enable_thinking"] = enabled
-        elif (
-            "thinking" not in chat_template_kwargs
-            and "enable_thinking" not in chat_template_kwargs
-        ):
-            chat_template_kwargs["thinking"] = True
-            chat_template_kwargs["enable_thinking"] = True
-
-        return chat_template_kwargs
+        return apply_deepseek_v4_chat_kwargs(
+            chat_template_kwargs,
+            model_name=self.model,
+            model_config=model_config,
+            thinking_enabled=(
+                None if self.thinking is None else self.thinking.type == "enabled"
+            ),
+        )
 
     def _use_deepseek_v4_sampling_override(self) -> bool:
         return self.deepseek_v4_sampling_override
