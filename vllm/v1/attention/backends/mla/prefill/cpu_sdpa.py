@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU MLA prefill backend implemented on top of torch SDPA.
+"""CPU MLA prefill backend implemented with dense per-request attention.
 
 This backend is selected on CPU devices, where flash-attn is unavailable. It
-computes MLA prefill attention by converting the ragged (varlen) q/k/v tensors
-into per-request padded-dense tensors and invoking
-``torch.nn.functional.scaled_dot_product_attention``.
+computes MLA prefill attention by slicing the ragged (varlen) q/k/v tensors
+per request and evaluating dense attention in PyTorch.
 """
 
 from typing import TYPE_CHECKING
 
 import torch
-import torch.nn.functional as F
 
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
@@ -22,13 +20,10 @@ if TYPE_CHECKING:
 
 
 class CPUSDPAMLAPrefillBackend(MLAPrefillBackend):
-    """MLA prefill backend for CPU using torch SDPA.
+    """MLA prefill backend for CPU using dense PyTorch attention.
 
     flash-attn is not installable on CPU, so this backend provides an
-    equivalent prefill implementation using dense SDPA with padding. Each
-    request is materialized as a padded-dense tensor and attended in
-    isolation, then the relevant rows are scattered back into the ragged
-    layout.
+    equivalent prefill implementation using per-request dense attention.
     """
 
     @staticmethod
@@ -40,35 +35,57 @@ class CPUSDPAMLAPrefillBackend(MLAPrefillBackend):
         # SDPA is always available on CPU.
         return True
 
-    def _dense_sdpa(
+    def supports_out(self) -> bool:
+        return True
+
+    def _ragged_sdpa(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        cu_seq_lens: torch.Tensor,
+        q_cu_seq_lens: torch.Tensor,
+        kv_cu_seq_lens: torch.Tensor,
         causal: bool,
-    ) -> torch.Tensor:
+        return_softmax_lse: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # q/k/v: [num_tokens, num_heads, head_dim] (ragged, concatenated).
-        # cu_seq_lens: [num_reqs + 1] row offsets shared by q and k.
-        num_reqs = cu_seq_lens.numel() - 1
+        # q_cu_seq_lens/kv_cu_seq_lens: [num_reqs + 1] row offsets for each
+        # request's query and key/value tokens.
+        num_reqs = q_cu_seq_lens.numel() - 1
+        assert num_reqs == kv_cu_seq_lens.numel() - 1
 
         out_chunks: list[torch.Tensor] = []
+        lse_chunks: list[torch.Tensor] = []
         for r in range(num_reqs):
-            start, end = int(cu_seq_lens[r]), int(cu_seq_lens[r + 1])
-            q_r = q[start:end].transpose(0, 1)  # [NH, Sq, H]
-            k_r = k[start:end].transpose(0, 1)  # [NH, Sk, H]
-            v_r = v[start:end].transpose(0, 1)  # [NH, Sk, H]
+            q_start = int(q_cu_seq_lens[r])
+            q_end = int(q_cu_seq_lens[r + 1])
+            kv_start = int(kv_cu_seq_lens[r])
+            kv_end = int(kv_cu_seq_lens[r + 1])
 
-            out_r = F.scaled_dot_product_attention(
-                q_r.unsqueeze(0),
-                k_r.unsqueeze(0),
-                v_r.unsqueeze(0),
-                is_causal=causal,
-                scale=self.scale,
-            )
-            out_chunks.append(out_r.squeeze(0).transpose(0, 1))  # [Sq, NH, H]
+            q_r = q[q_start:q_end].transpose(0, 1).float()  # [NH, Sq, Hq]
+            k_r = k[kv_start:kv_end].transpose(0, 1).float()  # [NH, Sk, Hq]
+            v_r = v[kv_start:kv_end].transpose(0, 1).float()  # [NH, Sk, Hv]
 
-        return torch.cat(out_chunks, dim=0)
+            attn_scores = torch.matmul(q_r, k_r.transpose(-2, -1)) * self.scale
+            if causal:
+                causal_mask = torch.ones(
+                    (q_end - q_start, kv_end - kv_start),
+                    dtype=torch.bool,
+                    device=attn_scores.device,
+                ).triu(1)
+                attn_scores.masked_fill_(causal_mask.unsqueeze(0), float("-inf"))
+
+            attn_probs = torch.softmax(attn_scores, dim=-1, dtype=torch.float32)
+            out_r = torch.matmul(attn_probs, v_r).transpose(0, 1).to(v.dtype)
+            out_chunks.append(out_r)  # [Sq, NH, Hv]
+            if return_softmax_lse:
+                lse_chunks.append(torch.logsumexp(attn_scores, dim=-1))
+
+        out = torch.cat(out_chunks, dim=0)
+        if not return_softmax_lse:
+            return out
+        lse = torch.cat(lse_chunks, dim=1)
+        return out, lse
 
     def run_prefill_new_tokens(
         self,
@@ -79,13 +96,20 @@ class CPUSDPAMLAPrefillBackend(MLAPrefillBackend):
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert not return_softmax_lse, (
-            "chunked-context path is not supported on CPU MLA prefill"
+        assert output_scale is None, (
+            "CPU MLA prefill backend does not support fused FP8 output"
         )
-        out_t = self._dense_sdpa(
-            q, k, v, self._prefill_metadata.query_start_loc, causal=True
+        out_t = self._ragged_sdpa(
+            q,
+            k,
+            v,
+            self._prefill_metadata.query_start_loc,
+            self._prefill_metadata.query_start_loc,
+            causal=True,
+            return_softmax_lse=return_softmax_lse,
         )
-        if out is not None:
+        if out is not None and not return_softmax_lse:
+            assert isinstance(out_t, torch.Tensor)
             out.copy_(out_t)
             return out
         return out_t
@@ -97,6 +121,15 @@ class CPUSDPAMLAPrefillBackend(MLAPrefillBackend):
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError(
-            "chunked-context prefill is not supported on CPU MLA prefill"
+        result = self._ragged_sdpa(
+            q,
+            k,
+            v,
+            chunk.query_start_loc,
+            chunk.cu_seq_lens,
+            causal=False,
+            return_softmax_lse=True,
         )
+        assert isinstance(result, tuple)
+        out, lse = result
+        return out, lse
