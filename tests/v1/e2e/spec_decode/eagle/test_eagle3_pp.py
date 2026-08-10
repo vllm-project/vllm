@@ -78,11 +78,16 @@ def draft_without_embed_tokens(tmp_path_factory) -> str:
     one. ``DRAFT`` carries its own, so on its own it never exercises that path.
     Removing the key reproduces the shared-embedding class at 1B.
     """
-    from huggingface_hub import snapshot_download
     from safetensors.torch import load_file, save_file
 
+    from vllm.transformers_utils.repo_utils import hf_api
+
     src = Path(
-        snapshot_download(DRAFT, allow_patterns=["*.json", "*.py", "*.safetensors"])
+        hf_api().snapshot_download(
+            repo_id=DRAFT,
+            repo_type="model",
+            allow_patterns=["*.json", "*.py", "*.safetensors"],
+        )
     )
     dst = tmp_path_factory.mktemp("eagle3_shared_embed")
     for path in src.iterdir():
