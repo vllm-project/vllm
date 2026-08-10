@@ -575,6 +575,10 @@ def test_naive_block_assignment_moe(
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("has_zp", [True, False])
 @pytest.mark.parametrize("weight_bits", [4, 8])
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="MoE WNA16 Triton kernels require CUDA/ROCm or XPU.",
+)
 def test_fused_moe_wn16(
     m: int,
     n: int,
@@ -587,10 +591,10 @@ def test_fused_moe_wn16(
     has_zp: bool,
     weight_bits: int,
 ):
-    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-    score = torch.randn((m, e), device="cuda", dtype=dtype)
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device=DEVICE_TYPE, dtype=dtype) / 10
+    score = torch.randn((m, e), device=DEVICE_TYPE, dtype=dtype)
 
     if weight_bits == 4:
         pack_factor = 2
@@ -602,16 +606,22 @@ def test_fused_moe_wn16(
     w1_ref = w1.clone()
     w2_ref = w2.clone()
     w1_qweight = torch.empty(
-        (e, 2 * n, k // pack_factor), device="cuda", dtype=torch.uint8
+        (e, 2 * n, k // pack_factor), device=DEVICE_TYPE, dtype=torch.uint8
     )
-    w2_qweight = torch.empty((e, k, n // pack_factor), device="cuda", dtype=torch.uint8)
-    w1_scales = torch.empty((e, 2 * n, k // group_size), device="cuda", dtype=dtype)
-    w2_scales = torch.empty((e, k, n // group_size), device="cuda", dtype=dtype)
+    w2_qweight = torch.empty(
+        (e, k, n // pack_factor), device=DEVICE_TYPE, dtype=torch.uint8
+    )
+    w1_scales = torch.empty(
+        (e, 2 * n, k // group_size), device=DEVICE_TYPE, dtype=dtype
+    )
+    w2_scales = torch.empty((e, k, n // group_size), device=DEVICE_TYPE, dtype=dtype)
     w1_qzeros = torch.empty(
-        (e, 2 * n // pack_factor, k // group_size), device="cuda", dtype=torch.uint8
+        (e, 2 * n // pack_factor, k // group_size),
+        device=DEVICE_TYPE,
+        dtype=torch.uint8,
     )
     w2_qzeros = torch.empty(
-        (e, k // pack_factor, n // group_size), device="cuda", dtype=torch.uint8
+        (e, k // pack_factor, n // group_size), device=DEVICE_TYPE, dtype=torch.uint8
     )
 
     for i in range(e * 2):
@@ -653,9 +663,9 @@ def test_fused_moe_wn16(
 
     if ep_size > 1:
         local_e = e // ep_size
-        e_ids = torch.randint(0, e, (local_e,), device="cuda", dtype=torch.int32)
-        e_map = torch.full((e,), -1, device="cuda", dtype=torch.int32)
-        e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
+        e_ids = torch.randint(0, e, (local_e,), device=DEVICE_TYPE, dtype=torch.int32)
+        e_map = torch.full((e,), -1, device=DEVICE_TYPE, dtype=torch.int32)
+        e_map[e_ids] = torch.arange(local_e, device=DEVICE_TYPE, dtype=torch.int32)
         w1_ref = w1_ref[e_ids]
         w2_ref = w2_ref[e_ids]
         w1_qweight = w1_qweight[e_ids]
