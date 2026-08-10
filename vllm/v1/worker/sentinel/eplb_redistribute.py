@@ -62,6 +62,21 @@ def mark_dead_expert_slots_inplace(
         physical_to_logical_map[:, start:end] = -1
 
 
+def check_redundancy_sufficient(
+    num_logical: int,
+    num_local_experts: int,
+    ep_world_size: int,
+    dead_ep_ranks: set[int],
+) -> None:
+    """Fail fast if the surviving slots cannot host every logical expert."""
+    alive_slots = (ep_world_size - len(dead_ep_ranks)) * num_local_experts
+    if alive_slots < num_logical:
+        raise RuntimeError(
+            f"scale_down would leave {alive_slots} expert slot(s) for "
+            f"{num_logical} logical experts. EPLB redundancy insufficient."
+        )
+
+
 def redistribute_expert_placement(
     physical_to_logical_map: torch.Tensor,
     num_logical: int,
