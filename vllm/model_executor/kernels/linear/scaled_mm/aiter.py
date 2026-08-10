@@ -384,13 +384,45 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
         )
 
-        # Pre-shuffle the weight and dispatch the faster bpreshuffle GEMM when
-        # enabled and the weight shape is eligible (N and K divisible by 128).
-        self._bpreshuffled = (
+        # bpreshuffle GEMM requires an fp8 2D weight with N and K divisible by 128
+        self._is_bpreshuffled = (
             rocm_aiter_ops.is_fp8_block_scale_bpreshuffle_enabled()
             and n % 128 == 0
             and k % 128 == 0
         )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+        params = FP8BlockParams.from_layer(layer)
+        if params.weight_scale_inv is not None:
+            ws, attr = params.weight_scale_inv, params.WEIGHT_SCALE_INV
+        else:
+            ws, attr = params.weight_scale, params.WEIGHT_SCALE
+        if ws is not None and ws.dtype == torch.float8_e8m0fnu:
+            replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
+
+        layer.aiter_bpreshuffled = False
+        if not self._is_bpreshuffled:
+            return
+
+        weight = params.weight
+        if (
+            weight.dim() != 2
+            or weight.dtype != current_platform.fp8_dtype()
+            or weight.shape[0] % 128 != 0
+            or weight.shape[1] % 128 != 0
+        ):
+            self._is_bpreshuffled = False
+            return
+
+        shuffled_weight = rocm_aiter_ops.shuffle_weight(weight, layout=(16, 16))
+        replace_parameter(
+            layer,
+            params.WEIGHT,
+            torch.nn.Parameter(shuffled_weight.data, requires_grad=False),
+        )
+        layer.aiter_bpreshuffled = True
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -430,41 +462,6 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 )
         return True, None
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        super().process_weights_after_loading(layer)
-
-        params = FP8BlockParams.from_layer(layer)
-        if params.weight_scale_inv is not None:
-            ws, attr = params.weight_scale_inv, params.WEIGHT_SCALE_INV
-        else:
-            ws, attr = params.weight_scale, params.WEIGHT_SCALE
-        if ws is not None and ws.dtype == torch.float8_e8m0fnu:
-            replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
-
-        layer.aiter_bpreshuffled = False
-        if not self._bpreshuffled:
-            return
-
-        weight = params.weight
-        # bpreshuffle GEMM requires an fp8 2D weight with N and K divisible by
-        # 128; fall back to the standard path if the loaded weight is not.
-        if (
-            weight.dim() != 2
-            or weight.dtype != current_platform.fp8_dtype()
-            or weight.shape[0] % 128 != 0
-            or weight.shape[1] % 128 != 0
-        ):
-            self._bpreshuffled = False
-            return
-
-        shuffled_weight = rocm_aiter_ops.shuffle_weight(weight, layout=(16, 16))
-        replace_parameter(
-            layer,
-            params.WEIGHT,
-            torch.nn.Parameter(shuffled_weight.data, requires_grad=False),
-        )
-        layer.aiter_bpreshuffled = True
-
     def apply_block_scaled_mm(
         self,
         A: torch.Tensor,
@@ -481,9 +478,8 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
-        if getattr(self, "_bpreshuffled", False):
-            # Weight is pre-shuffled (16, 16); the bpreshuffle kernel expects
-            # a column-major activation scale (matches the aiter reference).
+        if self._is_bpreshuffled:
+            # Kernel expects column-major activation scale
             As = As.t().contiguous().t()
             return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
                 A, B, As, Bs, output_dtype=out_dtype
