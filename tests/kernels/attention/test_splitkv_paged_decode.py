@@ -6,7 +6,7 @@ import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx12x
+from vllm.platforms.rocm import on_gfx1x
 from vllm.triton_utils import triton
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
@@ -104,7 +104,7 @@ def _ref_paged_decode(
 
 
 @pytest.mark.skipif(
-    not on_gfx12x(), reason="split-KV decode kernel is only activated on gfx12x"
+    not on_gfx1x(), reason="split-KV decode kernel is only activated on gfx1x"
 )
 @pytest.mark.skipif(
     not torch.accelerator.is_available(), reason="split-KV decode test requires a GPU"
@@ -176,7 +176,7 @@ def test_paged_attention_2d_splitkv_decode(
 
 
 @pytest.mark.skipif(
-    not on_gfx12x(), reason="split-KV decode kernel is only activated on gfx12x"
+    not on_gfx1x(), reason="split-KV decode kernel is only activated on gfx1x"
 )
 @pytest.mark.skipif(
     not torch.accelerator.is_available(), reason="split-KV decode test requires a GPU"
