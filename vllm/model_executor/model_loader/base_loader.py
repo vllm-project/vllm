@@ -9,7 +9,10 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_processing,
+    freeze_load_plan,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -63,6 +66,10 @@ class BaseModelLoader(ABC):
             logger.debug("Loading weights on %s ...", load_device)
             self.load_weights(model, model_config)
 
+            # Close the recording opened at model init, before post-load
+            # processing replaces any parameter.
+            freeze_load_plan(model)
+
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
             if current_platform.is_cuda_alike() or current_platform.is_xpu():
@@ -75,7 +82,10 @@ class BaseModelLoader(ABC):
             # Process weights into kernel format. Note that when using online
             # quantization, weights are (typically) quantized as they are loaded.
             if _has_online_quant(model):
-                finalize_layerwise_processing(model, model_config)
+                # The pass that records the contract cannot be held to it.
+                finalize_layerwise_processing(
+                    model, model_config, fail_on_incomplete=False
+                )
 
             process_weights_after_loading(model, model_config, target_device)
 
