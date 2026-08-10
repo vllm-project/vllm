@@ -124,6 +124,46 @@ def test_sparse_kernels_recognize_fp8_dtypes(dtype: torch.dtype):
 
 
 # Index top-k kernels.
+def _assert_prefill_index_scores(
+    actual: torch.Tensor,
+    idx_q: torch.Tensor,
+    index_kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    q_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    block_size_q: int,
+) -> None:
+    q_start = 0
+    for req_id, (q_len, seq_len, prefix_len) in enumerate(
+        zip(q_lens.tolist(), seq_lens.tolist(), prefix_lens.tolist())
+    ):
+        q = idx_q[q_start : q_start + q_len]
+        num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        pages = block_table[req_id, :num_blocks]
+        k = index_kv_cache[pages].reshape(num_blocks * BLOCK_SIZE, -1)
+        expected = torch.einsum("qhd,kd->hqk", q.float(), k.float())
+
+        q_pos = prefix_len + torch.arange(q_len, device=idx_q.device)
+        k_pos = torch.arange(k.shape[0], device=idx_q.device)
+        expected.masked_fill_(k_pos[None, :] > q_pos[:, None], -float("inf"))
+        expected = (
+            expected.reshape(idx_q.shape[1], q_len, num_blocks, BLOCK_SIZE)
+            .max(dim=3)
+            .values
+        )
+
+        for local_q in range(q_len):
+            q_block_end = min(q_len, (local_q // block_size_q + 1) * block_size_q)
+            hi = min(seq_len, prefix_len + q_block_end)
+            written_blocks = (hi + BLOCK_SIZE - 1) // BLOCK_SIZE
+            torch.testing.assert_close(
+                actual[:, q_start + local_q, :written_blocks],
+                expected[:, local_q, :written_blocks],
+            )
+        q_start += q_len
+
+
 def _reference_index_topk(
     idx_q: torch.Tensor,
     index_kv_cache: torch.Tensor,
@@ -222,14 +262,34 @@ def _reference_decode_index_score(
     return out
 
 
-def test_prefill_index_topk_correctness():
+@pytest.mark.parametrize("long_context", [False, True])
+def test_prefill_index_topk_correctness(long_context: bool):
+    if current_platform.is_rocm():
+        from vllm.models.minimax_m3.amd.ops.index_topk import (
+            minimax_m3_index_score as amd_index_score,
+        )
+
+        index_score = amd_index_score
+    else:
+        index_score = minimax_m3_index_score
+
+    if long_context:
+        if not current_platform.is_rocm():
+            pytest.skip("The split-K index-score path is ROCm-specific.")
+        from vllm.platforms.rocm import on_gfx942
+
+        if not on_gfx942():
+            pytest.skip("The split-K index-score path is enabled on gfx942.")
+
     topk = 6
     init_blocks = 0
     local_blocks = 1
     num_idx_heads = 2
     head_dim = 16
-    q_lens = torch.tensor((4, 3), device="cuda", dtype=torch.int32)
-    prefix_lens = torch.tensor((0, 1024), device="cuda", dtype=torch.int32)
+    q_lens_values = (128, 129) if long_context else (4, 3)
+    prefix_lens_values = (8192, 16384) if long_context else (0, 1024)
+    q_lens = torch.tensor(q_lens_values, device="cuda", dtype=torch.int32)
+    prefix_lens = torch.tensor(prefix_lens_values, device="cuda", dtype=torch.int32)
     seq_lens = prefix_lens + q_lens
     batch = q_lens.numel()
     max_seq_len = seq_lens.max().item()
@@ -242,13 +302,15 @@ def test_prefill_index_topk_correctness():
         batch, max_blocks
     )
     idx_q = torch.ones(q_lens.sum().item(), num_idx_heads, head_dim, device="cuda")
-    index_kv_cache = torch.empty(num_pages, BLOCK_SIZE, head_dim, device="cuda")
-    for req_id in range(batch):
-        for block_id in range(max_blocks):
-            page = block_table[req_id, block_id]
-            index_kv_cache[page].fill_(block_id + 1)
+    block_values = torch.empty(num_pages, device="cuda")
+    block_values[block_table] = torch.arange(
+        1, max_blocks + 1, device="cuda", dtype=torch.float32
+    ).expand(batch, -1)
+    index_kv_cache = (
+        block_values[:, None, None].expand(-1, BLOCK_SIZE, head_dim).contiguous()
+    )
 
-    score = minimax_m3_index_score(
+    score = index_score(
         idx_q,
         index_kv_cache,
         block_table,
@@ -258,6 +320,16 @@ def test_prefill_index_topk_correctness():
         max_query_len=q_lens.max().item(),
         max_seq_len=max_seq_len,
         num_kv_heads=num_idx_heads,
+    )
+    _assert_prefill_index_scores(
+        score,
+        idx_q,
+        index_kv_cache,
+        block_table,
+        q_lens,
+        seq_lens,
+        prefix_lens,
+        block_size_q=128 if long_context else 64,
     )
     actual = minimax_m3_index_topk(
         score,

@@ -17,11 +17,19 @@ feed the block-sparse attention kernels in ``sparse_attn``.
 import torch
 
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx942
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
+from vllm.utils.platform_utils import num_compute_units
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
+
+# gfx942 split-K prefill tuning. Target bounded K-loop lengths while retaining
+# enough work per split to amortize launch overhead.
+_INDEX_SCORE_TARGET_K_TILES_PER_SPLIT = 64
+_INDEX_SCORE_MAX_SPLITS = 16
+_INDEX_SCORE_MIN_SEQ_LEN = _INDEX_SCORE_TARGET_K_TILES_PER_SPLIT * SPARSE_BLOCK_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -101,8 +109,10 @@ def _index_block_score_kernel(
     stride_bt_b,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    NUM_K_SPLITS: tl.constexpr,
 ):
-    pid_q = tl.program_id(0)
+    pid_q = tl.program_id(0) // NUM_K_SPLITS
+    pid_split = tl.program_id(0) % NUM_K_SPLITS
     pid_bh = tl.program_id(1)
     pid_b = pid_bh // num_idx_heads
     pid_h = pid_bh % num_idx_heads
@@ -112,6 +122,16 @@ def _index_block_score_kernel(
     seq_len = tl.load(seq_lens + pid_b)
     prefix_len = tl.load(prefix_lens + pid_b)
     if BLOCK_SIZE_Q * pid_q >= q_len:
+        return
+
+    # Split the state-free K loop across programs. Every score element still
+    # has exactly one writer, so no reduction or atomic operation is needed.
+    hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
+    num_k_tiles = tl.cdiv(hi, BLOCK_SIZE_K)
+    tiles_per_split = tl.cdiv(num_k_tiles, NUM_K_SPLITS)
+    tile_lo = pid_split * tiles_per_split
+    tile_hi = min(num_k_tiles, tile_lo + tiles_per_split)
+    if tile_lo >= tile_hi:
         return
 
     q_ptrs = tl.make_block_ptr(
@@ -130,10 +150,8 @@ def _index_block_score_kernel(
     off_d = tl.arange(0, head_dim)
     # Block table row for this request.
     bt_row = block_table_ptr + pid_b * stride_bt_b
-    # Causal window: only blocks up to the last query token's position.
-    hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
-    for i in tl.range(0, hi, BLOCK_SIZE_K):
-        blk = i // BLOCK_SIZE_K
+    for blk in tl.range(tile_lo, tile_hi):
+        i = blk * BLOCK_SIZE_K
         page = tl.load(bt_row + blk).to(tl.int64)
         pos = i + off_k
         # index-K for this page: [BLOCK_SIZE_D, BLOCK_SIZE_K] (transposed)
@@ -651,6 +669,39 @@ def _topk_index_merge_kernel(
 # ---------------------------------------------------------------------------
 # Python wrappers
 # ---------------------------------------------------------------------------
+def _index_score_launch_config(
+    max_query_len: int,
+    max_seq_len: int,
+    batch: int,
+    num_idx_heads: int,
+) -> tuple[int, int, dict]:
+    """Select a split-K launch only for shapes with useful parallel work."""
+    if not on_gfx942() or max_query_len < 128 or max_seq_len < _INDEX_SCORE_MIN_SEQ_LEN:
+        return 64, 1, {}
+
+    block_size_q = 128
+    num_k_tiles = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
+    q_programs = triton.cdiv(max_query_len, block_size_q) * batch * num_idx_heads
+
+    # Aim for two programs per CU when the split cap and K work permit, and
+    # avoid leaving very long K loops. Power-of-two splits limit compilations.
+    occupancy_splits = triton.cdiv(2 * num_compute_units(), q_programs)
+    work_splits = triton.cdiv(num_k_tiles, _INDEX_SCORE_TARGET_K_TILES_PER_SPLIT)
+    num_splits = triton.next_power_of_2(max(occupancy_splits, work_splits))
+    num_splits = min(_INDEX_SCORE_MAX_SPLITS, num_k_tiles, num_splits)
+    if num_splits == 1:
+        return 64, 1, {}
+
+    return (
+        block_size_q,
+        num_splits,
+        {
+            "num_warps": 4,
+            "num_stages": 1,
+        },
+    )
+
+
 @torch.no_grad()
 def minimax_m3_index_score(
     idx_q: torch.Tensor,  # [total_q, num_idx_heads, head_dim]
@@ -682,8 +733,16 @@ def minimax_m3_index_score(
         dtype=torch.float32,
         device=idx_q.device,
     )
-    BLOCK_SIZE_Q = 64
-    grid_score = (triton.cdiv(max_query_len, BLOCK_SIZE_Q), batch * num_idx_heads)
+    block_size_q, num_k_splits, launch_kwargs = _index_score_launch_config(
+        max_query_len,
+        max_seq_len,
+        batch,
+        num_idx_heads,
+    )
+    grid_score = (
+        triton.cdiv(max_query_len, block_size_q) * num_k_splits,
+        batch * num_idx_heads,
+    )
     _index_block_score_kernel[grid_score](
         idx_q,
         index_kv_cache,
@@ -704,8 +763,10 @@ def minimax_m3_index_score(
         score.stride(1),
         score.stride(2),
         block_table.stride(0),
-        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+        BLOCK_SIZE_Q=block_size_q,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        NUM_K_SPLITS=num_k_splits,
+        **launch_kwargs,
     )
     return score
 
