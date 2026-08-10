@@ -72,6 +72,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 GDN_AITER_TRITON_AVAILABLE = (
     rocm_aiter_ops.are_gdn_triton_kernels_available()
     or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+    or rocm_aiter_ops.is_gfx1100_gdn_triton_kernels_available()
 )
 
 if GDN_AITER_TRITON_AVAILABLE:

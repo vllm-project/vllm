@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 from collections.abc import Callable
+from pathlib import Path
 
 import torch
 from torch._ops import OpOverload
@@ -85,6 +86,25 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
 
         return on_rdna4()
     return False
+
+
+_AITER_GFX1100_W8A8_CONFIG = Path("ops/triton/configs/gemm/gfx1100-GEMM-A8W8.json")
+
+
+def _is_gfx1100_aiter_w8a8_capable() -> bool:
+    """Check the installed AITER package for the gfx1100 W8A8 contract."""
+    try:
+        import aiter
+
+        package_file = getattr(aiter, "__file__", None)
+        if package_file is None or getattr(aiter, "AITER_TRITON_ONLY", False):
+            return False
+        config_path = Path(package_file).parent / _AITER_GFX1100_W8A8_CONFIG
+        return callable(getattr(aiter, "gemm_a8w8", None)) and config_path.is_file()
+    except Exception:
+        # Old, partially installed, or otherwise incompatible AITER packages
+        # must not make gfx1100 eligible for the custom W8A8 path.
+        return False
 
 
 @functools.cache
@@ -563,6 +583,13 @@ def _rocm_aiter_w8a8_gemm_impl(
     bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
+    if rocm_aiter_ops.is_gfx1100():
+        # The public dispatcher selects the Triton WMMA kernel on gfx1100.
+        from aiter import gemm_a8w8
+
+        return gemm_a8w8(A, B, As, Bs, bias, output_dtype)
+
+    # Preserve the existing CK dispatch on supported CDNA targets.
     from aiter import gemm_a8w8_CK
 
     # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
@@ -1735,6 +1762,28 @@ class rocm_aiter_ops:
         """RDNA4 (gfx12) analog of is_linear_enabled() (aiter Triton blockscale)."""
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
+    @staticmethod
+    def is_gfx1100() -> bool:
+        if not current_platform.is_rocm():
+            return False
+        from vllm.platforms.rocm import on_gfx1100
+
+        return on_gfx1100()
+
+    @classmethod
+    def is_gfx1100_aiter_enabled(cls) -> bool:
+        """Whether the installed AITER can safely provide gfx1100 W8A8."""
+        return (
+            cls._AITER_ENABLED
+            and IS_AITER_FOUND
+            and cls.is_gfx1100()
+            and _is_gfx1100_aiter_w8a8_capable()
+        )
+
+    @classmethod
+    def is_gfx1100_linear_enabled(cls) -> bool:
+        return cls.is_gfx1100_aiter_enabled() and cls._LINEAR_ENABLED
+
     @classmethod
     @if_aiter_supported
     def is_linear_enabled(cls) -> bool:
@@ -1927,6 +1976,10 @@ class rocm_aiter_ops:
         return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()
 
     @classmethod
+    def is_gfx1100_gdn_triton_kernels_available(cls) -> bool:
+        return cls.is_gfx1100_aiter_enabled() and cls._gdn_triton_kernels_importable()
+
+    @classmethod
     @if_aiter_supported
     @functools.cache
     def fused_moe_supports_gate_mode(cls) -> bool:
@@ -1943,13 +1996,25 @@ class rocm_aiter_ops:
 
     @staticmethod
     def register_ops_once() -> None:
+        gfx1100_enabled = rocm_aiter_ops.is_gfx1100_aiter_enabled()
         if not (
-            is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4()
+            is_aiter_found_and_supported()
+            or is_aiter_found_and_supported_on_rdna4()
+            or gfx1100_enabled
         ):
             return
 
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
+            if gfx1100_enabled:
+                direct_register_custom_op(
+                    op_name="rocm_aiter_w8a8_gemm",
+                    op_func=_rocm_aiter_w8a8_gemm_impl,
+                    fake_impl=_rocm_aiter_w8a8_gemm_fake,
+                )
+                _OPS_REGISTERED = True
+                return
+
             # register all the custom ops here
             direct_register_custom_op(
                 op_name="rocm_aiter_asm_moe_tkw1",
