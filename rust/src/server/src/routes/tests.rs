@@ -703,7 +703,7 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
 /// stays alive for the duration of the test.
 async fn test_dev_mode_app_with_ready(
     ready_response: vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse,
-    configured_data_parallel_size: usize,
+    data_parallel_size: usize,
 ) -> (axum::Router, MockEngineTask) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -730,7 +730,7 @@ async fn test_dev_mode_app_with_ready(
     let app = build_router_with_dev_mode(
         Arc::new(
             AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
-                .with_configured_data_parallel_size(configured_data_parallel_size),
+                .with_data_parallel_size(data_parallel_size),
         ),
         true,
     );

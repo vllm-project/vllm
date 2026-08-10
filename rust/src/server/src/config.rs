@@ -162,7 +162,7 @@ pub struct Config {
     /// Frontend-to-engine transport setup.
     pub transport_mode: TransportMode,
     /// Deployment-wide data-parallel size retained by the frontend.
-    pub configured_data_parallel_size: usize,
+    pub data_parallel_size: usize,
     /// Requested frontend-side coordinator behavior.
     pub coordinator_mode: CoordinatorMode,
     /// Backend model identifier used for engine-core loading.
@@ -239,21 +239,21 @@ impl Config {
                 max_logprobs
             );
         }
-        if self.configured_data_parallel_size == 0 {
+        if self.data_parallel_size == 0 {
             bail!("data parallel size must be at least 1");
         }
-        if self.configured_data_parallel_size > usize::from(u16::MAX) + 1 {
+        if self.data_parallel_size > usize::from(u16::MAX) + 1 {
             bail!(
                 "data parallel size ({}) exceeds the two-byte engine identity limit",
-                self.configured_data_parallel_size
+                self.data_parallel_size
             );
         }
         match &self.transport_mode {
             TransportMode::HandshakeOwner { engine_count, .. } => {
-                if *engine_count != self.configured_data_parallel_size {
+                if *engine_count != self.data_parallel_size {
                     bail!(
-                        "managed frontend engine count ({engine_count}) must equal configured data parallel size ({})",
-                        self.configured_data_parallel_size
+                        "managed frontend engine count ({engine_count}) must equal data parallel size ({})",
+                        self.data_parallel_size
                     );
                 }
             }
@@ -271,10 +271,10 @@ impl Config {
                     engine_start_index.checked_add(*engine_count).ok_or_else(|| {
                         anyhow::anyhow!("engine start index + engine count overflows")
                     })?;
-                if engine_end_index > self.configured_data_parallel_size {
+                if engine_end_index > self.data_parallel_size {
                     bail!(
-                        "connected engine range [{engine_start_index}, {engine_end_index}) exceeds configured data parallel size {}",
-                        self.configured_data_parallel_size
+                        "connected engine range [{engine_start_index}, {engine_end_index}) exceeds data parallel size {}",
+                        self.data_parallel_size
                     );
                 }
             }

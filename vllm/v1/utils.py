@@ -339,7 +339,7 @@ class RustFrontendProcessManager:
         output_address: str,
         engine_start_index: int,
         engine_count: int,
-        configured_data_parallel_size: int,
+        data_parallel_size: int,
         stats_update_address: str | None = None,
     ):
         import os
@@ -362,7 +362,7 @@ class RustFrontendProcessManager:
             "--engine-count",
             str(engine_count),
             "--data-parallel-size",
-            str(configured_data_parallel_size),
+            str(data_parallel_size),
         ]
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])

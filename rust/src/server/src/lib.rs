@@ -139,7 +139,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
             .with_server_info(ServerInfoSnapshot::from_config(config))
-            .with_configured_data_parallel_size(config.configured_data_parallel_size)
+            .with_data_parallel_size(config.data_parallel_size)
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_profiler(config.profiler.clone()),
