@@ -18,9 +18,11 @@
 
 import os
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
+from functools import cached_property
 from itertools import chain
 from operator import attrgetter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import regex as re
 import torch
@@ -46,7 +48,6 @@ from vllm.model_executor.layers.attention import (
 from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import MoERunner
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
@@ -58,12 +59,14 @@ from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.fuser import BaseFuser, Fusers
 from vllm.model_executor.models.transformers.fusers import MLAFuser
 from vllm.model_executor.models.transformers.utils import (
+    attrsetter,
     can_enable_torch_compile,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
     named_state,
     replace_conv_class,
+    replace_embedding_class,
     replace_linear_class,
 )
 from vllm.model_executor.models.utils import (
@@ -84,15 +87,10 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class ScaledVocabParallelEmbedding(VocabParallelEmbedding):
-    """`VocabParallelEmbedding` that scales its output."""
-
-    def __init__(self, *args, embed_scale: float, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.embed_scale = embed_scale
-
-    def forward(self, input_: torch.Tensor) -> torch.Tensor:
-        return super().forward(input_) * self.embed_scale
+class PreTrainedModelClasses(NamedTuple):
+    decoder: type["PreTrainedModel"]
+    encoders: dict[str, type["PreTrainedModel"]]
+    """Modality -> encoder class, for each modality that has one."""
 
 
 class Base(
@@ -157,14 +155,13 @@ class Base(
                 )
 
         self._patch_config()
-        from_config_kwargs = dict(
-            config=self.config,
-            dtype=self.model_config.dtype,
-            trust_remote_code=self.model_config.trust_remote_code,
-        )
-        self._decorate_for_torch_compile(**from_config_kwargs)
+        self._decorate_for_torch_compile()
         # Init on "meta" to delay allocating GPU tensors
-        with init_on_device_without_buffers("meta"):
+        with (
+            self._mark_model_components(vllm_config),
+            init_on_device_without_buffers("meta"),
+        ):
+            from_config_kwargs = self._from_config_kwargs
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
 
         # Create weight name to module qualname mapper
@@ -179,24 +176,9 @@ class Base(
         # Input embeddings
         input_embeddings = self.model.get_input_embeddings()
         if not isinstance(input_embeddings, PPMissingLayer):
-            names = ("embedding_size", "hidden_size")
-            embedding_dim = getattr_iter(self.text_config, names, None)
-            assert embedding_dim is not None
-            embedding_kwargs = dict(
-                num_embeddings=self.text_config.vocab_size,
-                embedding_dim=embedding_dim,
-                org_num_embeddings=self.text_config.vocab_size,
-                quant_config=self.quant_config,
+            self.model.set_input_embeddings(
+                replace_embedding_class(input_embeddings, self.quant_config)
             )
-            embed_scale = getattr(input_embeddings, "embed_scale", None)
-            if embed_scale is not None:
-                # Some models scale embeddings inside the input embedding layer
-                new_input_embeddings = ScaledVocabParallelEmbedding(
-                    **embedding_kwargs, embed_scale=float(embed_scale)
-                )
-            else:
-                new_input_embeddings = VocabParallelEmbedding(**embedding_kwargs)
-            self.model.set_input_embeddings(new_input_embeddings)
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -221,22 +203,47 @@ class Base(
         self.text_config._attn_implementation = "vllm"
         self.config.dtype = torch.get_default_dtype()
 
-    def _get_decoder_cls(self, **kwargs: dict) -> type["PreTrainedModel"]:
+    @contextmanager
+    def _mark_model_components(self, vllm_config: "VllmConfig"):
+        """Mark language model and tower submodules as `self.model` is created.
+
+        Nothing to do in `Base`, `MultiModalMixin` will override."""
+        yield
+
+    @cached_property
+    def _from_config_kwargs(self) -> dict[str, Any]:
+        """The kwargs used to create `self.model`."""
+        return dict(
+            config=self.config,
+            dtype=self.model_config.dtype,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+
+    def _find_encoder_classes(
+        self, model: "PreTrainedModel"
+    ) -> dict[str, type["PreTrainedModel"]]:
+        """Find the encoder class of each modality `model` has one for.
+
+        Text models have none. Multi-modal ones override this.
         """
-        Get the decoder class from the model.
+        return {}
 
-        Args:
-            kwargs: The kwargs to create the model.
+    @cached_property
+    def _pre_trained_model_classes(self) -> PreTrainedModelClasses:
+        """The decoder class and the encoder class of each modality that has one.
 
-        Returns:
-            The decoder class.
+        Both come from a single throwaway model, since building one is not cheap.
         """
         with torch.device("meta"):
-            model: PreTrainedModel = AutoModel.from_config(**kwargs)
-        decoder_cls = type(model.get_decoder())
-        logger.debug("Identified decoder class as: %s", decoder_cls)
+            model: PreTrainedModel = AutoModel.from_config(**self._from_config_kwargs)
+        model_classes = PreTrainedModelClasses(
+            decoder=type(model.get_decoder()),
+            encoders=self._find_encoder_classes(model),
+        )
         del model
-        return decoder_cls
+
+        logger.debug("Identified model classes as: %s", model_classes)
+        return model_classes
 
     def _decorate_cls_for_torch_compile(
         self,
@@ -271,7 +278,7 @@ class Base(
             is_encoder=is_encoder,
         )(cls)
 
-    def _decorate_for_torch_compile(self, **kwargs: dict):
+    def _decorate_for_torch_compile(self):
         """
         Decorate the model's decoder class to indicate to vLLM that it supports torch
         compile if `can_enable_torch_compile` is True.
@@ -281,7 +288,7 @@ class Base(
                 class.
         """
         self._decorate_cls_for_torch_compile(
-            cls=self._get_decoder_cls(**kwargs),
+            cls=self._pre_trained_model_classes.decoder,
             # Applied to a PreTrainedModel so the batch dimension will exist
             dynamic_arg_dims=dict[str, int](
                 input_ids=1,  # shape: [1, seq_len]
@@ -379,16 +386,6 @@ class Base(
                 type(module),
                 tip,
             )
-
-        def attrsetter(attr: str) -> Callable[[object, object], None]:
-            """Set a possibly nested attribute, like the inverse of attrgetter."""
-            parent, _, name = attr.rpartition(".")
-
-            def setter(obj: object, value: object):
-                attr_parent = attrgetter(parent)(obj) if parent else obj
-                setattr(attr_parent, name, value)
-
-            return setter
 
         module_lists = []
         module_list_idx = None
@@ -557,9 +554,6 @@ class Base(
                 if qk_head_dim := qk_nope_head_dim + qk_rope_head_dim:
                     self.model_config.model_arch_config.head_size = qk_head_dim
 
-        num_heads = self.model_config.get_num_attention_heads(self.parallel_config)
-        head_size = self.model_config.get_head_size()
-        num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
 
         pp_rank = self.pp_group.rank_in_group
@@ -567,11 +561,22 @@ class Base(
         start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
 
         for i in range(start, end):
+            # `[i]` is the whole-model config unless the checkpoint is
+            # heterogeneous, in which case it is this layer's own geometry.
+            arch_config = self.model_config.model_arch_config[i]
+            num_heads = self.model_config.get_num_attention_heads(
+                self.parallel_config, arch_config
+            )
+            head_size = arch_config.head_size
+            # Default to Llama scale, maybe updated in vllm_attention_forward
+            scale = head_size**-0.5
+            num_kv_heads = self.model_config.get_num_kv_heads(
+                self.parallel_config, arch_config
+            )
+
             kwargs = dict(
                 num_heads=num_heads,
-                # NOTE: We use Llama scale as default, if it's set by
-                # Transformers, it's updated in vllm_attention_forward
-                scale=head_size**-0.5,
+                scale=scale,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 prefix=f"{i}.attn",

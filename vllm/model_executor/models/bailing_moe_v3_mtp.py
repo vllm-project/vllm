@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Bailing MoE v3 MTP model."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -25,8 +26,11 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.bailing_moe_v3 import (
+    BailingMoeV3ForCausalLM,
     BailingMoeV3MLAAttention,
     BailingMoeV3MoE,
+    _configure_ling_fp8_quant_config,
+    _maybe_pad_block_fp8_shared_expert_checkpoint_tensor,
 )
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
@@ -79,7 +83,14 @@ class BailingMoeV3MultiTokenPredictorLayer(nn.Module):
         self.layer_id = layer_id
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self.eh_proj = ReplicatedLinear(
+            config.hidden_size * 2,
+            config.hidden_size,
+            bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "eh_proj"),
+            return_bias=False,
+        )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.self_attn = BailingMoeV3MLAAttention(
             config,
@@ -204,6 +215,8 @@ class BailingMoeV3MultiTokenPredictor(nn.Module):
 
 @support_torch_compile
 class BailingMoeV3MTPModel(nn.Module, SupportsPP):
+    hf_to_vllm_mapper = BailingMoeV3ForCausalLM.hf_to_vllm_mapper
+
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
@@ -217,6 +230,8 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
     ) -> None:
         super().__init__()
         self.config = _get_draft_hf_config(vllm_config)
+        self.quant_config = vllm_config.quant_config
+        _configure_ling_fp8_quant_config(self.quant_config)
         self.model = BailingMoeV3MultiTokenPredictor(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -233,11 +248,12 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        assert hidden_states is not None
         del intermediate_tensors
         return self.model(
             input_ids,
@@ -264,6 +280,7 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = self.hf_to_vllm_mapper.apply(weights)
         stacked_params_mapping = [
             (".fused_qkv_a_proj", ".q_a_proj", 0),
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
@@ -280,14 +297,17 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
             loaded_weight: torch.Tensor,
             shard_id=None,
         ) -> bool:
-            name = maybe_remap_kv_scale_name(name, params_dict)
-            if name is None:
+            remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+            if remapped_name is None:
                 return False
+            name = remapped_name
             if name not in params_dict or is_pp_missing_parameter(name, self):
                 return False
 
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader: Callable[..., None] = getattr(
+                param, "weight_loader", default_weight_loader
+            )
             if shard_id is None:
                 weight_loader(param, loaded_weight)
             elif isinstance(shard_id, int):
@@ -316,7 +336,6 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
             return None
 
         def normalize_name(name: str) -> str:
-            name = name.replace(".attention.", ".self_attn.")
             return name.replace(
                 "mlp.gate.e_score_correction_bias",
                 "mlp.gate.expert_bias",
@@ -345,15 +364,21 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
             if spec_layer is None:
                 continue
             name = normalize_name(name)
+            loaded_weight = _maybe_pad_block_fp8_shared_expert_checkpoint_tensor(
+                self.quant_config,
+                self.config,
+                name,
+                loaded_weight,
+            )
 
             loaded = False
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 if "mlp.experts." in name and name not in params_dict:
                     continue
                 mapped_name = name.replace(weight_name, param_name)
-                if load_param(mapped_name, loaded_weight, shard_id):
+                if load_param(mapped_name, loaded_weight, stacked_shard_id):
                     loaded = True
                     break
             if loaded:
