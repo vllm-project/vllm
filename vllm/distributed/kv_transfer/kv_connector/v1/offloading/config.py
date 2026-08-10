@@ -145,9 +145,7 @@ def build_offloading_config(
 
         from .canonical_mapping import canonical_format_id
 
-        # canonical_format_id resolves the KV cache layout, which needs the
-        # current vLLM config; scheduler-side consumers run outside that
-        # context, so resolve the id here once.
+        # Resolved once here; consumers may run outside the vLLM config context
         with set_current_vllm_config(vllm_config):
             canonical_format = canonical_format_id()
 
@@ -166,19 +164,15 @@ def build_offloading_config(
         and parallel_config.decode_context_parallel_size == 1
         and parallel_config.prefill_context_parallel_size == 1
     )
-    # Canonical pages are topology-free by construction, so the canonical
-    # layout widens the gate to every config whose mappings derive portable,
-    # group by group: sharded or replicated GQA heads, the TP-replicated MLA
-    # latent, and attention-only hybrids. Certification happens per layer
-    # against live tensor strides at registration, and create_worker fails
-    # closed against this flag if any layer cannot be certified.
+    # Canonical pages are topology-free, so the gate widens to every config
+    # whose mappings derive portable, group by group; certification happens
+    # per layer at registration and create_worker fails closed on this flag.
     if canonical_layout and not is_parallelism_agnostic:
         tp_size = parallel_config.tensor_parallel_size
         total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
 
         def spec_certifiable(spec: KVCacheSpec) -> bool:
-            """Statically mirrors _layer_mapping's certifiable spec classes;
-            hybrid attention models certify group by group."""
+            """Statically mirrors _layer_mapping's certifiable spec classes."""
             if not isinstance(spec, AttentionSpec):
                 return False
             if spec.kv_quant_mode.is_per_token_head:

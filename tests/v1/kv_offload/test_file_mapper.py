@@ -211,9 +211,7 @@ def test_parallel_agnostic_separates_persistent_layouts():
 
 
 def test_canonical_layout_changes_storage_namespace():
-    # Canonical bytes are not interchangeable with the direct layout, so the
-    # format id must fork the storage namespace. The id is precomputed on
-    # OffloadingConfig, so the mapper needs no vLLM config context.
+    # The canonical format id must fork the storage namespace
     direct = make_mapper_from_offloading_spec()
     canonical = make_mapper_from_offloading_spec(
         canonical_layout=True, canonical_format="v1-nhd"
