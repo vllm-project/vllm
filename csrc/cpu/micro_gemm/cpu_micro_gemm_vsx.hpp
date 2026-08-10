@@ -197,10 +197,14 @@ class TileGemmVSX {
         __vector unsigned int l01 = vec_mergel(u0, u1);
         __vector unsigned int l23 = vec_mergel(u2, u3);
 
-        vA_0[0] = (__vector unsigned int)vec_mergeh((__vector unsigned long long)h01, (__vector unsigned long long)h23);
-        vA_2[0] = (__vector unsigned int)vec_mergel((__vector unsigned long long)h01, (__vector unsigned long long)h23);
-        vA_4[0] = (__vector unsigned int)vec_mergeh((__vector unsigned long long)l01, (__vector unsigned long long)l23);
-        vA_6[0] = (__vector unsigned int)vec_mergel((__vector unsigned long long)l01, (__vector unsigned long long)l23);
+        vA_0[0] = (__vector unsigned int)vec_mergeh(
+            (__vector unsigned long long)h01, (__vector unsigned long long)h23);
+        vA_2[0] = (__vector unsigned int)vec_mergel(
+            (__vector unsigned long long)h01, (__vector unsigned long long)h23);
+        vA_4[0] = (__vector unsigned int)vec_mergeh(
+            (__vector unsigned long long)l01, (__vector unsigned long long)l23);
+        vA_6[0] = (__vector unsigned int)vec_mergel(
+            (__vector unsigned long long)l01, (__vector unsigned long long)l23);
       }
 
       if constexpr (M >= 5) {
@@ -239,10 +243,14 @@ class TileGemmVSX {
         __vector unsigned int l45 = vec_mergel(u4, u5);
         __vector unsigned int l67 = vec_mergel(u6, u7);
 
-        vA_0[1] = (__vector unsigned int)vec_mergeh((__vector unsigned long long)h45, (__vector unsigned long long)h67);
-        vA_2[1] = (__vector unsigned int)vec_mergel((__vector unsigned long long)h45, (__vector unsigned long long)h67);
-        vA_4[1] = (__vector unsigned int)vec_mergeh((__vector unsigned long long)l45, (__vector unsigned long long)l67);
-        vA_6[1] = (__vector unsigned int)vec_mergel((__vector unsigned long long)l45, (__vector unsigned long long)l67);
+        vA_0[1] = (__vector unsigned int)vec_mergeh(
+            (__vector unsigned long long)h45, (__vector unsigned long long)h67);
+        vA_2[1] = (__vector unsigned int)vec_mergel(
+            (__vector unsigned long long)h45, (__vector unsigned long long)h67);
+        vA_4[1] = (__vector unsigned int)vec_mergeh(
+            (__vector unsigned long long)l45, (__vector unsigned long long)l67);
+        vA_6[1] = (__vector unsigned int)vec_mergel(
+            (__vector unsigned long long)l45, (__vector unsigned long long)l67);
       }
 
       // Load B and GER for k_idx + 0
