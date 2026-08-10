@@ -1241,7 +1241,9 @@ def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
     src_padding = dst.shape[-1] - src.shape[-1]
     assert src_padding >= 0
     new_src = torch.nn.functional.pad(src, (0, src_padding), value=-1)
-    dst.copy_(new_src)
+    # `non_blocking` matters even for a pageable source: without it the copy
+    # blocks the calling thread.
+    dst.copy_(new_src, non_blocking=True)
 
 
 def _commit_eplb_maps_for_layer(
@@ -1256,32 +1258,26 @@ def _commit_eplb_maps_for_layer(
     visible to the model.
     """
 
-    # Committing the CPU-computed maps into the device-side map tensors
-    # is inherently H2D; the sources are pageable so the copies block.
-    with gpu_sync_allowed():
-        # Commit physical_to_logical_map
-        src = new_physical_to_logical_map
-        dst = model_state.physical_to_logical_map[layer]
-        assert src.shape == dst.shape, (
-            "The number of physical experts must stay the same while running "
-            f"Async EPLB. Current number of physical experts: {dst.shape[0]}. "
-            f"New number of physical experts {src.shape[0]}."
-        )
-        dst.copy_(src, non_blocking=True)
+    # Commit physical_to_logical_map
+    src = new_physical_to_logical_map
+    dst = model_state.physical_to_logical_map[layer]
+    assert src.shape == dst.shape, (
+        "The number of physical experts must stay the same while running "
+        f"Async EPLB. Current number of physical experts: {dst.shape[0]}. "
+        f"New number of physical experts {src.shape[0]}."
+    )
+    dst.copy_(src, non_blocking=True)
 
-        num_logical_experts = model_state.logical_to_physical_map.shape[1]
-        new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
-        # Commit logical_to_physical_map
-        _pad_out_tensor(
-            src=new_logical,
-            dst=model_state.logical_to_physical_map[layer],
-        )
+    num_logical_experts = model_state.logical_to_physical_map.shape[1]
+    new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
+    # Commit logical_to_physical_map
+    _pad_out_tensor(src=new_logical, dst=model_state.logical_to_physical_map[layer])
 
-        # Commit logical_replica_count
-        src = new_replica_count
-        dst = model_state.logical_replica_count[layer]
-        assert src.shape == dst.shape
-        dst.copy_(src, non_blocking=True)
+    # Commit logical_replica_count
+    src = new_replica_count
+    dst = model_state.logical_replica_count[layer]
+    assert src.shape == dst.shape
+    dst.copy_(src, non_blocking=True)
 
 
 def _commit_eplb_maps(
