@@ -90,6 +90,20 @@ class BaseOffloader(ABC):
         """Join streams after forward. Override in subclasses."""
         pass
 
+    @property
+    def gates_collectives(self) -> bool:
+        """Whether `gate_h2d_for_collective` does anything for this offloader.
+
+        Collective call sites check this before entering the context manager,
+        so the common no-op case costs a boolean rather than a generator.
+        """
+        return False
+
+    @contextmanager
+    def gate_h2d_for_collective(self) -> Generator[None, None, None]:
+        """Gate paced H2D work during an active device collective."""
+        yield
+
     def begin_forward_stats(self) -> None:  # noqa: B027
         """Start optional per-forward instrumentation."""
         pass
@@ -183,6 +197,7 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
             prefetch_step=prefetch.offload_prefetch_step,
             offload_params=prefetch.offload_params,
             offload_selectors=prefetch.offload_selectors,
+            comm_aware=prefetch.offload_comm_aware,
             mode="cpu",
         )
     elif backend == "uva":

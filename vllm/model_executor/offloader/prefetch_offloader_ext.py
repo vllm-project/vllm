@@ -24,7 +24,11 @@ from vllm.model_executor.offloader.prefetch_runtime_buffers import (
     StorageGroupInfo,
     build_runtime_buffer_plan,
 )
-from vllm.model_executor.offloader.slab import SlabLayout, view_slab_tensor
+from vllm.model_executor.offloader.slab import (
+    CpuSlabChunk,
+    SlabLayout,
+    build_cpu_slab_chunks,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.offloader.prefetch import (
@@ -245,13 +249,13 @@ def assign_module_buffer_slot(
         )
         self._slab_layout = slab_layout
         self._gpu_slab = gpu_slab
-        self._cpu_slab = _build_cpu_slab(self, slab_layout)
+        self._cpu_slab_chunks = _build_cpu_slab_chunks(self, slab_layout)
         for name in self._slab_param_names:
             self._param_offloaders[name].assign_static_buffer(slab_views[name])
     else:
         self._buffer_pool = None
         self._slab_layout = None
-        self._cpu_slab = None
+        self._cpu_slab_chunks = ()
         self._gpu_slab = None
 
     if self.uses_storage_group_fallback:
@@ -277,19 +281,18 @@ def assign_module_buffer_slot(
         self._param_offloaders[name].assign_static_buffer(gpu_buffer)
 
 
-def _build_cpu_slab(
+def _build_cpu_slab_chunks(
     self: "_ModuleOffloader",
     slab_layout: SlabLayout,
-) -> torch.Tensor:
-    """Build one pinned CPU slab from the current parameter CPU storages."""
-    cpu_slab = torch.empty(
-        slab_layout.total_bytes,
-        dtype=torch.uint8,
-        device="cpu",
-        pin_memory=should_pin_memory(),
-    )
+) -> tuple[CpuSlabChunk, ...]:
+    """Build bounded pinned CPU chunks for one logical GPU slab."""
+    tensors: dict[str, torch.Tensor] = {}
     for spec in slab_layout.specs:
         cpu_storage = self._param_offloaders[spec.name]._cpu_storage
         assert cpu_storage is not None, f"CPU storage for {spec.name} not initialized"
-        view_slab_tensor(cpu_slab, spec).copy_(cpu_storage)
-    return cpu_slab
+        tensors[spec.name] = cpu_storage
+    return build_cpu_slab_chunks(
+        slab_layout,
+        tensors,
+        pin_memory=should_pin_memory(),
+    )

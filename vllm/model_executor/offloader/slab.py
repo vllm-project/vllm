@@ -7,6 +7,17 @@ from dataclasses import dataclass
 
 import torch
 
+PINNED_CPU_SLAB_CHUNK_BYTES = 2 * 1024**3
+PINNED_CPU_SLAB_MIN_TAIL_BYTES = 128 * 1024**2
+
+
+@dataclass(frozen=True)
+class CpuSlabChunk:
+    """One pinned CPU byte range and its offset in the GPU slab."""
+
+    offset_bytes: int
+    data: torch.Tensor
+
 
 @dataclass(frozen=True)
 class SlabTensorSpec:
@@ -26,6 +37,97 @@ class SlabLayout:
 
     specs: tuple[SlabTensorSpec, ...]
     total_bytes: int
+
+
+def build_slab_chunk_ranges(
+    total_bytes: int,
+    *,
+    chunk_bytes: int = PINNED_CPU_SLAB_CHUNK_BYTES,
+    min_tail_bytes: int = PINNED_CPU_SLAB_MIN_TAIL_BYTES,
+) -> tuple[tuple[int, int], ...]:
+    """Split a slab into bounded ranges without leaving a tiny tail."""
+    if total_bytes < 0:
+        raise ValueError("total_bytes must be non-negative")
+    if chunk_bytes <= 0:
+        raise ValueError("chunk_bytes must be positive")
+    if not 0 <= min_tail_bytes < chunk_bytes:
+        raise ValueError("min_tail_bytes must be in [0, chunk_bytes)")
+    if total_bytes == 0:
+        return ()
+
+    full_chunks, tail_bytes = divmod(total_bytes, chunk_bytes)
+    if tail_bytes == 0 or tail_bytes >= min_tail_bytes or full_chunks == 0:
+        return tuple(
+            (start, min(start + chunk_bytes, total_bytes))
+            for start in range(0, total_bytes, chunk_bytes)
+        )
+
+    ranges = [
+        (index * chunk_bytes, (index + 1) * chunk_bytes)
+        for index in range(full_chunks - 1)
+    ]
+    penultimate_start = (full_chunks - 1) * chunk_bytes
+    tail_start = total_bytes - min_tail_bytes
+    ranges.append((penultimate_start, tail_start))
+    ranges.append((tail_start, total_bytes))
+    return tuple(ranges)
+
+
+def build_cpu_slab_chunks(
+    layout: SlabLayout,
+    tensors: dict[str, torch.Tensor],
+    *,
+    chunk_bytes: int = PINNED_CPU_SLAB_CHUNK_BYTES,
+    min_tail_bytes: int = PINNED_CPU_SLAB_MIN_TAIL_BYTES,
+    pin_memory: bool,
+) -> tuple[CpuSlabChunk, ...]:
+    """Pack one logical slab into bounded pinned CPU allocations.
+
+    The GPU slab remains contiguous; only its CPU source is split into byte
+    ranges. Copying raw storage bytes supports strided tensors and parameters
+    that cross a chunk boundary.
+    """
+    chunks: list[CpuSlabChunk] = []
+    for chunk_start, chunk_end in build_slab_chunk_ranges(
+        layout.total_bytes,
+        chunk_bytes=chunk_bytes,
+        min_tail_bytes=min_tail_bytes,
+    ):
+        data = torch.empty(
+            chunk_end - chunk_start,
+            dtype=torch.uint8,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
+
+        for spec in layout.specs:
+            spec_start = spec.offset_bytes
+            spec_end = spec_start + spec.storage_bytes
+            copy_start = max(chunk_start, spec_start)
+            copy_end = min(chunk_end, spec_end)
+            if copy_start >= copy_end:
+                continue
+
+            tensor = tensors[spec.name]
+            assert tensor.storage_offset() == 0, (
+                f"Slab tensor {spec.name} must have storage_offset=0."
+            )
+            itemsize = tensor.element_size()
+            assert spec.storage_bytes % itemsize == 0
+            storage = tensor.as_strided(
+                (spec.storage_bytes // itemsize,),
+                (1,),
+                storage_offset=0,
+            ).view(torch.uint8)
+            source_start = copy_start - spec_start
+            source_end = copy_end - spec_start
+            data[copy_start - chunk_start : copy_end - chunk_start].copy_(
+                storage[source_start:source_end]
+            )
+
+        chunks.append(CpuSlabChunk(offset_bytes=chunk_start, data=data))
+
+    return tuple(chunks)
 
 
 def build_slab_layout(

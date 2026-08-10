@@ -127,6 +127,18 @@ def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
+def _prefetch_collective_context(group_name: str):
+    if not group_name.startswith("tp:"):
+        return nullcontext()
+    from vllm.model_executor.offloader.base import get_offloader
+
+    offloader = get_offloader()
+    if not offloader.gates_collectives:
+        return nullcontext()
+
+    return offloader.gate_h2d_for_collective()
+
+
 def _apply_to_device_comms(
     action: Callable[[DeviceCommunicatorBase], None],
 ) -> None:
@@ -686,7 +698,8 @@ class GroupCoordinator:
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
-        return self.device_communicator.all_reduce(input_)
+        with _prefetch_collective_context(self.unique_name):
+            return self.device_communicator.all_reduce(input_)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
@@ -707,7 +720,8 @@ class GroupCoordinator:
     def _all_gather_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
-        return self.device_communicator.all_gather(input_, dim)
+        with _prefetch_collective_context(self.unique_name):
+            return self.device_communicator.all_gather(input_, dim)
 
     def all_gatherv(
         self,
@@ -745,7 +759,8 @@ class GroupCoordinator:
     def _reduce_scatter_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
-        return self.device_communicator.reduce_scatter(input_, dim)
+        with _prefetch_collective_context(self.unique_name):
+            return self.device_communicator.reduce_scatter(input_, dim)
 
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1

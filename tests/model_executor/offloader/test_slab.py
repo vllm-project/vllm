@@ -20,6 +20,9 @@ from vllm.model_executor.offloader.prefetch_runtime_buffers import (
     view_storage_group_tensor,
 )
 from vllm.model_executor.offloader.slab import (
+    CpuSlabChunk,
+    build_cpu_slab_chunks,
+    build_slab_chunk_ranges,
     build_slab_layout,
     storage_size_in_bytes,
     view_slab_tensor,
@@ -97,6 +100,45 @@ def test_slab_layout_uses_storage_span_not_numel_for_strided_tensors():
         )
         == 14
     )
+
+
+def test_cpu_slab_chunks_preserve_tensor_crossing_chunk_boundaries():
+    tensor = torch.arange(20, dtype=torch.float32)
+    layout = build_slab_layout([("experts", tensor)])
+
+    chunks = build_cpu_slab_chunks(
+        layout,
+        {"experts": tensor},
+        chunk_bytes=32,
+        min_tail_bytes=8,
+        pin_memory=False,
+    )
+
+    assert [chunk.offset_bytes for chunk in chunks] == [0, 32, 64]
+    assert [chunk.data.numel() for chunk in chunks] == [32, 32, 16]
+    rebuilt_slab = torch.cat([chunk.data for chunk in chunks])
+    assert torch.equal(view_slab_tensor(rebuilt_slab, layout.specs[0]), tensor)
+
+
+def test_slab_chunk_ranges_rebalance_only_a_tiny_tail():
+    assert build_slab_chunk_ranges(69, chunk_bytes=32, min_tail_bytes=8) == (
+        (0, 32),
+        (32, 61),
+        (61, 69),
+    )
+    assert build_slab_chunk_ranges(72, chunk_bytes=32, min_tail_bytes=8) == (
+        (0, 32),
+        (32, 64),
+        (64, 72),
+    )
+    assert build_slab_chunk_ranges(64, chunk_bytes=32, min_tail_bytes=8) == (
+        (0, 32),
+        (32, 64),
+    )
+
+
+def test_slab_chunk_ranges_keep_single_small_slab_intact():
+    assert build_slab_chunk_ranges(7, chunk_bytes=32, min_tail_bytes=8) == ((0, 7),)
 
 
 def test_static_buffer_pool_reuses_one_slab_per_module_layout():
@@ -308,8 +350,9 @@ def test_module_onload_copies_mixed_slab_and_storage_group_buffers(monkeypatch):
     offloader._direct_param_names = ()
     offloader._direct_buffers = {}
     offloader._buffer_pool = object()
-    offloader._cpu_slab = torch.arange(8, dtype=torch.uint8)
-    offloader._gpu_slab = torch.zeros_like(offloader._cpu_slab)
+    cpu_slab = torch.arange(8, dtype=torch.uint8)
+    offloader._cpu_slab_chunks = (CpuSlabChunk(0, cpu_slab),)
+    offloader._gpu_slab = torch.zeros_like(cpu_slab)
     offloader._use_slab_copy = True
     offloader.copy_stream = _FakeCudaStream()
     offloader.transfer_stats = PrefetchTransferStats()
@@ -327,5 +370,5 @@ def test_module_onload_copies_mixed_slab_and_storage_group_buffers(monkeypatch):
 
     assert offloader.start_onload_to_static() is False
 
-    assert torch.equal(offloader._gpu_slab, offloader._cpu_slab)
+    assert torch.equal(offloader._gpu_slab, cpu_slab)
     assert torch.equal(gpu_storage_group, base)

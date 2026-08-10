@@ -8,17 +8,30 @@ the corresponding env vars are set:
 
 * ``VLLM_PREFETCH_LOG_TRANSFER_STATS`` enables :class:`PrefetchTransferStats`
   bookkeeping during forward passes.
-* ``VLLM_PREFETCH_LOG_SCHEDULE`` triggers :func:`log_prefetch_schedule`.
+* ``VLLM_PREFETCH_LOG_SCHEDULE`` triggers the human schedule table and the
+  post-init machine-readable manifest.
 * ``VLLM_PREFETCH_LOG_OFFLOADED_PARAMS`` triggers
   :func:`log_prefetch_offload_plan`.
 """
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
+import torch
+
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.offloader.prefetch_helpers import (
+    maybe_retarget_offload_unit,
+)
+from vllm.model_executor.offloader.prefetch_tail_copy import (
+    PREFETCH_H2D_CHUNK_BYTES,
+    TAIL_PREFETCH_H2D_CHUNK_BYTES,
+)
 from vllm.model_executor.offloader.runtime import PrefetchRuntimeController
+from vllm.model_executor.offloader.selectors import select_module_parameters
 
 logger = init_logger(__name__)
 
@@ -29,6 +42,10 @@ def should_log_transfer_stats() -> bool:
 
 def should_log_prefetch_schedule() -> bool:
     return envs.VLLM_PREFETCH_LOG_SCHEDULE
+
+
+def should_collect_prefetch_debug_metadata() -> bool:
+    return envs.VLLM_PREFETCH_LOG_SCHEDULE or envs.VLLM_NVTX_SCOPES_FOR_PROFILING
 
 
 @dataclass
@@ -127,6 +144,248 @@ class PrefetchScheduleRow:
     lead_layers: int | None
     steady_state_load_after_layer_idx: int | None = None
     steady_state_lead_layers: int | None = None
+
+
+@dataclass(frozen=True)
+class PrefetchCopySegment:
+    """One base CPU-to-GPU copy submitted for an offload unit."""
+
+    kind: str
+    num_bytes: int
+
+
+def build_prefetch_copy_segments(
+    module_offloader: Any,
+) -> tuple[PrefetchCopySegment, ...]:
+    """Describe the copies submitted by ``run_onload_to_static``."""
+    segments: list[PrefetchCopySegment] = []
+    if module_offloader.uses_slab_buffers and module_offloader._use_slab_copy:
+        segments.extend(
+            PrefetchCopySegment("slab_chunk", chunk.data.numel())
+            for chunk in module_offloader._cpu_slab_chunks
+        )
+    elif module_offloader.uses_slab_buffers:
+        for name in module_offloader._slab_param_names:
+            storage = module_offloader._param_offloaders[name]._cpu_storage
+            assert storage is not None
+            segments.append(
+                PrefetchCopySegment(
+                    "slab_parameter", storage.numel() * storage.element_size()
+                )
+            )
+
+    for group_info in module_offloader._storage_group_infos:
+        source = group_info.cpu_source
+        segments.append(
+            PrefetchCopySegment("storage_group", source.numel() * source.element_size())
+        )
+    for name in module_offloader._direct_param_names:
+        storage = module_offloader._param_offloaders[name]._cpu_storage
+        assert storage is not None
+        segments.append(
+            PrefetchCopySegment(
+                "direct_parameter", storage.numel() * storage.element_size()
+            )
+        )
+    return tuple(segments)
+
+
+def _layout_id(kind: str, signature: Any) -> str:
+    digest = hashlib.sha256(repr(signature).encode()).hexdigest()[:16]
+    return f"{kind}-{digest}"
+
+
+def _slab_layout_metadata(module_offloader: Any) -> tuple[str, int] | None:
+    layout = module_offloader._slab_layout
+    if layout is None:
+        return None
+    signature = tuple(
+        (
+            spec.name,
+            spec.shape,
+            spec.stride,
+            str(spec.dtype),
+            spec.offset_bytes,
+            spec.storage_bytes,
+        )
+        for spec in layout.specs
+    )
+    return _layout_id("slab", signature), layout.total_bytes
+
+
+def _storage_group_layout_metadata(
+    module_offloader: Any,
+) -> tuple[str, int] | None:
+    group_infos = module_offloader._storage_group_infos
+    if not group_infos:
+        return None
+    signature = tuple(group_info.key for group_info in group_infos)
+    bytes_per_slot = sum(
+        group_info.cpu_source.numel() * group_info.cpu_source.element_size()
+        for group_info in group_infos
+    )
+    return _layout_id("storage_group", signature), bytes_per_slot
+
+
+def _candidate_positions(
+    modules: tuple[Any, ...],
+    *,
+    selectors: set[Any],
+    include_names: set[str],
+) -> list[dict[str, Any]]:
+    positions: list[dict[str, Any]] = []
+    for module_index, module in enumerate(modules):
+        param_names = select_module_parameters(
+            module,
+            selectors=selectors,
+            include_names=include_names,
+        )
+        if param_names:
+            target_module, target_names = maybe_retarget_offload_unit(
+                module,
+                param_names,
+                selectors=selectors,
+                include_names=include_names,
+            )
+            named_parameters = dict(target_module.named_parameters())
+            selected = [
+                named_parameters[name]
+                for name in target_names
+                if name in named_parameters
+            ]
+        else:
+            target_names = ()
+            selected = []
+        positions.append(
+            {
+                "module_index": module_index,
+                "offloadable": bool(selected),
+                "selected_parameter_count": len(selected),
+                "logical_parameter_bytes": sum(
+                    parameter.numel() * parameter.element_size()
+                    for parameter in selected
+                ),
+            }
+        )
+    return positions
+
+
+def build_prefetch_manifest(
+    plan_units: tuple[Any, ...],
+    runtime: PrefetchRuntimeController,
+    module_offloaders: list[Any],
+    all_modules: tuple[Any, ...],
+    *,
+    group_size: int,
+    num_in_group: int,
+    prefetch_step: int,
+    selectors: set[Any],
+    include_names: set[str],
+    comm_aware: bool,
+    total_offloaded_bytes: int,
+    runtime_buffer_bytes: int,
+) -> dict[str, Any]:
+    """Build a compact, rank-local manifest for the offline optimizer."""
+    initial_units = {unit.unit_idx for unit in runtime.initial_prefetches()}
+    loaded_after: dict[int, int] = {}
+    for source in runtime.units:
+        target = runtime.prefetch_after(source.unit_idx)
+        if target is not None:
+            loaded_after[target.unit_idx] = source.unit_idx
+
+    pooled_layouts: dict[str, dict[str, Any]] = {}
+    units: list[dict[str, Any]] = []
+    for runtime_unit, plan_unit, module_offloader in zip(
+        runtime.units, plan_units, module_offloaders
+    ):
+        copy_segments = module_offloader._copy_segments
+        pooled_layout_ids: list[str] = []
+        for kind, metadata in (
+            ("slab", _slab_layout_metadata(module_offloader)),
+            ("storage_group", _storage_group_layout_metadata(module_offloader)),
+        ):
+            if metadata is None:
+                continue
+            layout_id, bytes_per_slot = metadata
+            pooled_layout_ids.append(layout_id)
+            layout = pooled_layouts.setdefault(
+                layout_id,
+                {
+                    "layout_id": layout_id,
+                    "kind": kind,
+                    "bytes_per_slot": bytes_per_slot,
+                    "unit_indices": [],
+                },
+            )
+            layout["unit_indices"].append(runtime_unit.unit_idx)
+
+        target = runtime.prefetch_after(runtime_unit.unit_idx)
+        source_unit_idx = loaded_after.get(runtime_unit.unit_idx)
+        source_module_index = None
+        if source_unit_idx is not None:
+            source_module_index = plan_units[source_unit_idx].module_index
+        units.append(
+            {
+                "unit_idx": runtime_unit.unit_idx,
+                "module_index": plan_unit.module_index,
+                "slot_idx": runtime_unit.slot_idx,
+                "initial": runtime_unit.unit_idx in initial_units,
+                "prefetch_after_unit_idx": (
+                    None if target is None else target.unit_idx
+                ),
+                "loaded_after_unit_idx": source_unit_idx,
+                "loaded_after_module_index": source_module_index,
+                "logical_parameter_bytes": module_offloader.offloaded_bytes,
+                "h2d_bytes_per_prefetch": sum(
+                    segment.num_bytes for segment in copy_segments
+                ),
+                "copy_segments": [
+                    {"kind": segment.kind, "bytes": segment.num_bytes}
+                    for segment in copy_segments
+                ],
+                "pooled_layout_ids": pooled_layout_ids,
+                "direct_runtime_buffer_bytes": module_offloader.direct_buffer_bytes,
+            }
+        )
+
+    rank = None
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+    return {
+        "schema_version": 1,
+        "rank": rank,
+        "module_count": len(all_modules),
+        "config": {
+            "group_size": group_size,
+            "num_in_group": num_in_group,
+            "prefetch_step": prefetch_step,
+        },
+        "tail_copy_chunk_bytes": TAIL_PREFETCH_H2D_CHUNK_BYTES,
+        "comm_aware": comm_aware,
+        "regular_copy_chunk_bytes": (PREFETCH_H2D_CHUNK_BYTES if comm_aware else None),
+        "total_offloaded_bytes": total_offloaded_bytes,
+        "runtime_buffer_bytes": runtime_buffer_bytes,
+        "positions": _candidate_positions(
+            all_modules,
+            selectors=selectors,
+            include_names=include_names,
+        ),
+        "pooled_buffer_layouts": sorted(
+            pooled_layouts.values(), key=lambda item: item["layout_id"]
+        ),
+        "units": units,
+    }
+
+
+def log_prefetch_manifest(*args: Any, **kwargs: Any) -> None:
+    """Log one machine-readable manifest when schedule diagnostics are enabled."""
+    if not should_log_prefetch_schedule():
+        return
+    manifest = build_prefetch_manifest(*args, **kwargs)
+    logger.info(
+        "[PrefetchOffloader] manifest_json=%s",
+        json.dumps(manifest, separators=(",", ":"), sort_keys=True),
+    )
 
 
 def build_prefetch_schedule_rows(

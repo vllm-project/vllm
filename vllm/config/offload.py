@@ -94,6 +94,15 @@ class PrefetchOffloadConfig:
     unioned.
     """
 
+    offload_comm_aware: bool = False
+    """Pace H2D prefetch copies around tensor-parallel collectives.
+
+    Prefetch copies and TP collectives contend for the same PCIe links, so an
+    unpaced copy can delay a collective that every rank is waiting on. When
+    enabled, copies are chunked and gated while a TP collective is in flight.
+    Default is False, which issues copies without regard to collectives.
+    """
+
 
 @config
 class OffloadConfig:
