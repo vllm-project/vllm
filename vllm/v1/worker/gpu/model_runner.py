@@ -58,7 +58,7 @@ from vllm.multimodal.encoder_budget import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -167,7 +167,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        self.max_num_tokens = self._pad_for_sequence_parallelism(
+            self.scheduler_config.max_num_batched_tokens
+        )
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
@@ -298,6 +300,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.routed_experts_capturer: RoutedExpertsCapturer | None = None
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
+
+    def _pad_for_sequence_parallelism(self, num_tokens: int) -> int:
+        tp_size = self.parallel_config.tensor_parallel_size
+        if self.parallel_config.use_sequence_parallel_moe and tp_size > 1:
+            return round_up(num_tokens, tp_size)
+        return num_tokens
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -974,6 +982,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
+        if num_tokens_after_padding > num_tokens:
+            self.input_buffers.input_ids[num_tokens:num_tokens_after_padding].zero_()
+            self.input_buffers.positions[num_tokens:num_tokens_after_padding].zero_()
         if envs.VLLM_MOE_SKIP_PADDING:
             # Mark trailing cudagraph-padding rows so kernels can skip work for
             # them when supported.
@@ -1289,7 +1300,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
-            num_toks,
+            self._pad_for_sequence_parallelism(num_toks),
             uniform_tok_count,
             self.dp_size,
             self.dp_rank,
@@ -1403,10 +1414,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
                 input_ids = None
 
+        if (
+            inputs_embeds is not None
+            and input_batch.num_tokens_after_padding > input_batch.num_tokens
+        ):
+            inputs_embeds[
+                input_batch.num_tokens : input_batch.num_tokens_after_padding
+            ].zero_()
+
         if self.is_encoder_only:
             output = make_empty_encoder_model_runner_output(scheduler_output)
             output.ec_connector_output = ec_connector_output
             return output
+
+        model_state_inputs = self.model_state.prepare_inputs(
+            input_batch,
+            self.req_states,
+        )
+        model_state_positions = model_state_inputs.get("positions")
+        if (
+            model_state_positions is not None
+            and input_batch.num_tokens_after_padding > input_batch.num_tokens
+        ):
+            model_state_positions[
+                ..., input_batch.num_tokens : input_batch.num_tokens_after_padding
+            ].zero_()
 
         model_inputs = {
             "input_ids": input_ids,
@@ -1415,7 +1447,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             "intermediate_tensors": None,
             # NOTE: Values returned by `prepare_inputs` will override the default
             # values above.
-            **self.model_state.prepare_inputs(input_batch, self.req_states),
+            **model_state_inputs,
         }
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.

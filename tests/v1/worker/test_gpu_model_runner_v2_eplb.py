@@ -12,6 +12,16 @@ from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
 
 
+def test_v2_model_runner_pads_moe_sequence_parallel_input():
+    runner = object.__new__(mrv2.GPUModelRunner)
+    runner.parallel_config = SimpleNamespace(
+        tensor_parallel_size=4,
+        use_sequence_parallel_moe=True,
+    )
+
+    assert runner._pad_for_sequence_parallelism(5) == 8
+
+
 class FakeMemoryProfiler:
     def __enter__(self):
         self.consumed_memory = 0
