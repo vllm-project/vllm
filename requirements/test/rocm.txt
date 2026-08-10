@@ -568,6 +568,7 @@ numpy==2.2.6
     #   -r requirements/test/../common.txt
     #   accelerate
     #   albumentations
+    #   bitsandbytes
     #   bm25s
     #   contourpy
     #   cupy-cuda12x
@@ -697,6 +698,7 @@ packaging==26.2
     # via
     #   -c requirements/rocm.txt
     #   accelerate
+    #   bitsandbytes
     #   black
     #   datasets
     #   evaluate
