@@ -354,7 +354,7 @@ class Lfm2MoeShortConvDecoderLayer(nn.Module):
             model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.conv",
+            prefix=f"{prefix}.short_conv",
         )
 
         if layer_idx < config.num_dense_layers:
