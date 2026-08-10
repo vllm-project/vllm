@@ -670,6 +670,8 @@ class EngineArgs:
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
+    compile_cache: bool = False
+    """Enable persistent remote torch/CUDA-graph compilation cache reuse."""
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
     mamba_config: MambaConfig = get_field(VllmConfig, "mamba_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
@@ -1572,6 +1574,12 @@ class EngineArgs:
             "--max-cudagraph-capture-size",
             **compilation_kwargs["max_cudagraph_capture_size"],
         )
+        compilation_group.add_argument(
+            "--compile-cache",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Enable persistent remote torch/CUDA-graph compilation cache reuse.",
+        )
 
         # Kernel arguments
         kernel_kwargs = get_kwargs(KernelConfig)
@@ -2466,6 +2474,7 @@ class EngineArgs:
             compilation_config.max_cudagraph_capture_size = (
                 self.max_cudagraph_capture_size
             )
+        compilation_config.persistent_cache_enabled = self.compile_cache
 
         offload_config = OffloadConfig(
             offload_backend=self.offload_backend,

@@ -464,6 +464,11 @@ class CompilationConfig:
     """The directory to store the compiled graph, to accelerate Inductor
     compilation. By default, it will use model-related information to generate
     a cache directory."""
+    persistent_cache_enabled: bool = False
+    """Persist torch compilation artifacts in the configured remote cache.
+
+    This is opt-in and is normally set by ``--compile-cache``.
+    """
     compile_cache_save_format: Literal["binary", "unpacked"] = field(
         default_factory=lambda: envs.VLLM_COMPILE_CACHE_SAVE_FORMAT
     )
@@ -794,6 +799,7 @@ class CompilationConfig:
             "debug_dump_path",
             "cache_dir",
             "local_cache_dir",
+            "persistent_cache_enabled",
             "traced_files",
             "compilation_time",
             "encoder_compilation_time",

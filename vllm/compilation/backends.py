@@ -1075,7 +1075,27 @@ class VllmBackend:
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_index
         local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}", self.prefix)
-        os.makedirs(local_cache_dir, exist_ok=True)
+        persistent_cache = None
+        if self.compilation_config.persistent_cache_enabled:
+            from .persistent_cache import (
+                PersistentCompileCache,
+                build_cache_manifest,
+                manifest_key,
+            )
+
+            manifest = build_cache_manifest(
+                vllm_config,
+                env_factors=env_factors,
+                config_hash=config_hash,
+                compiler_hash=compiler_hash,
+                code_hash=code_hash,
+            )
+            persistent_cache = PersistentCompileCache(
+                manifest_key(manifest), rank, dp_rank, self.prefix
+            )
+            persistent_cache.restore(local_cache_dir)
+        else:
+            os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
         # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
@@ -1226,6 +1246,8 @@ class VllmBackend:
         # All compilation is done. Save the cache.
         time_before_saving = time.perf_counter()
         self.compiler_manager.save_to_file()
+        if persistent_cache is not None:
+            persistent_cache.publish(local_cache_dir)
         elapsed = time.perf_counter() - time_before_saving
         if elapsed > 1:
             logger.info_once(
