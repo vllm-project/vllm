@@ -23,6 +23,9 @@ def is_shared_expert_quant_fse_compatible(
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
     if isinstance(quant_config, QuarkConfig):
+        # TODO: Check on `layer_quant_config`. There could be cases where
+        # `expert_prefix` and `shared_expert_prefix` have a different per-layer
+        # quantization config through `layer_quant_config`
         is_compatible = not any(
             "shared_expert" in str(entry)
             for entry in quant_config.quant_config.get("exclude", [])
