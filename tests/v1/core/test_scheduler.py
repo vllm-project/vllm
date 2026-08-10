@@ -1281,6 +1281,7 @@ def test_reset_connector_cache_no_connector_is_no_op_success():
 
 
 def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     monkeypatch.setattr("vllm.platforms.current_platform.device_type", "cuda")
     (tmp_path / "config.json").write_text(
         '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
