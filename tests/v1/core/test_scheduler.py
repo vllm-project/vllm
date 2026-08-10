@@ -29,6 +29,15 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.plugins import (
+    FCFSSchedulerPlugin,
+    PrioritySchedulerPlugin,
+    SchedulerPluginManager,
+)
+from vllm.v1.core.sched.request_queue import (
+    FCFSRequestQueue,
+    PriorityRequestQueue,
+)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
@@ -2426,6 +2435,55 @@ def test_memory_leak():
 
     # Confirm no memory leak.
     assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("policy", "plugin_cls", "queue_cls"),
+    [
+        ("fcfs", FCFSSchedulerPlugin, FCFSRequestQueue),
+        ("priority", PrioritySchedulerPlugin, PriorityRequestQueue),
+    ],
+)
+def test_builtin_scheduling_policy_uses_plugin(
+    policy: str,
+    plugin_cls: type,
+    queue_cls: type,
+):
+    manager = SchedulerPluginManager(policy)
+
+    assert isinstance(manager.queue_sort_plugin, plugin_cls)
+    assert isinstance(manager.preemption_plugin, plugin_cls)
+    assert isinstance(manager.create_request_queue(), queue_cls)
+
+
+@pytest.mark.skip_global_cleanup
+def test_fcfs_plugin_preserves_queue_and_preemption_order():
+    manager = SchedulerPluginManager("fcfs")
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    requests = create_requests(num_requests=3)
+    waiting.add_request(requests[0])
+    skipped.add_request(requests[1])
+
+    assert manager.select_queue(waiting, skipped) is skipped
+    assert manager.select_preemption_victim(requests) is requests[-1]
+
+
+@pytest.mark.skip_global_cleanup
+def test_priority_plugin_preserves_queue_and_preemption_order():
+    manager = SchedulerPluginManager("priority")
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    requests = create_requests(num_requests=3)
+    priorities = (2, 0, 1)
+    for request, priority in zip(requests, priorities):
+        request.priority = priority
+    waiting.add_request(requests[0])
+    skipped.add_request(requests[1])
+
+    assert manager.select_queue(waiting, skipped) is skipped
+    assert manager.select_preemption_victim(requests) is requests[0]
 
 
 def create_scheduler_with_priority(
