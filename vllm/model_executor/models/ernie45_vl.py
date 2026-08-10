@@ -1721,16 +1721,18 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
-        dest,
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
     ) -> None:
         # The graph output is the raw ViT features (pre-merge), padded to the
         # token budget. Run the resampler eagerly on the valid portion using
         # the actual batch grid_thw, then scatter the post-merge embeddings.
+        output = outputs["default"]
+        assert batch_mm_kwargs is not None
         grid_thw = batch_mm_kwargs["image_grid_thw"].to(output.device)
         num_valid = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum())
         image_embeds = self.resampler_model(output[:num_valid], grid_thw)
