@@ -5547,6 +5547,7 @@ def _create_hybrid_mamba_connector_scheduler(
     matched_tokens: int,
     block_size: int = 16,
     num_blocks: int = 100,
+    supports_divergent_hits: bool = True,
 ) -> Scheduler:
     """FA + Mamba ("all" cache mode) scheduler with a MockKVConnector."""
     model_config = ModelConfig(
@@ -5577,6 +5578,7 @@ def _create_hybrid_mamba_connector_scheduler(
             kv_connector_extra_config={
                 "matched_tokens": matched_tokens,
                 "is_async": False,
+                "supports_divergent_local_hybrid_hits": supports_divergent_hits,
             },
         ),
     )
@@ -5685,15 +5687,34 @@ def test_hybrid_per_group_hit_divergence_with_connector(
     assert replay.num_tokens - num_scheduled == expected_num_computed
 
 
-def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
-    """The opposite divergence: the FA prefix survives deeper than the Mamba
-    state and the connector supplies nothing (ext == 0). Reporting the deep FA
-    hit as locally computed would resume with no valid Mamba state at that
-    boundary (silent bad output). The scheduler must fall back to the
-    convergent boundary that every group agrees on (block 0's surviving state).
+@pytest.mark.parametrize(
+    (
+        "supports_divergent_local_hybrid_hits",
+        "matched_tokens",
+        "replay_blocks",
+        "expected_num_computed",
+    ),
+    [
+        (True, 0, 5, 16),
+        (True, 16, 6, 80),
+        (False, 16, 6, 32),
+    ],
+)
+def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
+    supports_divergent_local_hybrid_hits: bool,
+    matched_tokens: int,
+    replay_blocks: int,
+    expected_num_computed: int,
+):
+    """A capable connector may restore missing Mamba state at the deeper FA
+    boundary. An external miss or an incapable connector uses a locally
+    consistent boundary instead.
     """
     block_size = 16
-    scheduler = _create_hybrid_mamba_connector_scheduler(matched_tokens=0)
+    scheduler = _create_hybrid_mamba_connector_scheduler(
+        matched_tokens,
+        supports_divergent_hits=supports_divergent_local_hybrid_hits,
+    )
     manager = scheduler.kv_cache_manager
     assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
 
@@ -5719,7 +5740,7 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
 
     [replay] = create_requests(
         num_requests=1,
-        num_tokens=5 * block_size,
+        num_tokens=replay_blocks * block_size,
         max_tokens=1,
         same_prompt=True,
         block_size=block_size,
@@ -5733,8 +5754,7 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
     scheduler.add_request(replay)
     output = scheduler.schedule()
     num_scheduled = output.num_scheduled_tokens[replay.request_id]
-    # Must resume at the convergent boundary (block 0), not the deep FA hit.
-    assert replay.num_tokens - num_scheduled == block_size
+    assert replay.num_tokens - num_scheduled == expected_num_computed
 
 
 def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
@@ -5832,3 +5852,34 @@ def test_encoder_instance_finishes_request_once_prompt_is_consumed():
     assert request.status == RequestStatus.FINISHED_STOPPED
     # The encoder instance publishes an embedding, not tokens.
     assert request.num_output_tokens == 0
+
+
+@pytest.mark.parametrize("ec_role", ["ec_producer", "ec_consumer"])
+def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str):
+    """Neither role re-encodes what the connector already holds.
+
+    For a consumer the item is loaded; for a producer there is nothing left to
+    do at all -- it published that embedding earlier (or a sibling encoder did),
+    so a second ViT pass would be pure waste. Reached on any repeat: a second
+    chat turn re-sending its image, a sibling encoder behind the proxy's
+    round-robin, or a restart that kept the shared storage.
+
+    Pinned because the obvious "fix" for the encoder-instance crash this used to
+    cause is to make the producer encode anyway; the crash belongs to the worker
+    (an encoder instance must not gather embeddings it never needed), and paying
+    for it here would cost every deployment a redundant encode.
+    """
+    scheduler = create_scheduler(
+        max_num_seqs=8,
+        max_num_batched_tokens=1024,
+        use_ec_connector=True,
+        ec_role=ec_role,
+    )
+    request = _make_encoder_instance_request(scheduler)
+    req_id = request.request_id
+    scheduler.ec_connector.has_cache_item = lambda *a, **k: True
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[req_id] > 0
+    assert not output.scheduled_encoder_inputs.get(req_id)

@@ -571,9 +571,11 @@ class ModelConfig:
 
         # If loading model/tokenizer from HF Hub, resolve the revision once
         # to prevent resolving it multiple times downstream.
-        can_resolve_model_revision = (
-            self.hf_config_path is None or self.hf_config_path == self.model
-        )
+        # If the weights come from a different repo, we cannot eagerly resolve revision
+        weights_from_model = not self.model_weights or self.model_weights == self.model
+        # If the config comes from a different repo, we cannot eagerly resolve revision
+        config_from_model = not self.hf_config_path or self.hf_config_path == self.model
+        can_resolve_model_revision = config_from_model and weights_from_model
         if can_resolve_model_revision:
             self.revision = resolve_revision(
                 self.model,
@@ -853,7 +855,6 @@ class ModelConfig:
         self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
-        self._verify_bnb_config()
 
     def _supports_multimodal_for_mm_prefix(self) -> bool:
         """Whether multimodal inputs can still appear for this deployment.
@@ -1319,34 +1320,6 @@ class ModelConfig:
                 "to eager mode.",
                 self.model_arch_config.model_type,
             )
-            self.enforce_eager = True
-
-    def _verify_bnb_config(self) -> None:
-        """
-        The current version of bitsandbytes (0.46.1) with 8-bit models does not
-        yet support CUDA graph.
-        # TODO Remove this when bitsandbytes supports.
-        """
-        is_bitsandbytes = self.quantization == "bitsandbytes"
-        has_quantization_config = self.model_arch_config.quantization_config is not None
-        is_8bit = (
-            self.model_arch_config.quantization_config.get("load_in_8bit", False)  # type: ignore[union-attr]
-            if has_quantization_config
-            else False
-        )
-        if all(
-            [
-                is_bitsandbytes,
-                has_quantization_config,
-                is_8bit,
-                not self.enforce_eager,
-            ]
-        ):
-            logger.warning(
-                "CUDA graph is not supported on BitsAndBytes 8bit yet, "
-                "fallback to the eager mode."
-            )
-
             self.enforce_eager = True
 
     def _verify_with_expert_parallelism(self) -> None:
