@@ -1544,3 +1544,64 @@ def test_fp8_dcp_head_envelope_guard(local_heads, dcp_world_size, should_raise):
         gathered_pad = 64 if gathered_heads <= 64 else 128
         assert builder.fp8_decode_padded_heads == local_pad
         assert local_pad == gathered_pad
+
+
+def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
+    """A decode row whose top-k shard holds no local candidates (all -1) has
+    undefined kernel out/lse; it must come back as (0, -inf), the identity of
+    the cross-rank LSE merge, or a NaN would survive the merge even at zero
+    weight (0 * NaN = NaN)."""
+    num_tokens, num_heads, head_dim = 3, 2, 3
+    q = torch.empty(num_tokens, num_heads, head_dim, device=DEVICE_TYPE)
+    local_indices = torch.tensor(
+        [[0, 1, -1, -1], [-1, -1, -1, -1], [2, -1, 3, -1]],
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_filter_and_convert_dcp_index",
+        lambda *args, **kwargs: local_indices,
+    )
+
+    def run_kernel(**kwargs):
+        out = torch.full(
+            (1, num_tokens, num_heads, 1), float("nan"), device=DEVICE_TYPE
+        )
+        lse = torch.full((1, num_heads, num_tokens), float("nan"), device=DEVICE_TYPE)
+        for token_id in (0, 2):  # rows with local candidates get real values
+            out[0, token_id] = float(token_id + 1)
+            lse[0, :, token_id] = float(token_id + 1)
+        return out, lse
+
+    metadata = SimpleNamespace(
+        fp8_extra_metadata=FlashMLASparseMetadata.FP8KernelMetadata(
+            scheduler_metadata=object(),  # type: ignore[arg-type]
+            dummy_block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+            cache_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
+        ),
+        req_id_per_token=torch.empty(num_tokens, dtype=torch.int32, device=DEVICE_TYPE),
+        block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        block_size=64,
+        cp_kv_cache_interleave_size=1,
+    )
+    impl = SimpleNamespace(
+        dcp_world_size=2,
+        dcp_rank=0,
+        need_to_return_lse_for_decode=True,
+        _fp8_flash_mla_kernel=run_kernel,
+    )
+
+    out, lse = FlashMLASparseImpl._forward_fp8_kv_mixed_batch(
+        impl, q, torch.empty(0, device=DEVICE_TYPE), local_indices, metadata
+    )
+
+    assert torch.equal(out[1], torch.zeros_like(out[1]))
+    assert torch.isneginf(lse[1]).all()
+    for token_id in (0, 2):
+        assert torch.equal(out[token_id], torch.full_like(out[token_id], token_id + 1))
+        assert torch.equal(lse[token_id], torch.full_like(lse[token_id], token_id + 1))
+    assert out.is_contiguous()
+    assert not out.isnan().any()
+    assert not lse.isnan().any()
