@@ -142,14 +142,9 @@ def aiter_requires_tcp_store() -> bool:
     ``FileStore`` and trips that assertion. Prefer the TCP rendezvous
     (pre-#50999) for ROCm + AITER custom AR until AITER accepts FileStore.
     """
-    import vllm.envs as envs
-    from vllm.platforms import current_platform
+    from vllm._aiter_ops import rocm_aiter_ops
 
-    return (
-        current_platform.is_rocm()
-        and envs.VLLM_ROCM_USE_AITER
-        and envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
-    )
+    return rocm_aiter_ops.is_custom_all_reduce_enabled()
 
 
 def get_tcp_uri(ip: str, port: int) -> str:
