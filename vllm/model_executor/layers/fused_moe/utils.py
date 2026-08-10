@@ -94,8 +94,14 @@ def resolve_model_fused_shared_expert_fusion(
     enabled = [
         getattr(layer, "is_fused_shared_expert_enabled", False) for layer in moe_layers
     ]
-    if len(set(enabled)) > 1:
-        raise ValueError("Shared-expert FSE must be enabled for all MoE layers.")
+    enabled_count = sum(enabled)
+    disabled_count = len(enabled) - enabled_count
+    if enabled_count > 0 and disabled_count > 0:
+        raise NotImplementedError(
+            "Fused shared experts must be enabled for all MoE layers; found "
+            f"{enabled_count} enabled and {disabled_count} disabled layers. "
+            "Please open an issue."
+        )
     return any(enabled)
 
 
