@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::result::Result;
 
 use thiserror::Error;
@@ -10,7 +13,7 @@ pub enum TokenIdsError {
     #[error("allowed_token_ids should not be empty")]
     EmptyAllowedTokenIds,
     #[error(
-        "token_id(s) {token_ids:?} in {parameter} contain out-of-vocab token ids. \
+        "token_id(s) {token_ids:?} in {parameter} are out of vocabulary. \
          Vocabulary size: {vocab_size}"
     )]
     OutOfVocab {

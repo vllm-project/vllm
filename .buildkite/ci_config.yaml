@@ -14,6 +14,7 @@ run_all_patterns:
   - "setup.py"
   - "csrc/"
   - "cmake/"
+  - ".buildkite/check-torch-abi.py"
 run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"

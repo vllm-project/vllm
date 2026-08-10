@@ -505,7 +505,18 @@ def has_triton_kernels() -> bool:
 @cache
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available."""
-    return _has_module("tilelang")
+    if not _has_module("tilelang"):
+        return False
+    # ROCm-only guard, imported lazily to avoid loading rocm on CUDA.
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1250
+
+        # TODO: Re-enable when tilelang supports gfx1250
+        if on_gfx1250():
+            return False
+    return True
 
 
 def has_arctic_inference() -> bool:
@@ -552,3 +563,26 @@ def has_cutedsl() -> bool:
 def has_humming() -> bool:
     """Whether the optional `humming` package is available."""
     return _has_module("humming")
+
+
+def has_quark():
+    """Whether the optional `quark` package is available."""
+    return _has_module("quark")
+
+
+def check_torchcodec_available():
+    """Whether the optional `torchcodec` package is available."""
+    try:
+        import torchcodec  # noqa: F401
+    except RuntimeError as e:
+        # torchcodec will raise RuntimeError during import instead
+        # of ImportError when system ffmpeg unavailable, with a
+        # message that can leak sensitive system information.
+        # Trim it down to avoid it.
+        marker = (
+            "The following exceptions were raised as we tried to load libtorchcodec:"
+        )
+        message = str(e)
+        if marker in message:
+            raise RuntimeError(message.split(marker, 1)[0].rstrip()) from None
+        raise e

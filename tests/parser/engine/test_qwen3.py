@@ -454,10 +454,10 @@ class TestStreaming:
 
         args_after_partial_tag = collect_tool_arguments(results[:4])
         assert "<param" not in args_after_partial_tag
-        assert args_after_partial_tag == '{"query": "hello'
+        assert args_after_partial_tag == '{"query": "hello '
 
         args_text = collect_tool_arguments(results)
-        assert json.loads(args_text) == {"query": "hello", "limit": "10"}
+        assert json.loads(args_text) == {"query": "hello ", "limit": "10"}
 
     def test_streaming_numeric_values(self, parser, mock_request):
         chunks = [

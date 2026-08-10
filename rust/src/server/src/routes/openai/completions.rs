@@ -1,8 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 mod convert;
 mod types;
 mod validate;
 
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
@@ -19,28 +21,41 @@ use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, TextOutputStream,
-    TextOutputStreamExt as _,
+    TextOutputStreamExt as _, TextRequest,
 };
 
 use self::convert::{ResponseOptions, prepare_completion_request};
+pub(crate) use self::types::CompletionRequest;
 use super::utils::logprobs::{
-    collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_maps,
-    decoded_prompt_logprobs_to_openai, text_len,
+    collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
+    prompt_logprobs_to_maps, text_len,
 };
 use super::utils::types::Usage;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
+use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::types::{
-    CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
-    CompletionStreamChoice, CompletionStreamResponse,
+    CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
+    CompletionStreamResponse,
 };
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
-use crate::utils::{resolve_request_context, unix_timestamp};
+use crate::utils::{ResolvedRequestContext, resolve_request_context, unix_timestamp};
+
+pub(crate) fn lower_completion_request(
+    request: CompletionRequest,
+    lora_resolution: &LoraModelResolution,
+    ctx: ResolvedRequestContext,
+    tokenizer: &dyn Tokenizer,
+) -> Result<TextRequest, ApiError> {
+    prepare_completion_request(request, lora_resolution, ctx, tokenizer)
+        .map(|prepared| prepared.text_request)
+}
 
 /// Validate one completions request and proxy it into the shared `vllm-text`
 /// stack.
@@ -212,6 +227,7 @@ async fn collect_completion(
         usage: Some(usage),
         system_fingerprint: None,
         kv_transfer_params: collected.kv_transfer_params,
+        ec_transfer_params: collected.ec_transfer_params,
     })
 }
 
@@ -501,27 +517,6 @@ fn prompt_only_logprobs_to_openai(
     ))
 }
 
-fn prompt_logprobs_to_maps(
-    prompt_logprobs: Option<&DecodedPromptLogprobs>,
-    prompt_token_ids: &[u32],
-    return_tokens_as_token_ids: bool,
-) -> Result<Vec<Option<HashMap<String, f32>>>, ApiError> {
-    if let Some(prompt_logprobs) = prompt_logprobs {
-        return Ok(decoded_prompt_logprobs_to_maps(
-            prompt_logprobs,
-            return_tokens_as_token_ids,
-        ));
-    }
-
-    if let [_token_id] = prompt_token_ids {
-        return Ok(vec![None]);
-    }
-
-    Err(server_error!(
-        "completion response requested prompt_logprobs but generation returned none"
-    ))
-}
-
 fn usage_chunk(
     request_id: &str,
     response_model: &str,
@@ -682,6 +677,7 @@ mod tests {
                         "repetition_detected".to_string(),
                     ))),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -786,6 +782,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -837,6 +834,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -891,6 +889,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -962,6 +961,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -1035,6 +1035,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);

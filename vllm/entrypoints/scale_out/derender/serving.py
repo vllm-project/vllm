@@ -4,8 +4,14 @@ import time
 from typing import cast
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
-from vllm.entrypoints.openai.completion.protocol import CompletionResponse
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionResponse,
+    ChatCompletionStreamResponse,
+)
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionResponse,
+    CompletionStreamResponse,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
@@ -28,7 +34,10 @@ from vllm.renderers.online_derenderer import OnlineDerenderer
 from ..token_in_token_out.mm_serde import encode_mm_kwargs_item
 from ..token_in_token_out.protocol import (
     DerenderChatRequest,
+    DerenderChatStreamRequest,
     DerenderCompletionRequest,
+    DerenderCompletionStreamRequest,
+    DerenderStreamState,
     GenerateResponse,
     MultiModalFeatures,
     PlaceholderRangeInfo,
@@ -64,6 +73,8 @@ class ServingDerender(BaseServing):
         """
         max_n = envs.VLLM_MAX_N_SEQUENCES
         max_model_len = self.model_config.max_model_len
+        # See ModelConfig.max_logprobs for semantics and default value.
+        max_logprobs = self.model_config.max_logprobs
 
         if len(generate_responses) > max_n:
             return self.create_error_response(
@@ -95,11 +106,16 @@ class ServingDerender(BaseServing):
                             f"max_model_len ({max_model_len})."
                         )
                     for entry in choice.logprobs.content:
-                        if entry.top_logprobs and len(entry.top_logprobs) > 20:
+                        if (
+                            max_logprobs >= 0
+                            and entry.top_logprobs
+                            and len(entry.top_logprobs) > max_logprobs
+                        ):
                             return self.create_error_response(
                                 f"top_logprobs count "
                                 f"({len(entry.top_logprobs)}) in "
-                                f"choice {choice.index} exceeds maximum (20)."
+                                f"choice {choice.index} exceeds "
+                                f"max_logprobs ({max_logprobs})."
                             )
 
             if gen.prompt_logprobs and len(gen.prompt_logprobs) > max_model_len:
@@ -193,7 +209,9 @@ class ServingDerender(BaseServing):
             total_prompt_tokens,
             total_completion_tokens,
         ) = await self.online_derenderer.derender_completion(
-            request.generate_responses, request.prompt_tokens
+            request.generate_responses,
+            request.prompt_tokens,
+            completion_request=request.completion_request,
         )
 
         first = request.generate_responses[0]
@@ -229,6 +247,90 @@ class ServingDerender(BaseServing):
             usage=usage,
             kv_transfer_params=kv_params,
         )
+
+    async def derender_chat_stream_response(
+        self,
+        request: DerenderChatStreamRequest,
+    ) -> tuple[ChatCompletionStreamResponse, DerenderStreamState] | ErrorResponse:
+        """Streaming counterpart to ``derender_chat_response``.
+
+        Processes one ``GenerateStreamResponse`` chunk and returns the
+        derendered chunk together with the updated client carried state.
+
+        ``parser is None`` or no ``chat_request`` until reasoning/tool call
+        functionality added in future PR.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        try:
+            chunk, updated_state = await self.online_derenderer.derender_chat_stream(
+                model=request.model,
+                generate_chunk=request.generate_chunk,
+                state=request.stream_state,
+                chat_request=request.chat_request,
+                prompt_tokens=request.prompt_tokens,
+            )
+        except NotImplementedError as exc:
+            return self.create_error_response(exc)
+        except ValueError as exc:
+            return self.create_error_response(str(exc))
+        except (KeyError, IndexError) as exc:
+            return self.create_error_response(
+                f"invalid stream_state: detokenization failed ({exc!r})"
+            )
+
+        logger.debug(
+            "derender_chat_stream request_id=%s model=%s delta_tokens=%d",
+            request.generate_chunk.request_id,
+            request.model,
+            sum(
+                len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
+            ),
+        )
+        return chunk, updated_state
+
+    async def derender_completion_stream_response(
+        self,
+        request: DerenderCompletionStreamRequest,
+    ) -> tuple[CompletionStreamResponse, DerenderStreamState] | ErrorResponse:
+        """Streaming counterpart to ``derender_completion_response``.
+
+        Processes one ``GenerateStreamResponse`` chunk (one output sequence's
+        delta) and returns the derendered chunk and updated state.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        try:
+            (
+                chunk,
+                updated_state,
+            ) = await self.online_derenderer.derender_completion_stream(
+                model=request.model,
+                generate_chunk=request.generate_chunk,
+                state=request.stream_state,
+                prompt_tokens=request.prompt_tokens,
+                completion_request=request.completion_request,
+            )
+        except ValueError as exc:
+            return self.create_error_response(str(exc))
+        except (KeyError, IndexError) as exc:
+            return self.create_error_response(
+                f"invalid stream_state: detokenization failed ({exc!r})"
+            )
+
+        logger.debug(
+            "derender_completion_stream request_id=%s model=%s delta_tokens=%d",
+            request.generate_chunk.request_id,
+            request.model,
+            sum(
+                len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
+            ),
+        )
+        return chunk, updated_state
 
     @staticmethod
     def _extract_mm_features(

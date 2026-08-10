@@ -14,8 +14,10 @@ Layout (4 GPUs, TP=1, DP=4, EP):
   * A ``DataParallelInferenceEngine`` actor spawns all 4 LLM actors,
     waits for initialization, and orchestrates generation / weight-sync.
 
-Uses the built-in ``ray`` send_mode: each FSDP worker calls
-``trainer_send_weights`` targeting its colocated LLM actor.
+Every FSDP rank builds an ``IPCTrainerWeightTransferEngine`` (via ``trainer_init``)
+and calls ``send_weights()``; all ranks join the IPC handle all-gather, and only
+rank 0 (the sender) ships the merged handles and drives the DP LLM actors through
+its ``RayVLLMWeightSyncClient``.
 
 This example was run on 4xH100.
 """
@@ -23,7 +25,6 @@ This example was run on 4xH100.
 from __future__ import annotations
 
 import os
-from dataclasses import asdict
 
 import ray
 import torch
@@ -31,18 +32,25 @@ import torch.distributed as dist
 from huggingface_hub import snapshot_download
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from torch.distributed._tensor import DTensor
 from torch.distributed.fsdp import fully_shard
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.ipc_engine import (
-    IPCTrainerSendWeightsArgs,
-    IPCWeightTransferEngine,
-    IPCWeightTransferInitInfo,
+from vllm.distributed.weight_transfer import (
+    ModuleSource,
+    RayVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
 )
+from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 from vllm.utils.network_utils import get_ip, get_open_port
+
+# The inference side only needs the backend; the packed wire params are
+# trainer-side and get propagated to the workers at the init handshake.
+WEIGHT_TRANSFER_CONFIG = WeightTransferConfig(backend="ipc")
+# Packed IPC transfer with a 1 GB buffer (matches the per-chunk buffer size).
+PACKED = True
+PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024
 
 TRAIN_GPU_FRACTION = float(os.environ.get("RLHF_IPC_TRAIN_GPU_FRACTION", "0.42"))
 VLLM_GPU_FRACTION = float(os.environ.get("RLHF_IPC_VLLM_GPU_FRACTION", "0.42"))
@@ -125,71 +133,33 @@ class FSDPTrainWorker:
     def get_weight_metadata(self):
         return self.weight_names, self.weight_dtype_names, self.weight_shapes
 
-    def gather_and_broadcast_weights_ipc(self, llm_handle, packed: bool = True):
-        """All-gather full params; all ranks create IPC handles, rank 0 sends.
+    def setup_engine(self, llm_handles):
+        """Build the trainer IPC engine on every FSDP rank.
 
-        All ranks must call trainer_send_weights so they participate in the
-        all_gather_object collective inside _all_gather_and_merge_handles.
-        Only rank 0 actually sends the payload to vLLM (gated by _is_rank_zero).
+        Called on all ranks: rank 0 becomes the sender (drives the inference
+        side and performs the no-op IPC init handshake against all DP LLM
+        actors); the other ranks hold a null-client engine and only join the
+        IPC handle all-gather during send_weights.
         """
-
-        def _full_param_iter():
-            # HF's Qwen3MoeExperts (and other recent HF MoE impls) packs
-            # all experts into two fused 3-D tensors per layer:
-            #   experts.gate_up_proj  shape (E, 2*I, H)
-            #   experts.down_proj     shape (E, H, I)
-            # vLLM's Qwen3MoE load_weights still expects the older
-            # per-expert HF layout (experts.<i>.gate_proj.weight,
-            # experts.<i>.up_proj.weight, experts.<i>.down_proj.weight),
-            # so we un-fuse on the fly. Split order matches HF's forward:
-            #   gate, up = linear(x, gate_up_proj[i]).chunk(2, dim=-1)
-            # → rows [:I] of gate_up_proj[i] are gate, rows [I:] are up.
-            params = self.model.state_dict()
-            for name in list(params.keys()):
-                param = params.pop(name)
-                if isinstance(param, DTensor):
-                    tensor = param.full_tensor().detach().contiguous()
-                else:
-                    tensor = param.detach().contiguous()
-                del param
-
-                if name.endswith(".experts.gate_up_proj") and tensor.dim() == 3:
-                    prefix = name[: -len(".gate_up_proj")]
-                    num_experts, two_inter, _ = tensor.shape
-                    inter = two_inter // 2
-                    for i in range(num_experts):
-                        expert = tensor[i]
-                        yield (
-                            f"{prefix}.{i}.gate_proj.weight",
-                            expert[:inter].contiguous(),
-                        )
-                        yield (
-                            f"{prefix}.{i}.up_proj.weight",
-                            expert[inter:].contiguous(),
-                        )
-                    del tensor
-                elif name.endswith(".experts.down_proj") and tensor.dim() == 3:
-                    prefix = name[: -len(".down_proj")]
-                    num_experts = tensor.shape[0]
-                    for i in range(num_experts):
-                        yield (
-                            f"{prefix}.{i}.down_proj.weight",
-                            tensor[i].contiguous(),
-                        )
-                    del tensor
-                else:
-                    yield name, tensor
-
-        trainer_args = IPCTrainerSendWeightsArgs(
-            send_mode="ray",
-            llm_handle=llm_handle,
-            packed=packed,
-            packed_buffer_size_bytes=1024 * 1024 * 1024,  # 1 GB
+        self.engine = WeightTransferTrainerFactory.trainer_init(
+            init_info=IPCTrainerInitInfo(
+                rank=self.rank,  # FSDP rank; sender is 0
+                packed=PACKED,
+                packed_buffer_size_bytes=PACKED_BUFFER_SIZE_BYTES,
+            ),
+            client=RayVLLMWeightSyncClient(llm_handles),
+            source=ModuleSource(self.model),
         )
-        IPCWeightTransferEngine.trainer_send_weights(
-            iterator=_full_param_iter(),
-            trainer_args=trainer_args,
-        )
+
+    def gather_and_broadcast_weights_ipc(self):
+        """All-gather full params across FSDP ranks; rank 0 sends to vLLM.
+
+        Called on all ranks concurrently. `send_weights` gathers each param and
+        contributes to the IPC handle all-gather on every rank; only rank 0 (the
+        sender) drives start/update/finish on the inference side (the other
+        ranks' client RPCs no-op).
+        """
+        self.engine.send_weights()
 
 
 @ray.remote(num_cpus=1)
@@ -224,7 +194,7 @@ class DataParallelInferenceEngine:
                     distributed_executor_backend="ray",
                     enable_expert_parallel=True,
                     gpu_memory_utilization=0.35,
-                    weight_transfer_config=WeightTransferConfig(backend="ipc"),
+                    weight_transfer_config=WEIGHT_TRANSFER_CONFIG,
                     enable_sleep_mode=True,
                     load_format="dummy",
                     dp_rank=r,
@@ -266,22 +236,6 @@ class DataParallelInferenceEngine:
                     ordered[orig_i] = all_outputs[rank_idx][local_i]
                 rank_idx += 1
         return ordered
-
-    def init_weight_transfer(self):
-        ray.get(
-            [
-                actor.init_weight_transfer_engine.remote(
-                    dict(init_info=asdict(IPCWeightTransferInitInfo()))
-                )
-                for actor in self.llm_actors
-            ]
-        )
-
-    def start_weight_update(self):
-        ray.get([actor.start_weight_update.remote() for actor in self.llm_actors])
-
-    def finish_weight_update(self):
-        ray.get([actor.finish_weight_update.remote() for actor in self.llm_actors])
 
     def sleep(self, level: int = 0):
         ray.get([actor.sleep.remote(level=level) for actor in self.llm_actors])
@@ -370,8 +324,10 @@ def main():
         print("-" * 60)
 
     # --- Weight transfer ---
-    print("[transfer] Initializing IPC weight transfer...")
-    ray.get(inference_engine.init_weight_transfer.remote())
+    # The rank-0 FSDP worker owns the trainer engine and drives the inference
+    # side (init/start/update/finish) for all DP actors via the Ray client.
+    print("[transfer] Initializing IPC weight transfer (all FSDP ranks)...")
+    ray.get([w.setup_engine.remote(llm_actors) for w in fsdp_workers])
 
     # Two-phase sleep/wake pattern:
     # 1. sleep(level=1) — offload weights to CPU, discard KV cache
@@ -384,18 +340,11 @@ def main():
     print("[sync] Waking weights (KV cache stays free)...")
     ray.get(inference_engine.wake_up.remote(tags=["weights"]))
 
-    print("[sync] Starting weight update...")
-    ray.get(inference_engine.start_weight_update.remote())
-
+    # All FSDP ranks participate in the IPC handle all-gather; rank 0's engine
+    # additionally drives start_weight_update / update_weights /
+    # finish_weight_update on the inference side.
     print("[sync] Packed IPC transfer FSDP → vLLM...")
-    ray.get(
-        [
-            w.gather_and_broadcast_weights_ipc.remote(llm_actors, packed=True)
-            for w in fsdp_workers
-        ]
-    )
-
-    ray.get(inference_engine.finish_weight_update.remote())
+    ray.get([w.gather_and_broadcast_weights_ipc.remote() for w in fsdp_workers])
     print("[sync] Weight transfer complete.")
 
     print("[sync] Waking KV cache + scheduling...")

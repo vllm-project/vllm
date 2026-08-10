@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Streaming tool parsers for chat completions.
 
 #[macro_use]
@@ -6,12 +9,13 @@ mod deepseek_dsml;
 pub(crate) mod deepseek_json;
 mod glm_xml;
 mod hy_v3;
-mod json;
+pub(crate) mod json;
 mod kimi_k2;
 mod minimax_m2;
 mod minimax_m3;
 mod parameters;
 mod qwen_coder;
+mod seed_oss;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
 use std::collections::{BTreeMap, btree_map};
@@ -29,9 +33,10 @@ pub use kimi_k2::KimiK2ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;
+pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub use xgrammar_structural_tag::Model as StructuralTagModel;
+pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
 
 use crate::utils;
 
@@ -182,8 +187,8 @@ pub trait ToolParser: Send {
         false
     }
 
-    /// Return the xgrammar structural-tag model used for strict tool calling.
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+    /// Return the xgrammar structural-tag builder used for strict tool calling.
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         None
     }
 
