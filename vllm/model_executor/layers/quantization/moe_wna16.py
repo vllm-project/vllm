@@ -42,6 +42,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 
 
 class MoeWNA16Config(QuantizationConfig):
@@ -251,7 +252,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
     ):
         layer.quant_config = self.quant_config
         bit8_pack_factor = self.quant_config.bit8_pack_factor
-        group_size = self.quant_config.group_size
+        full_group_size = self.quant_config.group_size
+        group_size = full_group_size
         group_size_div_factor = 1
 
         # make intermediate_size and hidden_size divisible by group_size
@@ -263,6 +265,23 @@ class MoeWNA16Method(FusedMoEMethodBase):
             assert group_size >= 32
         layer.group_size = group_size
         layer.group_size_div_factor = group_size_div_factor
+
+        def scale_num_groups(dim: int) -> int:
+            """Number of scale/qzeros groups stored along ``dim``.
+
+            Checkpoints group weights using the full (unreduced) group size,
+            padding the last partial group when ``dim`` is not divisible by it
+            (e.g. 704 with group_size 128 -> ceil(704 / 128) = 6 groups). The
+            weight loader later repeats each group ``group_size_div_factor``
+            times, so the parameter must be sized to match that repeated
+            layout: ``ceil(dim / full_group_size) * group_size_div_factor``.
+
+            When ``dim`` is divisible by ``full_group_size`` (the common case)
+            this equals the previous ``dim // group_size`` and behaviour is
+            unchanged; it only differs for the non-divisible case that
+            previously produced a shape mismatch on load.
+            """
+            return cdiv(dim, full_group_size) * group_size_div_factor
 
         strategy = FusedMoeWeightScaleSupported.GROUP.value
         extra_weight_attrs.update({"quant_method": strategy, "is_transposed": False})
@@ -302,7 +321,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             torch.zeros(
                 num_experts,
                 self.moe.w13_num_shards * intermediate_size_per_partition,
-                hidden_size // group_size,
+                scale_num_groups(hidden_size),
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -314,7 +333,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             torch.zeros(
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition // group_size,
+                scale_num_groups(intermediate_size_per_partition),
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -329,7 +348,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
                     self.moe.w13_num_shards
                     * intermediate_size_per_partition
                     // bit8_pack_factor,
-                    hidden_size // group_size,
+                    scale_num_groups(hidden_size),
                     dtype=torch.uint8,
                 ),
                 requires_grad=False,
