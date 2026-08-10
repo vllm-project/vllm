@@ -14,7 +14,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.models.glm5next.nvidia.ops.kpool_compress import (
-    append_tail_to_topk,
+    expand_pools_and_append_tail,
     expand_pools_to_tokens,
     kpool_compress_and_write_cache,
     kpool_decode_update_and_maybe_write_cache_batched,
@@ -491,22 +491,21 @@ def sparse_attn_indexer_kpool(
 
             if index_kpool > 1:
                 pool_ids = pool_topk.to(torch.int64)
-                valid = pool_ids >= 0
-                expanded = expand_pools_to_tokens(
-                    pool_ids, valid, topk_tokens, index_kpool
-                )
-                # Append the per-query causal tail: tokens beyond the last
-                # complete pool within [0, pos]. seq_len_q = pos + 1; the
-                # incomplete remainder (seq_len_q % kpool) is not pooled so it
-                # is reachable only by direct inclusion.
                 if positions is not None:
-                    q_pos = positions[chunk.token_start : chunk.token_end].to(
-                        torch.int32
+                    # Fused expand-pools + append-tail into one Triton kernel
+                    # (replaces ~25 elementwise ops). seq_len is token-granular
+                    # (pos+1); the kernel derives pool_len internally.
+                    q_seq = (
+                        positions[chunk.token_start : chunk.token_end].to(torch.int32)
+                        + 1
                     )
-                    q_seq = q_pos + 1
-                    pool_lens = (q_seq // index_kpool).to(torch.int32)
-                    expanded = append_tail_to_topk(
-                        expanded, q_seq, pool_lens, index_kpool
+                    expanded = expand_pools_and_append_tail(
+                        pool_ids, q_seq, index_kpool
+                    )
+                else:
+                    valid = pool_ids >= 0
+                    expanded = expand_pools_to_tokens(
+                        pool_ids, valid, topk_tokens, index_kpool
                     )
                 topk_indices_buffer[
                     chunk.token_start : chunk.token_end, : expanded.shape[-1]
@@ -766,19 +765,14 @@ def sparse_attn_indexer_kpool(
         # Resolve to token-level indices in the output buffer.
         if index_kpool > 1:
             pool_ids = pool_topk.to(torch.int64)
-            valid = pool_ids >= 0
-            out = expand_pools_to_tokens(pool_ids, valid, topk_tokens, index_kpool)
-            # Append the always-selected tail: the request's trailing incomplete
-            # pool (seq_len % kpool tokens) is not in the index K cache, so it
-            # can only be reached by direct inclusion.
-            n = out.shape[0]
+            n = pool_topk.shape[0]
             # NOTE: decode_metadata.seq_lens is POOL-granular (divided by
             # compress_ratio in the indexer metadata builder) because it feeds
-            # the paged-MQA logits. append_tail_to_topk / pool_lens need
-            # TOKEN-granular seq_len, so recover it from the decode tokens'
-            # positions (pos == seq_len - 1). Using the compressed seq_lens
-            # here yields dec_seq=0 for seq_len<kpool -> empty topk -> the
-            # sparse MLA attends to nothing -> decode degradation.
+            # the paged-MQA logits. The fused kernel needs TOKEN-granular seq_len,
+            # so recover it from the decode tokens' positions (pos == seq_len-1).
+            # Using the compressed seq_lens yields dec_seq=0 for seq_len<kpool
+            # -> empty topk -> the sparse MLA attends to nothing -> decode
+            # degradation.
             if positions is not None:
                 dec_seq = positions[:n].to(torch.int32) + 1
             else:
@@ -786,8 +780,7 @@ def sparse_attn_indexer_kpool(
                 if dec_seq.ndim == 2:
                     dec_seq = dec_seq[:, -1]
                 dec_seq = dec_seq.to(torch.int32)
-            pool_lens = (dec_seq // index_kpool).to(torch.int32)
-            out = append_tail_to_topk(out, dec_seq, pool_lens, index_kpool)
+            out = expand_pools_and_append_tail(pool_ids, dec_seq, index_kpool)
         else:
             out = topk_dst
 
