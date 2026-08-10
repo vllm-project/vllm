@@ -5709,6 +5709,17 @@ class GPUModelRunner(
 
         prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
 
+        # When LoRA targets lm_head, add_lora_logits uses prompt_mapping_meta
+        # (one entry per sequence). For prompt_logprobs we have one hidden-state
+        # row per prompt token, so the per-sequence mapping is wrong and the
+        # lm_head delta is silently dropped. Cache the wrapper here and swap the
+        # metadata to per-token indices around each compute_logits call.
+        lm_wrapper = None
+        if self.lora_config:
+            lm_wrapper = self.lora_manager.get_lm_punica_wrapper()
+            if not hasattr(lm_wrapper, "prompt_mapping_meta"):
+                lm_wrapper = None
+
         # Since prompt logprobs are a rare feature, prioritize simple,
         # maintainable loop over optimal performance.
         completed_prefill_reqs = []
@@ -5767,7 +5778,18 @@ class GPUModelRunner(
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc.np[req_idx].item()
             prompt_hidden_states = hidden_states[offset : offset + num_logits]
-            logits = self.model.compute_logits(prompt_hidden_states)
+            if lm_wrapper is not None:
+                token_slice = lm_wrapper.token_lora_indices[
+                    offset : offset + num_logits
+                ]
+                lm_wrapper.prompt_mapping_meta.prepare_tensors(token_slice)
+            try:
+                logits = self.model.compute_logits(prompt_hidden_states)
+            finally:
+                if lm_wrapper is not None:
+                    lm_wrapper.prompt_mapping_meta.prepare_tensors(
+                        lm_wrapper.sampler_indices
+                    )
 
             # Get the "target" tokens for each index. For prompt at index i,
             # the token at prompt index i+1 is the "sampled" token we want

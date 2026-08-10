@@ -726,6 +726,13 @@ class LoRAModelManager:
 
         return None
 
+    def get_lm_punica_wrapper(self) -> PunicaWrapperBase:
+        """Return the punica wrapper for the language model component."""
+        if not self.supports_mm:
+            return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
+        lm_prefix = self.mm_mapping.language_model[0]
+        return self.punica_wrapper_mapping[lm_prefix]
+
     def _register_packed_modules(self, module_full_name: str) -> None:
         parts = module_full_name.split(".")
         module_name = parts[-1]

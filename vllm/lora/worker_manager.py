@@ -201,6 +201,9 @@ class WorkerLoRAManager:
             and self._adapter_manager.supports_tower_connector_lora
         )
 
+    def get_lm_punica_wrapper(self):
+        return self._adapter_manager.get_lm_punica_wrapper()
+
     def _apply_adapters(self, adapter_requests: set[Any]) -> None:
         existing_adapters = self.list_adapters()
         models_map = {
