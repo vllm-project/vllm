@@ -78,26 +78,10 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     }
 )
 
-# Architectures that default to V1 on ROCm: the V2 runner faults during the
-# profile run. VLLM_USE_V2_MODEL_RUNNER=1 still forces V2.
-# TODO: fix V2 enablement
-ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
-    {
-        "KimiK3ForConditionalGeneration",
-    }
-)
-
 
 @lru_cache
 def default_v2_model_runner_architectures() -> frozenset[str]:
     """Architectures defaulting to the V2 model runner on this platform."""
-    from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        return (
-            DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
-            - ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES
-        )
     return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
 
 
