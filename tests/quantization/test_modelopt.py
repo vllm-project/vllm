@@ -640,6 +640,47 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
     assert isinstance(kernel, kernel_cls)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_modelopt_linear_exposes_humming_layer_attrs(dist_init, monkeypatch):
+    """``prepare_humming_linear_layer_config`` reads ``output_partition_sizes``
+    and ``has_bias`` straight off the layer, so ``--linear-backend=humming``
+    needs create_weights to leave both there. Nothing else sets
+    ``output_partition_sizes``; ``LinearBase`` sets ``has_bias`` but
+    ``ParallelLMHead`` does not.
+    """
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.layers.quantization import modelopt as mo
+
+    monkeypatch.setattr(mo, "select_linear_kernel", lambda spec, layer, rt: Mock())
+    monkeypatch.setattr(mo, "expose_input_quant_key", lambda layer, kernel: None)
+
+    def build(layer):
+        method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+        method.spec = QuantSpec(weight=kNvfp4Static, activation=None)
+        method.ctx = mo.CkptCtx(group_size=16)
+        method.fmt = mo.FormatScheme()
+        method.wkey = mo.SCHEME_FOR[kNvfp4Static]
+        method.akey = None
+        method.input_dtype = method.out_dtype = torch.bfloat16
+        method.marlin_input_dtype = None
+        method.create_weights(
+            layer, 64, [32, 32], 64, 64, torch.bfloat16, weight_loader=Mock()
+        )
+
+    # ParallelLMHead-style: a bias slot but no has_bias attribute.
+    lm_head = torch.nn.Module()
+    lm_head.register_parameter("bias", None)
+    build(lm_head)
+    assert lm_head.output_partition_sizes == [32, 32]
+    assert lm_head.has_bias is False
+
+    # LinearBase already decided has_bias; we must not overwrite it.
+    linear = torch.nn.Module()
+    linear.has_bias = True
+    build(linear)
+    assert linear.has_bias is True
+
+
 @pytest.mark.parametrize(
     "quant_method, expected_use_a16, act_key_is_none",
     [

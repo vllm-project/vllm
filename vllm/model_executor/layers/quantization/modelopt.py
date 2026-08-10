@@ -2316,6 +2316,12 @@ class ModelOptLinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = sum(output_partition_sizes)
+        # Humming reads both off the layer in
+        # prepare_humming_linear_layer_config. LinearBase sets them itself;
+        # ParallelLMHead does not, so supply them here.
+        layer.output_partition_sizes = output_partition_sizes
+        if not hasattr(layer, "has_bias"):
+            layer.has_bias = getattr(layer, "bias", None) is not None
         shapes = Shapes(output_partition_sizes, input_size_per_partition, params_dtype)
 
         self.wkey.create_weights(layer, WEIGHT, self.ctx, shapes, weight_loader)
