@@ -27,7 +27,10 @@ from vllm.v1.attention.backends.mla.prefill.base import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.model_executor.layers.attention.mla_attention import MLADims
+    from vllm.model_executor.layers.attention.mla_attention import (
+        MLACommonPrefillMetadata,
+        MLADims,
+    )
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 if is_flash_attn_varlen_func_available():
@@ -288,26 +291,23 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
     @classmethod
     def supports_mla_dimensions(cls, mla_dimensions: MLADimensions) -> bool:
-        dims_deepseek = MLADimensions(
-            qk_nope_head_dim=128,
-            qk_rope_head_dim=64,
-            v_head_dim=128,
-        )
-        dims_glm = MLADimensions(
-            qk_nope_head_dim=192,
-            qk_rope_head_dim=64,
-            v_head_dim=256,
-        )
-        dims_mistral_s4 = MLADimensions(
-            qk_nope_head_dim=64,
-            qk_rope_head_dim=64,
-            v_head_dim=128,
-        )
-        fa_version = get_flash_attn_version()
-        if fa_version == 4:
-            return mla_dimensions in [dims_deepseek, dims_mistral_s4]
-        else:
-            return mla_dimensions in [dims_deepseek, dims_glm, dims_mistral_s4]
+        return mla_dimensions in [
+            MLADimensions(
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
+            MLADimensions(
+                qk_nope_head_dim=192,
+                qk_rope_head_dim=64,
+                v_head_dim=256,
+            ),
+            MLADimensions(
+                qk_nope_head_dim=64,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
+        ]
 
     def __init__(
         self,
@@ -422,6 +422,11 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             return attn_out, lse
         return attn_out
 
+    def supports_out(self) -> bool:
+        # A padded V produces a qk_head_dim output that cannot be written into
+        # a v_head_dim `out`; only the unpadded path honors `out`.
+        return not self.requires_v_padding
+
     def run_prefill_new_tokens(
         self,
         q: torch.Tensor,
@@ -448,20 +453,19 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self._prefill_metadata.chunked_context is not None
         return self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=self._prefill_metadata.query_start_loc,
-            cu_seqlens_k=self._prefill_metadata.chunked_context.cu_seq_lens[chunk_idx],
-            max_seqlen_q=self._prefill_metadata.max_query_len,
-            max_seqlen_k=self._prefill_metadata.chunked_context.max_seq_lens[chunk_idx],
+            cu_seqlens_q=chunk.query_start_loc,
+            cu_seqlens_k=chunk.cu_seq_lens,
+            max_seqlen_q=chunk.max_query_len,
+            max_seqlen_k=chunk.max_seq_len,
             softmax_scale=self.scale,
             causal=False,  # Context is unmasked
             return_softmax_lse=True,

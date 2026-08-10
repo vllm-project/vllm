@@ -7,6 +7,7 @@ import uuid
 import pytest
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_random_seed
@@ -16,6 +17,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheTensor,
     GPULoadStoreSpec,
 )
+from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -30,6 +32,18 @@ DEVICE_TYPE = current_platform.device_type
 DEVICES = [f"{DEVICE_TYPE}:0"]
 NUM_MAPPINGS = [3]
 NUM_MAPPINGS_PER_GROUP = [2]
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", True)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: True)
+
+    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
+    assert gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False) is (
+        ops.swap_blocks_batch
+    )
 
 
 @pytest.mark.parametrize("gpu_to_cpu", [True, False])
@@ -181,7 +195,7 @@ def test_transfer(
             assert finished[0].success
             assert finished[0].transfer_size == (
                 len(gpu_blocks)
-                * sum([x.page_size_bytes for x in handler.kv_cache_groups_data_refs[0]])
+                * sum([x.page_size_bytes for x in handler.layer_refs_per_group[0]])
             )
             assert finished[0].transfer_time > 0
             assert finished[0].transfer_time < (time.time() - start_time)
@@ -395,7 +409,7 @@ def test_transfer_multi_group(
             expected_bytes = sum(
                 group_size * sum([x.page_size_bytes for x in data_refs])
                 for group_size, data_refs in zip(
-                    group_sizes, handler.kv_cache_groups_data_refs
+                    group_sizes, handler.layer_refs_per_group
                 )
             )
             assert finished[0].transfer_size == expected_bytes
