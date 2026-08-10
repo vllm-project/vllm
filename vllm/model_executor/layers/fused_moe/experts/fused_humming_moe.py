@@ -92,6 +92,19 @@ def get_humming_moe_gemm_type() -> str:
     return gemm_type
 
 
+def _cap_tuning_config_k_block(tuning_config: list, max_k_block: int = 128) -> None:
+    """Cap each tile's K-block (block_shape[2]) at ``max_k_block`` in place.
+
+    A K-block of 256 produces a TMA descriptor the driver rejects at launch
+    (CUDA_ERROR_MISALIGNED_ADDRESS); 128 is what Humming uses for larger M.
+    """
+    for entry in tuning_config:
+        config = entry[2]
+        block_shape = config.get("block_shape")
+        if block_shape and len(block_shape) == 3 and block_shape[2] > max_k_block:
+            config["block_shape"] = [block_shape[0], block_shape[1], max_k_block]
+
+
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
@@ -143,6 +156,13 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             gemm_type=self.humming_gemm_type(),
         )
         self.compute_config_str = json.dumps(self.compute_config)
+        # Small-M tiles can select a K-block of 256, whose TMA descriptor the
+        # driver rejects at cuLaunchKernelEx (CUDA_ERROR_MISALIGNED_ADDRESS).
+        # Cap the K-block at 128 -- what Humming already uses for larger M and
+        # which launches cleanly (warp_shape K is 128 in every entry). This also
+        # fires in profile_run, so it is not avoidable with --enforce-eager.
+        _cap_tuning_config_k_block(self.w13_tuning_config)
+        _cap_tuning_config_k_block(self.w2_tuning_config)
         self.w13_tuning_config_str = json.dumps(self.w13_tuning_config)
         self.w2_tuning_config_str = json.dumps(self.w2_tuning_config)
 
