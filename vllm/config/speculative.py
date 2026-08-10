@@ -48,6 +48,7 @@ MTPModelTypes = Literal[
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
+    "bailing_hybrid_v3_mtp",
     "minimax_m3_mtp",
     "bailing_hybrid_mtp",
     "mtp",
@@ -489,7 +490,9 @@ class SpeculativeConfig:
             )
 
         architectures = getattr(hf_config, "architectures", []) or []
-        if (
+        if initial_architecture == "BailingMoeV3ForCausalLM":
+            hf_config.model_type = "bailing_hybrid_v3_mtp"
+        elif (
             hf_config.model_type == "bailing_hybrid"
             or "BailingMoeV2_5ForCausalLM" in architectures
         ):
@@ -500,6 +503,14 @@ class SpeculativeConfig:
                 {
                     "n_predict": n_predict,
                     "architectures": ["BailingMoeV25MTPModel"],
+                }
+            )
+        if hf_config.model_type == "bailing_hybrid_v3_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["BailingMoeV3MTPModel"],
                 }
             )
 
@@ -517,8 +528,16 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
             )
-        if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
-            is_moe = hf_config.model_type == "qwen3_5_moe"
+        if hf_config.model_type in (
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+        ):
+            # Checkpoints that ship only the text config resolve to the
+            # `qwen3_5_text` / `qwen3_5_moe_text` model types and carry the
+            # same `mtp_num_hidden_layers` field as the multimodal ones.
+            is_moe = hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text")
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
             hf_config.update(
@@ -527,15 +546,28 @@ class SpeculativeConfig:
                     "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
                 }
             )
-        if hf_config.model_type == "intern_s2_preview":
+        if hf_config.model_type in ("intern_s2_preview", "interns2_mobius"):
+            is_mobius = hf_config.model_type == "interns2_mobius"
             text_config = getattr(hf_config, "text_config", None)
-            is_moe = getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            is_moe = is_mobius or (
+                getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            )
+            if is_mobius:
+                assert text_config is not None
+                text_config.model_type = "qwen3_5_moe_text"
+                text_config.num_experts = text_config.mtp_num_experts
+                text_config.num_experts_per_tok = text_config.mtp_num_experts_per_tok
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
+            architecture = (
+                "InternS2MobiusMTP"
+                if is_mobius
+                else ("Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP")
+            )
             hf_config.update(
                 {
                     "n_predict": n_predict,
-                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                    "architectures": [architecture],
                 }
             )
         if hf_config.model_type in ("longcat_flash", "longcat_flash_ngram"):
