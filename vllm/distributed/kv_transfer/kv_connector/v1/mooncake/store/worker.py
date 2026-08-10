@@ -58,7 +58,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
@@ -1489,18 +1489,9 @@ class MooncakeStoreWorker:
             for g_idx, db in enumerate(self.token_dbs)
         )
 
-    def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
-        """Register a cross-layers KV cache tensor.
-
-        Wraps the unified tensor in a single-entry dict so that the
-        existing stride-based logic in register_kv_caches() produces
-        the correct single-segment result (block_len = page_size * num_layers).
-        """
-        self.register_kv_caches({"__cross_layer__": kv_cache})
-
     def register_kv_caches(
         self,
-        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+        kv_caches: dict[str, torch.Tensor],
     ) -> None:
         """Register KV cache tensors and start transfer threads."""
         if self._capacity_only:
@@ -1509,58 +1500,53 @@ class MooncakeStoreWorker:
             logger.warning("No KV caches to offload.")
             return
 
-        # Resolve each entry to a representative tensor for storage
-        # deduplication. For attention layers the value is already a tensor;
-        # for Mamba layers it is a list of tensors that all share the same
-        # underlying raw storage, so we take the first one.
-        def _repr_tensor(v: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
-            assert isinstance(v, torch.Tensor | list)
-            return v if isinstance(v, torch.Tensor) else v[0]
-
         assert self.cache_config.num_gpu_blocks is not None
         self.num_blocks = self.cache_config.num_gpu_blocks
 
-        seen_ptrs: set[int] = set()
+        layout = resolve_kv_cache_layout()
+        seen_storage_ptrs: set[int] = set()
+        seen_region_ptrs: set[int] = set()
         addrs: list[int] = []
         block_lens: list[int] = []
 
-        for value in kv_caches.values():
-            cache = _repr_tensor(value)
+        for cache in kv_caches.values():
             cache_storage = cache.untyped_storage()
             base_addr = cache_storage.data_ptr()
-            if base_addr in seen_ptrs:
-                continue
-            seen_ptrs.add(base_addr)
             region_len = cache_storage.nbytes()
 
-            ret = self.store.register_buffer(base_addr, region_len)
-            if ret != 0:
-                logger.error(
-                    "register_buffer failed for addr %#x len %d: %d",
-                    base_addr,
-                    region_len,
-                    ret,
-                )
+            if base_addr not in seen_storage_ptrs:
+                seen_storage_ptrs.add(base_addr)
+                ret = self.store.register_buffer(base_addr, region_len)
+                if ret != 0:
+                    logger.error(
+                        "register_buffer failed for addr %#x len %d: %d",
+                        base_addr,
+                        region_len,
+                        ret,
+                    )
 
-            # Detect layout via stride: a dim whose byte-stride exceeds
-            # page_size_bytes is an outer segment dim (e.g. the K/V dim of
-            # FlashAttn's (2, num_blocks, ...)). FlashInfer/MLA's blocks-
-            # outermost layout has no such dim and yields a single segment.
-            el = cache.element_size()
-            page_size_bytes = region_len // self.num_blocks
-            outer_dims = [
-                d for d in range(cache.ndim) if cache.stride(d) * el > page_size_bytes
-            ]
-            if not outer_dims:
-                # Blocks-first layout (FlashInfer / MLA): one segment.
+            if layout.heads_outside_blocks:
+                for head_idx in range(cache.shape[1]):
+                    head_cache = cache[:, head_idx]
+                    region_addr = head_cache.data_ptr()
+                    if region_addr in seen_region_ptrs:
+                        continue
+                    seen_region_ptrs.add(region_addr)
+                    addrs.append(region_addr)
+                    block_lens.append(head_cache.stride(0) * head_cache.element_size())
+            elif not layout.is_layer_compact:
+                if base_addr in seen_region_ptrs:
+                    continue
+                seen_region_ptrs.add(base_addr)
                 addrs.append(base_addr)
-                block_lens.append(page_size_bytes)
+                block_lens.append(region_len // self.num_blocks)
             else:
-                # K/V-first layout (FlashAttn / ROCm): split segments.
-                seg_stride = cache.stride(outer_dims[0]) * el
-                for idx in range(cache.shape[outer_dims[0]]):
-                    addrs.append(base_addr + idx * seg_stride)
-                    block_lens.append(seg_stride // self.num_blocks)
+                region_addr = cache.data_ptr()
+                if region_addr in seen_region_ptrs:
+                    continue
+                seen_region_ptrs.add(region_addr)
+                addrs.append(region_addr)
+                block_lens.append(cache.stride(0) * cache.element_size())
 
         logger.info(
             "Registered KV caches: num_groups=%d, num_segments=%d, num_blocks=%d",

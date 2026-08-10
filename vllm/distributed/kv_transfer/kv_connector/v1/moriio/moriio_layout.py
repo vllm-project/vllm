@@ -57,11 +57,6 @@ def is_mla_cache_layer(
     return isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
 
 
-def _content_packed_dim(spec: AttentionSpec) -> int:
-    head_size_v = getattr(spec, "head_size_v", spec.head_size)
-    return spec.head_size + head_size_v
-
-
 def _spec_dim_matches(value: int, expected: int | None) -> bool:
     return expected is None or value == expected
 
@@ -109,23 +104,6 @@ def get_layer_transfer_geometry(
     element_size = kv_cache.element_size()
     spec = layer_to_spec[layer_name]
     is_mla_cache = is_mla_cache_layer(layer_to_spec, layer_name)
-
-    if is_mla_cache and len(shape) == 3:
-        num_blocks, block_size, latent_dim = shape
-        slot_size_bytes = latent_dim * element_size
-        block_len = block_size * slot_size_bytes
-        return LayerTransferGeometry(
-            num_blocks=num_blocks,
-            block_size=block_size,
-            block_len=block_len,
-            slot_size_bytes=slot_size_bytes,
-            block_stride=stride[0],
-            local_kv_stride=None,
-            remote_kv_stride=None,
-            transfers_per_block=1,
-            regions_per_block=1,
-            split_kv_regions=False,
-        )
 
     if not is_mla_cache and len(shape) == 5 and shape[0] == 2:
         _, num_blocks = shape[:2]
@@ -230,19 +208,19 @@ def get_layer_transfer_geometry(
         )
 
     if (
-        not is_mla_cache
-        and isinstance(spec, AttentionSpec)
+        isinstance(spec, AttentionSpec)
         and len(shape) == 4
-        and shape[1] == spec.num_kv_heads
-        and shape[2] == spec.block_size
-        and shape[3] == _content_packed_dim(spec)
+        and shape[1] == spec.num_heads
+        and shape[2] == spec.num_states
+        and shape[3] * element_size == spec.state_content_size_bytes
     ):
-        num_blocks, num_kv_heads, block_size, packed_dim = shape
-        slot_size_bytes = num_kv_heads * packed_dim * element_size
-        block_len = block_size * slot_size_bytes
+        # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
+        num_blocks, num_heads, num_states, content_dim = shape
+        slot_size_bytes = num_heads * content_dim * element_size
+        block_len = num_states * slot_size_bytes
         return LayerTransferGeometry(
             num_blocks=num_blocks,
-            block_size=block_size,
+            block_size=spec.block_size,
             block_len=block_len,
             slot_size_bytes=slot_size_bytes,
             block_stride=stride[0],
@@ -267,6 +245,13 @@ def iter_layer_registration_regions(
 ) -> list[tuple[torch.Tensor, int]]:
     geometry = get_layer_transfer_geometry(layer_name, kv_cache, layer_to_spec)
     region_len = geometry.num_blocks * geometry.regions_per_block * geometry.block_len
+    if geometry.regions_per_block == 1:
+        # With padded pages the block stride exceeds the meaningful block_len;
+        # register the full strided span so every block's bytes are covered.
+        region_len = max(
+            region_len,
+            geometry.num_blocks * geometry.block_stride * kv_cache.element_size(),
+        )
     if geometry.split_kv_regions:
         return [(cache, region_len) for cache in kv_cache]
     return [(kv_cache, region_len)]

@@ -204,6 +204,20 @@ def _prefill_backend_dimension_params():
                         )
                     )
                 )
+            elif (
+                current_platform.is_rocm()
+                and prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
+            ):
+                # Pre-existing on main: upstream flash-attn MLA prefill
+                # produces incorrect outputs and intermittent GPU memory
+                # faults on ROCm (fails identically on the pre-standardized
+                # base commit). Skip until the ROCm FA MLA path is fixed.
+                marks.append(
+                    pytest.mark.skip(
+                        reason="FLASH_ATTN MLA prefill is broken on ROCm "
+                        "(pre-existing; see PR #44458 discussion)"
+                    )
+                )
             params.append(
                 pytest.param(
                     prefill_backend,
@@ -345,8 +359,9 @@ def create_and_prepopulate_kv_cache(
         else:
             kv_entry_size = head_size
 
+        # Create MLA KV cache: (num_blocks, num_heads=1, block_size, kv_entry_size)
         kv_cache = torch.zeros(
-            num_blocks, block_size, kv_entry_size, dtype=torch.uint8, device=device
+            num_blocks, 1, block_size, kv_entry_size, dtype=torch.uint8, device=device
         )
         scale_tensor = (
             scale
@@ -355,9 +370,9 @@ def create_and_prepopulate_kv_cache(
         )
         scale_tensor = scale_tensor.to(device=device, dtype=torch.float32)
     else:
-        # Create MLA KV cache: (num_blocks, block_size, head_size)
+        # Create MLA KV cache: (num_blocks, num_heads=1, block_size, head_size)
         kv_cache = torch.zeros(
-            num_blocks, block_size, head_size, dtype=dtype, device=device
+            num_blocks, 1, block_size, head_size, dtype=dtype, device=device
         )
         kv_cache_flat = kv_cache.view(-1, head_size)
 
@@ -378,7 +393,7 @@ def create_and_prepopulate_kv_cache(
             ops.concat_and_cache_mla(
                 kv_c_context,
                 k_pe_context.squeeze(1),
-                kv_cache,
+                kv_cache.squeeze(1),
                 slots,
                 kv_cache_dtype=kv_cache_dtype,
                 scale=scale_tensor,
@@ -495,6 +510,11 @@ class MockSparseMLAAttentionLayer:
         """Forward for sparse MLA - uses forward_mqa for all tokens."""
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
         fp8_attention = kv_cache_dtype.startswith("fp8")
+
+        # Impls receive the bind-time-squeezed [B, N, C] cache; mirror
+        # mla_attention.py's bind_kv_cache squeeze here.
+        if kv_cache.ndim == 4:
+            kv_cache = kv_cache.squeeze(1)
 
         # Write to KV cache
         if kv_cache.numel() > 0:
@@ -630,6 +650,11 @@ class MockMLAAttentionLayer(MLAAttention):
         output: torch.Tensor,
     ) -> torch.Tensor:
         """Replicates MLAAttention.forward_impl logic for testing."""
+        # Impls receive the bind-time-squeezed [B, N, C] cache; mirror
+        # mla_attention.py's bind_kv_cache squeeze here.
+        if kv_cache.ndim == 4:
+            kv_cache = kv_cache.squeeze(1)
+
         # Write to KV cache
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
         fp8_attention = kv_cache_dtype.startswith("fp8")

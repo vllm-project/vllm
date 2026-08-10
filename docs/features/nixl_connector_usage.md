@@ -404,19 +404,10 @@ GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVC
 
 ### Heterogeneous KV Layout support
 
-Support use case: Prefill with 'HND' and decode with 'NHD' with experimental configuration
+Support use case: Prefill with `LBHNC` (head-major) and decode with `LBNHC` (token-major) with experimental configuration
 
 ```bash
 --kv-transfer-config '{..., "enable_permute_local_kv":"True"}'
-```
-
-### Cross layers blocks
-
-By default, this feature is disabled. On attention backends that support this feature, each logical block is contiguous in physical memory. This reduces the number of buffers that need to be transferred.
-To enable this feature:
-
-```bash
---kv-transfer-config '{..., "kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'
 ```
 
 ## Metrics Reference

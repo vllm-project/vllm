@@ -265,7 +265,9 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
 class HpcAttentionBackend(AttentionBackend):
     """HPC attention backend (pure attention, no RoPE/Norm).
 
-    KV cache layout: NHD (num_blocks, 2, block_size, num_kv_heads, head_size).
+    KV cache layout: NHD; the logical per-layer view is
+    (num_blocks, num_kv_heads, block_size, 2 * head_size) with K and V
+    packed along the content dim.
     """
 
     accept_output_buffer: bool = True
@@ -298,24 +300,6 @@ class HpcAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["HpcAttnMetadataBuilder"]:
         return HpcAttnMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (1, 0, 2, 3, 4, 5)
-        return (0, 1, 2, 3, 4)
-
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [128]
@@ -332,7 +316,7 @@ class HpcAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
-        return "NHD"
+        return "LBNHC"
 
 
 class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
@@ -452,6 +436,9 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         num_decode_reqs = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
 
+        # Logical (B, H, N, 2*head_size) -> (B, N, H, head_size) K/V views.
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+
         # Standard-path KV write: when no upstream fused op wrote KV cache
         # (i.e. the model didn't wire HpcRopeNorm), fall back to the generic
         # reshape_and_cache_flash. This is what lets non-HunYuan-V3 models use
@@ -466,8 +453,8 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
-                kv_cache[:, 0],
-                kv_cache[:, 1],
+                key_cache,
+                value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
                 layer._k_scale,
@@ -485,7 +472,8 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     f" (layer={getattr(layer, 'layer_name', '?')})"
                 )
             torch_dtype = _get_fp8_dtype_for_kv_cache(self.kv_cache_dtype)
-            kv_cache = kv_cache.view(torch_dtype)
+            key_cache = key_cache.view(torch_dtype)
+            value_cache = value_cache.view(torch_dtype)
             k_scale = layer._k_scale.reshape(1)
             v_scale = layer._v_scale.reshape(1)
 
@@ -508,8 +496,8 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
             if self.use_fp8:
                 hpc.attention_with_kvcache_prefill_fp8(
                     q_prefill,
-                    kv_cache[:, 0],
-                    kv_cache[:, 1],
+                    key_cache,
+                    value_cache,
                     hpc_prefill_q_scale,
                     k_scale,
                     v_scale,
@@ -523,8 +511,8 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
             else:
                 hpc.attention_with_kvcache_prefill_bf16(
                     q_prefill,
-                    kv_cache[:, 0],
-                    kv_cache[:, 1],
+                    key_cache,
+                    value_cache,
                     cu_seqlens_prefill,
                     block_table_prefill,
                     seq_lens_prefill,
@@ -545,8 +533,8 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
             if self.use_fp8:
                 hpc.attention_decode_fp8(
                     q_decode,
-                    kv_cache[:, 0],
-                    kv_cache[:, 1],
+                    key_cache,
+                    value_cache,
                     block_table_decode,
                     num_seq_kvcache,
                     hpc_decode_q_scale,
@@ -575,8 +563,8 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                 )
                 hpc.attention_decode_bf16(
                     q_decode,
-                    kv_cache[:, 0],
-                    kv_cache[:, 1],
+                    key_cache,
+                    value_cache,
                     block_table_decode,
                     num_seq_kvcache,
                     mtp=mtp,
