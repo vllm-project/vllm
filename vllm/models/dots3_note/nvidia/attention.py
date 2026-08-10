@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Dots3 NOTE sliding-window MLA execution on Hopper.
+"""Dots3 NOTE sliding-window MLA attention backends for Hopper.
 
 Prefill and mixed batches expand the latent cache and use FlashAttention-3
 varlen MHA. Decode-only batches use the Triton absorbed-MQA kernel.

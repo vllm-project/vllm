@@ -51,12 +51,13 @@ from vllm.models.deepseek_v32.nvidia.model import (
     DeepseekV32Model,
 )
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.mla.dots3_note import (
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+from .attention import (
     Dots3NoteFlashAttnPrefillBackend,
     Dots3NotePaddedSparseBackend,
     Dots3NoteTritonMLABackend,
 )
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 
 def _padded_mlp_size(
