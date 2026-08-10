@@ -105,11 +105,7 @@ class GenerateRequest(BaseModel):
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
     content_parts: list[dict[str, Any]] | None = None
-    """OpenAI-style content parts for raw multimodal input.
-    Reuses the same format as chat completion message content parts
-    (``image_url``, ``input_audio``, ``video_url``, ``image_embeds``,
-    ``audio_embeds``, etc.). The generate server resolves these
-    internally — no pixel data transfer needed. Mutually exclusive
+    """Raw multimodal input; server resolves media. Mutually exclusive
     with ``features``."""
 
     sampling_params: SamplingParams

@@ -630,48 +630,6 @@ fn extract_media_parts(request: &ChatRequest) -> Result<Vec<MediaContentPart>> {
     Ok(all_parts)
 }
 
-/// Convert a slice of [`ChatContentPart`]s into [`MediaContentPart`]s,
-/// skipping text parts. Used by the generate endpoint to accept raw
-/// multimodal input without a chat message wrapper.
-pub fn content_parts_to_media_parts(
-    parts: &[ChatContentPart],
-) -> Result<Vec<MediaContentPart>> {
-    let mut out = Vec::new();
-    for part in parts {
-        match part {
-            ChatContentPart::Text { .. } => {}
-            ChatContentPart::ImageUrl {
-                image_url,
-                detail,
-                uuid,
-            } => out.push(MediaContentPart::ImageUrl {
-                url: image_url.clone(),
-                detail: *detail,
-                uuid: uuid.clone(),
-            }),
-            ChatContentPart::VideoUrl { video_url, uuid } => {
-                out.push(MediaContentPart::VideoUrl {
-                    url: video_url.clone(),
-                    uuid: uuid.clone(),
-                })
-            }
-            ChatContentPart::InputAudio { data, format, uuid } => {
-                out.push(MediaContentPart::AudioUrl {
-                    url: input_audio_data_url(data, format.as_deref())?,
-                    uuid: uuid.clone(),
-                })
-            }
-            ChatContentPart::AudioUrl { audio_url, uuid } => {
-                out.push(MediaContentPart::AudioUrl {
-                    url: audio_url.clone(),
-                    uuid: uuid.clone(),
-                })
-            }
-        }
-    }
-    Ok(out)
-}
-
 /// Wrap OpenAI base64 audio in a data URL consumed by `MediaConnector`.
 fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
     let mime_type = match format {

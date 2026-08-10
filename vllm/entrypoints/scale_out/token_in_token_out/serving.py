@@ -153,8 +153,11 @@ class ServingTokens(GenerateBaseServing):
             tracker = AsyncMultiModalItemTracker(self.model_config)
             mm_parser = tracker.create_parser()
             for part in request.content_parts:
+                ptype = part.get("type", "")
+                url = part.get("url")
+                nested = {**part, ptype: {"url": url}} if url else part
                 _parse_content_part(
-                    part,
+                    nested,
                     mm_parser,
                     wrap_dicts=False,
                     interleave_strings=False,

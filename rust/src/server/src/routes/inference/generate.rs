@@ -51,19 +51,9 @@ pub async fn generate(
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
     let mm_features = if let Some(parts) = body.content_parts.take() {
-        let media_parts = match vllm_chat::multimodal::content_parts_to_media_parts(&parts) {
-            Ok(parts) => parts,
-            Err(e) => {
-                return ApiError::invalid_request(
-                    format!("failed to convert content_parts: {}", e.as_report()),
-                    Some("content_parts"),
-                )
-                .into_response();
-            }
-        };
         match state
             .chat
-            .prepare_media(media_parts, &mut body.token_ids)
+            .prepare_media(parts, &mut body.token_ids)
             .await
         {
             Ok(features) => features,

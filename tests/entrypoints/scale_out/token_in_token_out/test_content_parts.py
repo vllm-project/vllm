@@ -82,7 +82,7 @@ async def test_content_parts_matches_render_generate(client, test_image):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "image_url", "url": data_url},
                         {"type": "text", "text": "What color is this image? One word."},
                     ],
                 }
@@ -101,7 +101,7 @@ async def test_content_parts_matches_render_generate(client, test_image):
         json={
             "token_ids": token_ids,
             "content_parts": [
-                {"type": "image_url", "image_url": {"url": data_url}},
+                {"type": "image_url", "url": data_url},
             ],
             "sampling_params": sampling_params,
         },
@@ -141,7 +141,7 @@ async def test_content_parts_produces_correct_output(client, test_image):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "image_url", "url": data_url},
                         {
                             "type": "text",
                             "text": "What color is this image? Answer in one word.",
@@ -159,7 +159,7 @@ async def test_content_parts_produces_correct_output(client, test_image):
         json={
             "token_ids": token_ids,
             "content_parts": [
-                {"type": "image_url", "image_url": {"url": data_url}},
+                {"type": "image_url", "url": data_url},
             ],
             "sampling_params": {"max_tokens": 10, "temperature": 0.0},
         },
@@ -196,7 +196,7 @@ async def test_content_parts_streaming(client, test_image):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "image_url", "url": data_url},
                         {"type": "text", "text": "Describe this image briefly."},
                     ],
                 }
@@ -212,7 +212,7 @@ async def test_content_parts_streaming(client, test_image):
         json={
             "token_ids": token_ids,
             "content_parts": [
-                {"type": "image_url", "image_url": {"url": data_url}},
+                {"type": "image_url", "url": data_url},
             ],
             "sampling_params": {"max_tokens": 16, "temperature": 0.0},
             "stream": True,
