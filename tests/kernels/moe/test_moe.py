@@ -418,6 +418,50 @@ def test_fused_moe(
         )
 
 
+def test_fused_shared_expert_alignment(workspace_init):
+    set_random_seed(7)
+    m, n, k = 4, 64, 128
+    routed_experts = 8
+    physical_experts = routed_experts + 1
+    dtype = torch.bfloat16
+
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w1 = torch.randn((physical_experts, 2 * n, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w2 = torch.randn((physical_experts, k, n), device=DEVICE_TYPE, dtype=dtype) / 10
+    topk_ids = torch.tensor(
+        [[0, 8], [1, 8], [2, 8], [3, 8]], device=DEVICE_TYPE, dtype=torch.int32
+    )
+    topk_weights = torch.tensor(
+        [[0.5, 1.0]] * m, device=DEVICE_TYPE, dtype=torch.float32
+    )
+
+    moe_config = make_dummy_moe_config(
+        num_experts=physical_experts,
+        experts_per_token=2,
+        hidden_dim=k,
+        intermediate_size=n,
+        in_dtype=dtype,
+        max_num_tokens=m,
+    )
+    modular_moe = modular_triton_fused_moe(moe_config, FUSED_MOE_UNQUANTIZED_CONFIG)
+
+    with set_current_vllm_config(vllm_config):
+        expected = torch_experts(a, w1, w2, topk_weights, topk_ids)
+        actual = modular_moe.apply(
+            hidden_states=a,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=routed_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
+
+
 def test_fused_moe_int64_overflow(workspace_init):
     """Regression test for int32 overflow in stride*offset products.
 

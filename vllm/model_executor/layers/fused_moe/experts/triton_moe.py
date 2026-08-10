@@ -313,13 +313,15 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
+        # Include fused shared-expert rows while preserving EP remapping.
+        num_align_experts = w1.shape[0] if expert_map is None else global_num_experts
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             _prepare_expert_assignment(
                 topk_ids,
                 config,
                 num_tokens,
                 top_k_num,
-                global_num_experts,
+                num_align_experts,
                 expert_map,
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
@@ -683,8 +685,10 @@ class TritonWNA16Experts(TritonExperts):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
+        # Include fused shared-expert rows while preserving EP remapping.
+        num_align_experts = w1.shape[0] if expert_map is None else global_num_experts
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+            topk_ids, config["BLOCK_SIZE_M"], num_align_experts, expert_map
         )
 
         invoke_fused_moe_wna16_triton_kernel(
