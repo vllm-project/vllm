@@ -614,51 +614,55 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
     assert not _parallelism_agnostic(kv_cache_groups)
 
 
-def test_canonical_layout_widens_parallelism_agnostic_to_mla():
-    """The canonical layout dedups the TP-replicated MLA latent into one
-    portable copy, so the gate admits MLA — but only when canonical_layout
-    is requested."""
-    mla_groups = [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))]
-    assert not _parallelism_agnostic(mla_groups)
-    assert _parallelism_agnostic(mla_groups, canonical=True)
+_SWA_SPEC = SlidingWindowSpec(
+    block_size=16,
+    num_kv_heads=4,
+    head_size=128,
+    dtype=torch.float32,
+    sliding_window=128,
+)
+_SWA_MLA_SPEC = SlidingWindowMLASpec(
+    block_size=16,
+    num_kv_heads=1,
+    head_size=576,
+    dtype=torch.float32,
+    sliding_window=128,
+)
 
-    # Mamba hybrids stay out: their state layers can only derive opaque
-    # (exact-topology) mappings
-    mamba_groups = list(_make_mamba_hybrid_kv_cache_config().kv_cache_groups)
-    assert not _parallelism_agnostic(mamba_groups, canonical=True)
 
-
-def test_canonical_layout_certifies_attention_hybrids():
-    """Hybrid attention models (full + sliding-window groups, e.g. gpt-oss)
-    certify group by group under the canonical layout; every layer's bytes
-    are head-shard fragments regardless of its window."""
-    hybrid_groups = [
-        KVCacheGroupSpec(["l0"], _full_attention_spec()),
-        KVCacheGroupSpec(
-            ["l1"],
-            SlidingWindowSpec(
-                block_size=16,
-                num_kv_heads=4,
-                head_size=128,
-                dtype=torch.float32,
-                sliding_window=128,
-            ),
+@pytest.mark.parametrize(
+    ("kv_cache_groups", "certified"),
+    [
+        pytest.param(
+            [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))],
+            True,
+            id="mla-latent",
         ),
-    ]
-    assert not _parallelism_agnostic(hybrid_groups)
-    assert _parallelism_agnostic(hybrid_groups, canonical=True)
-
-    # DSv4-style sliding-window MLA is not a head-sharded layout; stays out
-    swa_mla = SlidingWindowMLASpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=576,
-        dtype=torch.float32,
-        sliding_window=128,
-    )
-    assert not _parallelism_agnostic(
-        [KVCacheGroupSpec(["l0"], swa_mla)], canonical=True
-    )
+        pytest.param(
+            [
+                KVCacheGroupSpec(["l0"], _full_attention_spec()),
+                KVCacheGroupSpec(["l1"], _SWA_SPEC),
+            ],
+            True,
+            id="attention-hybrid",
+        ),
+        pytest.param(
+            [KVCacheGroupSpec(["l0"], _SWA_MLA_SPEC)],
+            False,
+            id="swa-mla",
+        ),
+        pytest.param(
+            list(_make_mamba_hybrid_kv_cache_config().kv_cache_groups),
+            False,
+            id="mamba-hybrid",
+        ),
+    ],
+)
+def test_canonical_layout_gate(kv_cache_groups, certified):
+    """The canonical layout certifies portability group by group; none of
+    these shapes are portable in the direct layout."""
+    assert not _parallelism_agnostic(kv_cache_groups)
+    assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
 
 
 def test_canonical_layout_certifies_v2_model_runner():
