@@ -54,6 +54,13 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "completed (0.0 = idle, 1.0 = saturated)."
                 ),
             ),
+            CPUOffloadingMetrics.CPU_CAPACITY_TOKENS: OffloadingGaugeMetadata(
+                documentation=(
+                    "Total capacity of the CPU KV cache in tokens. Each "
+                    "engine reports its own cache, so sum across engines "
+                    "for the capacity of the whole instance."
+                ),
+            ),
             CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(
                 documentation=(
                     "Histogram of the number of CPU blocks requested by each "
@@ -109,6 +116,14 @@ class CPUOffloadingSpec(OffloadingSpec):
             # or |--- B0 (single copy) ---| *** maybe-pad *** |
             self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
+        # Offload keys include the group index, so each group consumes a
+        # separate slot. num_blocks maps directly to tokens for one group only.
+        self.tokens_per_chunk = 0
+        if len(config.groups) == 1:
+            self.tokens_per_chunk = (
+                config.groups[0].tokens_per_block * self.blocks_per_chunk
+            )
+
         # scheduler-side
         self._manager: OffloadingManager | None = None
 
@@ -133,6 +148,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 num_blocks=self.num_blocks,
+                tokens_per_chunk=self.tokens_per_chunk,
                 cache_policy=self.eviction_policy,
                 cache_policy_module_path=self.cache_policy_module_path,
                 enable_events=self.kv_events_config.enable_kv_cache_events,

@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
@@ -153,6 +154,66 @@ def test_cpu_spec_sizes_normalized_worker_layout():
     assert spec.cpu_page_size_per_worker == 32
     assert spec.kv_bytes_per_chunk == alignment
     assert spec.num_blocks == 3
+
+
+def test_cpu_spec_reports_capacity_tokens_for_single_group():
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 3,
+        worker_kv_bytes_per_block=alignment // 2,
+        groups=(OffloadingGroupConfig(32, ("layer",)),),
+        blocks_per_chunk=2,
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_blocks == 3
+    stats = spec.get_manager().get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.CPU_CAPACITY_TOKENS] == 192
+
+
+def test_tiering_spec_reports_cpu_capacity_tokens(monkeypatch):
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", MagicMock)
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        cpu_bytes_to_use=alignment * 3,
+        worker_kv_bytes_per_block=alignment // 2,
+        groups=(OffloadingGroupConfig(32, ("layer",)),),
+        blocks_per_chunk=2,
+    )
+
+    assert isinstance(spec, TieringOffloadingSpec)
+    stats = spec.get_manager().get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.CPU_CAPACITY_TOKENS] == 192
+
+
+@pytest.mark.parametrize(
+    "groups",
+    [
+        (
+            OffloadingGroupConfig(16, ("layer_0",)),
+            OffloadingGroupConfig(16, ("layer_1",)),
+        ),
+        (
+            OffloadingGroupConfig(16, ("layer_0",)),
+            OffloadingGroupConfig(32, ("layer_1",)),
+        ),
+    ],
+    ids=["equal-spans", "different-spans"],
+)
+def test_cpu_spec_omits_capacity_tokens_for_multiple_groups(
+    groups: tuple[OffloadingGroupConfig, ...],
+):
+    spec = _create_spec(groups=groups)
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    stats = spec.get_manager().get_stats()
+    assert stats is not None
+    assert CPUOffloadingMetrics.CPU_CAPACITY_TOKENS not in stats.reduce()
 
 
 def test_cpu_spec_zero_worker_bytes_produces_empty_cache():
