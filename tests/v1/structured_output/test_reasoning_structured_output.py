@@ -157,126 +157,121 @@ class TestReasoningStructuredOutput:
             is not None
         )
 
-    def test_should_advance_with_enable_in_reasoning(
+    # ------------------------------------------------------------------
+    # advance_grammar — replaces the former should_advance tests.
+    # The scheduler now calls this single method instead of
+    # should_advance + trim_reasoning_for_advance + grammar.accept_tokens.
+    # ------------------------------------------------------------------
+
+    def test_advance_grammar_with_enable_in_reasoning(
         self,
         manager_with_reasoner,
         mock_request_with_structured_output,
     ):
-        """Test should_advance when enable_in_reasoning is True."""
-        # Enable enable_in_reasoning
+        """advance_grammar passes tokens directly when enable_in_reasoning."""
         manager_with_reasoner.enable_in_reasoning = True
+        grammar = mock_request_with_structured_output.structured_output_request.grammar
+        grammar.accept_tokens = Mock(return_value=True)
 
-        # Should always return True when enable_in_reasoning is enabled
-        result = manager_with_reasoner.should_advance(
-            mock_request_with_structured_output
+        new_tokens = [10, 20]
+        result = manager_with_reasoner.advance_grammar(
+            mock_request_with_structured_output, new_tokens
         )
         assert result is True
+        grammar.accept_tokens.assert_called_once_with("mock_req", new_tokens)
 
-    def test_should_advance_reasoning_not_ended(
+    def test_advance_grammar_reasoning_not_ended(
         self,
         manager_with_reasoner,
         mock_request_with_structured_output,
     ):
-        """Test should_advance when reasoning has not ended."""
-        # Set reasoning as not ended
-        (
-            mock_request_with_structured_output.structured_output_request
-        ).reasoning_ended = False
+        """advance_grammar skips FSM advancement while reasoning is active."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        grammar = structured_req.grammar
+        grammar.accept_tokens = Mock(return_value=True)
 
-        result = manager_with_reasoner.should_advance(
-            mock_request_with_structured_output
+        result = manager_with_reasoner.advance_grammar(
+            mock_request_with_structured_output, [6, 7, 8]
         )
 
-        # Should return False since reasoning hasn't ended
-        assert result is False
+        # Grammar should NOT have been advanced.
+        grammar.accept_tokens.assert_not_called()
+        assert result is True  # no rejection
 
-    def test_should_advance_reasoning_just_ended(
+    def test_advance_grammar_reasoning_just_ended(
         self,
         manager_with_reasoner,
         mock_request_with_structured_output,
     ):
-        """Test should_advance when reasoning ends in current step."""
-        # Set reasoning as not ended initially, but ends in this step
-        (
-            mock_request_with_structured_output.structured_output_request
-        ).reasoning_ended = False
+        """advance_grammar detects reasoning-end mid-step and trims prefix."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
         reasoner = MockReasoner(tokenizer=Mock())
         reasoner.is_reasoning_end_streaming.return_value = True
-        structured_req = mock_request_with_structured_output.structured_output_request
         structured_req.reasoner = reasoner
+        grammar = structured_req.grammar
+        grammar.accept_tokens = Mock(return_value=True)
 
-        result = manager_with_reasoner.should_advance(
-            mock_request_with_structured_output
+        result = manager_with_reasoner.advance_grammar(
+            mock_request_with_structured_output, [6, 7, 8]
         )
 
-        # The scheduler trims the reasoning prefix before advancing the grammar.
-        assert (
-            mock_request_with_structured_output.structured_output_request.reasoning_ended
-            is True
-        )
+        assert structured_req.reasoning_ended is True
         assert result is True
 
-    def test_should_advance_reasoning_already_ended(
+    def test_advance_grammar_reasoning_already_ended(
         self,
         manager_with_reasoner,
         mock_request_with_structured_output,
     ):
-        """Test should_advance when reasoning has already ended."""
-        # Set reasoning as already ended
-        (
-            mock_request_with_structured_output.structured_output_request
-        ).reasoning_ended = True
+        """advance_grammar advances directly when reasoning already ended."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = True
+        structured_req.reasoning_end_token_index = None  # prior step
+        grammar = structured_req.grammar
+        grammar.accept_tokens = Mock(return_value=True)
 
-        result = manager_with_reasoner.should_advance(
-            mock_request_with_structured_output
+        new_tokens = [10, 20]
+        result = manager_with_reasoner.advance_grammar(
+            mock_request_with_structured_output, new_tokens
         )
 
-        # Should return True since reasoning has ended
         assert result is True
+        grammar.accept_tokens.assert_called_once_with("mock_req", new_tokens)
 
-    def test_should_advance_uses_new_token_ids_when_provided(
+    def test_advance_grammar_uses_new_token_ids_for_delta(
         self,
         manager_with_reasoner,
         mock_request_with_structured_output,
     ):
-        """Regression for #43388: when caller passes new_token_ids, the
-        reasoner sees the exact multi-token delta rather than the
-        placeholder-derived window.
+        """Regression for #43388: advance_grammar uses the exact multi-token
+        delta rather than a placeholder-derived window.
         """
         structured_req = mock_request_with_structured_output.structured_output_request
         structured_req.reasoning_ended = False
 
         end_token_id = 248069
-
         reasoner = MockReasoner(tokenizer=Mock())
-        # Detection mirrors the real Qwen3 parser: end token in the delta.
         reasoner.is_reasoning_end_streaming = Mock(
             side_effect=lambda input_ids, delta_ids: end_token_id in list(delta_ids)
         )
         structured_req.reasoner = reasoner
+        structured_req.grammar.accept_tokens = Mock(return_value=True)
 
-        # Scenario from #43388: async + spec decode K=4, 4 tokens accepted
-        # but only 1 placeholder remains (some drafts were rejected).
-        # The placeholder math would yield delta=[271] and miss </think>.
-        # Passing new_token_ids must override that.
         new_token_ids = [9, 198, end_token_id, 271]
         mock_request_with_structured_output.all_token_ids = [
-            1,
-            2,
-            3,
-            4,
-            5,
+            1, 2, 3, 4, 5,
         ] + new_token_ids
         mock_request_with_structured_output.num_computed_tokens = 9
         mock_request_with_structured_output.num_output_placeholders = 1
 
-        result = manager_with_reasoner.should_advance(
+        result = manager_with_reasoner.advance_grammar(
             mock_request_with_structured_output,
             new_token_ids=new_token_ids,
         )
 
-        # First call to is_reasoning_end_streaming was with the full
-        # new_token_ids (not the truncated placeholder window).
         first_call = reasoner.is_reasoning_end_streaming.call_args_list[0]
         _, called_delta = first_call.args
         assert list(called_delta) == new_token_ids
@@ -284,39 +279,14 @@ class TestReasoningStructuredOutput:
         assert structured_req.reasoning_ended is True
         assert result is True
 
-    def test_should_advance_without_new_token_ids_falls_back(
+    def test_advance_grammar_trims_reasoning_prefix_for_json(
         self,
         manager_with_reasoner,
         mock_request_with_structured_output,
     ):
-        """Backward compat: callers that don't pass new_token_ids keep
-        the original placeholder-derived delta window.
+        """advance_grammar trims the reasoning prefix before advancing the
+        FSM at the boundary, so the grammar only sees post-reasoning tokens.
         """
-        structured_req = mock_request_with_structured_output.structured_output_request
-        structured_req.reasoning_ended = False
-        reasoner = MockReasoner(tokenizer=Mock())
-        reasoner.is_reasoning_end_streaming.return_value = False
-        structured_req.reasoner = reasoner
-
-        mock_request_with_structured_output.all_token_ids = [1, 2, 3, 4, 5]
-        mock_request_with_structured_output.num_computed_tokens = 5
-        mock_request_with_structured_output.num_output_placeholders = 2
-
-        result = manager_with_reasoner.should_advance(
-            mock_request_with_structured_output
-        )
-
-        # placeholder window: start = 5 - 2 = 3, delta = [4, 5]
-        _, called_delta = reasoner.is_reasoning_end_streaming.call_args[0]
-        assert list(called_delta) == [4, 5]
-        assert result is False
-
-    def test_should_advance_trims_reasoning_prefix_for_json(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
-    ):
-        """JSON uses the common trim-then-advance path at the boundary."""
         structured_req = mock_request_with_structured_output.structured_output_request
         structured_req.reasoning_ended = False
         structured_req.structured_output_key = (
@@ -338,15 +308,77 @@ class TestReasoningStructuredOutput:
         new_token_ids = [9, 198, marker, 271, 5005]
         mock_request_with_structured_output.all_token_ids = [1, 2, 3] + new_token_ids
 
-        result = manager_with_reasoner.should_advance(
+        result = manager_with_reasoner.advance_grammar(
             mock_request_with_structured_output,
             new_token_ids=new_token_ids,
         )
 
-        structured_req.grammar.accept_tokens.assert_not_called()
+        # Grammar should have received only the trimmed suffix.
+        structured_req.grammar.accept_tokens.assert_called_once_with(
+            "mock_req", [271, 5005]
+        )
         assert structured_req.reasoning_ended is True
         assert result is True
         assert structured_req.reasoning_end_token_index == 5
-        assert manager_with_reasoner.trim_reasoning_for_advance(
-            mock_request_with_structured_output, new_token_ids
-        ) == [271, 5005]
+
+    # ------------------------------------------------------------------
+    # filter_draft_tokens — replaces should_advance + validate_tokens
+    # at the draft-token call sites.
+    # ------------------------------------------------------------------
+
+    def test_filter_draft_tokens_passthrough_while_reasoning(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """filter_draft_tokens returns drafts unchanged while reasoning
+        is still in progress.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        grammar = structured_req.grammar
+        grammar.validate_tokens = Mock(return_value=[1, 2, 3])
+
+        spec_tokens = [10, 20, 30]
+        result = manager_with_reasoner.filter_draft_tokens(
+            mock_request_with_structured_output, spec_tokens
+        )
+
+        assert result == spec_tokens
+        grammar.validate_tokens.assert_not_called()
+
+    def test_filter_draft_tokens_validates_after_reasoning(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """filter_draft_tokens delegates to grammar.validate_tokens once
+        reasoning has ended.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = True
+        grammar = structured_req.grammar
+        validated = [10, 20]
+        grammar.validate_tokens = Mock(return_value=validated)
+
+        result = manager_with_reasoner.filter_draft_tokens(
+            mock_request_with_structured_output, [10, 20, 30]
+        )
+
+        assert result == validated
+        grammar.validate_tokens.assert_called_once_with([10, 20, 30])
+
+    def test_filter_draft_tokens_no_reasoner(
+        self, mock_vllm_config, mock_request_with_structured_output
+    ):
+        """filter_draft_tokens validates when no reasoner is configured."""
+        manager = StructuredOutputManager(mock_vllm_config)
+        grammar = mock_request_with_structured_output.structured_output_request.grammar
+        grammar.validate_tokens = Mock(return_value=[10])
+
+        result = manager.filter_draft_tokens(
+            mock_request_with_structured_output, [10, 20]
+        )
+
+        assert result == [10]
+        grammar.validate_tokens.assert_called_once_with([10, 20])

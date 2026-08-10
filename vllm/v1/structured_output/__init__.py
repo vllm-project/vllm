@@ -340,9 +340,8 @@ class StructuredOutputManager:
                     #   enable_in_reasoning).
                     # - apply_bitmask: reasoning ended mid-window in this
                     #   call and was flipped True after the marker;
-                    #   should_fill_bitmask still returns False here because
                     #   reasoning_ended is only persisted later by
-                    #   should_advance.
+                    #   advance_grammar.
                     bonus_apply = self.should_fill_bitmask(request) or apply_bitmask
                     self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
                     cumulative_index += 1
@@ -378,65 +377,93 @@ class StructuredOutputManager:
             return request.structured_output_request.reasoning_ended
         return True
 
-    def should_advance(
+    def advance_grammar(
         self,
         request: "Request",
-        new_token_ids: list[int] | None = None,
+        new_token_ids: list[int],
     ) -> bool:
-        if not request.use_structured_output:
-            return False
+        """Commit accepted tokens to the grammar FSM.
 
-        # To determine whether we can advance the FSM.
-        # Supports thinking usage where we skip the reasoning components.
-        if TYPE_CHECKING:
-            assert request.structured_output_request is not None
-            assert request.structured_output_request.grammar is not None
-        # by default, we should always advance
-        # for cases that don't use thinking mode.
-        reasoner = self._get_reasoner(request)
-        if reasoner is None:
+        Encapsulates reasoning-end detection, reasoning-token trimming, and
+        FSM advancement behind a single entry point.  The scheduler never
+        needs to know whether the request is still in its reasoning phase;
+        this method figures that out from internal state.
+
+        Returns ``True`` when the grammar accepted the tokens (or when no
+        grammar advancement is needed yet).  Returns ``False`` when the
+        grammar explicitly rejects — the caller should terminate the request.
+        """
+        if not request.use_structured_output:
             return True
 
-        # if the model needs structured in reasoning, we should advance
-        if self.enable_in_reasoning:
+        reasoner = self._get_reasoner(request)
+
+        # No reasoner or enable_in_reasoning: always advance directly.
+        if reasoner is None or self.enable_in_reasoning:
+            structured_req = request.structured_output_request
+            assert structured_req is not None
+            grammar = structured_req.grammar
+            assert isinstance(grammar, StructuredOutputGrammar)
+            if new_token_ids:
+                return grammar.accept_tokens(request.request_id, new_token_ids)
             return True
 
         structured_req = request.structured_output_request
-        if structured_req.reasoning_ended:
-            return True
+        assert structured_req is not None
 
-        # Check if reasoning ends in *this* step.
-        # When the caller passes new_token_ids (the tokens that were just
-        # appended this step), use it directly as the delta window. The
-        # placeholder-derived fallback assumes num_output_placeholders ==
-        # len(new_token_ids), which breaks under async scheduling + spec
-        # decode when some drafts are rejected (#43388): the placeholder
-        # count remains > 0 after the step and the computed delta window
-        # starts past the reasoning-end marker.
-        all_token_ids = request.all_token_ids
-        if new_token_ids:
-            # The tokens were already appended this step, so the step window
-            # starts exactly len(new_token_ids) from the end.
+        if not structured_req.reasoning_ended:
+            # Check whether reasoning ends in *this* step's tokens.
+            all_token_ids = request.all_token_ids
             start = len(all_token_ids) - len(new_token_ids)
             delta_ids: Iterable[int] = new_token_ids
-        else:
-            delta_from = request.num_computed_tokens - request.num_output_placeholders
-            start = (
-                delta_from
-                if delta_from >= 0
-                else max(len(all_token_ids) + delta_from, 0)
-            )
-            delta_ids = itertools.islice(all_token_ids, start, None)
-        if reasoner.is_reasoning_end_streaming(all_token_ids, delta_ids):
-            structured_req.reasoning_ended = True
+            if reasoner.is_reasoning_end_streaming(all_token_ids, delta_ids):
+                structured_req.reasoning_ended = True
+                end_index = self._find_reasoning_end_index(
+                    reasoner, all_token_ids, start
+                )
+                structured_req.reasoning_end_token_index = end_index
+            else:
+                # Still reasoning — grammar stays idle.
+                return True
 
-            # Record the boundary so the scheduler can exclude reasoning tokens.
-            end_index = self._find_reasoning_end_index(reasoner, all_token_ids, start)
-
-            structured_req.reasoning_end_token_index = end_index
+        # Reasoning has ended (either now or in a prior step).
+        # Trim reasoning content from the token window before advancing.
+        advance_token_ids = self._trim_reasoning_tokens(
+            request, new_token_ids
+        )
+        if not advance_token_ids:
             return True
 
-        return False
+        grammar = structured_req.grammar
+        assert isinstance(grammar, StructuredOutputGrammar)
+        return grammar.accept_tokens(request.request_id, advance_token_ids)
+
+    def filter_draft_tokens(
+        self,
+        request: "Request",
+        spec_token_ids: list[int],
+    ) -> list[int]:
+        """Validate draft tokens against the grammar.
+
+        Returns the possibly-truncated token list.  When the request is
+        still in its reasoning phase the drafts are passed through
+        unchanged — the caller does not need to check reasoning state.
+        """
+        if not request.use_structured_output:
+            return spec_token_ids
+
+        reasoner = self._get_reasoner(request)
+        if reasoner is not None and not self.enable_in_reasoning:
+            structured_req = request.structured_output_request
+            assert structured_req is not None
+            if not structured_req.reasoning_ended:
+                return spec_token_ids
+
+        structured_req = request.structured_output_request
+        assert structured_req is not None
+        grammar = structured_req.grammar
+        assert isinstance(grammar, StructuredOutputGrammar)
+        return grammar.validate_tokens(spec_token_ids)
 
     @staticmethod
     def _find_reasoning_end_index(
@@ -459,15 +486,15 @@ class StructuredOutputManager:
                 return idx
         return len(all_token_ids) - 1
 
-    def trim_reasoning_for_advance(
+    def _trim_reasoning_tokens(
         self, request: "Request", new_token_ids: list[int]
     ) -> list[int]:
         """Drops reasoning content from tokens about to advance the grammar.
 
-        When reasoning ends mid-step (see should_advance), the step's output
-        still contains reasoning tokens up to and including the end marker.
-        Those are not grammar content: feeding them to accept_tokens makes
-        the grammar reject the marker and kills the request (#44006).
+        When reasoning ends mid-step, the step's output still contains
+        reasoning tokens up to and including the end marker.  Those are not
+        grammar content: feeding them to accept_tokens makes the grammar
+        reject the marker and kills the request (#44006).
 
         Returns:
             The suffix of ``new_token_ids`` that follows the reasoning-end
