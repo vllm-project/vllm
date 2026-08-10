@@ -491,7 +491,6 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        assert getattr(config, "tie_word_embeddings", True)
         self.unpadded_vocab_size = config.vocab_size
         self.quant_config = quant_config
         self.logits_scale = config.logit_scale

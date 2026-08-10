@@ -367,9 +367,6 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        # currently all existing command R models have `tie_word_embeddings`
-        # enabled
-        assert config.tie_word_embeddings
 
         self.quant_config = quant_config
         self.logits_processor = LogitsProcessor(
