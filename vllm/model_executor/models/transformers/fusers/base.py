@@ -57,6 +57,17 @@ class BaseFuser(ABC):
         return {}
 
 
+def fused_head_size(module: nn.Module, vllm_config: "VllmConfig") -> int:
+    """The head size of `module`, which head counts are derived from.
+
+    Prefer the module's own `head_dim`, which Transformers sets per instance:
+    the model-wide value is the largest head size across layers, so on a
+    heterogeneous checkpoint it would divide out the wrong number of heads, and
+    it is the text head size, so it does not describe a vision tower at all.
+    """
+    return getattr(module, "head_dim", None) or vllm_config.model_config.get_head_size()
+
+
 def local_output_sizes(merged_name: str) -> str:
     """Source for the per-rank widths of the merged linear `self.<merged_name>`."""
     merged = f"self.{merged_name}"

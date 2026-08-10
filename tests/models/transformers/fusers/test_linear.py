@@ -15,6 +15,8 @@ from vllm.model_executor.models.transformers.fusers import (
     GLUFuser,
     PackedQKVFuser,
     QKVFuser,
+    packed_qkv,
+    qkv,
 )
 
 
@@ -640,3 +642,63 @@ def test_act_and_mul_derived_from_module(default_vllm_config):
     assert GLUFuser._get_act_and_mul_name(nn.LayerNorm(8)) is None
     with pytest.raises(ValueError, match="No AndMul equivalent"):
         GLUFuser._get_act_and_mul(nn.Dropout())
+
+
+def _wider_model_config(head_dim: int) -> SimpleNamespace:
+    """A model whose global head size is twice `head_dim`, as a wider layer
+    elsewhere in a heterogeneous checkpoint would make it."""
+    return SimpleNamespace(
+        model_config=SimpleNamespace(get_head_size=lambda: 2 * head_dim),
+        quant_config=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "cls, fuser_module", [(FakeAttention, qkv), (PackedQKVAttention, packed_qkv)]
+)
+def test_head_counts_come_from_the_module_not_the_model(cls, fuser_module, monkeypatch):
+    """A layer narrower than the model-wide head size must not be miscounted.
+
+    On a heterogeneous checkpoint (Gemma 4) the model-wide head size is the
+    largest across layers, so deriving `total_num_heads = out_features //
+    head_size` from it undercounts heads on a narrower layer. The widths still
+    add up, so nothing raises below TP=4: the layer is just sharded wrong.
+    """
+    head_dim, heads, kv_heads = 8, 8, 4
+    vllm_config = _wider_model_config(head_dim)
+    with torch.device("meta"):
+        module = cls(hidden=32, head_dim=head_dim, heads=heads, kv_heads=kv_heads)
+
+    # Both replacements shard, so they need a TP group; only the head counts
+    # the fuser derives are under test here.
+    captured = {}
+    monkeypatch.setattr(
+        fuser_module,
+        "QKVParallelLinear",
+        lambda **kwargs: captured.update(kwargs) or nn.Identity(),
+    )
+    monkeypatch.setattr(
+        fuser_module, "replace_linear_class", lambda *a, **kw: nn.Identity()
+    )
+    fuser = get_fuser(module)
+    assert fuser is not None and fuser.validate(module, vllm_config)
+    fuser.update_attrs(module, "model.layers.0.self_attn", vllm_config)
+
+    assert captured["head_size"] == head_dim
+    assert captured["total_num_heads"] == heads
+    assert captured["total_num_kv_heads"] == kv_heads
+
+
+def test_validate_accepts_a_layer_the_model_wide_head_size_would_reject():
+    """`validate` gates fusion, so a wrong head size silently disables it."""
+    head_dim, heads, kv_heads = 8, 8, 3
+    vllm_config = _wider_model_config(head_dim)
+    with torch.device("meta"):
+        module = FakeAttention(
+            hidden=32, head_dim=head_dim, heads=heads, kv_heads=kv_heads
+        )
+
+    # kv width is 24, not a multiple of the model-wide 16, but is of this
+    # layer's 8.
+    fuser = get_fuser(module)
+    assert fuser is not None and fuser.validate(module, vllm_config)

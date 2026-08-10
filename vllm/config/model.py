@@ -886,9 +886,7 @@ class ModelConfig:
             )
         return supports_mm
 
-    def get_model_arch_config(
-        self,
-    ) -> ModelArchitectureConfig:
+    def get_model_arch_config(self) -> ModelArchitectureConfig:
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
             self.hf_config.model_type, ModelArchConfigConvertorBase
         )
@@ -982,8 +980,8 @@ class ModelConfig:
         """Determine which Transformers modeling backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
         cls = "Transformers"
-        # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
-        cls += "MultiModal" if self.hf_config != self.hf_text_config else ""
+        # If 'hf_config is not hf_text_config' it's a nested config, i.e. multimodal
+        cls += "MultiModal" if self.hf_config is not self.hf_text_config else ""
         cls += "MoE" if self.is_moe else ""
         # Check if the architecture we're wrapping has defaults
         runner = None
@@ -1473,21 +1471,40 @@ class ModelConfig:
         """Returns the total number of KV heads."""
         return self.model_arch_config.total_num_kv_heads
 
-    def get_num_kv_heads(self, parallel_config: ParallelConfig) -> int:
-        """Returns the number of KV heads per GPU."""
+    def get_num_kv_heads(
+        self,
+        parallel_config: ParallelConfig,
+        arch_config: ModelArchitectureConfig | None = None,
+    ) -> int:
+        """Returns the number of KV heads per GPU.
+
+        Pass ``arch_config`` (from ``model_arch_config[layer_idx]``) to size a
+        single layer of a heterogeneous model rather than the model as a whole.
+        """
         if self.use_mla:
             # When using MLA during decode it becomes MQA
             return 1
 
-        total_num_kv_heads = self.get_total_num_kv_heads()
+        arch_config = arch_config or self.model_arch_config
+        total_num_kv_heads = arch_config.total_num_kv_heads
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
         return max(1, total_num_kv_heads // parallel_config.tensor_parallel_size)
 
-    def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
-        num_heads = self.model_arch_config.total_num_attention_heads
+    def get_num_attention_heads(
+        self,
+        parallel_config: ParallelConfig,
+        arch_config: ModelArchitectureConfig | None = None,
+    ) -> int:
+        """Returns the number of attention heads per GPU.
+
+        Pass ``arch_config`` (from ``model_arch_config[layer_idx]``) to size a
+        single layer of a heterogeneous model rather than the model as a whole.
+        """
+        arch_config = arch_config or self.model_arch_config
+        num_heads = arch_config.total_num_attention_heads
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_experts(self) -> int:
