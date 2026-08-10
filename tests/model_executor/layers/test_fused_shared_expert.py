@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
@@ -138,3 +142,29 @@ def test_non_quark_shared_expert_fse_is_incompatible() -> None:
     assert reason == (
         "shared-expert FSE quantization compatibility is not implemented for object"
     )
+
+
+@pytest.mark.parametrize(
+    ("linear", "moe", "expected"),
+    [
+        ("mxfp4", "mxfp4", True),
+        ("mxfp4", "fp8_per_tensor", False),
+        (None, "mxfp4", False),
+        ("mxfp4", None, False),
+    ],
+)
+def test_online_shared_expert_fse_requires_matching_linear_and_moe_configs(
+    linear: str | None, moe: str | None, expected: bool
+) -> None:
+    quant_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(linear=linear, moe=moe)
+    )
+
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_expert",
+    )
+
+    assert compatible is expected
+    assert (reason is None) is expected

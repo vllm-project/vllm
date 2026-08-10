@@ -20,7 +20,24 @@ def is_shared_expert_quant_fse_compatible(
     if quant_config is None:
         return True, None
 
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+
+    if isinstance(quant_config, OnlineQuantizationConfig):
+        if (
+            quant_config.args.moe is not None
+            and quant_config.args.linear is not None
+            and quant_config.args.moe == quant_config.args.linear
+        ):
+            return True, None
+        return (
+            False,
+            "online quantization requires identical non-empty moe and linear "
+            f"quantization configurations; got moe={quant_config.args.moe!r}, "
+            f"linear={quant_config.args.linear!r}",
+        )
 
     if isinstance(quant_config, QuarkConfig):
         # TODO: Check on `layer_quant_config`. There could be cases where

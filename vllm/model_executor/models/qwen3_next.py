@@ -131,11 +131,14 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.shared_expert_gate",
         )
 
-        self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
-            quant_config,
-            prefix,
-            shared_expert_name="shared_expert",
-        )
+        self.is_fused_shared_expert_enabled = False
+        if config.shared_expert_intermediate_size > 0:
+            self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
+                quant_config,
+                prefix,
+                shared_expert_name="shared_expert",
+            )
+
         if (
             self.is_fused_shared_expert_enabled
             or config.shared_expert_intermediate_size <= 0

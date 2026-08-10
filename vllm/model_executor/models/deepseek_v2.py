@@ -339,9 +339,13 @@ class DeepseekV2MoE(nn.Module):
         )
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
-            quant_config, prefix
-        )
+
+        self.is_fused_shared_expert_enabled = False
+        if config.n_shared_experts is not None:
+            self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
+                quant_config, prefix
+            )
+
         if (
             self.is_rocm_aiter_moe_enabled
             and self.gate.e_score_correction_bias is not None
