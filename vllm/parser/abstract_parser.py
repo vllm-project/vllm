@@ -848,26 +848,37 @@ class DelegatingParser(Parser):
                     current_token_ids, delta_token_ids
                 )
             if should_transition:
-                state.reasoning_ended = True
-                reasoning_transitioned = True
-                current_token_ids = self.extract_content_ids(delta_token_ids)
-                # Flush whenever the reasoning parser is engine-based (not only
-                # when _engine_based is True): it buffers the post-marker text
-                # (e.g. the "<" of "<tool_call>"), surfaced via finish_streaming().
-                flush_delta = (
-                    reasoning_parser.finish_streaming()  # type: ignore[union-attr, attr-defined]
-                    if reasoning_parser is not None
-                    and reasoning_parser.engine_based_streaming
-                    else None
-                )
-                current_text = (
-                    (delta_message.content if delta_message else None) or ""
-                ) + ((flush_delta.content if flush_delta else None) or "")
-                if self._engine_based:
-                    if delta_message and self._tool_parser is not None:
-                        delta_message.content = None
-                else:
-                    delta_text = current_text
+                # Guard against premature state transition caused by
+                # stop-buffer desync: the detokenizer may hold back
+                # characters so delta_text trails delta_token_ids.
+                # Don't transition until the end marker text is visible.
+                if reasoning_parser is not None and not reasoning_parser.engine_based_streaming:
+                    reasoning_end_str = getattr(
+                        reasoning_parser, "reasoning_end_str", None
+                    )
+                    if reasoning_end_str and reasoning_end_str not in delta_text:
+                        should_transition = False
+                if should_transition:
+                    state.reasoning_ended = True
+                    reasoning_transitioned = True
+                    current_token_ids = self.extract_content_ids(delta_token_ids)
+                    # Flush whenever the reasoning parser is engine-based (not only
+                    # when _engine_based is True): it buffers the post-marker text
+                    # (e.g. the "<" of "<tool_call>"), surfaced via finish_streaming().
+                    flush_delta = (
+                        reasoning_parser.finish_streaming()  # type: ignore[union-attr, attr-defined]
+                        if reasoning_parser is not None
+                        and reasoning_parser.engine_based_streaming
+                        else None
+                    )
+                    current_text = (
+                        (delta_message.content if delta_message else None) or ""
+                    ) + ((flush_delta.content if flush_delta else None) or "")
+                    if self._engine_based:
+                        if delta_message and self._tool_parser is not None:
+                            delta_message.content = None
+                    else:
+                        delta_text = current_text
 
         # Tool call extraction
         if self._in_tool_call_phase(state):

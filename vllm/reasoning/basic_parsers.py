@@ -115,21 +115,39 @@ class BaseThinkingReasoningParser(ReasoningParser):
         ):
             return None
 
+        # Check if the end token text is visible in delta_text.
+        # delta_text may trail delta_token_ids when the stop buffer in the
+        # detokenizer holds back characters to avoid emitting a stop string.
+        end_token_in_text = self.end_token in delta_text
+
         # Check if start token is present in previous or delta.
         # Keep compatibility with models that don't generate start tokens.
         if self.start_token_id in previous_token_ids:
             if self.end_token_id in delta_token_ids:
-                # start token in previous, end token in delta,
-                # extract reasoning content
-                end_index = delta_text.find(self.end_token)
-                reasoning = delta_text[:end_index]
-                content = delta_text[end_index + len(self.end_token) :]
-                return DeltaMessage(
-                    reasoning=reasoning, content=content if content else None
-                )
+                # start token in previous, end token in delta
+                if end_token_in_text:
+                    end_index = delta_text.find(self.end_token)
+                    reasoning = delta_text[:end_index]
+                    content = delta_text[end_index + len(self.end_token) :]
+                    return DeltaMessage(
+                        reasoning=reasoning, content=content if content else None
+                    )
+                # end token ID detected but text not yet visible
+                # (delayed by stop buffer). Keep emitting reasoning
+                # until the text catches up.
+                return DeltaMessage(reasoning=delta_text)
             elif self.end_token_id in previous_token_ids:
-                # start token in previous, end token in previous,
-                # reasoning content continues
+                # start token in previous, end token in previous
+                if end_token_in_text:
+                    # End token text was held back by the stop buffer and
+                    # is now visible. Split on it so the marker doesn't
+                    # leak into content.
+                    end_index = delta_text.find(self.end_token)
+                    reasoning = delta_text[:end_index]
+                    content = delta_text[end_index + len(self.end_token) :]
+                    return DeltaMessage(
+                        reasoning=reasoning, content=content if content else None
+                    )
                 return DeltaMessage(content=delta_text)
             else:
                 # start token in previous, no end token in previous or delta,
@@ -137,15 +155,17 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 return DeltaMessage(reasoning=delta_text)
         elif self.start_token_id in delta_token_ids:
             if self.end_token_id in delta_token_ids:
-                # start token in delta, end token in delta,
-                # extract reasoning content
-                start_index = delta_text.find(self.start_token)
-                end_index = delta_text.find(self.end_token)
-                reasoning = delta_text[start_index + len(self.start_token) : end_index]
-                content = delta_text[end_index + len(self.end_token) :]
-                return DeltaMessage(
-                    reasoning=reasoning, content=content if content else None
-                )
+                # start token in delta, end token in delta
+                if end_token_in_text:
+                    start_index = delta_text.find(self.start_token)
+                    end_index = delta_text.find(self.end_token)
+                    reasoning = delta_text[start_index + len(self.start_token) : end_index]
+                    content = delta_text[end_index + len(self.end_token) :]
+                    return DeltaMessage(
+                        reasoning=reasoning, content=content if content else None
+                    )
+                # end token ID detected but text not yet visible
+                return DeltaMessage(reasoning=delta_text)
             else:
                 # start token in delta, no end token in delta,
                 # reasoning content continues
