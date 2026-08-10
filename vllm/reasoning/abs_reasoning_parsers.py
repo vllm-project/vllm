@@ -41,7 +41,7 @@ class ReasoningParser:
 
     @cached_property
     def vocab(self) -> dict[str, int]:
-        # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
+        # NOTE: Only TokenizersBackend is guaranteed to have .vocab
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
@@ -186,6 +186,18 @@ class ReasoningParser:
     ) -> "ChatCompletionRequest | ResponsesRequest":
         """Adjust request parameters; override in subclasses as needed."""
         return request
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """Hook called once at the start of streaming with the prompt tokens.
+
+        Gives parsers a chance to adjust their initial parsing state based on
+        the prompt — for example, when the chat template leaves the prompt
+        inside an open reasoning channel and the engine's default initial
+        state would otherwise misclassify the first generated tokens.
+
+        Default is a no-op; override in subclasses as needed.
+        """
+        return
 
     def prepare_structured_tag(
         self,

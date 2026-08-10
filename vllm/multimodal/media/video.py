@@ -10,13 +10,16 @@ import pybase64
 from PIL import Image
 
 from vllm import envs
+from vllm.logger import init_logger
 
 from ..video import VIDEO_LOADER_REGISTRY
-from .base import MediaIO
+from .base import MediaIO, MediaWithBytes
 from .image import ImageMediaIO
 
+logger = init_logger(__name__)
 
-class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
+
+class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
     """Configuration values can be user-provided either by --media-io-kwargs or
     by the runtime API field "media_io_kwargs". Ensure proper validation and
     error handling.
@@ -28,6 +31,29 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         default_kwargs: dict[str, Any] | None,
         runtime_kwargs: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        if runtime_kwargs:
+            # Decoder GPU memory is reserved from the startup value.
+            runtime_kwargs = dict(runtime_kwargs)
+            runtime_kwargs.pop("hw_decoders", None)
+            runtime_kwargs.pop("pool_size", None)
+
+            # Block request-level selection of GPU video backends that
+            # were not configured (and VRAM-reserved) at startup.
+            for key in ("video_backend", "backend"):
+                requested = runtime_kwargs.get(key)
+                if requested and VIDEO_LOADER_REGISTRY.backend_requires_gpu(requested):
+                    static_val = (default_kwargs or {}).get(key)
+                    if static_val != requested:
+                        logger.warning_once(
+                            "Stripping request-level %s=%r: GPU video "
+                            "backend not configured at startup.",
+                            key,
+                            requested,
+                        )
+                        runtime_kwargs = {
+                            k: v for k, v in runtime_kwargs.items() if k != key
+                        }
+
         merged = super().merge_kwargs(default_kwargs, runtime_kwargs)
         # fps and num_frames interact with each other, so if either is
         # overridden at request time, wipe the other from defaults to
@@ -66,14 +92,17 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         self.kwargs = kwargs
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
-    def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
-        return self.video_loader.load_bytes(
+    def load_bytes(
+        self, data: bytes
+    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
+        video = self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
+        return MediaWithBytes(video, data)
 
     def load_base64(
         self, media_type: str, data: str
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         if media_type.lower() == "video/jpeg":
             load_frame = partial(
                 self.image_io.load_base64,
@@ -135,11 +164,13 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
                 "frames_indices": frames_indices,
                 "do_sample_frames": self.kwargs.get("do_sample_frames", False),
             }
-            return frames, metadata
+            return MediaWithBytes((frames, metadata), data.encode())
 
         return self.load_bytes(pybase64.b64decode(data))
 
-    def load_file(self, filepath: Path) -> tuple[npt.NDArray, dict[str, Any]]:
+    def load_file(
+        self, filepath: Path
+    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         with filepath.open("rb") as f:
             data = f.read()
 

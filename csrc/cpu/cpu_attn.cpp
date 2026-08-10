@@ -11,6 +11,18 @@ static inline cpu_attention::Fp8KVCacheDataType parse_fp8_kv_dtype(
   return cpu_attention::Fp8KVCacheDataType::kAuto;
 }
 
+bool cpu_attn_has_isa(const std::string& isa) {
+  if (isa == "rvv") {
+#if defined(__riscv) && defined(__riscv_v_min_vlen) && \
+    (__riscv_v_min_vlen == 128 || __riscv_v_min_vlen == 256)
+    return true;
+#else
+    return false;
+#endif
+  }
+  return false;
+}
+
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
@@ -18,7 +30,8 @@ torch::Tensor get_scheduler_metadata(
     const torch::Tensor& query_start_loc, const bool causal,
     const int64_t window_size, const std::string& isa_hint,
     const bool enable_kv_split,
-    const std::optional<torch::Tensor>& dynamic_causal) {
+    const std::optional<torch::Tensor>& dynamic_causal,
+    const std::string& kv_cache_dtype) {
   cpu_attention::ISA isa;
   if (isa_hint == "amx") {
     isa = cpu_attention::ISA::AMX;
@@ -53,9 +66,11 @@ torch::Tensor get_scheduler_metadata(
   input.dynamic_causal =
       dynamic_causal.has_value() ? dynamic_causal->data_ptr<bool>() : nullptr;
 
+  const int64_t kv_cache_idx =
+      static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "get_scheduler_metadata", [&]() {
-    CPU_ATTN_DISPATCH(head_dim, isa, 0, [&]() {
-      input.elem_size = sizeof(scalar_t);
+    CPU_ATTN_DISPATCH(head_dim, isa, kv_cache_idx, [&]() {
+      input.elem_size = sizeof(attn_impl::kv_cache_t);
       input.q_buffer_elem_size = sizeof(attn_impl::q_buffer_t);
       input.logits_buffer_elem_size = sizeof(attn_impl::logits_buffer_t);
       input.output_buffer_elem_size =

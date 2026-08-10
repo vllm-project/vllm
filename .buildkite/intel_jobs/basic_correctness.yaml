@@ -3,8 +3,12 @@ depends_on:
   - image-build-xpu
 steps:
 - label: XPU Sleep Mode
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -14,9 +18,11 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_cumem.py
+  # Remove VLLM_DISABLE_COMPILE_CACHE=1 once intel/intel-xpu-backend-for-triton#7682 is fixed
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      VLLM_DISABLE_COMPILE_CACHE=1 pytest -v -s basic_correctness/test_cpu_offload.py &&
       pytest -v -s basic_correctness/test_mem.py::test_end_to_end'

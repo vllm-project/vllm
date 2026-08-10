@@ -1,8 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{ModelDtype, OpaqueValue};
+use crate::protocol::OpaqueValue;
+use crate::protocol::dtype::ModelDtype;
 
 /// Decoded engine startup-handshake payload sent on the handshake socket.
 ///
@@ -18,6 +22,19 @@ pub struct ReadyMessage {
     pub headless: Option<bool>,
     #[serde(default)]
     pub parallel_config_hash: Option<String>,
+}
+
+/// KV-event publisher configuration reported by EngineCore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KvEventsConfig {
+    pub enable_kv_cache_events: bool,
+    pub publisher: String,
+    pub endpoint: String,
+    pub replay_endpoint: Option<String>,
+    pub buffer_steps: u32,
+    pub hwm: u32,
+    pub max_queue_size: u32,
+    pub topic: String,
 }
 
 /// Post-initialization configuration sent from each engine on the input socket
@@ -44,10 +61,32 @@ pub struct EngineCoreReadyResponse {
     pub dtype: ModelDtype,
     /// Python vLLM version reported by the engine process.
     pub vllm_version: String,
+    /// World size (TP * PP) from the parallel config.
+    pub world_size: u64,
+    /// Data parallelism size from the parallel config.
+    pub data_parallel_size: u64,
+    // Required discovery metadata; EngineCore and client versions must match.
+    /// Tensor-parallel size of this engine.
+    pub tensor_parallel_size: u32,
+    /// Pipeline-parallel size of this engine.
+    pub pipeline_parallel_size: u32,
+    /// Decode-context-parallel size of this engine.
+    pub decode_context_parallel_size: u32,
+    /// This engine's data-parallel rank.
+    pub data_parallel_rank: u32,
+    /// Scheduler cap on concurrently running sequences.
+    pub max_num_seqs: u64,
+    /// Scheduler cap on batched tokens per step.
+    pub max_num_batched_tokens: u64,
+    /// Unique identifier for this server instance.
+    pub instance_id: String,
     /// Total KV cache capacity in tokens, if reported.
     pub kv_cache_size_tokens: Option<u64>,
     /// Maximum achievable request concurrency given the KV cache, if reported.
     pub kv_cache_max_concurrency: Option<f64>,
+    /// KV-event publisher configuration, if configured.
+    #[serde(default)]
+    pub kv_events_config: Option<KvEventsConfig>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

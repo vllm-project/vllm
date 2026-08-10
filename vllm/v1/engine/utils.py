@@ -5,14 +5,13 @@ import contextlib
 import os
 import threading
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from multiprocessing import Process, connection
+from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
 from typing import TYPE_CHECKING, cast
-from unittest.mock import patch
 
 import msgspec
 import zmq
@@ -33,7 +32,7 @@ from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
 from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
-from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
+from vllm.v1.utils import _SubprocessWrapper, get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -175,38 +174,38 @@ class CoreEngineProcManager:
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
 
+        # All ranks share this config object: capture the user-provided
+        # --device-ids list before the per-rank shard overwrites it. Mutating
+        # the config before each proc.start() works because the spawn method
+        # pickles process args at start() time, sequentially per rank.
+        user_assigned_gpu_ids = vllm_config.parallel_config.assigned_physical_gpu_ids
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Adjust device control in DP for platforms that cannot rely
-                # on torch.accelerator.set_device_index(), and for Ray launchers.
-                device_control_context: contextlib.AbstractContextManager[None] = (
-                    contextlib.nullcontext()
-                )
+                # Populate the logical-to-physical GPU mapping in DP for
+                # platforms that cannot rely on
+                # torch.accelerator.set_device_index(), and for Ray.
                 needs_device_env_isolation = not (
                     current_platform.is_cuda_alike() or current_platform.is_xpu()
                 )
                 if is_dp and (
                     needs_device_env_isolation or vllm_config.parallel_config.use_ray
                 ):
-                    device_control_context = set_device_control_env_var(
-                        vllm_config, local_dp_rank
+                    set_assigned_physical_gpu_ids_for_dp_rank(
+                        vllm_config, local_dp_rank, user_assigned_gpu_ids
                     )
 
-                with (
-                    device_control_context,
-                    numa_utils.configure_subprocess(
-                        # EngineCore itself does not have a TP/PP-local rank.
-                        # When DP is enabled, set_device_control_env_var()
-                        # narrows visible devices to this DP shard first, so
-                        # local_rank=0 means "the first local GPU in this
-                        # shard". The actual TP/PP worker processes spawned by
-                        # the executor are bound separately with their own
-                        # local_rank values.
-                        vllm_config,
-                        local_rank=0,
-                        dp_local_rank=local_dp_rank,
-                        process_kind="EngineCore",
-                    ),
+                with numa_utils.configure_subprocess(
+                    # EngineCore itself does not have a TP/PP-local rank.
+                    # When DP is enabled, set_assigned_physical_gpu_ids_for_dp_rank()
+                    # populates the logical-to-physical mapping for this DP
+                    # shard, so local_rank=0 means "the first local GPU in
+                    # this shard". The actual TP/PP worker processes spawned
+                    # by the executor are bound separately with their own
+                    # local_rank values.
+                    vllm_config,
+                    local_rank=0,
+                    dp_local_rank=local_dp_rank,
+                    process_kind="EngineCore",
                 ):
                     proc.start()
         finally:
@@ -235,9 +234,6 @@ class CoreEngineProcManager:
                 if exitcode != 0 and not self.manager_stopped.is_set():
                     self.failed_proc_name = proc.name
             if died_sentinels:
-                # Any engine exit currently triggers a shutdown. Future
-                # work (e.g., Elastic and fault-tolerant EP) will add finer-grained
-                # handling for different exit scenarios.
                 break
 
         self.shutdown()
@@ -281,55 +277,79 @@ class SignalCallback:
         self._event.set()
 
 
-@contextlib.contextmanager
-def set_device_control_env_var(
-    vllm_config: VllmConfig, local_dp_rank: int
-) -> Iterator[None]:
+def set_assigned_physical_gpu_ids_for_dp_rank(
+    vllm_config: VllmConfig,
+    local_dp_rank: int,
+    user_assigned_gpu_ids: list[int] | None = None,
+) -> None:
     """
-    Temporarily set CUDA_VISIBLE_DEVICES or equivalent
-    for engine subprocess.
+    Populate assigned_physical_gpu_ids on the config for the given DP rank.
+
+    user_assigned_gpu_ids is the full (un-sharded) --device-ids list, if the
+    user provided one; this DP rank's shard is sliced from it. It is passed
+    explicitly rather than read from the config because callers may reuse
+    one config object across DP ranks, overwriting the field each time.
     """
     world_size = vllm_config.parallel_config.world_size
     local_world_size = vllm_config.parallel_config.local_world_size
     evar = current_platform.device_control_env_var
 
-    value = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
-    with patch.dict(os.environ, values=((evar, value),)):
-        yield
+    physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
+        evar,
+        local_dp_rank,
+        world_size,
+        local_world_size,
+        user_assigned_gpu_ids=user_assigned_gpu_ids,
+    )
+    vllm_config.parallel_config.assigned_physical_gpu_ids = physical_gpu_ids
 
 
-def get_device_indices(
+def get_physical_gpu_ids_for_local_dp_rank(
     device_control_env_var: str,
     local_dp_rank: int,
     world_size: int,
     local_world_size: int | None = None,
-):
+    user_assigned_gpu_ids: list[int] | None = None,
+) -> list[int]:
     """
-    Returns a comma-separated string of device indices for the specified
+    Returns list of physical GPU IDs for the specified
     data parallel rank.
 
     For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
-    this will select devices 2 and 3 for local_dp_rank=1.
+    this will return [2, 3] for local_dp_rank=1.
+
+    If user_assigned_gpu_ids is provided (e.g. from --device-ids), this DP
+    rank's shard is sliced from it instead of being derived from the
+    device-control env var.
     """
     if local_world_size is None:
         local_world_size = world_size
+    if user_assigned_gpu_ids is not None:
+        start = local_dp_rank * world_size
+        stop = start + local_world_size
+        if stop > len(user_assigned_gpu_ids):
+            raise ValueError(
+                f"--device-ids provides {len(user_assigned_gpu_ids)} devices, "
+                f"but DP rank {local_dp_rank} needs devices [{start}, {stop})"
+            )
+        return user_assigned_gpu_ids[start:stop]
     try:
-        value = ",".join(
-            str(current_platform.device_id_to_physical_device_id(i))
+        return [
+            current_platform.device_id_to_physical_device_id(i)
             for i in range(
                 local_dp_rank * world_size,
                 local_dp_rank * world_size + local_world_size,
             )
-        )
+        ]
     except IndexError as e:
         raise Exception(
-            f"Error setting {device_control_env_var}: "
+            f"Error computing device indices for "
+            f"{device_control_env_var}: "
             f"local range: [{local_dp_rank * world_size}, "
             f"{(local_dp_rank + 1) * world_size}) "
             "base value: "
             f'"{os.getenv(device_control_env_var)}"'
         ) from e
-    return value
 
 
 def _apply_dp_identity_suffix(dp_vllm_config, dp_rank: int) -> None:
@@ -453,11 +473,11 @@ class CoreEngineActorManager:
             # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
             if current_platform.is_xpu():
                 device_evar = current_platform.device_control_env_var
-                device_indices = get_device_indices(
+                physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
                     device_evar, local_index, world_size
                 )
                 actor_env_vars = self.env_vars_dict.copy()
-                actor_env_vars[device_evar] = device_indices
+                actor_env_vars[device_evar] = ",".join(str(d) for d in physical_gpu_ids)
                 runtime_env = RuntimeEnv(env_vars=actor_env_vars)
 
             actor = (
@@ -801,7 +821,10 @@ class CoreEngineActorManager:
         return placement_groups, local_dp_ranks
 
     def scale_up_elastic_ep(
-        self, cur_vllm_config: VllmConfig, new_data_parallel_size: int
+        self,
+        cur_vllm_config: VllmConfig,
+        new_data_parallel_size: int,
+        num_redundant_experts: int,
     ) -> None:
         import copy
 
@@ -844,6 +867,9 @@ class CoreEngineActorManager:
             if new_data_parallel_size > 1:
                 _apply_dp_identity_suffix(dp_vllm_config, rank)
             dp_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+            dp_vllm_config.parallel_config.eplb_config.num_redundant_experts = (
+                num_redundant_experts
+            )
             dp_vllm_config.parallel_config.placement_group = pg
 
             # Check if this placement group is on the head node
@@ -886,38 +912,17 @@ class CoreEngineActorManager:
             self.created_placement_groups.append(pg)
             self.placement_group_is_local.append(local_client)
 
-        ray.get(
-            [
-                actor.wait_for_init.remote()
-                for actor in (
-                    self.local_engine_actors[-new_local_engines:]
-                    if new_local_engines > 0
-                    else []
-                )
-                + self.remote_engine_actors[
-                    -(len(placement_groups) - new_local_engines) :
-                ]
-            ]
-        )
-
         actors = (
             self.local_engine_actors[-new_local_engines:]
             if new_local_engines > 0
             else []
         ) + self.remote_engine_actors[-(len(placement_groups) - new_local_engines) :]
 
+        ray.get([actor.wait_for_init.remote() for actor in actors])
         for actor in actors:
             ref = actor.run.remote()
             self.run_refs.append(ref)
             self.actor_run_ref_dict[actor] = ref
-
-        cur_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        # Update old_vllm_config with new data_parallel_size_local if any new
-        # local engines were added
-        if new_local_engines > 0:
-            cur_vllm_config.parallel_config.data_parallel_size_local += (
-                new_local_engines
-            )
 
     def scale_down_elastic_ep(
         self, cur_data_parallel_size: int, new_data_parallel_size: int
@@ -1045,21 +1050,29 @@ def get_engine_zmq_addresses(
     )
 
 
+FrontendProcess = BaseProcess | _SubprocessWrapper
+
+
+@dataclass
+class CoreEngineLaunch:
+    """Resources and startup barrier for launched engine processes."""
+
+    engine_manager: CoreEngineProcManager | CoreEngineActorManager | None
+    coordinator: DPCoordinator | None
+    addresses: EngineZmqAddresses
+    tensor_queue: Queue | None
+    # Frontend processes to watch during engine startup; may be assigned by
+    # the caller before the startup barrier runs on context manager exit.
+    watched_frontend_processes: Sequence[FrontendProcess] = ()
+
+
 @contextlib.contextmanager
 def launch_core_engines(
     vllm_config: VllmConfig,
     executor_class: type[Executor],
     log_stats: bool,
     addresses: EngineZmqAddresses,
-    num_api_servers: int = 1,
-) -> Iterator[
-    tuple[
-        CoreEngineProcManager | CoreEngineActorManager | None,
-        DPCoordinator | None,
-        EngineZmqAddresses,
-        Queue | None,
-    ]
-]:
+) -> Iterator[CoreEngineLaunch]:
     """Launch engine and DP coordinator processes as needed."""
 
     parallel_config = vllm_config.parallel_config
@@ -1115,7 +1128,9 @@ def launch_core_engines(
             log_stats=log_stats,
         )
 
-        yield engine_actor_manager, coordinator, addresses, tensor_queue
+        yield CoreEngineLaunch(
+            engine_actor_manager, coordinator, addresses, tensor_queue
+        )
         return
 
     if offline_mode:
@@ -1150,11 +1165,11 @@ def launch_core_engines(
     if parallel_config.enable_elastic_ep:
         handshake_local_only = False
 
-    # Preserve "port=0 means auto-pick" for the handshake address, which
-    # is consumed by engines spawned in this process and so cannot defer
-    # port resolution to bind time.
-    rpc_port = parallel_config.data_parallel_rpc_port or get_open_port()
-    handshake_address = get_engine_client_zmq_addr(handshake_local_only, host, rpc_port)
+    handshake_address = get_engine_client_zmq_addr(
+        handshake_local_only,
+        host,
+        parallel_config.data_parallel_rpc_port,
+    )
 
     if local_engines_only and dp_rank > 0:
         assert not handshake_local_only
@@ -1184,30 +1199,27 @@ def launch_core_engines(
         else:
             local_engine_manager = None
 
-        yield local_engine_manager, coordinator, addresses, tensor_queue
-
-        # Now wait for engines to start.
+        launch = CoreEngineLaunch(
+            local_engine_manager, coordinator, addresses, tensor_queue
+        )
+        yield launch
         wait_for_engine_startup(
             handshake_socket,
-            addresses,
             engines_to_handshake,
             parallel_config,
             dp_size > 1 and vllm_config.model_config.is_moe,
             vllm_config.cache_config,
-            local_engine_manager,
-            coordinator.proc if coordinator else None,
+            launch,
         )
 
 
 def wait_for_engine_startup(
     handshake_socket: zmq.Socket,
-    addresses: EngineZmqAddresses,
     core_engines: list[CoreEngine],
     parallel_config: ParallelConfig,
     coordinated_dp: bool,
     cache_config: CacheConfig,
-    proc_manager: CoreEngineProcManager | None,
-    coord_process: Process | None,
+    launch: CoreEngineLaunch,
 ):
     # Wait for engine core process(es) to send ready messages.
     local_count = parallel_config.data_parallel_size_local
@@ -1222,11 +1234,21 @@ def wait_for_engine_startup(
         and not parallel_config.data_parallel_external_lb
     )
 
-    if proc_manager is not None:
-        for sentinel in proc_manager.sentinels():
+    # 1. Engine processes
+    if isinstance(launch.engine_manager, CoreEngineProcManager):
+        for sentinel in launch.engine_manager.sentinels():
             poller.register(sentinel, zmq.POLLIN)
+    # 2. DP Coordinator process, if present
+    coord_process = launch.coordinator.proc if launch.coordinator else None
     if coord_process is not None:
         poller.register(coord_process.sentinel, zmq.POLLIN)
+    # 3. Watched frontend processes, if any
+    frontend_process_by_fd: dict[int, FrontendProcess] = {}
+    for proc in launch.watched_frontend_processes:
+        fd = proc.sentinel if isinstance(proc.sentinel, int) else proc.sentinel.fileno()
+        frontend_process_by_fd[fd] = proc
+        poller.register(fd, zmq.POLLIN)
+
     while any(conn_pending) or any(start_pending):
         events = poller.poll(STARTUP_POLL_PERIOD_MS)
         if not events:
@@ -1242,14 +1264,34 @@ def wait_for_engine_startup(
                 )
             continue
         if len(events) > 1 or events[0][0] != handshake_socket:
-            # One of the local core processes exited.
-            finished = proc_manager.finished_procs() if proc_manager else {}
+            # One of the local core, coordinator, or watched frontend processes exited.
+            if isinstance(launch.engine_manager, CoreEngineProcManager):
+                finished = launch.engine_manager.finished_procs()
+            else:
+                finished = {}
             if coord_process is not None and coord_process.exitcode is not None:
                 finished[coord_process.name] = coord_process.exitcode
+            failed_frontend_procs = {
+                proc.name: proc.exitcode
+                for fd, proc in frontend_process_by_fd.items()
+                if proc.exitcode is not None
+                or any(event_fd == fd for event_fd, _ in events)
+            }
+            if failed_frontend_procs and not finished:
+                raise RuntimeError(
+                    "Frontend process failed during engine core initialization. "
+                    "See root cause above. "
+                    f"Failed frontend proc(s): {failed_frontend_procs}"
+                )
             raise RuntimeError(
                 "Engine core initialization failed. "
                 "See root cause above. "
                 f"Failed core proc(s): {finished}"
+                + (
+                    f", failed frontend proc(s): {failed_frontend_procs}"
+                    if failed_frontend_procs
+                    else ""
+                )
             )
 
         # Receive HELLO and READY messages from the input socket.
@@ -1289,7 +1331,7 @@ def wait_for_engine_startup(
             # Send init message with DP config info.
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
-                    addresses=addresses,
+                    addresses=launch.addresses,
                     parallel_config={
                         k: getattr(parallel_config, k)
                         for k in (

@@ -59,7 +59,7 @@ def test_decoder_max_context_length_validation(
                 "Make sure that `max_model_len` is no smaller than the number of "
                 "text tokens (prompt + requested output tokens)."
             )
-            with pytest.raises(ValueError) as excinfo:
+            with pytest.raises(VLLMValidationError) as excinfo:
                 vllm_model.generate_greedy(prompt_ids, max_tokens)
             assert expected_msg in str(excinfo.value)
 
@@ -75,8 +75,9 @@ def test_auto_fit_max_model_len_rejects_oversized_input(
     must see this reduced value and reject prompts that exceed it,
     rather than accepting them and hanging."""
 
-    # Use a tiny KV cache budget to force auto-fit to a very small
-    # max_model_len (e.g. ~16 tokens).
+    # Use a small KV cache budget to force auto-fit to a small
+    # max_model_len. Pin block_size=16 so the budget is independent
+    # of the platform's default block size.
     kv_cache_bytes = 1_000_000  # 1 MB
 
     with vllm_runner(
@@ -84,6 +85,7 @@ def test_auto_fit_max_model_len_rejects_oversized_input(
         max_model_len=-1,
         max_num_seqs=1,
         enforce_eager=True,
+        block_size=16,
         kv_cache_memory_bytes=kv_cache_bytes,
         load_format="dummy",
     ) as vllm_model:

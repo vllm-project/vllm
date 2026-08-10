@@ -1,12 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
+pub use vllm_parser::tool::Tool as ChatTool;
 pub use vllm_text::SamplingParams;
 use vllm_text::TextDecodeOptions;
-pub use vllm_tool_parser::Tool as ChatTool;
 
 use crate::AssistantMessageExt;
 use crate::error::{Error, Result};
@@ -36,7 +39,24 @@ pub enum ChatContentPart {
         detail: Option<ImageDetail>,
         uuid: Option<String>,
     },
+    /// One video URL/data URL content block.
+    VideoUrl {
+        video_url: String,
+        uuid: Option<String>,
+    },
+    /// One `input_audio` content block carrying base64-encoded audio bytes.
+    InputAudio {
+        data: String,
+        format: Option<String>,
+        uuid: Option<String>,
+    },
+    /// One audio URL/data URL content block.
+    AudioUrl {
+        audio_url: String,
+        uuid: Option<String>,
+    },
     // ImageData...
+    // VideoData...
     // ImageEmbeds...
 }
 
@@ -55,12 +75,40 @@ impl ChatContentPart {
         }
     }
 
+    /// Construct one video URL content part with the given URL string.
+    pub fn video_url(video_url: impl Into<String>) -> Self {
+        Self::VideoUrl {
+            video_url: video_url.into(),
+            uuid: None,
+        }
+    }
+
+    /// Construct one base64-encoded input-audio content part.
+    pub fn input_audio(data: impl Into<String>, format: Option<String>) -> Self {
+        Self::InputAudio {
+            data: data.into(),
+            format,
+            uuid: None,
+        }
+    }
+
+    /// Construct one audio URL content part with the given URL string.
+    pub fn audio_url(audio_url: impl Into<String>) -> Self {
+        Self::AudioUrl {
+            audio_url: audio_url.into(),
+            uuid: None,
+        }
+    }
+
     /// Return the text content of this part when it's a text block, or an
     /// "unsupported multimodal content" error otherwise.
     pub(crate) fn as_text(&self) -> Result<&str> {
         match self {
             Self::Text { text } => Ok(text),
             Self::ImageUrl { .. } => Err(Error::UnsupportedMultimodalContent("image_url")),
+            Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
+            Self::InputAudio { .. } => Err(Error::UnsupportedMultimodalContent("input_audio")),
+            Self::AudioUrl { .. } => Err(Error::UnsupportedMultimodalContent("audio_url")),
         }
     }
 
@@ -73,7 +121,10 @@ impl ChatContentPart {
     pub(crate) fn is_multimodal(&self) -> bool {
         match self {
             Self::Text { .. } => false,
-            Self::ImageUrl { .. } => true,
+            Self::ImageUrl { .. }
+            | Self::VideoUrl { .. }
+            | Self::InputAudio { .. }
+            | Self::AudioUrl { .. } => true,
         }
     }
 }
@@ -346,6 +397,10 @@ pub struct ChatOptions {
     /// Effort level exposed to chat templates for reasoning models.
     pub reasoning_effort: Option<ReasoningEffort>,
 
+    /// Standard response format available to model-specific renderers.
+    #[serde(default)]
+    pub response_format: Option<Value>,
+
     /// Additional keyword arguments exposed to the chat template.
     pub template_kwargs: HashMap<String, Value>,
 }
@@ -356,6 +411,7 @@ impl Default for ChatOptions {
             generation_prompt_mode: GenerationPromptMode::StartNewAssistant,
             chat_template: None,
             reasoning_effort: None,
+            response_format: None,
             template_kwargs: HashMap::new(),
         }
     }
@@ -382,12 +438,16 @@ impl ChatOptions {
 }
 
 /// Tool-choice semantics supported by `vllm-chat`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatToolChoice {
-    Auto,
     #[default]
     None,
+    Auto,
+    Required,
+    Function {
+        name: String,
+    },
 }
 
 /// One chat request ready to be rendered into a prompt and lowered into a
@@ -431,6 +491,9 @@ pub struct ChatRequest {
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
+    /// Stable session identity shared by related requests.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
@@ -454,6 +517,7 @@ impl ChatRequest {
             cache_salt: None,
             add_special_tokens: false,
             data_parallel_rank: None,
+            session_id: None,
             lora_request: None,
         }
     }
@@ -486,7 +550,7 @@ impl ChatRequest {
     /// Return true if this request should enable tool parsing based on the tool
     /// choice and tool list.
     pub(crate) fn tool_parsing_enabled(&self) -> bool {
-        matches!(self.tool_choice, ChatToolChoice::Auto) && !self.tools.is_empty()
+        !matches!(self.tool_choice, ChatToolChoice::None) && !self.tools.is_empty()
     }
 
     /// Return the request-level thinking toggle when explicitly requested.
@@ -549,6 +613,26 @@ mod tests {
     fn chat_content_deserializes_from_raw_string() {
         let content: ChatContent = serde_json::from_value(json!("hello")).unwrap();
         assert_eq!(content, ChatContent::Text("hello".to_string()));
+    }
+
+    #[test]
+    fn chat_content_video_url_part_round_trips_through_serde() {
+        let content = ChatContent::Parts(vec![ChatContentPart::VideoUrl {
+            video_url: "https://example.com/demo.mp4".to_string(),
+            uuid: Some("video-1".to_string()),
+        }]);
+
+        let value = to_value(&content).unwrap();
+        assert_eq!(
+            value,
+            json!([{
+                "type": "video_url",
+                "video_url": "https://example.com/demo.mp4",
+                "uuid": "video-1",
+            }])
+        );
+        let decoded: ChatContent = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, content);
     }
 
     #[test]

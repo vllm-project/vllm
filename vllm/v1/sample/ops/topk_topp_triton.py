@@ -111,7 +111,7 @@ def _topk_topp_kernel(
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
     for row_id in tl.range(pid, BATCH_SIZE, num_programs):
-        LOGITS_ROW = LOGITS + row_id * LOGITS_STRIDE_0
+        LOGITS_ROW = LOGITS + row_id.to(tl.int64) * LOGITS_STRIDE_0
         BUFFER_ROW = BUFFER + pid * VOCAB_SIZE
 
         final_pivot = -float("inf")

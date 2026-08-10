@@ -7,21 +7,57 @@ Abstract interfaces and data types for the secondary tiering layer.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingContext
+from vllm.v1.kv_offload.base import (
+    Locality,
+    LookupResult,
+    Medium,
+    OffloadingEvent,
+    OffloadingMetricMetadata,
+    OffloadKey,
+    ReqContext,
+    RequestOffloadingContext,
+    ScheduleEndContext,
+)
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+        OffloadingConnectorStats,
+    )
     from vllm.v1.kv_offload.base import OffloadingSpec
+
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
 
 
+class TieringOffloadingMetrics:
+    """Metric names for TieringOffloadingManager."""
+
+    LOOKUP_SYNC_DELAY = "vllm:kv_offload_tiering_lookup_sync_delay_seconds"
+    LOOKUP_ASYNC_DELAY = "vllm:kv_offload_tiering_lookup_async_delay_seconds"
+    READ_BYTES = "vllm:kv_offload_tiering_read_bytes"
+    READ_TIME = "vllm:kv_offload_tiering_read_time"
+    WRITE_BYTES = "vllm:kv_offload_tiering_write_bytes"
+    WRITE_TIME = "vllm:kv_offload_tiering_write_time"
+    PROMOTION_JOB_FAILURES = "vllm:kv_offload_tiering_promotion_job_failures"
+    CASCADE_JOB_FAILURES = "vllm:kv_offload_tiering_cascade_job_failures"
+    BLOCK_QUERIES = "vllm:kv_offload_tiering_block_queries"
+    BLOCK_HITS = "vllm:kv_offload_tiering_block_hits"
+    PRIMARY_WRITE_USAGE_PERC = "vllm:kv_offload_tiering_primary_write_usage_perc"
+    PRIMARY_READ_USAGE_PERC = "vllm:kv_offload_tiering_primary_read_usage_perc"
+    PROMOTION_ALLOCATION_FAILURES = (
+        "vllm:kv_offload_tiering_promotion_allocation_failures"
+    )
+    ACTIVE_PROMOTION_JOBS = "vllm:kv_offload_tiering_active_promotion_jobs"
+    ACTIVE_CASCADE_JOBS = "vllm:kv_offload_tiering_active_cascade_jobs"
+
+
 @dataclass
-class JobMetadata:
+class TransferJob:
     """Metadata for an in-flight async transfer job."""
 
     job_id: JobId
@@ -33,10 +69,53 @@ class JobMetadata:
 
 @dataclass
 class JobResult:
-    """Result of an async transfer job (successful or failed)."""
+    """Result of an async transfer job."""
 
     job_id: JobId
+    # True if all keys succeeded; False if all or some failed.
     success: bool
+    # Only applicable to promotion jobs. On partial failure, identifies the
+    # keys that were successfully loaded. None means all keys share the fate
+    # indicated by `success`. Must be a subset of the job's original keys.
+    successful_keys: Collection[OffloadKey] | None = None
+    transfer_time: float | None = None
+
+
+class ParentManager(ABC):
+    """Interface for secondary tiers to call back into the tiering manager.
+
+    Passed to secondary tiers via serve_external_requests() each step.
+    The _SecondaryTierFacingParent wrapper implements this, automatically
+    excluding the calling tier from fan-out operations.
+
+    Required call sequence for each remote request:
+        1. on_new_request(req_context)  — set up per-request state
+        2. lookup(key, req_context)     — check block availability
+           (repeat per block)
+        3. create_store_job(keys, req_context) — pin blocks and get a
+           job handle
+        4. on_request_finished(req_context) — clean up per-request state
+
+    Steps 2-3 may be interleaved. Step 4 must be called even if no
+    blocks were found, to avoid leaking async lookup state (e.g. in
+    the fs tier's AsyncLookupManager).
+    """
+
+    @abstractmethod
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext: ...
+
+    @abstractmethod
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult: ...
+
+    @abstractmethod
+    def create_store_job(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+    ) -> TransferJob: ...
+
+    @abstractmethod
+    def on_request_finished(self, req_context: ReqContext) -> None: ...
 
 
 class SecondaryTierManager(ABC):
@@ -52,6 +131,8 @@ class SecondaryTierManager(ABC):
     lightweight and non-blocking. submit_load() and submit_store() submit
     async jobs; get_finished_jobs() polls for completion.
     """
+
+    medium: ClassVar[Medium | None] = None
 
     def __init__(
         self,
@@ -69,9 +150,10 @@ class SecondaryTierManager(ABC):
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
         self.tier_type = tier_type
+        self.locality: Locality | None = None
 
     @abstractmethod
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """
         Check whether a block exists in this secondary tier.
 
@@ -80,14 +162,14 @@ class SecondaryTierManager(ABC):
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            True if the block is present and ready,
-            False if not found,
-            or None if the block is being transferred (retry later).
+            HIT if the block is present and ready,
+            MISS if not found,
+            or RETRY if the block is being transferred (retry later).
         """
         pass
 
     @abstractmethod
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         """
         Submit an async job to store blocks from the primary tier to this
         secondary tier.
@@ -115,7 +197,7 @@ class SecondaryTierManager(ABC):
         pass
 
     @abstractmethod
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         """
         Submit an async job to load blocks from this secondary tier to the
         primary tier.
@@ -153,6 +235,18 @@ class SecondaryTierManager(ABC):
         """
         pass
 
+    def has_pending_work(self) -> bool:
+        """Whether this tier needs the engine to keep stepping.
+
+        While True, on_schedule_end() and get_finished_jobs() continue
+        to be called even when no requests are scheduled.
+        """
+        return False
+
+    def take_events(self) -> Iterable[OffloadingEvent]:
+        """Take KV events for storage state owned by this tier."""
+        return ()
+
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark blocks as recently used for eviction policy.
@@ -180,16 +274,32 @@ class SecondaryTierManager(ABC):
         """
         Called when a request has finished.
 
+        By the time this is called, all per-request calls for this request
+        (submit_store, submit_load, touch) have already been issued, and none
+        will follow. Note this does NOT imply the tier's transfers have
+        completed: jobs already submitted may still be in flight and will
+        report via get_finished_jobs(). This is the right place to release
+        per-request bookkeeping.
+
         Args:
             req_context: per-request context.
         """
         return
 
-    def on_schedule_end(self) -> None:
+    def serve_external_requests(self, parent: ParentManager) -> None:
+        """Process remotely-originated requests using the parent manager.
+
+        Called once per scheduler step, BEFORE _flush_pending_promotions().
+        The parent handle is valid only for the duration of this call.
+        Tiers that don't serve external requests leave this as a no-op.
+        """
+        return
+
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.
 
-        Secondary tiers may override this for per-step cleanup or
-        deferred work submission.
+        Args:
+            context: Per-step context from the scheduler.
         """
         return
 
@@ -213,3 +323,14 @@ class SecondaryTierManager(ABC):
     def shutdown(self) -> None:
         """Release resources held by this tier (threads, connections, etc.)."""
         return
+
+    @classmethod
+    def build_metric_definitions(
+        cls, extra_config: dict[str, Any]
+    ) -> dict[str, OffloadingMetricMetadata]:
+        """Return Prometheus metric definitions emitted by this tier."""
+        return {}
+
+    def get_stats(self) -> "OffloadingConnectorStats | None":
+        """Return and reset metric observations collected by this tier."""
+        return None
