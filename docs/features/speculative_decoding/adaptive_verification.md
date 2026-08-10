@@ -32,8 +32,6 @@ vllm serve deepseek-ai/DeepSeek-V4-Flash-DSpark \
 
 Set `enable_adaptive_verification: false` to verify the full block for every request.
 
-`num_speculative_tokens` must be at least the checkpoint's block size (`dspark_block_size`, e.g. 7 for DeepSeek-V4-Flash); smaller values feed the block machinery a layout it was not trained for and are rejected at startup.
-
 ## Requirements and limitations
 
 - The attention backend must tolerate device-decided query lengths, since the CPU lengths only bound them from above. Backends that plan off the CPU lengths are excluded by the attention selector, and rejected at startup for models that hard-wire their backend.
