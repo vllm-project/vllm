@@ -16,7 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for multi-modal models."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +45,7 @@ from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     ProcessorInputs,
+    PromptUpdate,
     TimingContext,
 )
 from vllm.platforms import current_platform
@@ -215,21 +216,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
-    ):
-        """
-        Given the original multi-modal items for this modality
-        and HF-processed data, output the updates to perform.
+    ) -> Sequence[PromptUpdate]:
+        """No updates: `apply` locates placeholders via `mm_token_type_ids` instead.
 
-        The information returned by this method is used to update token inputs
-        which bypass the HF processor. It is also used to update the output of
-        HF processor if the HF process does not apply prompt updates to text
-        inputs.
-
-        Moreover, this information is critical to determine the token positions
-        in order to construct  :class:`~vllm-multimodal.input.PlaceholderRange`
-        for each multi-modal item.
+        HF processors have no generic contract for the token sequence they insert,
+        so it cannot be expressed as a `PromptUpdate`. Returning nothing is only
+        safe because `apply` is overridden; the base class would reject it.
         """
-        return None
+        return []
 
     def _get_modality_field_names(self, modality: str) -> set[str]:
         """Field names the sub-processor for `modality` produces."""
