@@ -593,6 +593,33 @@ class VllmConfig:
         return 0
 
     @property
+    def num_lookahead_tokens(self) -> int:
+        """KV slots to reserve past the tokens the target model is scheduled for.
+
+        The drafter writes KV for positions beyond the target model's query
+        range, so every component that reserves blocks must add this margin:
+        the scheduler through `allocate_slots`, and the worker warmup, which
+        builds its own `SchedulerOutput`s. Consumers must read this property
+        rather than re-deriving their own per-method lookahead, so the
+        scheduler and warmup cannot drift apart.
+        """
+        speculative_config = self.speculative_config
+        if speculative_config is None:
+            return 0
+        if speculative_config.use_dflash():
+            # DFlash requires an extra lookahead slot since it uses in-fill-style
+            # decoding instead of standard next-token sampling, so it has a query
+            # for the last sampled token plus queries for each draft token.
+            return self.num_speculative_tokens + 1
+        if speculative_config.use_eagle() or speculative_config.uses_draft_model():
+            # DSpark (covered by use_eagle) drafts a block of num_speculative_tokens
+            # query tokens in which the anchor itself is the first prediction
+            # position (no separate bonus query), so it needs exactly
+            # num_speculative_tokens lookahead slots.
+            return self.num_speculative_tokens
+        return 0
+
+    @property
     def use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
@@ -1808,7 +1835,9 @@ class VllmConfig:
         capture as:
 
         ```python
-        max_graph_size = min(max_num_seqs * 2, 512)
+        default_max_graph_size = 1024 if is_data_center_blackwell else 512
+        max_graph_size = min(max_num_seqs * decode_query_len * 2,
+                             default_max_graph_size)
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
         cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
@@ -1832,8 +1861,8 @@ class VllmConfig:
         Example:
             With `max_num_batched_tokens = 8192`, and typical sequences
             averaging ~32 tokens, most practical batch sizes fall below 256.
-            However, the system will still allow capture sizes up to 512 if
-            shape and memory permit.
+            However, the system will still allow capture sizes up to the
+            platform default if shape and memory permit.
 
         Note:
             If users explicitly specify cudagraph capture sizes in the
@@ -1856,9 +1885,15 @@ class VllmConfig:
                 self.compilation_config.max_cudagraph_capture_size
             )
             if max_cudagraph_capture_size is None:
+                from vllm.platforms import current_platform
+
                 decode_query_len = 1 + self.num_speculative_tokens
+                default_max_graph_size = (
+                    1024 if current_platform.is_device_capability_family(100) else 512
+                )
                 max_cudagraph_capture_size = min(
-                    self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
+                    self.scheduler_config.max_num_seqs * decode_query_len * 2,
+                    default_max_graph_size,
                 )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
@@ -2420,7 +2455,10 @@ class VllmConfig:
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
         if self.model_config is None:
             return self
-        if self.cache_config.cache_dtype == "nvfp4" and self.model_config.use_mla:
+        if (
+            self.cache_config.cache_dtype.startswith("nvfp4")
+            and self.model_config.use_mla
+        ):
             raise ValueError(
                 "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
                 "Attention) backends. Please use a different --kv-cache-dtype "
