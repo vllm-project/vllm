@@ -1105,6 +1105,23 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     def check_batch_mode(cls, data: Any) -> Any:
         if isinstance(data, BatchChatCompletionRequest):
             data = data.model_dump(exclude_unset=True)
+        if data.get("stream"):
+            raise VLLMValidationError(
+                "Batch chat completions do not support streaming. "
+                "Please set `stream` to False.",
+                parameter="stream",
+            )
+        if data.get("stream_options"):
+            raise VLLMValidationError(
+                "Batch chat completions do not support streaming. "
+                "Please omit `stream_options`.",
+                parameter="stream_options",
+            )
+        if data.get("tools"):
+            raise VLLMValidationError(
+                "Batch chat completions do not support tool use. Please omit `tools`.",
+                parameter="tools",
+            )
         if data.get("use_beam_search"):
             raise VLLMValidationError(
                 "Batch chat completions do not support beam search. "
