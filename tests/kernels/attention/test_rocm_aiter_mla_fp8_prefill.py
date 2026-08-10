@@ -105,6 +105,7 @@ def _build_prefill_metadata(seq_lens: list[int], device: torch.device):
         max_num_reqs=len(seq_lens),
         max_prefill_qlen=max_q,
         max_num_batched_tokens=total_q,
+        attn_out_dtype=torch.bfloat16,
         device=device,
     )
 
