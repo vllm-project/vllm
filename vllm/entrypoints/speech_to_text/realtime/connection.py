@@ -1015,7 +1015,7 @@ class RealtimeConnection:
                             if delta:
                                 await self.send(TranscriptionDelta(delta=delta))
 
-                    logger.info(
+                    logger.debug(
                         "QWEN3_ASR_RT_SEGMENT_OUTPUT request_id=%s segment_id=%s "
                         "generated_tokens=%d finish_reason=%r has_eos=%s "
                         "prefix_text=%r generated_text=%r candidate_text=%r "
@@ -1024,6 +1024,10 @@ class RealtimeConnection:
                         request_id or "-",
                         current_trace["segment_id"] if current_trace else "-",
                         segment_gen_tokens, finish_reason, has_eos, prefix_text,
+                        segment_gen_text, candidate, invalid_reason is None,
+                        invalid_reason, transcript.latest_valid_text, stable,
+                        delta, confirmed_text,
+                    )
                         segment_gen_text, candidate, invalid_reason is None,
                         invalid_reason, transcript.latest_valid_text, stable,
                         delta, confirmed_text,
