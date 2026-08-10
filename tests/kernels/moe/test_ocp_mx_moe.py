@@ -8,7 +8,11 @@ import pytest
 import torch
 
 from tests.kernels.moe.utils import check_accuracy
-from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
+from vllm._aiter_ops import (
+    is_aiter_found,
+    is_aiter_found_and_supported,
+    rocm_aiter_ops,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -1602,6 +1606,10 @@ def test_rocm_mxfp4_moe_oracle(
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm-specific test")
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(), reason="AITER is not installed or supported"
+)
 @pytest.mark.parametrize(
     ("num_fused_shared_experts", "expected_intermediate_size"),
     [(0, 384), (1, 512)],
@@ -1609,7 +1617,6 @@ def test_rocm_mxfp4_moe_oracle(
 def test_aiter_mxfp4_bf16_only_pads_dsv4_for_active_shared_expert_fusion(
     num_fused_shared_experts: int,
     expected_intermediate_size: int,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     """Keep DSV4's TP8 shard native unless shared-expert fusion is active."""
     from vllm.model_executor.layers.fused_moe import FusedMoEConfig
@@ -1623,7 +1630,6 @@ def test_aiter_mxfp4_bf16_only_pads_dsv4_for_active_shared_expert_fusion(
     )
     from vllm.models.deepseek_v4.amd.mxfp4 import DeepseekV4AmdMxfp4MoEMethod
 
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     moe_parallel_config = replace(
         FusedMoEParallelConfig.make_no_parallel(),
         tp_size=8,
