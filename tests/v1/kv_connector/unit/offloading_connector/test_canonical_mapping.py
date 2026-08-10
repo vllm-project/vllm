@@ -397,8 +397,7 @@ def test_fail_closed_cases():
 
 
 def _packed_nhd_quant_cache(spec) -> torch.Tensor:
-    """The per-token-head packed form: each (token, head) row is padded so
-    its fp32 scale sits inline after the quantized data."""
+    """Per-token-head packed form: fp32 scale inline after each row's data."""
     scale_pad = 4 // spec.dtype.itemsize
     inner = 2 * (spec.head_size + scale_pad)
     return torch.zeros(
@@ -407,9 +406,8 @@ def _packed_nhd_quant_cache(spec) -> torch.Tensor:
 
 
 def test_per_token_head_packed_rows_certify():
-    """Padded packed rows carry their scales inline, so head-shard fragments
-    stay self-contained and portable; the page must span the scale carve
-    (unpadded_page_size_bytes), matching the worker's offload refs."""
+    """Padded rows carry scales inline, so head shards stay portable; the
+    page spans the scale carve, matching the worker's offload refs."""
     spec = _full_spec(kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD)
     cache = _packed_nhd_quant_cache(spec)
     per_rank = [_mapping(spec, cache, _ctx(rank=r, tp=2)) for r in range(2)]
