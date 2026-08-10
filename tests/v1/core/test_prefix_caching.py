@@ -14,6 +14,8 @@ import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
+    ORIGIN_NEW,
+    ORIGIN_REUSED,
     AllBlocksCleared,
     BlockRemoved,
     BlockStored,
@@ -2292,6 +2294,55 @@ def test_block_stored_event_group_idx(group_id: int):
             None,
         ][group_id]
     )
+
+
+def test_block_stored_event_origin():
+    """Test BlockStored events carry the correct origin for newly cached and for
+    reused blocks."""
+    block_size = 4
+    num_tokens = block_size * 2
+
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=5),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=block_size,
+    )
+    pool = manager.block_pool
+
+    req = make_request(
+        "req_origin",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    pool.cache_full_blocks(
+        request=req,
+        blocks=pool.get_new_blocks(2),
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    events = manager.take_events()
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].origin == ORIGIN_NEW
+
+    # Announce the same blocks as a prefix-cache hit
+    pool.emit_cached_block_events(
+        request=req,
+        num_cached_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    events = manager.take_events()
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].origin == ORIGIN_REUSED
+    assert len(events[0].block_hashes) == 2
 
 
 def test_block_stored_event_group_idx_multiple_groups():

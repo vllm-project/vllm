@@ -46,6 +46,9 @@ MEDIUM_GPU = "GPU"
 MEDIUM_CPU = "CPU"
 MEDIUM_STORAGE = "STORAGE"
 
+ORIGIN_NEW = "NEW"
+ORIGIN_REUSED = "REUSED"
+
 
 class BlockStored(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
@@ -76,6 +79,10 @@ class BlockStored(KVCacheEvent):
     locality: str | None = None
     """LOCAL or REMOTE relative to the publisher; None means unspecified."""
 
+    origin: str | None = None
+    """NEW for a newly cached block, REUSED for one found already cached;
+    None means unspecified."""
+
     def __hash__(self) -> int:
         return hash(
             (
@@ -90,6 +97,7 @@ class BlockStored(KVCacheEvent):
                 self.kv_cache_spec_kind,
                 self.kv_cache_spec_sliding_window,
                 self.locality,
+                self.origin,
             )
         )
 
