@@ -970,7 +970,8 @@ steps:
     matrix:
       - "cuda-13-0"
       - "cuda-12-9"
-      - "ubuntu-24-04"
+      - "cuda-13-0-ubuntu-24-04"
+      - "cuda-12-9-ubuntu-24-04"
       - "rocm"
       - "xpu"
       - "cpu"

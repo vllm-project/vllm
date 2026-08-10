@@ -10,9 +10,10 @@ set -euo pipefail
 
 TARGET="${1:-all}"
 case "${TARGET}" in
-  cuda-13-0 | cuda-12-9 | ubuntu-24-04 | rocm | xpu | cpu | all) ;;
+  cuda-13-0 | cuda-12-9 | cuda-13-0-ubuntu-24-04 | \
+    cuda-12-9-ubuntu-24-04 | rocm | xpu | cpu | all) ;;
   *)
-    echo "Usage: $0 {cuda-13-0|cuda-12-9|ubuntu-24-04|rocm|xpu|cpu|all}"
+    echo "Usage: $0 {cuda-13-0|cuda-12-9|cuda-13-0-ubuntu-24-04|cuda-12-9-ubuntu-24-04|rocm|xpu|cpu|all}"
     exit 2
     ;;
 esac
@@ -88,7 +89,7 @@ fi
 
 # ---- Ubuntu 24.04 (CUDA 13.0) ----
 
-if target_enabled ubuntu-24-04; then
+if target_enabled cuda-13-0-ubuntu-24-04; then
   docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404
   docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404
 
@@ -108,9 +109,11 @@ if target_enabled ubuntu-24-04; then
   docker manifest create vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404
   docker manifest push vllm/vllm-openai:latest-ubuntu2404
   docker manifest push vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404
+fi
 
-  # ---- Ubuntu 24.04 (CUDA 12.9) ----
+# ---- Ubuntu 24.04 (CUDA 12.9) ----
 
+if target_enabled cuda-12-9-ubuntu-24-04; then
   docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-cu129-ubuntu2404
   docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-cu129-ubuntu2404
 
