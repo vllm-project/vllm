@@ -7,6 +7,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.cache import CacheDType
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
@@ -17,14 +18,18 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import triton
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.v1.attention.ops.triton_decode_attention import (
+    decode_attention_fwd,
+    stage1_head_tiles,
+    stage1_workgroups_per_cu,
+)
+
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -32,27 +37,45 @@ from vllm.v1.worker.workspace import (
 
 logger = init_logger(__name__)
 
+_FP8_DTYPES = (
+    torch.float8_e4m3fn,
+    torch.float8_e4m3fnuz,
+    torch.float8_e5m2,
+)
+
 # num_kv_splits selection (shared by forward_mqa and the workspace reservation
 # so the two cannot drift). Both are hardware dependent.
 _MIN_WORK_PER_SPLIT = 512
-_SPLIT_OCCUPANCY_MULTIPLIER = 2
 
 
-def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
-    # Power of 2 to avoid excessive kernel instantiations, capped by an SM-based
-    # maximum (occupancy multiplier allows multiple blocks per SM
-    # for latency hiding).
+def _compute_num_kv_splits(
+    max_seq_len: int,
+    sm_count: int,
+    grid_units: int = 1,
+    workgroups_per_cu: int = 2,
+) -> int:
+    # Power of 2 to avoid excessive kernel instantiations.
     ideal_splits = triton.next_power_of_2(max(1, max_seq_len // _MIN_WORK_PER_SPLIT))
-    max_splits = sm_count * _SPLIT_OCCUPANCY_MULTIPLIER
-    return min(ideal_splits, max_splits)
+    max_splits = sm_count * workgroups_per_cu
+    # Splitting past what it takes to fill the device buys no parallelism and
+    # costs a proportionally longer stage-2 reduction. grid_units must be the
+    # product of the stage-1 grid's non-split dimensions -- batch rows times
+    # head tiles -- which after the non-causal fold is neither the query-token
+    # count nor the row count alone. Load-bearing under full cudagraphs, where
+    # max_seq_len is the capture-time bound (max_model_len) rather than the
+    # live one.
+    occupancy_splits = triton.next_power_of_2(
+        triton.cdiv(max_splits, max(1, grid_units))
+    )
+    return min(ideal_splits, max_splits, occupancy_splits)
 
 
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
-    # Non-causal DSpark block is flattened to one decode row per query token in
-    # forward_mqa, so no intra-block causal masking is required.
+    # forward_mqa folds a non-causal DSpark block into the query-head dim, so
+    # no intra-block causal masking is required.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
@@ -76,12 +99,15 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
             return
         # Decode reorder threshold is 1, so decode tokens <= max_num_seqs.
         B = self.vllm_config.scheduler_config.max_num_seqs
-        # Non-causal DSpark draft flattens each request's block to query_len
-        # decode rows; cover max_num_seqs * block_len rows.
+        # o/lse/attn_logits are still allocated per query token even though the
+        # kernel sees them folded, so cover max_num_seqs * block_len rows.
         if getattr(self, "non_causal_multi_token_decode", False):
             B *= self.reorder_batch_threshold
         # DCP all-gathers the query heads before forward_mqa.
         q_num_heads = self.num_heads * self.dcp_world_size
+        # Defaults deliberately: grid_units=1 and two workgroups per CU give
+        # the largest split count any launch can ask for, so the reservation
+        # bounds every runtime shape.
         max_splits = _compute_num_kv_splits(
             self.model_config.max_model_len,
             current_platform.num_compute_units(),
@@ -146,7 +172,7 @@ class TritonMLABackend(MLACommonBackend):
 
     @classmethod
     def supports_non_causal(cls) -> bool:
-        # DSpark non-causal blocks are flattened to single-token decode rows in
+        # DSpark non-causal blocks are folded into the query-head dim in
         # TritonMLAImpl.forward_mqa (decode_attention_fwd has no causal flag /
         # no intra-block masking). Enables the non-causal AMD MLA path.
         return True
@@ -225,12 +251,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                     f"--kv-cache-dtype float16."
                 )
 
-        # For FP8 KV cache, we dequantize to BF16 on load inside the
-        # Triton kernel. Tell the common layer not to quantize queries
-        # to FP8 — we handle FP8 KV cache with BF16 queries (Mode 1).
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            self.supports_quant_query_input = False
-
+        self._out_dtype = get_current_vllm_config().model_config.dtype
         self._sm_count = current_platform.num_compute_units()
 
     def forward_mqa(
@@ -249,17 +270,45 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
         q_num_heads = q.shape[1]
+        # The layer hands us a quantized query when the cache is quantized; its
+        # scale multiplies the scores alongside the key's, and the output stays
+        # in the model dtype.
+        is_fp8_q = q.dtype in _FP8_DTYPES
+        q_scale = layer._q_scale if is_fp8_q else None
+        out_dtype = self._out_dtype if is_fp8_q else q.dtype
         o = torch.zeros(
-            B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
+            B, q_num_heads, self.kv_lora_rank, dtype=out_dtype, device=q.device
         )
-        lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
+        lse = torch.zeros(B, q_num_heads, dtype=out_dtype, device=q.device)
+
+        # Non-causal DSpark block: every query token attends to the same
+        # committed KV prefix and never to a sibling block token. Hand the block
+        # to the kernel as extra query heads rather than as extra decode rows:
+        # the two are the same problem, but the kernel rereads the whole KV span
+        # once per head tile, so the row form multiplies KV traffic by the block
+        # length.
+        query_len = attn_metadata.max_query_len
+        folded_rows = 0
+        if not attn_metadata.causal and query_len > 1:
+            folded_rows = attn_metadata.num_decodes * query_len
 
         # For batch invariance, use only 1 split to ensure deterministic reduction
         if envs.VLLM_BATCH_INVARIANT:
             num_kv_splits = 1
         else:
+            # Size the splits against the stage-1 grid the launch will
+            # actually build: the fold trades decode rows for query heads, so
+            # rows alone understate the parallelism by the head-tile count.
+            if folded_rows:
+                rows, heads = folded_rows // query_len, q_num_heads * query_len
+            else:
+                rows, heads = B, q_num_heads
+            # MLA carries a single KV head, so kv_group_num == heads.
             num_kv_splits = _compute_num_kv_splits(
-                attn_metadata.max_seq_len, self._sm_count
+                attn_metadata.max_seq_len,
+                self._sm_count,
+                rows * stage1_head_tiles(heads, heads, is_mla=True),
+                stage1_workgroups_per_cu(True, heads),
             )
 
         # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
@@ -285,18 +334,32 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         block_table = attn_metadata.decode.block_table
         seq_lens = attn_metadata.decode.seq_lens
-        if not attn_metadata.causal:
-            # Non-causal DSpark block: flatten to one decode row per query token.
-            # Each row attends to the same committed KV prefix (per-row seq_lens)
-            # and never to sibling block tokens = non-causal block semantics.
-            # Mirrors FlashInferMLA's non-causal path.
-            query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
-            if query_len > 1:
-                block_table = block_table.repeat_interleave(query_len, dim=0)
-                seq_lens = seq_lens.repeat_interleave(query_len)
-
         # Run MQA — always pass layer scales. When KV cache is
         # BF16 the kernel's `if dtype.is_fp8()` check is a no-op.
+        if folded_rows:
+            # q rows are token-major within a request, so the fold is a view.
+            # Rows past the real queries are cudagraph padding: leave them zero.
+            n = folded_rows // query_len
+            h = q_num_heads * query_len
+            decode_attention_fwd(
+                q[:folded_rows].view(n, h, -1),
+                kv_c_and_k_pe_cache,
+                kv_c_cache,
+                o[:folded_rows].view(n, h, -1),
+                lse[:folded_rows].view(n, h),
+                block_table[:n],
+                seq_lens[:n],
+                attn_logits[:folded_rows].view(n, h, num_kv_splits, -1),
+                num_kv_splits,
+                self.scale,
+                PAGE_SIZE,
+                k_scale=layer._k_scale,
+                v_scale=layer._k_scale,
+                q_scale=q_scale,
+                is_mla=True,
+            )
+            return o, lse
+
         decode_attention_fwd(
             q,
             kv_c_and_k_pe_cache,
@@ -311,6 +374,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             PAGE_SIZE,
             k_scale=layer._k_scale,
             v_scale=layer._k_scale,
+            q_scale=q_scale,
             is_mla=True,
         )
 
