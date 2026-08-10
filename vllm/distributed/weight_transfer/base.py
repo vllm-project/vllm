@@ -77,7 +77,15 @@ class WeightSource(ABC):
 
     @abstractmethod
     def metadata(self) -> list[ParamMeta]:
-        """Declare what iteration will yield, without transferring anything."""
+        """Declare what iteration will yield, without transferring anything.
+
+        Must agree with iteration element for element: the same parameters, in
+        the same order, with the same dtypes and shapes. Backends may read both
+        channels and trust that they match (dense NCCL sizes the worker's receive
+        buffers and its packed chunk boundaries from this, then sends the bytes
+        from iteration), so a source that disagrees between the two splits the
+        stream differently on each side.
+        """
         raise NotImplementedError
 
     @abstractmethod

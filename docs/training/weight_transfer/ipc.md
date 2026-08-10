@@ -15,6 +15,11 @@ The IPC weight transfer engine uses **CUDA IPC** (Inter-Process Communication) h
 Unlike NCCL, IPC transfer is straight-line: `update_weights` *is* the transfer,
 and it rides the client, so there is no concurrent broadcast to overlap with.
 
+!!! note
+    The handle all-gather in step 2 runs over the **default** process group, so it
+    assumes that group is exactly the set of colocated trainer ranks and that the
+    sender is a member. It is a no-op when no distributed group exists.
+
 !!! warning
     IPC handles involve sending serialized Python objects. When using HTTP transport, you must set `VLLM_ALLOW_INSECURE_SERIALIZATION=1` on both the server and client. This is because IPC handles are pickled and base64-encoded for HTTP transmission.
 
@@ -59,6 +64,10 @@ engine.send_weights()   # once per sync
 `finish_weight_update`, and holds strong references to the IPC-shared copies
 until after the post-send barrier — the consumer's views would otherwise dangle.
 
+Any [`VLLMWeightSyncClient`](base.md#vllmweightsyncclient) works here — the
+built-in HTTP and Ray clients, or an adapter for your own stack. The engine is
+identical either way.
+
 ### `IPCTrainerInitInfo`
 
 | Field | Default | Description |
@@ -72,53 +81,6 @@ records it and decodes accordingly. It is not a `WeightTransferConfig` field and
 not a per-round `update_weights` field. `packed_buffer_size_bytes` is
 producer-only — the consumer rebuilds from the IPC handle plus the per-chunk
 `tensor_sizes`, so it never needs the buffer size.
-
-## Choosing a Transport
-
-The transport is the client you pass; the engine is identical either way.
-
-### HTTP
-
-For a `vllm serve` server — the usual setup. The client pickles and
-base64-encodes the handles into `ipc_handles_pickled` and posts them to
-`/update_weights`; because the worker deserializes with `pickle.loads`, the
-server must be started with `VLLM_ALLOW_INSECURE_SERIALIZATION=1`.
-
-```python
-from vllm.distributed.weight_transfer import HTTPVLLMWeightSyncClient
-
-client = HTTPVLLMWeightSyncClient("http://localhost:8000")
-```
-
-A data-parallel server needs no special handling: the API server's DP client
-broadcasts each weight-transfer RPC to every engine core, so one client drives
-all ranks.
-
-### Ray
-
-Used when vLLM runs as an in-process `LLM`/`AsyncLLM` inside a Ray actor.
-Handles ride Ray's serialization natively.
-
-```python
-from vllm.distributed.weight_transfer import RayVLLMWeightSyncClient
-
-client = RayVLLMWeightSyncClient(llm_actor_handle)   # or a list of handles
-```
-
-### Custom
-
-`VLLMWeightSyncClient` is a structural protocol, so any object with the four
-methods works — no subclassing, no import:
-
-```python
-class MyClient:
-    def init_weight_transfer_engine(self, init_info): ...
-    def start_weight_update(self): ...
-    def update_weights(self, update_info): ...   # update_info["ipc_handles"] lands here
-    def finish_weight_update(self, weight_version=None): ...
-```
-
-See [Base Classes](base.md#vllmweightsyncclient) for details.
 
 ## Packed (Chunked) Transfer
 
@@ -147,56 +109,6 @@ On a multi-rank trainer the producer reuses one buffer across chunks, so packed
 mode carries a per-chunk barrier across ranks: without it, a rank could overwrite
 its buffer while its colocated worker is still reading the current chunk. This is
 handled inside `send_weights()`.
-
-## Multi-Rank (FSDP) Trainers
-
-Every trainer rank builds an engine and calls `send_weights()`, passing its own
-`rank`:
-
-```python
-engine = WeightTransferTrainerFactory.trainer_init(
-    init_info=IPCTrainerInitInfo(rank=torch.distributed.get_rank(), packed=True),
-    client=client,
-    source=ModuleSource(fsdp_model),
-)
-engine.send_weights()
-```
-
-All ranks iterate the source — materializing each parameter is an FSDP
-`full_tensor()` all-gather that every rank must join — and all ranks join the
-IPC-handle all-gather. Only rank 0 ships the merged handles and drives the
-inference-side RPCs.
-
-!!! note
-    The handle all-gather runs over the **default** process group, so it assumes
-    that group is exactly the set of colocated trainer ranks and that the sender
-    is a member. It is a no-op when no distributed group exists.
-
-### Placing the two sides on the same GPUs
-
-Because handles are keyed by physical GPU **UUID** rather than by rank index,
-what has to line up is the *set* of GPUs, not the pairing: every worker finds its
-own UUID in the merged payload as long as some trainer rank was on that GPU.
-
-Pin the server's GPUs with `--device-ids` (physical IDs or UUIDs, and unlike
-`CUDA_VISIBLE_DEVICES` it leaves topology visible to both sides):
-
-```bash
-vllm serve my-model --device-ids 0,1,2,3 \
-    --data-parallel-size 4 --tensor-parallel-size 1 --enable-expert-parallel \
-    --gpu-memory-utilization 0.35 \
-    --weight-transfer-config '{"backend": "ipc"}'
-```
-
-Data-parallel rank `i` takes `device_ids[i * TP : (i + 1) * TP]`, so this puts DP
-rank `i` on physical GPU `i`. If a scheduler assigns the trainer's GPUs for you,
-reserve those first and then pass them to `--device-ids`, rather than assuming a
-fixed range — that is what
-[`rlhf_ipc_fsdp_ep.py`](../../../examples/rl/rlhf_ipc_fsdp_ep.py) does.
-
-Both sides share each GPU, so cap the server with `--gpu-memory-utilization` and
-consider moving its weights aside for the transfer with `/sleep?level=1` →
-`/wake_up?tags=weights` → transfer → `/wake_up?tags=kv_cache&tags=scheduling`.
 
 ## Examples
 

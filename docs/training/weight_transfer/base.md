@@ -6,7 +6,7 @@ replaceable:
 | Abstraction | Side | Answers |
 | ----------- | ---- | ------- |
 | [`WeightSource`](#weightsource) | Trainer | *What* weights to send |
-| [`VLLMWeightSyncClient`](#vllmweightsyncclient) | Trainer | *How to reach* the inference engine's control plane |
+| [`VLLMWeightSyncClient`](#vllmweightsyncclient) | Trainer | *How to reach* the inference engine — the adapter for your RL stack's own vLLM wrapper |
 | [`TrainerWeightTransferEngine`](#trainerweighttransferengine) | Trainer | *How to transmit* the bytes |
 | [`WeightTransferEngine`](#weighttransferengine) | Inference | *How to receive* them and load them |
 
@@ -40,13 +40,13 @@ class ParamMeta:
 ```
 
 !!! warning "The two channels must agree, element for element"
-    The worker sizes its receive buffers — and in packed mode cuts its chunk
-    boundaries — from the update info, which the engine builds from
-    `metadata()`. The bytes themselves come from iteration. A source that
-    reorders, omits, or re-dtypes a parameter between the two channels makes the
-    two sides split the stream differently: NCCL hangs, or garbage lands in the
-    model. The NCCL sender checks each pair as it goes (one comparison per
-    parameter) and raises naming the first divergent parameter.
+    `metadata()` must declare exactly what iteration will yield: the same
+    parameters, in the same order, with the same dtypes and shapes. This is an
+    invariant of the ABC, not of any one backend — a source that reorders, omits,
+    or re-dtypes a parameter between the two channels is broken even if the
+    backend you happen to test against never notices. Backends are free to read
+    both channels and to trust that they match; dense NCCL does, and
+    [enforces it](nccl.md#the-two-weightsource-channels-must-agree).
 
 Materializing is typically a collective, so **every trainer rank must iterate the
 same source in the same order, in lockstep**, or ranks deadlock. `metadata()` can
@@ -72,9 +72,7 @@ source = ModuleSource(model)
 
 #### Custom Sources
 
-Subclass `WeightSource` when the weights you want to send are not simply a
-module's parameters — a Megatron-Bridge export, an MoE re-fusing pass, or any
-producer that reshapes trainer-format tensors into checkpoint format.
+Subclass `WeightSource` when the weights you want to send require additional processing to convert to a HF compatible format.
 
 ```python
 from vllm.distributed.weight_transfer import ParamMeta, WeightSource
@@ -101,16 +99,17 @@ class MyExportSource(WeightSource):
             yield name, materialize_full_tensor(tensor)
 ```
 
-`materialize_full_tensor(tensor)` calls `full_tensor()` on FSDP `DTensor` shards
-(a collective all-gather) and passes regular tensors through unchanged. Call it
-at send time so the gather happens exactly once per round, and keep it out of
-`metadata()`.
-
 ### VLLMWeightSyncClient
 
-The client is the trainer's stub for the inference engine's control plane. It is
-a `@runtime_checkable` structural `Protocol` (PEP 544) with four synchronous
-methods, so any object defining them works — no import or subclassing required.
+**This is the adapter for however your RL stack reaches vLLM.** Many RL frameworks wrap
+inference engines in their own abstractions, and each reaches vLLM its own way.
+`VLLMWeightSyncClient` is the single seam where that bespoke shape is adapted, so
+weight sync engines remain control plane agnostic.
+
+The contract is only this: **however the wrapper is shaped, it must bottom out in
+the same four calls** — `init_weight_transfer_engine` once at setup, then
+`start_weight_update` → one or more `update_weights` → `finish_weight_update` per
+round. Everything a trainer engine needs from the inference side goes through them.
 
 ```python
 class VLLMWeightSyncClient(Protocol):
@@ -120,10 +119,10 @@ class VLLMWeightSyncClient(Protocol):
     def finish_weight_update(self, weight_version: str | None = None) -> None: ...
 ```
 
-Concurrency that some backends need — NCCL must run `update_weights`
-concurrently with the trainer-side broadcast — is the *engine's* job, not the
-client's. That keeps the protocol a flat four-method surface any wrapper can
-implement.
+It is a `@runtime_checkable` structural `Protocol` (PEP 544), which is what makes
+adapting cheap: **any object with those four methods already satisfies it**. An existing
+wrapper in your framework can usually become a client by gaining four forwarding
+methods.
 
 Two implementations ship with vLLM:
 
@@ -132,15 +131,42 @@ Two implementations ship with vLLM:
 | `RayVLLMWeightSyncClient(handle)` | One or more `AsyncLLM`/`LLM` Ray actors. Accepts a list and fans each call out to every handle, blocking on all of them, so a multi-actor (e.g. multi-DP) deployment is driven as one unit |
 | `HTTPVLLMWeightSyncClient(base_url, timeout=300)` | A vLLM server over the RLHF HTTP routes |
 
-Writing your own is a matter of defining the four methods:
+Custom weight sync clients can be implement like so:
 
 ```python
-class MyClient:
-    def init_weight_transfer_engine(self, init_info): ...
-    def start_weight_update(self): ...
-    def update_weights(self, update_info): ...
-    def finish_weight_update(self, weight_version=None): ...
+class MyFrameworkWeightSyncClient:
+    """Adapts one RL framework's rollout pool to the four weight-sync calls."""
+
+    def __init__(self, rollout_pool):
+        self.pool = rollout_pool          # whatever your stack already has
+
+    def init_weight_transfer_engine(self, init_info):
+        # Fan out to every replica and block: all of them receive weights.
+        self.pool.broadcast_rpc("init_weight_transfer_engine", init_info=init_info)
+
+    def start_weight_update(self):
+        self.pool.broadcast_rpc("start_weight_update")
+
+    def update_weights(self, update_info):
+        self.pool.broadcast_rpc("update_weights", update_info=update_info)
+
+    def finish_weight_update(self, weight_version=None):
+        self.pool.broadcast_rpc("finish_weight_update")
+        if weight_version is not None:
+            self.pool.broadcast_rpc("update_weight_version", weight_version)
 ```
+
+Two things to get right in any adapter:
+
+- **Reach every replica, and block until all of them are done.** A weight update
+  is not a load-balanced request: every worker holding a copy of the model must
+  receive it. Returning before they all finish lets the trainer race ahead of
+  workers still loading. (Both built-in clients do this — Ray by fanning out over
+  its handles, HTTP because the server's DP client broadcasts internally.)
+- **Raise on failure.** Trainer engines rely on exceptions to surface
+  inference-side errors; a client that swallows them turns a failed sync into
+  silently stale weights, or into a hang for backends whose transfer rendezvouses
+  with the worker.
 
 !!! note
     HTTP cannot carry raw CUDA IPC handles, so `HTTPVLLMWeightSyncClient` pickles
@@ -148,38 +174,12 @@ class MyClient:
     deserializes it only when `VLLM_ALLOW_INSECURE_SERIALIZATION=1`. Backends
     whose payloads are JSON-native (NCCL) pass through untouched.
 
-### TrainerInitInfo
-
-Backend-specific trainer init info. The base class carries the one field every
-backend needs:
-
-```python
-@dataclass
-class TrainerInitInfo:
-    backend: ClassVar[str]        # factory dispatch key
-    rank: int = field(kw_only=True)
-
-    @property
-    def is_sender(self) -> bool:
-        return self.rank == 0
-```
-
-- **`rank`** is this trainer process's rank, supplied **explicitly**. The engine
-  does not read it from a global process group, which is ambiguous once several
-  groups (FSDP / TP / PP / EP) exist. **Rank 0 is always the sender.** It is
-  keyword-only, so backend subclasses can add positional fields freely.
-- **`backend`** is a `ClassVar`, not an `__init__` field: it is a fixed
-  per-backend constant that the factory reads to dispatch. Every subclass must
-  set it — `__init_subclass__` raises otherwise.
-
-Subclasses also carry the transfer's **wire params** (`packed`, buffer sizes).
-The sender propagates them to the worker inside `trainer_init`, so the two sides
-cannot disagree.
-
 ### TrainerWeightTransferEngine
 
-Generic over its init info type, constructed by the `trainer_init` classmethod
-factory, and driven by a **parameter-free `send_weights()`**.
+The trainer-side engine: it holds the transport state (NCCL communicators, IPC
+device info, transfer plans), pulls weights from a `WeightSource`, and drives the
+inference side through a `VLLMWeightSyncClient`. It is generic over its init info
+type, constructed by the `trainer_init` classmethod factory, and driven by `send_weights()`.
 
 | Method | Description |
 | ------ | ----------- |
@@ -195,6 +195,39 @@ ranks still run every collective so the group stays aligned.
 
 The trainer side takes **no `WeightTransferConfig`**. The backend comes from the
 init info's `backend` `ClassVar`, and the wire params ride the init info too.
+
+#### TrainerInitInfo
+
+The `init_info` passed to `trainer_init` above. It is how a caller configures a
+transfer: it selects the backend, says which rank this process is, and carries the
+wire params. Each backend subclasses it; the base class holds the one field every
+backend needs.
+
+```python
+@dataclass
+class TrainerInitInfo:
+    backend: ClassVar[str]        # factory dispatch key
+    rank: int = field(kw_only=True)
+
+    @property
+    def is_sender(self) -> bool:
+        return self.rank == 0
+```
+
+- **`rank`** is this trainer process's rank, supplied **explicitly**. The engine
+  does not read it from a global process group, which is ambiguous once several
+  groups (FSDP / TP / PP / EP) exist. **Rank 0 is always the sender** — this is
+  what `trainer_init` resolves into `is_sender`. It is keyword-only, so backend
+  subclasses can add positional fields freely.
+- **`backend`** is a `ClassVar`, not an `__init__` field: it is a fixed
+  per-backend constant that the factory reads to dispatch, which is why callers
+  never pass a `backend=` argument. Every subclass must set it —
+  `__init_subclass__` raises otherwise.
+
+Subclasses also carry the transfer's **wire params** (`packed`, buffer sizes).
+The sender propagates them to the worker inside `trainer_init`, so the two sides
+cannot disagree. See [`NCCLTrainerInitInfo`](nccl.md#nccltrainerinitinfo) and
+[`IPCTrainerInitInfo`](ipc.md#ipctrainerinitinfo) for the concrete fields.
 
 #### Full-Resync vs. Delta Backends
 

@@ -14,10 +14,9 @@ The NCCL weight transfer engine uses [NCCL](https://developer.nvidia.com/nccl) b
 2. The trainer broadcasts weights to all workers simultaneously. Each worker receives and loads the weights.
 3. Optionally, **packed tensor broadcasting** batches multiple small tensors into larger buffers with double/triple buffering and CUDA stream overlap for higher throughput. This implementation is based on [NeMo-RL's packed tensor](https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/utils/packed_tensor.py).
 
-The workers' `update_weights` and the trainer's broadcast **must run at the same
-time** — both sides rendezvous inside the same NCCL calls. The trainer engine
-owns that concurrency internally, so callers do not hand-roll a thread around
-the RPC.
+The workers' `update_weights` and the trainer's broadcast run at the same time —
+both sides rendezvous inside the same NCCL calls. The trainer engine
+owns that concurrency internally.
 
 ## Inference Side
 
@@ -107,34 +106,29 @@ decodes with exactly the values the trainer encoded with. They are not per-round
     `packed_buffer_size_bytes * packed_num_buffers` on each side (2 GiB at the
     defaults). Lower `packed_buffer_size_bytes` if that is too much headroom.
 
-## Multi-Rank (FSDP) Trainers
+### The two `WeightSource` channels must agree
 
-Every trainer rank builds an engine and calls `send_weights()`, passing its own
-`rank`:
+Dense NCCL is the backend that reads *both*
+[`WeightSource`](base.md#weightsource) channels, so it is the one where a
+disagreement between them is fatal. The engine builds the per-round update info
+from `metadata()` and ships it ahead of the bytes; the worker sizes its receive
+buffers from that info, and in packed mode cuts its chunk boundaries from it. The
+bytes themselves come from iterating the source.
 
-```python
-engine = WeightTransferTrainerFactory.trainer_init(
-    init_info=NCCLTrainerInitInfo(
-        master_address=master_address,
-        master_port=master_port,
-        world_size=world_size,
-        rank=torch.distributed.get_rank(),
-        packed=True,
-    ),
-    client=client,
-    source=ModuleSource(fsdp_model),
-)
-engine.send_weights()
-```
+If iteration disagrees with what `metadata()` declared — a reordered, omitted, or
+re-dtyped parameter — the two sides split the same byte stream differently. The
+transfer then either hangs in NCCL waiting for a length that never arrives, or
+loads garbage into the model.
 
-Only rank 0 holds a communicator, talks to the client, and broadcasts. Non-sender
-ranks skip all of that but still iterate the `WeightSource`, because each
-parameter is materialized by an FSDP `full_tensor()` all-gather that every rank
-must join. `source.metadata()` likewise runs on every rank (it can itself be a
-collective for custom producers); only the sender ships it.
+The sender therefore checks each pair against the declared metadata as it goes,
+one comparison per parameter, and raises naming the first divergent parameter
+rather than letting it reach the wire. `ModuleSource` satisfies this by
+construction. If you write a custom source — a Megatron export, an MoE re-fusing
+pass — this is the invariant to test first.
 
-Note that `world_size` counts the **NCCL transfer group** — the single trainer
-sender plus every inference worker — not the trainer's own FSDP world.
+!!! note
+    IPC does not read `metadata()` at all: it derives the update info from
+    iteration as it goes, so it cannot observe a divergence.
 
 ## Sparse NCCL
 
