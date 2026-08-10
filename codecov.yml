@@ -10,3 +10,16 @@ fixes:
   - "/usr/local/lib/python3.*/site-packages/vllm/::vllm/"
   - "/usr/lib/python3.*/dist-packages/vllm/::vllm/"
   - "/usr/lib/python3.*/site-packages/vllm/::vllm/"
+  # Map Rust sources built in the E2E image and on Buildkite agents.
+  - "/workspace/rust/::rust/"
+  - "/var/lib/buildkite-agent/.*/rust/::rust/"
+
+flags:
+  rust-unit:
+    paths:
+      - rust/
+    carryforward: false
+  rust-e2e:
+    paths:
+      - rust/
+    carryforward: false
