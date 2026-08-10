@@ -20,7 +20,7 @@ def format_size(
     num_bytes: int,
     decimal_places: int = 4,
     use_binary: bool = True,
-    target_unit: str = None,
+    target_unit: str | None = None,
 ) -> str:
     """Format a byte count as a human-readable string."""
     if num_bytes == 0:
@@ -57,6 +57,9 @@ class PagedShmTensorIPC:
 
     def connect(self):
         if not self.is_paged_shm_enabled:
+            return
+
+        if self.multimodal_config is None:
             return
 
         self.client_async = AsyncPagedShmClient(

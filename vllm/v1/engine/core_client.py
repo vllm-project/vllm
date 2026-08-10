@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.queues import Queue
 from threading import Thread
-from typing import Any, TypeAlias, TypeVar, Protocol
+from typing import Any, Protocol, TypeAlias, TypeVar
 
 import msgspec
 import msgspec.msgpack
@@ -425,7 +425,7 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
-    resources: list[Shutdownable| None] | None = None
+    resources: list[Shutdownable | None] | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
