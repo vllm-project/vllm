@@ -1574,11 +1574,19 @@ class EngineArgs:
             "--max-cudagraph-capture-size",
             **compilation_kwargs["max_cudagraph_capture_size"],
         )
-        compilation_group.add_argument(
+        persistent_cache_group = compilation_group.add_mutually_exclusive_group()
+        persistent_cache_group.add_argument(
             "--compile-cache",
-            action=argparse.BooleanOptionalAction,
+            dest="compile_cache",
+            action="store_true",
             default=False,
             help="Enable persistent remote torch/CUDA-graph compilation cache reuse.",
+        )
+        persistent_cache_group.add_argument(
+            "--no-compile-cache",
+            dest="compile_cache",
+            action="store_false",
+            help="Explicitly disable persistent remote compilation cache reuse.",
         )
 
         # Kernel arguments

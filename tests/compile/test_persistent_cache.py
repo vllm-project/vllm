@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from vllm.compilation.persistent_cache import (
@@ -74,6 +75,8 @@ def test_compile_cache_cli_flags_are_mutually_exclusive():
     assert parser.parse_args([]).compile_cache is False
     assert parser.parse_args(["--compile-cache"]).compile_cache is True
     assert parser.parse_args(["--no-compile-cache"]).compile_cache is False
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--compile-cache", "--no-compile-cache"])
 
 
 def test_manifest_is_deterministic_and_isolates_mismatch():
