@@ -420,6 +420,42 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.world_size == 8
 
 
+def test_ray_dp_backend_keeps_derived_master_ip_at_dp1(monkeypatch):
+    """`--data-parallel-backend ray --data-parallel-size 1` must keep the
+    master IP derived by EngineArgs instead of falling back to
+    `VLLM_DP_MASTER_IP` (default "127.0.0.1"). Otherwise the DP placement
+    group lookup fails ("The DP master node (ip: 127.0.0.1) is missing or
+    dead"). See issue #51712."""
+    # Force the env fallback to a wrong value, so this test fails if the
+    # ray branch still reads it.
+    monkeypatch.setenv("VLLM_DP_MASTER_IP", "127.0.0.1")
+    monkeypatch.setenv("VLLM_DP_SIZE", "1")
+    monkeypatch.setenv("VLLM_DP_RANK", "0")
+    monkeypatch.setenv("VLLM_DP_RANK_LOCAL", "-1")
+    monkeypatch.setenv("VLLM_DP_MASTER_PORT", "29500")
+
+    parallel_config = ParallelConfig(
+        data_parallel_size=1,
+        data_parallel_size_local=1,
+        data_parallel_backend="ray",
+        data_parallel_master_ip="192.168.1.100",  # as derived by EngineArgs
+    )
+    assert parallel_config.data_parallel_master_ip == "192.168.1.100"
+
+
+def test_mp_dp_backend_falls_back_to_env_master_ip(monkeypatch):
+    """The non-ray (offline SPMD) path must keep reading VLLM_DP_MASTER_IP."""
+    monkeypatch.setenv("VLLM_DP_MASTER_IP", "10.0.0.5")
+
+    parallel_config = ParallelConfig(
+        data_parallel_size=1,
+        data_parallel_size_local=1,
+        data_parallel_backend="mp",
+        data_parallel_master_ip="192.168.1.100",
+    )
+    assert parallel_config.data_parallel_master_ip == "10.0.0.5"
+
+
 def test_draft_model_enables_async_scheduling_by_default():
     parallel_config = ParallelConfig(distributed_executor_backend="uni")
     model_config = ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048)

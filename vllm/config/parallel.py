@@ -888,8 +888,14 @@ class ParallelConfig:
                     f"data_parallel_rank ({self.data_parallel_rank})"
                     f" must be in the range [0, {self.data_parallel_size})"
                 )
-        else:
+        elif self.data_parallel_backend != "ray":
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
+            # Skip this when the ray backend is selected: EngineArgs has
+            # already derived the DP master address from the Ray node (see
+            # `create_engine_config`), and the fallback below would discard it
+            # for the default `VLLM_DP_MASTER_IP` ("127.0.0.1"), breaking DP
+            # placement-group lookup with `--data-parallel-size 1
+            # --data-parallel-backend ray`.
             self.data_parallel_size = envs.VLLM_DP_SIZE
             self.data_parallel_rank = envs.VLLM_DP_RANK
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
