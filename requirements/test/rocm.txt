@@ -72,8 +72,6 @@ azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
     # via -r requirements/test/rocm.in
-bitsandbytes==0.49.2
-    # via -r requirements/test/rocm.in
 black==26.3.1
     # via datamodel-code-generator
 blake3==1.0.8
@@ -237,7 +235,7 @@ fastavro==1.12.2
     # via cohere
 fastparquet==2026.3.0
     # via genai-perf
-fastsafetensors==0.3.2
+fastsafetensors==0.3.3
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
@@ -568,7 +566,6 @@ numpy==2.2.6
     #   -r requirements/test/../common.txt
     #   accelerate
     #   albumentations
-    #   bitsandbytes
     #   bm25s
     #   contourpy
     #   cupy-cuda12x
@@ -698,7 +695,6 @@ packaging==26.0
     # via
     #   -c requirements/rocm.txt
     #   accelerate
-    #   bitsandbytes
     #   black
     #   datasets
     #   evaluate
