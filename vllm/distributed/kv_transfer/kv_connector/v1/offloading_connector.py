@@ -49,9 +49,7 @@ from vllm.v1.request import Request
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
-        # Canonical mappings are certified per layer against registered
-        # tensors; a cross-layer slab has no per-layer refs to certify, so
-        # keep per-layer registration when the canonical layout is requested.
+        # Cross-layer slabs have no per-layer refs to certify canonical mappings
         return not self._canonical_layout
 
     @property

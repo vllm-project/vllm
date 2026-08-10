@@ -662,10 +662,8 @@ def test_canonical_layout_certifies_v2_model_runner():
 
 
 def test_prefer_cross_layer_blocks_yields_to_canonical_layout():
-    """Canonical mappings are certified per layer, so the connector must not
-    steer the runner into cross-layer allocation when canonical_layout is
-    requested — otherwise uniform-attention models on the v1 runner refuse
-    to start."""
+    """The connector must not request cross-layer blocks under
+    canonical_layout: cross-layer slabs have no per-layer refs to certify."""
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
         OffloadingConnector,
