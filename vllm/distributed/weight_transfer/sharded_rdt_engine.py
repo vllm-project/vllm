@@ -22,6 +22,7 @@ packed-layout invariant, tuning, and the measured results behind the choices
 here.
 """
 
+import contextlib
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -576,6 +577,15 @@ class ShardedRDTWeightTransferEngine(
         producer_indices = self._select_producer_indices(len(producer_names))
         # Chunk owners and frees index producers LOCALLY (into _produce_methods).
         self._local_of_producer = {p: i for i, p in enumerate(producer_indices)}
+
+        # Idempotency: these two lists are APPEND-ONLY, and every downstream index
+        # (`_Chunk.owner`, `_local_owner_of`, the serve-arena reservations) is a
+        # position in them. A second `init_transfer_engine` on a live engine would
+        # therefore double their length and silently shift every owner index by one.
+        # That second call is exactly what a rejoining engine performs, so reset here
+        # rather than trusting the caller to only ever init once.
+        self._producer_actors = []
+        self._produce_methods = []
 
         for producer_idx in producer_indices:
             chosen_name = producer_names[producer_idx]
@@ -1266,6 +1276,45 @@ class ShardedRDTWeightTransferEngine(
         # nearer) high-water — the chunk pipeline may issue ahead from now on.
         self._completed_syncs += 1
 
+    def abort_update(self) -> None:
+        """Unwind this consumer from a sync that is being abandoned. Best-effort.
+
+        Called by the worker's abort control call after the trainer's abort has
+        already reached the producers, so no further pull can succeed. The goal is
+        a state where the NEXT sync can start cleanly, which means:
+
+        * join the proc/quant queues and their streams, so no background thread is
+          still scattering into a receive slot the next sync will reuse;
+        * drop ``_pending_frees`` WITHOUT waiting on them -- they are addressed at a
+          producer that may be gone, and a ``ray.get`` here would hang the very
+          unwind that is supposed to be bounded;
+        * keep the plan, the bake and the arenas, which are geometry rather than
+          per-sync state and are exactly what makes a retry cheap.
+
+        Errors are swallowed: this runs on a path that is already failing, and the
+        real error is the one the trainer will raise.
+        """
+        for q in (self._proc_queue, self._quant_queue):
+            if q is not None:
+                with contextlib.suppress(Exception):
+                    q.join()
+        for st in (self._proc_stream, self._quant_stream):
+            if st is not None:
+                with contextlib.suppress(Exception):
+                    st.synchronize()
+        # Deliberately not ray.get: see the docstring. Dropping the refs abandons
+        # the frees, which is correct -- the producer's per-(group, consumer) ledger
+        # makes the retry's frees idempotent, so a lost free costs nothing.
+        self._pending_frees.clear()
+        # Clear the recorded background error too: it belongs to the abandoned sync,
+        # and leaving it set would fail the retry before it started.
+        with contextlib.suppress(Exception):
+            self._proc_error = None
+        logger.warning(
+            "Sharded RDT engine (consumer %d) aborted a weight update",
+            self._consumer_id,
+        )
+
     def _dispatch_item(self, item: "_ProcItem") -> None:
         """Hand one chunk item to the background scatter thread.
 
@@ -1439,10 +1488,17 @@ class ShardedRDTWeightTransferEngine(
         every consumer routed to it for the group, and releases the group's
         backpressure slot on the last one. Firing at other producers instead
         would credit a group they never served. Refs are held and drained in
-        drain_pending so every free has executed before the sync ends."""
+        drain_pending so every free has executed before the sync ends.
+
+        ``consumer_id`` travels so the producer's free ledger is keyed on identity
+        rather than on a count of calls: an aborted-and-retried sync can deliver
+        this free twice, and a counter would read the repeat as a second consumer
+        and release a group another consumer is still pulling from."""
         local = self._local_owner_of(group_idx)
         self._pending_frees.append(
-            self._producer_actors[local].free_gather.remote(list(gnames))
+            self._producer_actors[local].free_gather.remote(
+                list(gnames), consumer_id=self._consumer_id
+            )
         )
 
     def _run_chunk_pipeline(self, plan: "_CallPlan") -> None:
