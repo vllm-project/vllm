@@ -192,5 +192,77 @@ def test_has_device_capability_comparisons(monkeypatch):
         NvmlCudaPlatform.get_device_capability.cache_clear()
 
 
+def _stub_nvml_uuids(monkeypatch, uuids: dict[int, str]):
+    """Stub NVML to report the given physical-index -> UUID map.
+
+    ``nvmlDeviceGetHandleByUUID`` only matches exact, full UUIDs (mirroring
+    NVML, which has no prefix-matching fallback), so short-form UUIDs must be
+    resolved via the prefix scan in
+    ``device_control_id_to_physical_device_id``.
+    """
+    from vllm.platforms.cuda import pynvml
+
+    def handle_by_index(index: int):
+        return f"handle-{index}"
+
+    def handle_by_uuid(uuid: str):
+        for index, full in uuids.items():
+            if full == uuid:
+                return f"handle-{index}"
+        raise pynvml.NVMLError_NotFound()
+
+    def index_of(handle: str):
+        return int(handle.split("-")[1])
+
+    monkeypatch.setattr(pynvml, "nvmlInit", lambda: None)
+    monkeypatch.setattr(pynvml, "nvmlShutdown", lambda: None)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetCount", lambda: len(uuids))
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByIndex", handle_by_index)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByUUID", handle_by_uuid)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetIndex", index_of)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetUUID",
+                        lambda h: uuids[index_of(h)])
+
+
+def test_device_control_id_short_uuid_prefix(monkeypatch):
+    """CUDA_VISIBLE_DEVICES accepts the first few characters of a GPU UUID
+    (NVIDIA-documented short form); NVML only matches exact UUIDs, so the
+    platform must fall back to a prefix scan."""
+    from vllm.platforms.cuda import NvmlCudaPlatform
+
+    uuids = {
+        0: "GPU-af7b61d8-21af-baea-6a19-42a1f9f7c3cb",
+        1: "GPU-95a445f6-69ca-10b5-3201-e1cf693804b2",
+    }
+    _stub_nvml_uuids(monkeypatch, uuids)
+
+    # Short prefix resolves to the correct physical index.
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
+        "GPU-95a445f6") == 1
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
+        "GPU-af7b61d8") == 0
+    # Short prefix without the leading "GPU-".
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
+        "95a445f6") == 1
+    # Exact full UUID still works.
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
+        "GPU-af7b61d8-21af-baea-6a19-42a1f9f7c3cb") == 0
+    # Integer IDs still work.
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("0") == 0
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("1") == 1
+
+
+def test_device_control_id_short_uuid_no_match(monkeypatch):
+    """A prefix that matches no physical device must surface NVML's not-found
+    error rather than silently mapping to an unrelated device."""
+    from vllm.platforms.cuda import NvmlCudaPlatform, pynvml
+
+    _stub_nvml_uuids(monkeypatch, {
+        0: "GPU-af7b61d8-21af-baea-6a19-42a1f9f7c3cb",
+    })
+    with pytest.raises(pynvml.NVMLError_NotFound):
+        NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-zzzz")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
