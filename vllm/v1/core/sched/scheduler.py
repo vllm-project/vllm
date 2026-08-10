@@ -423,6 +423,18 @@ class Scheduler(SchedulerInterface):
         end = min((s for s in stops if start < s < end), default=end)
         return max(end - start, 0)
 
+    def _get_local_prefix_cache_hit(
+        self, request: Request
+    ) -> tuple[KVCacheBlocks, int, int, bool]:
+        connector = self.connector
+        if connector is not None and connector.supports_divergent_local_hybrid_hits:
+            return self.kv_cache_manager.get_computed_blocks_for_connector(request)
+
+        blocks, num_local, shared_prefix_boundary = (
+            self.kv_cache_manager.get_computed_blocks(request)
+        )
+        return blocks, num_local, shared_prefix_boundary, False
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -518,6 +530,12 @@ class Scheduler(SchedulerInterface):
                 - self.num_sampled_tokens_per_step,
             )
 
+            # Apply Mamba alignment before encoder caps.
+            if self.need_mamba_block_aligned_split:
+                num_new_tokens = self._mamba_block_aligned_split(
+                    request, num_new_tokens
+                )
+
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
             external_load_encoder_input: list[int] = []
@@ -534,11 +552,6 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens,
                     encoder_compute_budget,
                     shift_computed_tokens=1 if self.use_eagle else 0,
-                )
-
-            if self.need_mamba_block_aligned_split:
-                num_new_tokens = self._mamba_block_aligned_split(
-                    request, num_new_tokens
                 )
 
             if num_new_tokens == 0:
@@ -739,26 +752,12 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
-                    hit_diverged = False
-                    # Get locally-cached tokens.
-                    if self.connector is not None:
-                        # A KV connector transfers the missing suffix, which needs a
-                        # hybrid-aware lookup that can diverge across groups.
-                        (
-                            new_computed_blocks,
-                            num_new_local_computed_tokens,
-                            request.shared_prefix_boundary,
-                            hit_diverged,
-                        ) = self.kv_cache_manager.get_computed_blocks_for_connector(
-                            request
-                        )
-                    else:
-                        (
-                            new_computed_blocks,
-                            num_new_local_computed_tokens,
-                            # Marconi shared-prefix junction to pin; 0 if none.
-                            request.shared_prefix_boundary,
-                        ) = self.kv_cache_manager.get_computed_blocks(request)
+                    (
+                        new_computed_blocks,
+                        num_new_local_computed_tokens,
+                        request.shared_prefix_boundary,
+                        hit_diverged,
+                    ) = self._get_local_prefix_cache_hit(request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -908,6 +907,17 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
+                    # Apply Mamba alignment before encoder caps.
+                    if self.need_mamba_block_aligned_split:
+                        num_new_tokens = self._mamba_block_aligned_split(
+                            request,
+                            num_new_tokens,
+                            num_new_local_computed_tokens,
+                            num_external_computed_tokens,
+                        )
+                        if num_new_tokens == 0:
+                            break
+
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
                         (
@@ -925,17 +935,6 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
-
-                # Skip block alignment when setting up async receive (no local work).
-                if self.need_mamba_block_aligned_split and not load_kv_async:
-                    num_new_tokens = self._mamba_block_aligned_split(
-                        request,
-                        num_new_tokens,
-                        num_new_local_computed_tokens,
-                        num_external_computed_tokens,
-                    )
-                    if num_new_tokens == 0:
-                        break
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1503,10 +1502,13 @@ class Scheduler(SchedulerInterface):
         mm_hashes_to_schedule = set()
         num_embeds_to_schedule = 0
 
+        encoder_window_end = (
+            num_computed_tokens + num_new_tokens + shift_computed_tokens
+        )
         lo, hi = get_mm_features_in_window(
             mm_features,
             start=num_computed_tokens,
-            end=num_computed_tokens + num_new_tokens + shift_computed_tokens,
+            end=encoder_window_end,
         )
         # For encoder-decoder, all inputs sit at start_pos=0, so lo=0 always.
         if self.is_encoder_decoder:
@@ -1588,9 +1590,7 @@ class Scheduler(SchedulerInterface):
             # Calculate the number of embeddings to schedule in the current range
             # of scheduled encoder placeholder tokens.
             start_idx_rel = max(0, num_computed_tokens - start_pos)
-            end_idx_rel = min(
-                num_encoder_tokens, num_computed_tokens + num_new_tokens - start_pos
-            )
+            end_idx_rel = min(num_encoder_tokens, encoder_window_end - start_pos)
             curr_embeds_start, curr_embeds_end = (
                 mm_feature.mm_position.get_embeds_indices_in_range(
                     start_idx_rel, end_idx_rel
@@ -1674,6 +1674,7 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
+        ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
@@ -1980,6 +1981,10 @@ class Scheduler(SchedulerInterface):
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
+
+        # EC Connector: update state from worker-side EC connector output.
+        if self.ec_connector is not None and ec_connector_output:
+            self.ec_connector.update_connector_output(ec_connector_output)
 
         # Worker-side KV connector stats from the model runner output.
         kv_connector_stats: KVConnectorStats | None = (
