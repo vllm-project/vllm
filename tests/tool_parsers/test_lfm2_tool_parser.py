@@ -452,6 +452,32 @@ def test_bad_sibling_call_does_not_drop_good_calls(
     assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
 
 
+@pytest.mark.parametrize("streaming", [True, False])
+def test_non_finite_argument_call_skipped(
+    streaming: bool, lfm2_tokenizer: TokenizerLike
+):
+    """1e999 overflows to inf and serialized as Infinity -- invalid JSON
+    delivered as a successful tool call. The offending call is skipped and
+    a parseable sibling still comes through."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}, calc(x=1e999)]{TOOL_CALL_END}"
+    )
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=streaming,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+    import json as _json
+
+    for call in tool_calls:
+        _json.loads(call.function.arguments)
+
+
 def test_whitespace_after_start_token(lfm2_tokenizer: TokenizerLike):
     """Whitespace between <|tool_call_start|> and the opening bracket must
     not break parsing. The streaming path used to feed the indented text to

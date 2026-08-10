@@ -663,6 +663,17 @@ class TestHandleSingleToolKwargsUnpack:
             handle_single_tool(_first_call("[f(**[1, 2])]"))
 
 
+class TestHandleSingleToolNonFinite:
+    # A numeric literal like 1e999 overflows to float inf at parse time and
+    # json.dumps rendered it as Infinity -- arguments no JSON parser accepts.
+    @pytest.mark.parametrize(
+        "expr", ["[f(x=1e999)]", "[f(x=-1e999)]", "[f(x=[1, 1e999])]"]
+    )
+    def test_non_finite_arguments_raise(self, expr):
+        with pytest.raises(UnexpectedAstError):
+            handle_single_tool(_first_call(expr))
+
+
 class TestGetParameterValueNonJsonConstants:
     # bytes/Ellipsis/complex are ast.Constant but have no JSON form; they
     # must raise UnexpectedAstError (like other unsupported nodes) instead

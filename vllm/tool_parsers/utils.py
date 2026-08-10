@@ -577,11 +577,21 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
             arguments.update(unpacked)
             continue
         arguments[keyword.arg] = get_parameter_value(keyword.value)
+    try:
+        # allow_nan=False: a non-finite float (e.g. the literal 1e999
+        # overflowing to inf at parse time) would otherwise serialize as
+        # Infinity, which is not valid JSON for downstream clients.
+        arguments_json = json.dumps(arguments, ensure_ascii=False, allow_nan=False)
+    except (ValueError, TypeError) as e:
+        logger.warning("Tool call arguments are not valid JSON: %s", e)
+        raise UnexpectedAstError(
+            "Tool call arguments must serialize to valid JSON"
+        ) from e
     return ToolCall(
         type="function",
         function=FunctionCall(
             name=function_name,
-            arguments=json.dumps(arguments, ensure_ascii=False),
+            arguments=arguments_json,
         ),
     )
 
