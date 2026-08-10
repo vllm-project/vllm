@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from unittest.mock import MagicMock, patch
+import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -49,39 +50,34 @@ def test_placeholder_module_error_handling():
 
 
 class TestHasModule:
-    """Tests for _has_module with trial import verification."""
+    """Tests for _has_module availability checks."""
 
     def setup_method(self):
         # Clear the @cache between tests so each test gets a fresh call
         _has_module.cache_clear()
 
-    def test_returns_true_for_importable_stdlib_module(self):
+    def test_returns_true_for_available_stdlib_module(self):
         assert _has_module("json") is True
 
     def test_returns_false_for_nonexistent_module(self):
         assert _has_module("nonexistent_module_xyz_12345") is False
 
-    def test_returns_false_when_find_spec_succeeds_but_import_fails(self):
-        """Simulate a native extension whose shared library is missing.
+    def test_does_not_import_discoverable_module(self, tmp_path, monkeypatch):
+        """Discovery does not execute a module whose import would fail."""
+        module_name = "vllm_test_module_with_import_side_effect"
+        sentinel = tmp_path / "module_imported"
+        module_path = tmp_path / f"{module_name}.py"
+        module_path.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(sentinel)!r}).touch()\n"
+            "raise ImportError('simulated missing runtime dependency')\n",
+            encoding="utf-8",
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
 
-        ``find_spec`` finds the package on disk, but the actual import
-        raises ``ImportError`` (e.g. missing ``libcudart.so``).
-        """
-        fake_spec = MagicMock()
-
-        with (
-            patch(
-                "vllm.utils.import_utils.importlib.util.find_spec",
-                return_value=fake_spec,
-            ),
-            patch(
-                "vllm.utils.import_utils.importlib.import_module",
-                side_effect=ImportError(
-                    "libcudart.so.12: cannot open shared object file"
-                ),
-            ),
-        ):
-            assert _has_module("fake_native_ext") is False
+        assert _has_module(module_name) is True
+        assert module_name not in sys.modules
+        assert not sentinel.exists()
 
     def test_returns_false_when_find_spec_raises(self):
         """``find_spec`` itself can raise for dotted names whose parent package
@@ -94,7 +90,7 @@ class TestHasModule:
             assert _has_module("fake_parent.child") is False
 
     def test_result_is_cached(self):
-        """Verify the @cache decorator prevents repeated imports."""
+        """Verify the @cache decorator prevents repeated lookups."""
         _has_module("json")  # prime the cache
 
         with patch("vllm.utils.import_utils.importlib.util.find_spec") as mock_spec:
