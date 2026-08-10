@@ -96,8 +96,11 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 // self.compress_ratio
             )
             M = N + self.window_size + self.max_num_batched_tokens
-            assert self.topk_indices_buffer is not None
-            top_k = 0 if swa_only else self.topk_indices_buffer.shape[-1]
+            if swa_only:
+                top_k = 0
+            else:
+                assert self.topk_indices_buffer is not None
+                top_k = self.topk_indices_buffer.shape[-1]
             combined_topk = round_up(top_k + self.window_size, 128)
             current_workspace_manager().get_simultaneous(
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
