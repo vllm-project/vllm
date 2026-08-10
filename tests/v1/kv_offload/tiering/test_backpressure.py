@@ -26,10 +26,10 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
-    JobMetadata,
     JobResult,
     SecondaryTierManager,
     TieringOffloadingMetrics,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
@@ -78,12 +78,12 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
     def lookup(self, key, req_context):
         return LookupResult.HIT if key in self.blocks else LookupResult.MISS
 
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         for key in job_metadata.keys:
             self.blocks[key] = True
         self._held_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         self._released_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -151,9 +151,10 @@ class TestBackpressure:
         to have taken ``age_s`` seconds when completed."""
         self.manager._processed_jobs_this_step = False
         now = time.monotonic()
-        for job_id, meta in self.manager._transfer_jobs.items():
-            if not meta.is_promotion and meta.submit_time > 0:
-                meta.submit_time = now - age_s
+        for job_id, meta in self.manager._jobs.items():
+            tj = meta.transfer_job
+            if not tj.is_promotion and tj.submit_time > 0:
+                tj.submit_time = now - age_s
 
     def test_ema_updates_on_store_completion(self, setup):
         bp = self.tier.bp_detector
