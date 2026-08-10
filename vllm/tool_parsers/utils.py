@@ -560,6 +560,22 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
     function_name = _ast_callable_dotted_name(call.func)
     arguments = {}
     for keyword in call.keywords:
+        if keyword.arg is None:
+            # **-unpacking is ast.keyword(arg=None); ``arguments[None]``
+            # used to serialize as a literal "null" key. Merge dict
+            # literals with Python's later-binding-wins semantics and
+            # reject anything else.
+            unpacked = get_parameter_value(keyword.value)
+            if not isinstance(unpacked, dict):
+                logger.warning(
+                    "**-unpacked tool call argument is not a dict: %s",
+                    ast.dump(keyword.value),
+                )
+                raise UnexpectedAstError(
+                    "**-unpacked tool call arguments must be dict literals"
+                )
+            arguments.update(unpacked)
+            continue
         arguments[keyword.arg] = get_parameter_value(keyword.value)
     return ToolCall(
         type="function",

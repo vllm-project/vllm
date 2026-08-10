@@ -642,6 +642,27 @@ class TestContainsBrokenStringLiteral:
         assert contains_broken_string_literal(text) is broken
 
 
+class TestHandleSingleToolKwargsUnpack:
+    # **-unpacking is ast.keyword(arg=None); arguments[None] serialized as a
+    # literal "null" key. Dict literals merge with later-binding-wins
+    # semantics; non-dict operands are rejected.
+    def test_unpacked_dict_merges(self):
+        tool = handle_single_tool(_first_call("[f(**{'a': 1})]"))
+        assert json.loads(tool.function.arguments) == {"a": 1}
+
+    def test_unpacked_dict_merges_with_keywords(self):
+        tool = handle_single_tool(_first_call("[f(x=1, **{'a': 2})]"))
+        assert json.loads(tool.function.arguments) == {"x": 1, "a": 2}
+
+    def test_later_binding_wins(self):
+        tool = handle_single_tool(_first_call("[f(**{'x': 1}, x=2)]"))
+        assert json.loads(tool.function.arguments) == {"x": 2}
+
+    def test_non_dict_unpack_raises(self):
+        with pytest.raises(UnexpectedAstError):
+            handle_single_tool(_first_call("[f(**[1, 2])]"))
+
+
 class TestGetParameterValueNonJsonConstants:
     # bytes/Ellipsis/complex are ast.Constant but have no JSON form; they
     # must raise UnexpectedAstError (like other unsupported nodes) instead
