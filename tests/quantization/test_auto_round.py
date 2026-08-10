@@ -200,7 +200,7 @@ def make_block_fp8_raw_config(**overrides) -> dict[str, object]:
         "group_size": [128, 128],
         "sym": True,
         "packing_format": "auto_round:fp8",
-        "quant_method": "auto_round:fp8",
+        "quant_method": "auto-round",
         "data_type": "fp",
         "act_bits": 8,
         "act_data_type": "fp",
