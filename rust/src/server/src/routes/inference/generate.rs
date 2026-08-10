@@ -51,11 +51,7 @@ pub async fn generate(
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
     let mm_features = if let Some(parts) = body.content_parts.take() {
-        match state
-            .chat
-            .prepare_media(parts, &mut body.token_ids)
-            .await
-        {
+        match state.chat.prepare_media(parts, &mut body.token_ids).await {
             Ok(features) => features,
             Err(e) => {
                 return ApiError::invalid_request(

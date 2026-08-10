@@ -3,10 +3,10 @@
 
 use std::collections::HashMap;
 
+use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
-use llm_multimodal::MediaContentPart;
 use vllm_text::SamplingParams;
 
 use crate::routes::openai::utils::types::{ChatLogProbs, Normalizable, StreamOptions, Usage};
