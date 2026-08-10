@@ -3,7 +3,7 @@
 import gc
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
@@ -195,6 +195,37 @@ class CudaGraphManager:
         # Counts above the largest captured case clamp to it.
         return self._lora_dispatch_map.get(num_active_loras, self._max_lora_case)
 
+    def _maybe_ubatch_twin(
+        self, desc: BatchExecutionDescriptor
+    ) -> BatchExecutionDescriptor | None:
+        """The microbatched counterpart of a capture candidate, if it needs one.
+
+        Only FULL graphs are captured for microbatched steps (the eager DBO
+        path is FULL-only too); PIECEWISE+DBO stays unsupported, as in V1.
+
+        The gate is the same threshold check the DP handshake votes with, so
+        the captured shapes cannot drift from the dispatchable ones. Either
+        threshold admitting the size is enough, since the handshake picks
+        between them from the runtime batch. It is a pure function of config,
+        which is what lets every DP rank derive the same candidate list -- they
+        dispatch independently, and a rank that replays while another runs
+        eager would hang the expert all-to-all.
+        """
+        if self.ubatch_runner is None or desc.cg_mode != CUDAGraphMode.FULL:
+            return None
+        parallel_config = self.vllm_config.parallel_config
+        num_ubatches = get_num_ubatches(parallel_config)
+        if desc.num_tokens < num_ubatches:
+            # Below one token per microbatch the split is not well-formed, no
+            # matter what the thresholds say.
+            return None
+        if not any(
+            check_ubatch_thresholds(parallel_config, desc.num_tokens, uniform_decode=ud)
+            for ud in (True, False)
+        ):
+            return None
+        return replace(desc, num_ubatches=num_ubatches)
+
     def _init_candidates(self) -> None:
         """Build priority-ordered candidate lists for each token count."""
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
@@ -281,6 +312,18 @@ class CudaGraphManager:
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
 
+                    # DBO: a microbatched twin of this decode graph. Uniform
+                    # decode is where FULL lives for backends that only
+                    # support uniform batches (MLA is one), and it is where
+                    # microbatching needs a graph most, since eager decode is
+                    # launch-bound. See the mixed-mode twin below for backends
+                    # whose mixed batches are FULL too.
+                    ubatch_desc = self._maybe_ubatch_twin(desc)
+                    if ubatch_desc is not None and (
+                        ubatch_desc not in descs_by_mode[decode_mode]
+                    ):
+                        descs_by_mode[decode_mode].append(ubatch_desc)
+
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
                 # i.e. no request padding is needed, so we leave it as None.
@@ -298,38 +341,11 @@ class CudaGraphManager:
                 )
                 descs_by_mode[mixed_mode].append(desc)
 
-                # DBO: also capture a FULL graph that splits this same token
-                # count into `num_ubatches` microbatches. Only FULL is
-                # supported (mirrors the eager DBO path, which only runs
-                # uncompiled); PIECEWISE+DBO stays unsupported. Gate on the
-                # same thresholds the DP handshake votes with, so the captured
-                # shapes cannot drift from the dispatchable ones; either
-                # threshold admitting the shape is enough, since the handshake
-                # picks between them from the runtime batch. They are a pure
-                # function of config, which is what lets every DP rank derive
-                # the same candidate list.
-                num_ubatches = get_num_ubatches(self.vllm_config.parallel_config)
-                if (
-                    self.ubatch_runner is not None
-                    and mixed_mode == CUDAGraphMode.FULL
-                    and num_tokens >= num_ubatches
-                    and any(
-                        check_ubatch_thresholds(
-                            self.vllm_config.parallel_config,
-                            num_tokens,
-                            uniform_decode=ud,
-                        )
-                        for ud in (True, False)
-                    )
-                ):
-                    ubatch_desc = BatchExecutionDescriptor(
-                        cg_mode=CUDAGraphMode.FULL,
-                        num_tokens=num_tokens,
-                        num_reqs=min(num_tokens, self.max_num_reqs),
-                        num_active_loras=num_active_loras,
-                        num_ubatches=num_ubatches,
-                    )
-                    descs_by_mode[CUDAGraphMode.FULL].append(ubatch_desc)
+                # DBO: a microbatched twin of the mixed-mode graph, for
+                # backends whose mixed batches are FULL as well.
+                ubatch_desc = self._maybe_ubatch_twin(desc)
+                if ubatch_desc is not None:
+                    descs_by_mode[mixed_mode].append(ubatch_desc)
 
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
