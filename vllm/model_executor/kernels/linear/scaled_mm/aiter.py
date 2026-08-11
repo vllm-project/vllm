@@ -414,7 +414,9 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             self._is_bpreshuffled = False
             return
 
-        shuffled_weight = rocm_aiter_ops.shuffle_weight(weight, layout=(16, 16))
+        shuffled_weight = rocm_aiter_ops.shuffle_weight(
+            weight.contiguous(), layout=(16, 16)
+        )
         replace_parameter(
             layer,
             params.WEIGHT,
@@ -460,6 +462,34 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 )
         return True, None
 
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        if not self._is_bpreshuffled:
+            return super().apply_weights(layer, x, bias, **kwargs)
+
+        params = self._get_layer_params(layer)
+        Bs = (
+            params.weight_scale
+            if params.weight_scale_inv is None
+            else params.weight_scale_inv
+        )
+
+        x_2d = x.view(-1, x.shape[-1])
+        # aiter's quant emits the shuffled column-major activation scale layout
+        # the bpreshuffle GEMM reads directly; a plain transpose is not enough.
+        A, As = rocm_aiter_ops.group_fp8_quant(x_2d, transpose_scale=True)
+        output = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            A, params.weight, As, Bs, output_dtype=self.config.out_dtype
+        )
+        if bias is not None:
+            output = output + bias
+        return output.view(*x.shape[:-1], params.weight.shape[0])
+
     def apply_block_scaled_mm(
         self,
         A: torch.Tensor,
@@ -476,13 +506,6 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
-        if self._is_bpreshuffled:
-            # Kernel expects column-major activation scale
-            As = As.t().contiguous().t()
-            return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
-                A, B, As, Bs, output_dtype=out_dtype
-            )
-
         if self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
