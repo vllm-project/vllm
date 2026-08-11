@@ -16,7 +16,6 @@ use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
 use self::template::{CompiledChatTemplate, TemplateContext};
-use self::value::{TemplateValue, to_template_value};
 use super::{ChatRenderer, RenderedPrompt, effective_template_kwargs};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
@@ -28,7 +27,6 @@ mod error;
 mod format;
 mod template;
 mod tojson;
-mod value;
 
 pub use template::{load_chat_template, resolve_chat_template};
 
@@ -277,7 +275,7 @@ struct TemplateToolCall {
 #[derive(Debug, Serialize)]
 struct TemplateToolFunction {
     name: String,
-    arguments: TemplateValue,
+    arguments: JsonValue,
 }
 
 #[derive(Debug, Serialize)]
@@ -291,7 +289,7 @@ pub(super) struct TemplateTool {
 struct TemplateToolDefinition {
     name: String,
     description: Option<String>,
-    parameters: TemplateValue,
+    parameters: JsonValue,
     strict: Option<bool>,
 }
 
@@ -384,8 +382,6 @@ fn to_template_tool_calls(
                 error.as_report()
             ))
         })?;
-        let arguments = to_template_value(arguments);
-
         tool_calls.push(TemplateToolCall {
             id: tool_call.id.clone(),
             r#type: "function",
@@ -564,7 +560,7 @@ fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
             function: TemplateToolDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: to_template_value(tool.parameters.clone()),
+                parameters: tool.parameters.clone(),
                 strict: tool.strict,
             },
         })
@@ -1008,7 +1004,7 @@ mod tests {
         .apply_chat_template(&request)
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("<bos>|true".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("<bos>|True".to_string()));
     }
 
     #[test]
@@ -1093,7 +1089,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap().prompt;
 
-        assert_eq!(rendered, Prompt::Text("true|x".to_string()));
+        assert_eq!(rendered, Prompt::Text("True|x".to_string()));
     }
 
     #[test]
@@ -1146,7 +1142,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("none|true".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("none|True".to_string()));
         assert_eq!(
             rendered.effective_template_kwargs.get("reasoning_effort"),
             Some(&Value::String("none".to_string()))
