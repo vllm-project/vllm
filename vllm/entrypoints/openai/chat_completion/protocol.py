@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionDefinition,
     OpenAIBaseModel,
     PerRequestTimingMetrics,
+    StopParam,
     StreamOptions,
     ToolCall,
     UsageInfo,
@@ -228,7 +229,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     presence_penalty: float | None = 0.0
     response_format: AnyResponseFormat | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = []
+    stop: StopParam = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
     temperature: float | None = None
@@ -1077,7 +1078,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     presence_penalty: float | None = 0.0
     response_format: Any | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = Field(default_factory=list)
+    stop: StopParam = Field(default_factory=list)
     temperature: float | None = None
     top_p: float | None = None
     user: str | None = None
