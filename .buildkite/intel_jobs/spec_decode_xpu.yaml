@@ -108,7 +108,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/ngram_suffix/ || true'
+    pytest -v -s v1/e2e/spec_decode/ngram_suffix/ || true &&
+    python3 spec_decode/test_custom_proposer.py || true'
 - label: Spec Decode Draft Model
   device: intel_gpu
   timeout_in_minutes: 45
