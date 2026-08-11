@@ -144,7 +144,7 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
             f"transformers>={required}, but got {installed}"
         )
 
-    model = get_model("DeepseekV2ForCausalLM")  # DeepSeek-V2-Lite, MLA + MoE
+    model = "hmellor/tiny-random-DeepseekV2ForCausalLM"
     args = (example_prompts, 32, 5)
     kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
 
