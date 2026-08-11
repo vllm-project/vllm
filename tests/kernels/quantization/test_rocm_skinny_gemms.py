@@ -191,7 +191,7 @@ def test_rocm_wvsplitkrc_kernel(n, k, m, dtype, padded_a, bias_mode, xnorm, seed
     GrpsShrB = min(N_p2 // 16, 4)
     # Given the above, how many CUs would we need?
     CuNeeded = rndup_cus * GrpsShrB
-    # candidate for atomic reduce count splitk?
+    # Deterministic reduction stores one float workspace value per K shard.
     fits_wvsplitkrc = (N_p2 * m * ((k + 512 - 1) // 512)) <= 128 * 1024 * 12
     fits_wvsplitkrc &= CuNeeded <= cu_count
 
