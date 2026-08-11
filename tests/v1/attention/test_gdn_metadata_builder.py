@@ -198,23 +198,6 @@ def test_has_initial_state_after_reclassification():
     assert meta.has_initial_state[0].item() is True
 
 
-def test_spec_token_prefix_layout_is_explicit():
-    """Only mark spec tokens contiguous when spec requests lead the batch."""
-    builder = _create_gdn_builder(num_speculative_tokens=2)
-
-    prefix_batch = BatchSpec(seq_lens=[80, 100], query_lens=[3, 50])
-    prefix_meta = _build(builder, prefix_batch, num_decode_draft_tokens=[2, -1])
-    assert prefix_meta.spec_token_prefix_len == 3
-    torch.testing.assert_close(prefix_meta.spec_token_indx, torch.arange(3))
-    torch.testing.assert_close(prefix_meta.non_spec_token_indx, torch.arange(3, 53))
-
-    interleaved_batch = BatchSpec(seq_lens=[100, 80], query_lens=[50, 3])
-    interleaved_meta = _build(
-        builder, interleaved_batch, num_decode_draft_tokens=[-1, 2]
-    )
-    assert interleaved_meta.spec_token_prefix_len is None
-
-
 def test_full_cudagraph_spec_metadata_uses_request_count():
     """FULL cudagraph token padding must not pad request-indexed metadata."""
     num_speculative_tokens = 3

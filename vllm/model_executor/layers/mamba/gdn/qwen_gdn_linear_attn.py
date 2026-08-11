@@ -1247,7 +1247,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         b: torch.Tensor,
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
-        fused_spec_output_gate: torch.Tensor | None = None,
     ):
         """Core conv1d + recurrent attention (standard path).
 
@@ -1256,8 +1255,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b: beta gating vector                   (num_tokens, num_heads)
             a: alpha gating vector                  (num_tokens, num_heads)
             core_attn_out: Pre-allocated output buffer for attention results.
-            fused_spec_output_gate: Output gate for fused MTP decode. When set,
-                only the speculative sub-batch is normalized in this method.
         """
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -1290,7 +1287,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         spec_sequence_masks = attn_metadata.spec_sequence_masks
         spec_token_indx = attn_metadata.spec_token_indx
         non_spec_token_indx = attn_metadata.non_spec_token_indx
-        spec_token_prefix_len = attn_metadata.spec_token_prefix_len
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
@@ -1308,13 +1304,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
-        if fused_spec_output_gate is not None:
-            fused_spec_output_gate = fused_spec_output_gate[:num_actual_tokens]
-        has_contiguous_spec_prefix = (
-            spec_sequence_masks is not None
-            and spec_token_prefix_len is not None
-            and (attn_metadata.num_prefills > 0 or attn_metadata.num_decodes > 0)
-        )
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(
@@ -1327,9 +1316,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 a_spec = a
                 b_spec = b
                 mixed_qkv_non_spec = None
-            elif has_contiguous_spec_prefix:
-                mixed_qkv_spec = mixed_qkv[:spec_token_prefix_len]
-                mixed_qkv_non_spec = mixed_qkv[spec_token_prefix_len:]
             else:
                 mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
                 a_spec = a.index_select(0, spec_token_indx)
@@ -1343,9 +1329,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             # spec_state_indices_tensor is always set when spec_sequence_masks is set
             assert spec_state_indices_tensor is not None
-            conv_out = (
-                torch.empty_like(mixed_qkv_spec) if has_contiguous_spec_prefix else None
-            )
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
                 conv_state,
@@ -1359,7 +1342,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 query_start_loc=spec_query_start_loc,
                 max_query_len=spec_state_indices_tensor.size(-1),
                 validate_data=False,
-                out=conv_out,
             )
 
         # 1.2: Process the remaining part
@@ -1395,10 +1377,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        if fused_spec_output_gate is None:
-            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        else:
-            query_spec, key_spec, value_spec = None, None, None
+        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
 
         # Split mixed non-spec-decode+prefill to process independently
         split_non_spec = (
@@ -1413,12 +1392,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 "mixed_qkv_non_spec must be provided for prefill path"
             )
             if spec_sequence_masks is not None:
-                if has_contiguous_spec_prefix:
-                    a_non_spec = a[spec_token_prefix_len:]
-                    b_non_spec = b[spec_token_prefix_len:]
-                else:
-                    a_non_spec = a.index_select(0, non_spec_token_indx)
-                    b_non_spec = b.index_select(0, non_spec_token_indx)
+                a_non_spec = a.index_select(0, non_spec_token_indx)
+                b_non_spec = b.index_select(0, non_spec_token_indx)
             else:
                 a_non_spec = a
                 b_non_spec = b
@@ -1466,62 +1441,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            if fused_spec_output_gate is not None:
-                assert mixed_qkv_spec is not None
-                if attn_metadata.num_prefills == 0:
-                    a_spec = a
-                    b_spec = b
-                    output_gate_spec = fused_spec_output_gate
-                elif has_contiguous_spec_prefix:
-                    a_spec = a[:spec_token_prefix_len]
-                    b_spec = b[:spec_token_prefix_len]
-                    output_gate_spec = fused_spec_output_gate[:spec_token_prefix_len]
-                else:
-                    assert spec_token_indx is not None
-                    a_spec = a.index_select(0, spec_token_indx)
-                    b_spec = b.index_select(0, spec_token_indx)
-                    output_gate_spec = fused_spec_output_gate.index_select(
-                        0, spec_token_indx
-                    )
-                fused_out = (
-                    core_attn_out[:spec_token_prefix_len]
-                    if has_contiguous_spec_prefix
-                    else torch.empty_like(output_gate_spec)
+            core_attn_out_spec, last_recurrent_state = (
+                fused_sigmoid_gating_delta_rule_update(
+                    A_log=self.A_log,
+                    a=a,
+                    b=b,
+                    dt_bias=self.dt_bias,
+                    q=query_spec,
+                    k=key_spec,
+                    v=value_spec,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=spec_query_start_loc[  # type: ignore[index]
+                        : attn_metadata.num_spec_decodes
+                        + 1  # type: ignore[attr-defined]
+                    ],
+                    ssm_state_indices=spec_state_indices_tensor,
+                    num_accepted_tokens=num_accepted_tokens,
+                    use_qk_l2norm_in_kernel=True,
                 )
-                self._forward_core_decode_spec_post_conv_fused_norm(
-                    mixed_qkv=mixed_qkv_spec,
-                    b=b_spec,
-                    a=a_spec,
-                    output_gate=output_gate_spec,
-                    core_attn_out=fused_out,
-                    attn_metadata=attn_metadata,
-                )
-                core_attn_out_spec = fused_out.unsqueeze(0)
-                last_recurrent_state = None
-            else:
-                assert query_spec is not None
-                assert key_spec is not None
-                assert value_spec is not None
-                core_attn_out_spec, last_recurrent_state = (
-                    fused_sigmoid_gating_delta_rule_update(
-                        A_log=self.A_log,
-                        a=a,
-                        b=b,
-                        dt_bias=self.dt_bias,
-                        q=query_spec,
-                        k=key_spec,
-                        v=value_spec,
-                        initial_state=ssm_state,
-                        inplace_final_state=True,
-                        cu_seqlens=spec_query_start_loc[  # type: ignore[index]
-                            : attn_metadata.num_spec_decodes
-                            + 1  # type: ignore[attr-defined]
-                        ],
-                        ssm_state_indices=spec_state_indices_tensor,
-                        num_accepted_tokens=num_accepted_tokens,
-                        use_qk_l2norm_in_kernel=True,
-                    )
-                )
+            )
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
@@ -1580,6 +1519,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
 
+            if split_non_spec:
+                # Stitch the peeled decode outputs in front of the prefill
+                # outputs (decode-first order).
+                core_attn_out_non_spec = torch.cat(
+                    [core_attn_out_decode, core_attn_out_non_spec], dim=1
+                )
         elif attn_metadata.num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
@@ -1605,36 +1550,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            if has_contiguous_spec_prefix:
-                if fused_spec_output_gate is None:
-                    core_attn_out[:spec_token_prefix_len] = core_attn_out_spec.squeeze(
-                        0
-                    )
-                    core_attn_out[spec_token_prefix_len:num_actual_tokens] = (
-                        core_attn_out_non_spec.squeeze(0)
-                    )
-                else:
-                    self._rms_norm_gated_cuda(
-                        core_attn_out_non_spec.squeeze(0),
-                        fused_spec_output_gate[spec_token_prefix_len:num_actual_tokens],
-                        core_attn_out[spec_token_prefix_len:num_actual_tokens],
-                    )
-            else:
-                merged_out = torch.empty(
-                    (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                    dtype=core_attn_out_non_spec.dtype,
-                    device=core_attn_out_non_spec.device,
-                )
-                merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-                merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+            merged_out = torch.empty(
+                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
+                dtype=core_attn_out_non_spec.dtype,
+                device=core_attn_out_non_spec.device,
+            )
+            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
+            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
+            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
-        elif split_non_spec:
-            core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)
-            core_attn_out[num_decode_tokens:num_actual_tokens] = (
-                core_attn_out_non_spec.squeeze(0)
-            )
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
@@ -1937,8 +1862,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert isinstance(attn_metadata_raw, dict)
         attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
-        use_fused_spec_decode = self._can_use_fused_gdn_mtp_decode(attn_metadata)
-        if use_fused_spec_decode and attn_metadata.num_prefills == 0:
+        if (
+            self._can_use_fused_gdn_mtp_decode(attn_metadata)
+            and attn_metadata.num_prefills == 0
+        ):
             self._forward_core_decode_spec_fused_norm(
                 mixed_qkv=mixed_qkv,
                 b=b,
@@ -1946,29 +1873,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 output_gate=output_gate,
                 core_attn_out=core_attn_out,
                 attn_metadata=attn_metadata,
-            )
-            return
-        if use_fused_spec_decode:
-            self._forward_core(
-                mixed_qkv=mixed_qkv,
-                b=b,
-                a=a,
-                core_attn_out=core_attn_out,
-                fused_spec_output_gate=output_gate,
-            )
-            if attn_metadata.spec_token_prefix_len is not None:
-                return
-            non_spec_token_indx = attn_metadata.non_spec_token_indx
-            assert non_spec_token_indx is not None
-            num_actual_tokens = attn_metadata.num_actual_tokens
-            core_attn_out_actual = core_attn_out[:num_actual_tokens]
-            output_gate_actual = output_gate[:num_actual_tokens]
-            normalized_non_spec = self.norm(
-                core_attn_out_actual.index_select(0, non_spec_token_indx),
-                output_gate_actual.index_select(0, non_spec_token_indx),
-            )
-            core_attn_out_actual.index_copy_(
-                0, non_spec_token_indx, normalized_non_spec
             )
             return
         self._forward_core(

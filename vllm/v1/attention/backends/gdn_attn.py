@@ -62,7 +62,6 @@ class GDNAttentionMetadata:
     spec_sequence_masks: torch.Tensor | None = None  # shape: [batch,]
     spec_token_indx: torch.Tensor | None = None
     non_spec_token_indx: torch.Tensor | None = None
-    spec_token_prefix_len: int | None = None
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
@@ -229,7 +228,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
-        spec_token_prefix_len: int | None = None
         if (
             not self.use_spec_decode
             or num_decode_draft_tokens_cpu is None
@@ -282,11 +280,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decode_tokens = (
                 query_lens_cpu.sum().item() - num_prefill_tokens - num_decode_tokens
             )
-            if (
-                spec_sequence_masks_cpu[:num_spec_decodes].all().item()
-                and not spec_sequence_masks_cpu[num_spec_decodes:].any().item()
-            ):
-                spec_token_prefix_len = num_spec_decode_tokens
 
             # num_decodes and num_spec_decodes are mutually exclusive.
             # Reclassify non-spec decodes as prefills when spec decodes
@@ -523,7 +516,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_sequence_masks=spec_sequence_masks,
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
-            spec_token_prefix_len=spec_token_prefix_len,
             num_accepted_tokens=num_accepted_tokens,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,

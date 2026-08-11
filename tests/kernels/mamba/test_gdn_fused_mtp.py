@@ -196,27 +196,18 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
 
 
 @pytest.mark.parametrize(
-    "seq_lens,query_lens,draft_tokens,expected_fused_calls,expected_prefix_len",
+    "seq_lens,query_lens,draft_tokens,expected_fused_calls",
     [
-        pytest.param([128], [SPEC_TOKENS], [NUM_SPEC], 1, SPEC_TOKENS, id="pure-mtp"),
+        pytest.param([128], [SPEC_TOKENS], [NUM_SPEC], 1, id="pure-mtp"),
         pytest.param(
             [128, 96],
             [SPEC_TOKENS, 64],
             [NUM_SPEC, -1],
-            1,
-            SPEC_TOKENS,
-            id="mixed-mtp-first",
+            0,
+            id="mixed-mtp-falls-back",
         ),
-        pytest.param(
-            [96, 128],
-            [64, SPEC_TOKENS],
-            [-1, NUM_SPEC],
-            1,
-            None,
-            id="mixed-mtp-last",
-        ),
-        pytest.param([96], [64], [-1], 0, None, id="pure-prefill"),
-        pytest.param([128], [1], [-1], 0, None, id="pure-decode"),
+        pytest.param([96], [64], [-1], 0, id="pure-prefill"),
+        pytest.param([128], [1], [-1], 0, id="pure-decode"),
     ],
 )
 @torch.inference_mode()
@@ -225,9 +216,8 @@ def test_fused_model_path_matches_reference(
     query_lens: list[int],
     draft_tokens: list[int],
     expected_fused_calls: int,
-    expected_prefix_len: int | None,
 ) -> None:
-    """Fused MTP and its prefill/decode fallbacks match the reference path."""
+    """Fused MTP and its mixed/prefill/decode fallbacks match the reference."""
     torch.manual_seed(1)
     device = torch.device("cuda")
     vllm_config = _make_vllm_config()
@@ -257,7 +247,6 @@ def test_fused_model_path_matches_reference(
             num_decode_draft_tokens_cpu=torch.tensor(draft_tokens, dtype=torch.int32),
         )
 
-    assert metadata.spec_token_prefix_len == expected_prefix_len
     state_indices = [
         indices
         for indices in (
