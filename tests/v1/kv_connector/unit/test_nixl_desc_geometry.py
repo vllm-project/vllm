@@ -617,3 +617,24 @@ def test_mla_hybrid_large_ppl_geometry(num_tokens):
         num_tokens=num_tokens,
         tp_size=8,
     )
+
+
+@pytest.mark.cpu_test
+def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
+    """The MLA per-token page is TP-independent, so kernel block lengths
+    differing by anything other than the block-size ratio must fail the
+    handshake loudly rather than transfer at mismatched geometry."""
+    worker = _make_mla_hybrid_worker(
+        local_block_size=12, kernel_block_size=4, num_logical_blocks=8
+    )
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=8,
+        remote_kernel_block_size=4,
+        remote_num_logical=12,
+        remote_ssm_sizes=(24, 32),
+    )
+    # Equal kernel block sizes (ratio 1), but a half-sized per-token page.
+    meta_r.block_lens = [x // 2 for x in worker.block_len_per_layer]
+    with pytest.raises((AssertionError, RuntimeError)):
+        worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)

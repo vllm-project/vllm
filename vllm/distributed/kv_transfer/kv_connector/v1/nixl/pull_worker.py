@@ -92,8 +92,20 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             assert req_id not in self._reqs_to_send
 
         # Add to requests that are waiting to be read and track expiration.
+        # Deadlines are stamped with the scheduler process's perf_counter,
+        # which is not comparable to ours when the worker runs in another
+        # process on another node (perf_counter epochs differ by boot time).
+        # Rebase the remaining TTL onto our clock; broadcast latency only
+        # lengthens the lease, which is the safe direction. A cross-node
+        # epoch gap larger than the TTL otherwise expires the lease on
+        # arrival and the blocks are freed before D reads them.
+        now_local = time.perf_counter()
         for req_id, expiration_time in metadata.reqs_to_send.items():
             if req_id in self._reqs_to_process:
+                if metadata.scheduler_clock:
+                    expiration_time = now_local + (
+                        expiration_time - metadata.scheduler_clock
+                    )
                 self._reqs_to_send[req_id] = expiration_time
 
         # Send heartbeats to P-side engines to keep KV blocks alive while
@@ -277,9 +289,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             == len(local_block_ids)
             == len(self.kv_cache_config.kv_cache_groups)
         )
-        remote_physical_per_logical = remote_info.remote_physical_blocks_per_logical
         local_block_ids, remote_block_ids = self._apply_prefix_caching(
-            local_block_ids, remote_block_ids, remote_physical_per_logical
+            decode_block_ids=local_block_ids,
+            prefill_block_ids=remote_block_ids,
+            decode_physical_per_logical=self._physical_blocks_per_logical_kv_block,
+            prefill_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
         )
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from

@@ -49,7 +49,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11" "3.12" "3.13" "3.14")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1250;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
 
 # ROCm installation prefix. Default to /opt/rocm but allow override via
 # -DROCM_PATH=/your/rocm/path when invoking cmake.
@@ -395,6 +395,34 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
   #
+  if(Torch_VERSION VERSION_GREATER_EQUAL "2.13" AND
+     Torch_VERSION VERSION_LESS "2.14")
+    # hotfix for https://github.com/pytorch/pytorch/pull/190493
+    # delete after we bump to 2.14
+    list(GET TORCH_INCLUDE_DIRS 0 TORCH_INCLUDE_DIR)
+    set(_stable_hdr_rel "torch/csrc/stable/stableivalue_conversions.h")
+    file(READ "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
+      TORCH_STABLE_STRING_CONTENTS)
+
+    if(TORCH_STABLE_STRING_CONTENTS MATCHES "auto strptr = new std::string")
+      set(TORCH_SHADOW_INCLUDE_DIR
+        "${CMAKE_CURRENT_BINARY_DIR}/torch_patched_headers")
+
+      file(MAKE_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}/torch/csrc/stable")
+      file(COPY_FILE
+        "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
+        "${TORCH_SHADOW_INCLUDE_DIR}/${_stable_hdr_rel}")
+
+      execute_process(
+        COMMAND patch --batch --forward -p1
+          "--input=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
+        WORKING_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}"
+        COMMAND_ERROR_IS_FATAL ANY)
+
+      include_directories(BEFORE "${TORCH_SHADOW_INCLUDE_DIR}")
+    endif()
+  endif()
+
   set(VLLM_STABLE_EXT_SRC
     "csrc/libtorch_stable/torch_bindings.cpp"
     "csrc/libtorch_stable/cuda_view.cu"
@@ -421,8 +449,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/mamba/selective_scan_fwd.cu"
     "csrc/libtorch_stable/cache_kernels.cu"
     "csrc/libtorch_stable/cache_kernels_fused.cu"
+    "csrc/libtorch_stable/custom_all_gather_reduce_scatter.cu"
+    "csrc/libtorch_stable/custom_all_gather_reduce_scatter_ops.cpp"
     "csrc/libtorch_stable/custom_all_reduce.cu"
-    "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
+    "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu"
+    "csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
      DEFINED CMAKE_CUDA_COMPILER_VERSION AND
@@ -443,6 +474,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_a2a_lse_reduce.cu"
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_kv_gather.cu"
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_q_gather.cu")
+
     SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
     # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
@@ -1080,6 +1116,23 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(FUSED_KDA_DECODE_ARCHS
+      "9.0a;10.0f;12.0f" "${CUDA_ARCHS}")
+  endif()
+  if(FUSED_KDA_DECODE_ARCHS)
+    set(FUSED_KDA_DECODE_SRC
+      "csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${FUSED_KDA_DECODE_SRC}"
+      CUDA_ARCHS "${FUSED_KDA_DECODE_ARCHS}")
+    set_property(SOURCE ${FUSED_KDA_DECODE_SRC} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_KDA_DECODE_SRC}")
+    message(STATUS
+      "Building fused KDA decode for archs: ${FUSED_KDA_DECODE_ARCHS}")
+  endif()
+
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(KIMI_K3_ATTN_RES_ARCHS
       "10.0f" "${CUDA_ARCHS}")
   endif()
@@ -1137,6 +1190,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(COOPERATIVE_TOPK_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_COOPERATIVE_TOPK=1)
+    endif()
+    if(FUSED_KDA_DECODE_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_KDA_DECODE=1)
     endif()
     if(KIMI_K3_ATTN_RES_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
@@ -1398,6 +1455,38 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/skinny_gemms_int4.cu"
     "csrc/rocm/attention.cu")
+  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
+
+  # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
+  # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
+  # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
+  # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms_int4.cu")
+  set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
+  list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
+  if(VLLM_SKINNY_ARCHES)
+    message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
+    set(VLLM_SKINNY_SRC
+      "csrc/rocm/skinny_gemms.cu"
+      "csrc/rocm/skinny_gemms_int4.cu")
+    hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "${VLLM_SKINNY_SRC}")
+    unset(_VLLM_LAST_HIPIFY_TARGET)
+    add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})
+    add_dependencies(_rocm_C_skinny hipify_all)
+    set_source_files_properties(${VLLM_SKINNY_HIP_SRCS} PROPERTIES LANGUAGE ${VLLM_GPU_LANG})
+    set_target_properties(_rocm_C_skinny PROPERTIES
+      ${VLLM_GPU_LANG}_ARCHITECTURES "${VLLM_SKINNY_ARCHES}"
+      POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(_rocm_C_skinny PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+    target_compile_options(_rocm_C_skinny PRIVATE
+      $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_ROCM_EXT_FLAGS}>)
+    target_compile_definitions(_rocm_C_skinny PRIVATE "-DTORCH_EXTENSION_NAME=_rocm_C")
+    target_link_libraries(_rocm_C_skinny PRIVATE torch)
+  else()
+    message(STATUS "Only gfx1250, skipping skinny_gemms")
+    list(APPEND VLLM_ROCM_EXT_FLAGS "-DVLLM_SKIP_SKINNY_GEMMS")
+  endif()
 
   set(VLLM_ROCM_HAS_GFX1100 OFF)
   if(VLLM_GPU_ARCHES MATCHES "gfx1100")
@@ -1413,10 +1502,16 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     DESTINATION vllm
     LANGUAGE ${VLLM_GPU_LANG}
     SOURCES ${VLLM_ROCM_EXT_SRC}
-    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    COMPILE_FLAGS ${VLLM_ROCM_EXT_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
+  
+  if(TARGET _rocm_C_skinny)
+    target_link_libraries(_rocm_C PRIVATE _rocm_C_skinny)
+  else()
+    target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
+  endif()
 
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
@@ -1439,6 +1534,7 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/deepgemm.cmake)
     include(cmake/external_projects/fmha_sm100.cmake)
     include(cmake/external_projects/flashmla.cmake)
+    include(cmake/external_projects/flashkda.cmake)
     include(cmake/external_projects/qutlass.cmake)
     include(cmake/external_projects/tml_fa4.cmake)
 
