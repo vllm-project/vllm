@@ -28,9 +28,13 @@ if(DEEPGEMM_SRC_DIR)
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
   # Keep in sync with tools/install_deepgemm.sh
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
+  # DeepSeek upstream, which ships sm120_tf32_hc_prenorm_gemm. The
+  # vllm-project fork provides only the SM90 and SM100 implementations, so
+  # family-12 Blackwell (SM120/SM121) hits DG_HOST_UNREACHABLE in
+  # csrc/apis/hyperconnection.hpp whenever a model uses hyperconnections.
+  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
   # TODO: switch to nv_dev branch after it support situ
-  set(_DEEPGEMM_UPSTREAM_TAG "e21c821f39a2056d68067a466c64ddc942200106")
+  set(_DEEPGEMM_UPSTREAM_TAG "a6b593d2826719dcf4892609af7b84ee23aaf32a")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)

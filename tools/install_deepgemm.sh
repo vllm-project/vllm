@@ -6,9 +6,10 @@ set -e
 
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
-DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
-# NOTE: This is currently targeting nv-dev branch due to sm120 support
-DEEPGEMM_GIT_REF="e21c821f39a2056d68067a466c64ddc942200106"
+DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
+# NOTE: DeepSeek upstream, which carries the SM120 kernels (including
+# sm120_tf32_hc_prenorm_gemm) that family-12 Blackwell needs.
+DEEPGEMM_GIT_REF="a6b593d2826719dcf4892609af7b84ee23aaf32a"
 WHEEL_DIR=""
 
 # Parse command line arguments
