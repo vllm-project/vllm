@@ -12,7 +12,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-from .op import exp, log
+from .op import exp, l2norm_bf16, log, sigmoid_bf16
 
 
 @triton.heuristics(
@@ -310,13 +310,15 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     q_off = i_h * K + o_k
     k_off = (H * K) + i_h * K + o_k
     v_off = (2 * H * K) + i_hv * V + o_v
-    b_q = tl.load(p_mixed + q_off, mask=mask_k, other=0).to(tl.float32)
-    b_k = tl.load(p_mixed + k_off, mask=mask_k, other=0).to(tl.float32)
+    b_q = tl.load(p_mixed + q_off, mask=mask_k, other=0)
+    b_k = tl.load(p_mixed + k_off, mask=mask_k, other=0)
     b_v = tl.load(p_mixed + v_off, mask=mask_v, other=0).to(tl.float32)
 
     if USE_QK_L2NORM_IN_KERNEL:
-        b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
-        b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+        b_q = l2norm_bf16(b_q, 1e-6, axis=0)
+        b_k = l2norm_bf16(b_k, 1e-6, axis=0)
+    b_q = b_q.to(tl.float32)
+    b_k = b_k.to(tl.float32)
     b_q = b_q * scale
 
     a_val = tl.load(a + i_n * stride_a_tok + i_hv).to(tl.float32)
@@ -326,7 +328,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     x = a_val + dt_bias_val
     softplus_x = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
     g_val = -tl.exp(A_log_val) * softplus_x
-    beta_val = tl.sigmoid(b_val).to(b.dtype.element_ty).to(tl.float32)
+    beta_val = sigmoid_bf16(b_val)
 
     b_h *= exp(g_val)
     b_v -= tl.sum(b_h * b_k[None, :], 1)
@@ -352,6 +354,13 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     ssm_state_indices: torch.Tensor,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    activation_dtypes = (mixed_qkv.dtype, a.dtype, b.dtype, out.dtype)
+    assert all(dtype == torch.bfloat16 for dtype in activation_dtypes), (
+        "fused_recurrent_gated_delta_rule_packed_decode only supports BF16 "
+        "activations; got "
+        f"mixed_qkv={mixed_qkv.dtype}, a={a.dtype}, b={b.dtype}, out={out.dtype}"
+    )
+
     if mixed_qkv.ndim != 2:
         raise ValueError(
             f"`mixed_qkv` must be a 2D tensor (got ndim={mixed_qkv.ndim})."

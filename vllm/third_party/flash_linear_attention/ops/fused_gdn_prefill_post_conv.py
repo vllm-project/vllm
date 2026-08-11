@@ -15,6 +15,8 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
+from .op import l2norm_bf16, sigmoid_bf16
+
 
 @triton.jit
 def _fused_post_conv_kernel(
@@ -75,26 +77,21 @@ def _fused_post_conv_kernel(
 
         # Load Q features: mixed_qkv[t, i_h*K + k]
         q_offsets = offs_t[:, None] * stride_x_tok + i_h * K + offs_k[None, :]
-        q_f32 = tl.load(mixed_qkv_ptr + q_offsets, mask=mask_2d, other=0).to(tl.float32)
+        q_vals = tl.load(mixed_qkv_ptr + q_offsets, mask=mask_2d, other=0)
 
         # Load K features: mixed_qkv[t, HK + i_h*K + k]
         k_offsets = offs_t[:, None] * stride_x_tok + HK + i_h * K + offs_k[None, :]
-        k_f32 = tl.load(mixed_qkv_ptr + k_offsets, mask=mask_2d, other=0).to(tl.float32)
+        k_vals = tl.load(mixed_qkv_ptr + k_offsets, mask=mask_2d, other=0)
 
         if APPLY_L2NORM:
-            q_sq_sum = tl.sum(q_f32 * q_f32, axis=1)  # [BLOCK_T]
-            q_inv = 1.0 / tl.sqrt(q_sq_sum + L2NORM_EPS)
-            q_f32 = q_f32 * q_inv[:, None]
-
-            k_sq_sum = tl.sum(k_f32 * k_f32, axis=1)
-            k_inv = 1.0 / tl.sqrt(k_sq_sum + L2NORM_EPS)
-            k_f32 = k_f32 * k_inv[:, None]
+            q_vals = l2norm_bf16(q_vals, L2NORM_EPS, axis=1)
+            k_vals = l2norm_bf16(k_vals, L2NORM_EPS, axis=1)
 
         # Store Q
         q_out = offs_t[:, None] * stride_q_tok + i_h * K + offs_k[None, :]
         tl.store(
             q_ptr + q_out,
-            q_f32.to(q_ptr.dtype.element_ty),
+            q_vals.to(q_ptr.dtype.element_ty),
             mask=mask_2d,
         )
 
@@ -102,7 +99,7 @@ def _fused_post_conv_kernel(
         k_out = offs_t[:, None] * stride_k_tok + i_h * K + offs_k[None, :]
         tl.store(
             k_ptr + k_out,
-            k_f32.to(k_ptr.dtype.element_ty),
+            k_vals.to(k_ptr.dtype.element_ty),
             mask=mask_2d,
         )
     else:
@@ -131,7 +128,7 @@ def _fused_post_conv_kernel(
         a_offsets = offs_t * stride_a_tok + i_hv
         b_offsets = offs_t * stride_b_tok + i_hv
         a_vals = tl.load(a_ptr + a_offsets, mask=mask_t, other=0).to(tl.float32)
-        b_vals = tl.load(b_ptr + b_offsets, mask=mask_t, other=0).to(tl.float32)
+        b_vals = tl.load(b_ptr + b_offsets, mask=mask_t, other=0)
 
         # g = -exp(A_log) * softplus(a + dt_bias)
         x = a_vals + dt_bias_val
@@ -142,7 +139,7 @@ def _fused_post_conv_kernel(
         if OUTPUT_G_EXP:
             g_vals = tl.exp(g_vals)
 
-        beta_vals = tl.sigmoid(b_vals)
+        beta_vals = sigmoid_bf16(b_vals)
 
         gb_offsets = offs_t * HV + i_hv
         tl.store(g_ptr + gb_offsets, g_vals, mask=mask_t)
@@ -182,6 +179,12 @@ def fused_post_conv_prep(
         g: [L, HV] float32
         beta: [L, HV] float32
     """
+    activation_dtypes = (conv_output.dtype, a.dtype, b.dtype)
+    assert all(dtype == torch.bfloat16 for dtype in activation_dtypes), (
+        "fused_post_conv_prep only supports BF16 activations; got "
+        f"conv_output={conv_output.dtype}, a={a.dtype}, b={b.dtype}"
+    )
+
     L = conv_output.shape[0]
     qkv_dim = conv_output.shape[1]
     H = num_k_heads

@@ -48,8 +48,8 @@ def reference_post_conv(
 
     # L2 norm
     if apply_l2norm:
-        q = F.normalize(q.float(), p=2, dim=-1, eps=1e-6).to(conv_output.dtype)
-        k = F.normalize(k.float(), p=2, dim=-1, eps=1e-6).to(conv_output.dtype)
+        q = _bf16_l2norm(q)
+        k = _bf16_l2norm(k)
 
     # Gating
     x = a.float() + dt_bias.float()
@@ -59,9 +59,14 @@ def reference_post_conv(
     if output_g_exp:
         g = torch.exp(g)
 
-    beta_out = torch.sigmoid(b.float())
+    beta_out = b.sigmoid().float()
 
     return q, k, v, g, beta_out
+
+
+def _bf16_l2norm(value: torch.Tensor) -> torch.Tensor:
+    inverse_norm = torch.rsqrt((value * value).sum(dim=-1, keepdim=True) + 1e-6)
+    return value * inverse_norm
 
 
 # Qwen3.5-35B config: H=16, HV=32, K=128, V=128
@@ -148,6 +153,64 @@ def test_fused_post_conv_correctness(H, HV, K, V, L, apply_l2norm, output_g_exp,
     torch.testing.assert_close(fused_beta, ref_beta, atol=1e-4, rtol=1e-4)
 
 
+def test_fused_post_conv_uses_bf16_semantics():
+    """BF16 normalization and sigmoid retain input-dtype semantics."""
+    torch.manual_seed(51779)
+    device = "cuda"
+    L, H, HV, K, V = 64, 16, 32, 128, 128
+    qkv_dim = 2 * H * K + HV * V
+
+    conv_output = torch.randn(L, qkv_dim, dtype=torch.bfloat16, device=device)
+    a = torch.randn(L, HV, dtype=torch.bfloat16, device=device)
+    b = torch.randn(L, HV, dtype=torch.bfloat16, device=device)
+    A_log = torch.randn(HV, dtype=torch.float32, device=device) - 2.0
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
+
+    q, k, _, _, beta = fused_post_conv_prep(
+        conv_output,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        num_k_heads=H,
+        head_k_dim=K,
+        head_v_dim=V,
+    )
+    raw_q, raw_k, _ = torch.split(conv_output, [H * K, H * K, HV * V], dim=-1)
+    raw_q = raw_q.view(L, H, K)
+    raw_k = raw_k.view(L, H, K)
+
+    for actual, raw in ((q, raw_q), (k, raw_k)):
+        bf16_reference = _bf16_l2norm(raw)
+        promoted_reference = F.normalize(raw.float(), p=2, dim=-1, eps=1e-6).to(
+            raw.dtype
+        )
+        assert not torch.equal(bf16_reference, promoted_reference)
+        torch.testing.assert_close(actual, bf16_reference, rtol=0.0, atol=0.0)
+
+    torch.testing.assert_close(beta, b.sigmoid().float(), rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("invalid_input", ["conv_output", "a", "b"])
+def test_fused_post_conv_rejects_non_bf16_activations(invalid_input: str):
+    inputs = {
+        "conv_output": torch.empty(1, 3, dtype=torch.bfloat16),
+        "a": torch.empty(1, 1, dtype=torch.bfloat16),
+        "b": torch.empty(1, 1, dtype=torch.bfloat16),
+    }
+    inputs[invalid_input] = inputs[invalid_input].float()
+
+    with pytest.raises(AssertionError, match="only supports BF16 activations"):
+        fused_post_conv_prep(
+            **inputs,
+            A_log=torch.empty(1),
+            dt_bias=torch.empty(1),
+            num_k_heads=1,
+            head_k_dim=1,
+            head_v_dim=1,
+        )
+
+
 @pytest.mark.parametrize("L", [1, 64, 256])
 def test_fused_post_conv_sanity(L):
     """Sanity checks: no NaN, unit-norm q/k, beta in (0,1)."""
@@ -183,8 +246,8 @@ def test_fused_post_conv_sanity(L):
     # L2 norm check: each head vector should have unit norm
     q_norms = torch.norm(q.float(), dim=-1)
     k_norms = torch.norm(k.float(), dim=-1)
-    torch.testing.assert_close(q_norms, torch.ones_like(q_norms), atol=1e-3, rtol=1e-3)
-    torch.testing.assert_close(k_norms, torch.ones_like(k_norms), atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(q_norms, torch.ones_like(q_norms), atol=5e-3, rtol=0)
+    torch.testing.assert_close(k_norms, torch.ones_like(k_norms), atol=5e-3, rtol=0)
 
     # Beta should be in (0, 1)
     assert (beta >= 0).all() and (beta <= 1).all(), "beta out of range"

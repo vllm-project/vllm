@@ -11,6 +11,8 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
+from .op import l2norm_bf16, sigmoid_bf16
+
 
 @triton.heuristics(
     {
@@ -120,10 +122,10 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for i_t in range(0, T):
-        b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
-        b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
+        b_q = tl.load(p_q, mask=mask_k, other=0)
+        b_k = tl.load(p_k, mask=mask_k, other=0)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
-        b_b = tl.load(p_b).to(tl.float32)
+        b_b = tl.load(p_b)
 
         # If the model is loaded in fp16, without the .float() here, A might be -inf
         x = tl.load(p_a).to(tl.float32) + tl.load(p_dt_bias).to(tl.float32)
@@ -133,11 +135,13 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         b_g = -tl.exp(tl.load(p_A_log).to(tl.float32)) * softplus_x
 
         # compute beta_output = sigmoid(b)
-        b_beta = tl.sigmoid(b_b.to(tl.float32))
+        b_beta = sigmoid_bf16(b_b)
 
         if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q * (tl.rsqrt(tl.sum(b_q * b_q) + 1e-6))
-            b_k = b_k * (tl.rsqrt(tl.sum(b_k * b_k) + 1e-6))
+            b_q = l2norm_bf16(b_q, 1e-6, axis=0)
+            b_k = l2norm_bf16(b_k, 1e-6, axis=0)
+        b_q = b_q.to(tl.float32)
+        b_k = b_k.to(tl.float32)
         b_q = b_q * scale
         # [BV, BK]
         if not IS_KDA:
@@ -202,6 +206,12 @@ def fused_sigmoid_gating_delta_rule_update(
     This function uses a single fused kernel that combines both sigmoid gating
     computation and the recurrent delta rule update for better performance.
     """
+    activation_dtypes = (a.dtype, b.dtype, q.dtype, k.dtype, v.dtype)
+    assert all(dtype == torch.bfloat16 for dtype in activation_dtypes), (
+        "fused_sigmoid_gating_delta_rule_update only supports BF16 activations; got "
+        f"a={a.dtype}, b={b.dtype}, q={q.dtype}, k={k.dtype}, v={v.dtype}"
+    )
+
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1

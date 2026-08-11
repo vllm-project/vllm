@@ -25,6 +25,26 @@ else:
     log2 = tl.log2
 
 
+@triton.jit
+def _round_to_bf16(x):
+    return x.to(tl.bfloat16).to(tl.float32)
+
+
+@triton.jit
+def l2norm_bf16(x, eps: tl.constexpr, axis: tl.constexpr):
+    x_f32 = x.to(tl.float32)
+    square = _round_to_bf16(x_f32 * x_f32)
+    square_sum = _round_to_bf16(tl.sum(square, axis=axis, keep_dims=True))
+    norm_square = _round_to_bf16(square_sum + eps)
+    inverse_norm = _round_to_bf16(tl.rsqrt(norm_square))
+    return _round_to_bf16(x_f32 * inverse_norm)
+
+
+@triton.jit
+def sigmoid_bf16(x):
+    return _round_to_bf16(tl.sigmoid(x.to(tl.float32)))
+
+
 if not is_gather_supported:
 
     @triton.jit
