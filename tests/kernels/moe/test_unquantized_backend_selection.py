@@ -482,6 +482,17 @@ def test_select_lora_backend_prefers_triton():
     assert experts_cls is not None
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-specific test")
+def test_fused_shared_experts_select_modular_backend():
+    moe_config = make_dummy_moe_config()
+    moe_config.num_fused_shared_experts = 1
+
+    _, experts_cls = select_unquantized_moe_backend(moe_config=moe_config)
+
+    assert experts_cls is not None
+    assert not experts_cls.is_monolithic()
+
+
 @skipif_not_cuda_rocm
 def test_select_lora_explicit_non_triton_backend():
     """LoRA should override explicit non-Triton backend to Triton."""

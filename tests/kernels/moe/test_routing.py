@@ -75,6 +75,95 @@ def test_degenerate_grouped_config_uses_standard_topk() -> None:
     )
 
 
+def test_standard_router_appends_fused_shared_experts() -> None:
+    num_experts = 8
+    num_shared = 2
+    top_k = 2
+    shared_weight = 0.75
+    router = create_fused_moe_router(
+        top_k=top_k,
+        global_num_experts=num_experts,
+        renormalize=True,
+        num_fused_shared_experts=num_shared,
+        shared_expert_weight=shared_weight,
+    )
+    hidden_states, router_logits = make_test_data(4, 16, num_experts)
+
+    weights, ids = router.select_experts(hidden_states, router_logits)
+    routed_weights, routed_ids = baseline_fused_topk(
+        router_logits, top_k=top_k, renormalize=True
+    )
+
+    assert_routing_results_close(
+        weights[:, :top_k],
+        ids[:, :top_k],
+        routed_weights,
+        routed_ids,
+    )
+    torch.testing.assert_close(
+        ids[:, top_k:],
+        torch.tensor(
+            [num_experts, num_experts + 1], device="cuda", dtype=ids.dtype
+        ).expand(4, 2),
+    )
+    torch.testing.assert_close(
+        weights[:, top_k:],
+        torch.full((4, num_shared), shared_weight, device="cuda"),
+    )
+
+
+def test_standard_router_can_defer_fused_shared_experts() -> None:
+    num_experts = 8
+    top_k = 2
+    router = create_fused_moe_router(
+        top_k=top_k,
+        global_num_experts=num_experts,
+        renormalize=True,
+        num_fused_shared_experts=1,
+    )
+    router.defer_fused_shared_experts = True
+    hidden_states, router_logits = make_test_data(4, 16, num_experts)
+
+    weights, ids = router.select_experts(hidden_states, router_logits)
+
+    assert weights.shape == (4, top_k)
+    assert ids.shape == (4, top_k)
+
+
+def test_standard_router_uses_fused_shared_expert_gate() -> None:
+    num_experts = 8
+    num_shared = 1
+    top_k = 2
+    router = create_fused_moe_router(
+        top_k=top_k,
+        global_num_experts=num_experts,
+        renormalize=True,
+        num_fused_shared_experts=num_shared,
+    )
+    router.defer_fused_shared_experts = True
+    hidden_states, routed_logits = make_test_data(4, 16, num_experts)
+    shared_logits = torch.tensor([[0.0], [1.0], [-1.0], [2.0]], device="cuda")
+
+    weights, ids = router.select_experts(
+        hidden_states, torch.cat((routed_logits, shared_logits), dim=-1)
+    )
+    routed_weights, routed_ids = baseline_fused_topk(
+        routed_logits, top_k=top_k, renormalize=True
+    )
+
+    assert_routing_results_close(
+        weights[:, :top_k],
+        ids[:, :top_k],
+        routed_weights,
+        routed_ids,
+    )
+    torch.testing.assert_close(
+        ids[:, top_k:],
+        torch.full((4, num_shared), num_experts, device="cuda", dtype=ids.dtype),
+    )
+    torch.testing.assert_close(weights[:, top_k:], torch.sigmoid(shared_logits))
+
+
 def test_multiple_expert_groups_use_grouped_topk() -> None:
     router = create_fused_moe_router(
         top_k=4,

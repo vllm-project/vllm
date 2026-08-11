@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.models.deepseek_v32.nvidia import model as deepseek_v32_model
 from vllm.models.deepseek_v32.nvidia import mtp as deepseek_v32_mtp
 
@@ -60,6 +61,55 @@ class _SequenceParallelMTPBlock:
     ):
         assert residual is None
         return hidden_states * 2, hidden_states * 3
+
+
+def test_shared_expert_fusion_requires_matching_fp8_storage():
+    prefix = "model.layers.3.mlp"
+    matching_fp8 = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="dynamic",
+        weight_block_size=[128, 128],
+    )
+    mismatched_fp8 = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="dynamic",
+        ignored_layers=[f"{prefix}.shared_experts"],
+        weight_block_size=[128, 128],
+    )
+
+    assert deepseek_v32_model._can_fuse_shared_experts(None, prefix)
+    assert deepseek_v32_model._can_fuse_shared_experts(matching_fp8, prefix)
+    assert not deepseek_v32_model._can_fuse_shared_experts(mismatched_fp8, prefix)
+
+
+def test_shared_expert_fusion_loader_decision_is_per_layer(monkeypatch):
+    class FakeMoE(nn.Module):
+        def __init__(self, enabled: bool) -> None:
+            super().__init__()
+            self.is_fusion_moe_shared_experts_enabled = enabled
+
+    monkeypatch.setattr(deepseek_v32_model, "DeepseekV2MoE", FakeMoE)
+    fusion_by_layer = deepseek_v32_model._get_shared_expert_fusion_by_layer(
+        (("layers.2.mlp", FakeMoE(True)), ("layers.3.mlp", FakeMoE(False)))
+    )
+
+    assert fusion_by_layer == {2: True, 3: False}
+
+    weights = (
+        ("model.layers.2.mlp.shared_experts.gate_proj.weight", torch.ones(2, 1)),
+        ("model.layers.3.mlp.shared_experts.gate_proj.weight", torch.ones(2, 1)),
+    )
+    transformed = list(
+        deepseek_v32_model._fuse_shared_expert_weights_by_layer(
+            weights,
+            fusion_by_layer,
+            n_routed_experts=8,
+            n_shared_experts=1,
+        )
+    )
+
+    assert transformed[0][0] == "model.layers.2.mlp.experts.8.gate_proj.weight"
+    assert transformed[1][0] == weights[1][0]
 
 
 def _mock_sequence_parallel_collectives(monkeypatch, module):

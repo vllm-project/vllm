@@ -417,6 +417,53 @@ def _pack_topk_ids_weights_kernel(
     tl.store(output_ptr + offsets, packed, mask=mask)
 
 
+@triton.jit
+def _pack_topk_ids_weights_with_shared_kernel(
+    topk_ids_ptr,
+    topk_weights_ptr,
+    output_ptr,
+    n_elements,
+    first_shared_expert_id,
+    shared_expert_weight,
+    ROUTED_TOPK: tl.constexpr,
+    NUM_SHARED_EXPERTS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,  # triton metadata
+):
+    pid = tl.program_id(axis=0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
+        tl.extra.cuda.gdc_wait()
+
+    output_topk: tl.constexpr = ROUTED_TOPK + NUM_SHARED_EXPERTS
+    token_idx = offsets // output_topk
+    slot_idx = offsets % output_topk
+    is_routed = slot_idx < ROUTED_TOPK
+    input_offsets = token_idx * ROUTED_TOPK + slot_idx
+
+    routed_expert_id = tl.load(
+        topk_ids_ptr + input_offsets,
+        mask=mask & is_routed,
+        other=0,
+    ).to(tl.int32)
+    shared_expert_id = first_shared_expert_id + slot_idx - ROUTED_TOPK
+    expert_id = tl.where(is_routed, routed_expert_id, shared_expert_id)
+
+    routed_weight = tl.load(
+        topk_weights_ptr + input_offsets,
+        mask=mask & is_routed,
+        other=0.0,
+    )
+    weight = tl.where(is_routed, routed_weight, shared_expert_weight)
+    weight_bf16 = weight.to(tl.bfloat16)
+    weight_int16 = weight_bf16.to(tl.int16, bitcast=True)
+    packed = (expert_id << 16) | (weight_int16.to(tl.int32) & 0xFFFF)
+    tl.store(output_ptr + offsets, packed, mask=mask)
+
+
 def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
     """Estimate FlashInfer's MoE autotuning maximum token count.
 
@@ -438,29 +485,50 @@ def trtllm_moe_pack_topk_ids_weights(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     block_size: int = 1024,
+    num_fused_shared_experts: int = 0,
+    first_shared_expert_id: int | None = None,
+    fused_shared_expert_weight: float = 1.0,
 ) -> torch.Tensor:
     assert topk_ids.shape == topk_weights.shape
     assert topk_ids.is_contiguous() and topk_weights.is_contiguous()
 
-    original_shape = topk_ids.shape
+    num_tokens, routed_topk = topk_ids.shape
+    output_topk = routed_topk + num_fused_shared_experts
+    output_shape = (num_tokens, output_topk)
     ids_flat = topk_ids.reshape(-1)
     weights_flat = topk_weights.reshape(-1)
 
-    n_elements = ids_flat.numel()
+    n_elements = num_tokens * output_topk
     output = torch.empty(n_elements, dtype=torch.int32, device=topk_ids.device)
 
     use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(90)
     grid = (triton.cdiv(n_elements, block_size),)
-    _pack_topk_ids_weights_kernel[grid](
-        ids_flat,
-        weights_flat,
-        output,
-        n_elements,
-        BLOCK_SIZE=block_size,
-        USE_GDC=use_gdc,
-        launch_pdl=use_gdc,
-    )
-    return output.reshape(original_shape)
+    if num_fused_shared_experts > 0:
+        assert first_shared_expert_id is not None
+        _pack_topk_ids_weights_with_shared_kernel[grid](
+            ids_flat,
+            weights_flat,
+            output,
+            n_elements,
+            first_shared_expert_id,
+            fused_shared_expert_weight,
+            ROUTED_TOPK=routed_topk,
+            NUM_SHARED_EXPERTS=num_fused_shared_experts,
+            BLOCK_SIZE=block_size,
+            USE_GDC=use_gdc,
+            launch_pdl=use_gdc,
+        )
+    else:
+        _pack_topk_ids_weights_kernel[grid](
+            ids_flat,
+            weights_flat,
+            output,
+            n_elements,
+            BLOCK_SIZE=block_size,
+            USE_GDC=use_gdc,
+            launch_pdl=use_gdc,
+        )
+    return output.reshape(output_shape)
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)

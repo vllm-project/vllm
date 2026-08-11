@@ -170,17 +170,81 @@ class BaseRouter(FusedMoERouter):
         top_k: int,
         global_num_experts: int,
         eplb_state: EplbLayerState | None = None,
+        num_fused_shared_experts: int = 0,
+        shared_expert_weight: float = 1.0,
     ):
         """
         Args:
             top_k: Number of experts to select per token
             global_num_experts: Total number of experts
             eplb_state: Optional EPLBLayerState for load balancing
+            num_fused_shared_experts: Number of always-on shared experts
+                appended after routed expert selection.
+            shared_expert_weight: Scale for each appended shared expert.
         """
         super().__init__(eplb_state=eplb_state)
         self.top_k = top_k
         self.global_num_experts = global_num_experts
+        self.num_fused_shared_experts = num_fused_shared_experts
+        self.shared_expert_weight = shared_expert_weight
+        self.defer_fused_shared_experts = False
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
+
+    @property
+    def handles_fused_shared_experts(self) -> bool:
+        """Whether ``_compute_routing`` appends shared experts itself."""
+        return False
+
+    def configure_fused_shared_experts(
+        self,
+        num_fused_shared_experts: int,
+        shared_expert_weight: float = 1.0,
+    ) -> None:
+        if self.handles_fused_shared_experts:
+            return
+        self.num_fused_shared_experts = num_fused_shared_experts
+        self.shared_expert_weight = shared_expert_weight
+
+    def _append_fused_shared_experts(
+        self,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_shared = self.num_fused_shared_experts
+        can_defer = (
+            self.defer_fused_shared_experts
+            and router_logits.shape[-1] == self.global_num_experts
+        )
+        if num_shared == 0 or can_defer:
+            return topk_weights, topk_ids
+
+        num_tokens = topk_ids.shape[0]
+        shared_ids = torch.arange(
+            self.global_num_experts,
+            self.global_num_experts + num_shared,
+            dtype=topk_ids.dtype,
+            device=topk_ids.device,
+        ).expand(num_tokens, num_shared)
+
+        if router_logits.shape[-1] == self.global_num_experts + num_shared:
+            shared_weights = torch.sigmoid(
+                router_logits[:, self.global_num_experts :].float()
+            )
+            if self.shared_expert_weight != 1.0:
+                shared_weights *= self.shared_expert_weight
+        else:
+            shared_weights = torch.full(
+                (num_tokens, num_shared),
+                self.shared_expert_weight,
+                dtype=topk_weights.dtype,
+                device=topk_weights.device,
+            )
+
+        return (
+            torch.cat((topk_weights, shared_weights), dim=-1),
+            torch.cat((topk_ids, shared_ids), dim=-1),
+        )
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -288,8 +352,21 @@ class BaseRouter(FusedMoERouter):
         self._validate_eplb_state()
 
         # Step 2: Compute routing (delegated to subclass)
+        routed_router_logits = router_logits
+        if (
+            self.num_fused_shared_experts > 0
+            and router_logits.shape[-1]
+            == self.global_num_experts + self.num_fused_shared_experts
+        ):
+            routed_router_logits = router_logits[
+                :, : self.global_num_experts
+            ].contiguous()
+
         topk_weights, topk_ids = self._compute_routing(
-            hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
+            hidden_states,
+            routed_router_logits,
+            topk_indices_dtype,
+            input_ids=input_ids,
         )
 
         # Capture logical ids before EPLB mapping.
@@ -298,6 +375,12 @@ class BaseRouter(FusedMoERouter):
 
         # Step 3: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)
+
+        # Shared experts are not part of EPLB and are deliberately appended
+        # after capture and logical-to-physical mapping.
+        topk_weights, topk_ids = self._append_fused_shared_experts(
+            topk_weights, topk_ids, router_logits
+        )
 
         # Step 4: Convert indices dtype
         topk_ids = self._convert_indices_dtype(topk_ids, topk_indices_dtype)

@@ -469,6 +469,29 @@ def prepare_fp8_moe_layer_for_fi(
     is_deepseek_fp8 = block_quant and not is_mxfp8
     is_gated = layer.activation.is_gated
 
+    if (
+        is_trtllm
+        and is_deepseek_fp8
+        and layer.moe_config.num_fused_shared_experts > 0
+        and w13.shape[0] % 4 != 0
+    ):
+        padded_num_experts = round_up(w13.shape[0], 4)
+
+        def pad_experts(x: torch.Tensor, value: float) -> torch.Tensor:
+            padded = x.new_full((padded_num_experts, *x.shape[1:]), value)
+            padded[: x.shape[0]].copy_(x)
+            return padded
+
+        logger.info_once(
+            "Padding FlashInfer TRTLLM fused expert count from %d to %d.",
+            w13.shape[0],
+            padded_num_experts,
+        )
+        w13 = pad_experts(w13, 0)
+        w2 = pad_experts(w2, 0)
+        w13_scale = pad_experts(w13_scale, 1)
+        w2_scale = pad_experts(w2_scale, 1)
+
     # MXFP8 TRT-LLM requires W31 swap + reorder + shuffle.
     if is_mxfp8 and is_trtllm:
         # FlashInfer TRT-LLM SwiGLU expects [up; gate] but vLLM stores

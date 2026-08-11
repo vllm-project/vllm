@@ -185,6 +185,7 @@ def create_fused_moe_router(
                 routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias,
                 num_fused_shared_experts=num_fused_shared_experts,
+                shared_expert_weight=shared_expert_weight,
             )
         # Otherwise fall through to the non-grouped chain below.
 
@@ -195,6 +196,8 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
             custom_routing_function=custom_routing_function,
             renormalize=renormalize,
+            num_fused_shared_experts=num_fused_shared_experts,
+            shared_expert_weight=shared_expert_weight,
         )
 
     assert scoring_func in ["sigmoid", "softmax", "sqrtsoftplus"]
@@ -233,4 +236,6 @@ def create_fused_moe_router(
         eplb_state=eplb_state,
         renormalize=renormalize,
         scoring_func=scoring_func,
+        num_fused_shared_experts=num_fused_shared_experts,
+        shared_expert_weight=shared_expert_weight,
     )

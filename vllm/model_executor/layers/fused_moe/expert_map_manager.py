@@ -256,7 +256,7 @@ class ExpertMapManager:
             )
 
     def _init_aiter_shared_experts_topK_buffer(self):
-        if self.num_fused_shared_experts > 0:
+        if self.rocm_aiter_enabled and self.num_fused_shared_experts > 0:
             dp_size = self.moe_parallel_config.dp_size
             init_aiter_topK_meta_data(
                 n_routed_experts=self.global_num_experts,

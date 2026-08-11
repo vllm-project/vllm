@@ -285,6 +285,7 @@ class DeepseekV2MoE(nn.Module):
         reduce_results: bool = True,
         prefix: str = "",
         apply_routed_scale_to_output: bool = False,
+        fuse_shared_experts: bool | None = None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -335,9 +336,14 @@ class DeepseekV2MoE(nn.Module):
         )
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        self.is_fusion_moe_shared_experts_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        )
+        if fuse_shared_experts is None:
+            fuse_shared_experts = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        self.is_fusion_moe_shared_experts_enabled = fuse_shared_experts
+        if fuse_shared_experts and config.n_shared_experts:
+            logger.info_once(
+                "Fusing %d shared expert(s) into the routed experts.",
+                config.n_shared_experts,
+            )
         if (
             self.is_rocm_aiter_moe_enabled
             and self.gate.e_score_correction_bias is not None
@@ -385,6 +391,7 @@ class DeepseekV2MoE(nn.Module):
             n_shared_experts=config.n_shared_experts
             if self.is_fusion_moe_shared_experts_enabled
             else None,
+            fuse_shared_experts=self.is_fusion_moe_shared_experts_enabled,
             router_logits_dtype=self.gate.out_dtype,
         )
 
@@ -1517,8 +1524,11 @@ class DeepseekV2Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        rocm_aiter_moe_shared_expert_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        fused_shared_experts_enabled = any(
+            isinstance(layer.mlp, DeepseekV2MoE)
+            and layer.mlp.is_fusion_moe_shared_experts_enabled
+            for layer in self.layers
+            if not isinstance(layer, PPMissingLayer)
         )
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -1558,11 +1568,7 @@ class DeepseekV2Model(nn.Module):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if rocm_aiter_moe_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if fused_shared_experts_enabled else 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -1587,8 +1593,8 @@ class DeepseekV2Model(nn.Module):
             ):
                 continue  # this layer has no indexer; drop its checkpoint weights
 
-            is_fusion_moe_shared_experts_layer = (
-                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
+            is_fusion_moe_shared_experts_layer = fused_shared_experts_enabled and (
+                "mlp.shared_experts" in name
             )
 
             if _try_load_fp8_indexer_wk(

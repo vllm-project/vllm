@@ -257,6 +257,7 @@ class GroupedTopKRouter(BaseRouter):
         routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
         num_fused_shared_experts: int = 0,
+        shared_expert_weight: float = 1.0,
         eplb_state: EplbLayerState | None = None,
     ):
         super().__init__(
@@ -271,6 +272,17 @@ class GroupedTopKRouter(BaseRouter):
         self.routed_scaling_factor = routed_scaling_factor
         self.e_score_correction_bias = e_score_correction_bias
         self.num_fused_shared_experts = num_fused_shared_experts
+        if not self.handles_fused_shared_experts:
+            self.configure_fused_shared_experts(
+                num_fused_shared_experts, shared_expert_weight
+            )
+
+    @property
+    def handles_fused_shared_experts(self) -> bool:
+        return (
+            self.num_fused_shared_experts > 0
+            and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        )
 
     @property
     def routing_method_type(self) -> RoutingMethodType:

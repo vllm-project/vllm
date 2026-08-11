@@ -14,6 +14,10 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -30,10 +34,12 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    extract_layer_index,
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    maybe_fuse_shared_experts,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.common.ops.sequence_parallel import (
@@ -46,6 +52,66 @@ from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.sequence import IntermediateTensors
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
+
+
+def _can_fuse_shared_experts(
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> bool:
+    if quant_config is None:
+        return True
+    if quant_config.get_name() != "fp8" or not getattr(
+        quant_config, "is_checkpoint_fp8_serialized", False
+    ):
+        return False
+
+    ignored_layers = getattr(quant_config, "ignored_layers", [])
+    fused_mapping = getattr(quant_config, "packed_modules_mapping", {})
+    match_mode = typing.cast(
+        typing.Literal["exact", "substring", "suffix"],
+        getattr(quant_config, "ignored_layers_match_mode", "exact"),
+    )
+    routed_experts_skipped = is_layer_skipped(
+        f"{prefix}.experts",
+        ignored_layers,
+        fused_mapping,
+        match_mode=match_mode,
+    )
+    shared_experts_skipped = is_layer_skipped(
+        f"{prefix}.shared_experts",
+        ignored_layers,
+        fused_mapping,
+        match_mode=match_mode,
+    )
+    return routed_experts_skipped == shared_experts_skipped
+
+
+def _get_shared_expert_fusion_by_layer(
+    named_modules: Iterable[tuple[str, torch.nn.Module]],
+) -> dict[int, bool]:
+    return {
+        extract_layer_index(module_name): module.is_fusion_moe_shared_experts_enabled
+        for module_name, module in named_modules
+        if isinstance(module, DeepseekV2MoE)
+    }
+
+
+def _fuse_shared_expert_weights_by_layer(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    fusion_by_layer: dict[int, bool],
+    n_routed_experts: int,
+    n_shared_experts: int,
+) -> Iterable[tuple[str, torch.Tensor]]:
+    for name, weight in weights:
+        if "mlp.shared_experts." not in name:
+            yield name, weight
+            continue
+        yield from maybe_fuse_shared_experts(
+            ((name, weight),),
+            n_routed_experts=n_routed_experts,
+            n_shared_experts=n_shared_experts,
+            enabled=fusion_by_layer.get(extract_layer_index(name), False),
+        )
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
@@ -94,6 +160,10 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 reduce_results=False,
                 prefix=f"{prefix}.mlp",
                 apply_routed_scale_to_output=False,
+                fuse_shared_experts=(
+                    config.n_shared_experts is not None
+                    and _can_fuse_shared_experts(quant_config, f"{prefix}.mlp")
+                ),
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -286,8 +356,17 @@ class DeepseekV32Model(torch.nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # DSA-only: MLA (fused_qkv_a_proj) + the fused indexer wk/weights_proj +
-        # routed experts. No MHA (qkv_proj) or ROCm shared-expert-fusion paths.
+        # DSA-only: MLA (fused_qkv_a_proj) + the fused indexer wk/weights_proj.
+        fuse_shared_experts_by_layer = _get_shared_expert_fusion_by_layer(
+            self.named_modules()
+        )
+        has_fused_shared_experts = any(fuse_shared_experts_by_layer.values())
+        weights = _fuse_shared_expert_weights_by_layer(
+            weights,
+            fuse_shared_experts_by_layer,
+            self.config.n_routed_experts,
+            self.config.n_shared_experts,
+        )
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -301,7 +380,8 @@ class DeepseekV32Model(torch.nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
+            num_experts=self.config.n_routed_experts
+            + (self.config.n_shared_experts if has_fused_shared_experts else 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 

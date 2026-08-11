@@ -432,11 +432,12 @@ def maybe_fuse_shared_experts(
     ckpt_prefix: str = "mlp.shared_experts",
     enabled: bool | None = None,
 ) -> Iterable[tuple[str, torch.Tensor]]:
-    """Route AITER fused-shared-expert checkpoint weights into fused slots.
+    """Route fused-shared-expert checkpoint weights into routed slots.
 
-    When AITER fused-shared-experts is active, shared experts are packed into
-    the routed expert tensor. The checkpoint stores them under `ckpt_prefix`
-    as a single (possibly widened) tensor; this splits it into
+    When shared-expert fusion is active, shared experts are packed into the
+    routed expert tensor on either a modular CUDA backend or ROCm AITER. The
+    checkpoint stores them under `ckpt_prefix` as a single (possibly widened)
+    tensor; this splits it into
     `n_shared_experts` chunks named `mlp.experts.{n_routed_experts + j}` so
     the `RoutedExperts` loader treats them as extra experts. Yields the input
     unchanged when the fusion is inactive, so callers can wrap unconditionally.
@@ -446,11 +447,9 @@ def maybe_fuse_shared_experts(
         n_routed_experts: Number of routed experts; offsets the fused slots.
         n_shared_experts: Number of shared experts packed into the tensor.
         ckpt_prefix: Checkpoint module name of the shared experts.
-        enabled: Whether AITER fused-shared-experts is active. Defaults to
-            `rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()`; pass an
-            explicit value only when the model gates on something more (e.g.
-            quant-spec compatibility) and it must match its construction-time
-            decision.
+        enabled: Whether fused shared experts are active. The default preserves
+            ROCm AITER behavior. CUDA integrations must pass their explicit
+            construction-time decision, including quant-spec compatibility.
 
     Yields:
         `(name, tensor)` pairs with shared experts routed to fused slots.

@@ -174,6 +174,13 @@ class RoutedExperts(PluggableLayer):
 
         self.lora_base_layer_prefix = ""
 
+    @property
+    def kernel_global_num_experts(self) -> int:
+        """Expert count visible to externally routed expert kernels."""
+        if self.moe_config.aiter_fmoe_shared_expert_enabled:
+            return self.global_num_experts
+        return self.global_num_experts + self.moe_config.num_fused_shared_experts
+
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
         self.quant_method = quant_method

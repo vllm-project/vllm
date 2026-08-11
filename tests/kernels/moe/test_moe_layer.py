@@ -26,6 +26,7 @@ from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
 from tests.kernels.moe.utils import TestMLP, make_test_weights, moe_quantize_weights
 from vllm.config import (
     CompilationConfig,
+    KernelConfig,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -1013,6 +1014,8 @@ def make_fused_moe_layer(
     routed_output_transform: torch.nn.Module | None = None,
     pcp_size: int | None = 1,
     is_sequence_parallel: bool = False,
+    n_shared_experts: int | None = None,
+    fuse_shared_experts: bool | None = None,
 ) -> MoERunner:
     quant_config, qw = make_quant_config(quantization, w1, w2, global_num_experts)
 
@@ -1052,6 +1055,8 @@ def make_fused_moe_layer(
         num_redundant_experts=num_redundant_experts,
         has_bias=has_bias,
         is_sequence_parallel=is_sequence_parallel,
+        n_shared_experts=n_shared_experts,
+        fuse_shared_experts=fuse_shared_experts,
         **kwargs,
     )
 
@@ -1598,6 +1603,112 @@ def _run_one_config(
         torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
     finally:
         torch.accelerator.synchronize()
+
+
+def test_fused_shared_experts_cuda() -> None:
+    """A shared expert can run as an always-on CUDA grouped-GEMM slot."""
+    if not current_platform.is_cuda():
+        pytest.skip("CUDA-only shared-expert fusion test")
+
+    set_random_seed(7)
+    device = torch.accelerator.current_accelerator()
+    num_tokens = 8
+    hidden_size = 256
+    intermediate_size = 128
+    num_routed_experts = 4
+    num_shared_experts = 1
+    top_k = 2
+    num_total_experts = num_routed_experts + num_shared_experts
+    dtype = torch.bfloat16
+    if not is_workspace_manager_initialized():
+        init_workspace_manager(device)
+
+    hidden_states = torch.randn(num_tokens, hidden_size, device=device, dtype=dtype)
+    router_logits = torch.randn(
+        num_tokens, num_routed_experts, device=device, dtype=dtype
+    )
+    w1 = (
+        torch.randn(
+            num_total_experts,
+            2 * intermediate_size,
+            hidden_size,
+            device=device,
+            dtype=dtype,
+        )
+        / 10
+    )
+    w2 = (
+        torch.randn(
+            num_total_experts,
+            hidden_size,
+            intermediate_size,
+            device=device,
+            dtype=dtype,
+        )
+        / 10
+    )
+
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(),
+        compilation_config=CompilationConfig(),
+        kernel_config=KernelConfig(moe_backend="triton"),
+        scheduler_config=SchedulerConfig.default_factory(max_num_batched_tokens=128),
+    )
+    _set_vllm_config(vllm_config, 1, rank=0, local_rank=0)
+
+    with set_current_vllm_config(vllm_config):
+        layer = make_fused_moe_layer(
+            quantization=None,
+            use_ep=False,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            in_dtype=dtype,
+            tp_size=1,
+            ep_size=1,
+            dp_size=1,
+            w1=w1,
+            w2=w2,
+            top_k=top_k,
+            global_num_experts=num_routed_experts,
+            renormalize=True,
+            n_shared_experts=num_shared_experts,
+            fuse_shared_experts=True,
+        )
+
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=num_tokens,
+            num_tokens_across_dp=torch.tensor([num_tokens], device=device),
+        ):
+            actual = layer(hidden_states, router_logits)
+
+    routed_weights = torch.softmax(router_logits.float(), dim=-1)
+    routed_weights, routed_ids = torch.topk(routed_weights, top_k, dim=-1)
+    routed_weights /= routed_weights.sum(dim=-1, keepdim=True)
+    shared_ids = torch.full(
+        (num_tokens, 1), num_routed_experts, device=device, dtype=routed_ids.dtype
+    )
+    shared_weights = torch.ones(
+        (num_tokens, 1), device=device, dtype=routed_weights.dtype
+    )
+    expert_ids = torch.cat((routed_ids, shared_ids), dim=-1)
+    expert_weights = torch.cat((routed_weights, shared_weights), dim=-1)
+
+    expected = torch.zeros_like(hidden_states)
+    for token_id in range(num_tokens):
+        for slot in range(top_k + num_shared_experts):
+            expert_id = expert_ids[token_id, slot]
+            gate_up = torch.nn.functional.linear(hidden_states[token_id], w1[expert_id])
+            gate, up = gate_up.chunk(2, dim=-1)
+            expert_out = torch.nn.functional.linear(
+                torch.nn.functional.silu(gate) * up, w2[expert_id]
+            )
+            expected[token_id] += expert_out * expert_weights[token_id, slot]
+
+    assert not layer.is_monolithic
+    assert layer.routed_experts.w13_weight.shape[0] == num_total_experts
+    torch.testing.assert_close(actual, expected, atol=4e-2, rtol=4e-2)
 
 
 # Test for non-parallel cases (world_size == 1) - backend doesn't matter

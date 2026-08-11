@@ -134,11 +134,15 @@ class FusedTopKRouter(BaseRouter):
         scoring_func: str = "softmax",
         renormalize: bool = True,
         eplb_state: EplbLayerState | None = None,
+        num_fused_shared_experts: int = 0,
+        shared_expert_weight: float = 1.0,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
+            num_fused_shared_experts=num_fused_shared_experts,
+            shared_expert_weight=shared_expert_weight,
         )
         self.renormalize = renormalize
         self.scoring_func = scoring_func

@@ -1305,6 +1305,12 @@ class FusedMoEConfig:
     has_bias: bool = False
     is_lora_enabled: bool = False
 
+    # Shared experts represented as always-on expert slots. Modular kernels
+    # consume appended routing assignments; capable monolithic kernels handle
+    # the shared slots internally.
+    num_fused_shared_experts: int = 0
+    fused_shared_expert_weight: float = 1.0
+
     # When True, the MoE skips its final cross-rank all-reduce (and the separate
     # shared-expert reduce), returning the partial per-rank sum. The caller is
     # then responsible for the reduction (e.g. fusing it into the next RMSNorm).

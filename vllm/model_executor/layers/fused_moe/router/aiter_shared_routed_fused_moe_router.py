@@ -47,6 +47,10 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         self.num_fused_shared_experts = num_fused_shared_experts
 
     @property
+    def handles_fused_shared_experts(self) -> bool:
+        return True
+
+    @property
     def routing_method_type(self) -> RoutingMethodType:
         return get_routing_method_type(
             scoring_func=self.scoring_func,
