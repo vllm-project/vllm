@@ -566,7 +566,9 @@ class TestPostprocessMambaFusedKernel:
         num_scheduled_tokens = {"req_0": 5, "req_1": 3, "req_2": 8, "req_3": 6}
         num_draft_tokens = {"req_0": 2, "req_1": 0, "req_2": 3, "req_3": 0}
         num_accepted_tokens = [3, 2, 4, 2]
-        mamba_state_idx = [3, 1, 2, 0]  # source block indices
+        # Keep the broad Python-vs-fused golden on disjoint pages. Same-page
+        # overlap is validated independently against untouched snapshots.
+        mamba_state_idx = [1, 1, 2, 0]  # source block indices
 
         # Block IDs for each request (simulate block table)
         block_ids_per_req = [

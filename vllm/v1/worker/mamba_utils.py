@@ -563,9 +563,6 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
     src_ptr = tl.load(src_ptrs + pid)
     dst_ptr = tl.load(dst_ptrs + pid)
     size = tl.load(sizes + pid)
-    # The generic fallback can receive an in-place left shift. Synchronize
-    # only that case so all waves load a chunk before any wave overwrites it.
-    is_left_overlap = dst_ptr < src_ptr and dst_ptr + size > src_ptr
 
     offsets = tl.arange(0, BLOCK_SIZE)
     for i in range(0, size, BLOCK_SIZE):
@@ -575,8 +572,6 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
         curr_dst_ptr = (dst_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
 
         data = tl.load(curr_src_ptr, mask=mask)
-        if is_left_overlap:
-            tl.debug_barrier()
         tl.store(curr_dst_ptr, data, mask=mask)
 
 
