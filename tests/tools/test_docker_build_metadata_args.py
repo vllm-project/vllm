@@ -4,12 +4,10 @@
 import os
 import shlex
 import subprocess
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
-USE_EXISTING_TORCH = REPO_ROOT / "use_existing_torch.py"
 
 
 def run_helper(
