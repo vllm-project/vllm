@@ -29,7 +29,6 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -147,7 +146,7 @@ class KVBlockZeroer:
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
-            if not isinstance(spec, FullAttentionSpec):
+            if not isinstance(spec, AttentionSpec):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
@@ -298,6 +297,17 @@ class AttentionGroup:
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
+
+    @property
+    def supports_draft_decode_metadata_update(self) -> bool:
+        return self.get_metadata_builder().supports_draft_decode_metadata_update
+
+    def update_draft_decode_metadata(
+        self,
+        attn_metadata: Mapping[str, Any],
+    ) -> None:
+        metadata = attn_metadata[self.layer_names[0]]
+        self.get_metadata_builder().update_draft_decode_metadata(metadata)
 
 
 def select_common_block_size(
@@ -628,3 +638,20 @@ def is_residual_scattered_for_sp(
     assert num_input_tokens % tp == 0
 
     return True
+
+
+@dataclass
+class EncoderTimingStats:
+    """Per-request timing statistics for encoder forward pass."""
+
+    encoder_forward_secs: float = 0.0
+    """Time spent in vision encoder forward pass (seconds)."""
+
+    num_encoder_calls: int = 0
+    """Number of times encoder was called for this request."""
+
+    def to_dict(self) -> dict[str, float | int]:
+        return {
+            "encoder_forward_secs": self.encoder_forward_secs,
+            "num_encoder_calls": self.num_encoder_calls,
+        }
