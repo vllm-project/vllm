@@ -180,9 +180,7 @@ class ExampleConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids, request.mm_hashes
                 )
                 kv_cache_cpu = safetensors.torch.load_file(filename)["kv_cache"]
-                kv_cache = kv_cache_cpu.to(
-                    kv_cache_layer.device, non_blocking=True
-                )
+                kv_cache = kv_cache_cpu.to(kv_cache_layer.device, non_blocking=True)
                 if isinstance(attn_metadata, dict):
                     inject_kv_into_layer(
                         kv_cache_layer,
