@@ -16,20 +16,24 @@
 # limitations under the License.
 """Transformers modeling backend mixin for multi-modal models."""
 
-from collections.abc import Mapping
-from contextlib import nullcontext
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 import torch
-from transformers import AutoModel
 
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
 from vllm.config.utils import getattr_iter
 from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMRoPE,
+    SupportsMultiModal,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MultiModalKwargsItems
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
@@ -37,6 +41,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import (
     ImageProcessorItems,
+    ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
 )
@@ -45,6 +50,7 @@ from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     ProcessorInputs,
+    PromptUpdate,
     TimingContext,
 )
 from vllm.platforms import current_platform
@@ -74,8 +80,19 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def _is_image_model(self) -> bool:
         return hasattr(self.get_hf_processor(), "image_processor")
 
-    def _is_video_model(self) -> bool:
-        return hasattr(self.get_hf_processor(), "video_processor")
+    def _get_supported_modalities(self) -> list[str]:
+        modalities = []
+        if self._is_audio_model():
+            modalities.append("audio")
+        if self._is_image_model():
+            modalities.append("image")
+        if not modalities:
+            raise ValueError(
+                f"{type(self.get_hf_processor()).__name__} exposes neither an image "
+                "processor nor an audio processor, so the Transformers modeling "
+                "backend cannot serve this model as multi-modal."
+            )
+        return modalities
 
     def _get_audio_token_id(self) -> int:
         processor = self.get_hf_processor()
@@ -107,32 +124,16 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return super().get_data_parser()
 
     def get_supported_mm_limits(self):
-        limits = {}
-        if self._is_audio_model():
-            limits["audio"] = None
-        if self._is_image_model():
-            limits["image"] = None
-        if not limits:
-            raise ValueError(
-                f"Unable to detect a supported modality on "
-                f"{type(self.get_hf_processor()).__name__}. "
-                "Checked `_is_audio_model` and `_is_image_model`."
-            )
-        return limits
+        return dict.fromkeys(self._get_supported_modalities())
 
     def get_mm_max_tokens_per_item(self, seq_len, mm_counts):
-        result = {}
-        if self._is_audio_model():
-            result["audio"] = self.get_max_audio_tokens()
-        if self._is_image_model():
-            result["image"] = self.get_max_image_tokens()
-        if not result:
-            raise ValueError(
-                f"Unable to detect a supported modality on "
-                f"{type(self.get_hf_processor()).__name__}. "
-                "Checked `_is_audio_model` and `_is_image_model`."
-            )
-        return result
+        modalities = self._get_supported_modalities()
+        max_tokens = {}
+        if "audio" in modalities:
+            max_tokens["audio"] = self.get_max_audio_tokens()
+        if "image" in modalities:
+            max_tokens["image"] = self.get_max_image_tokens()
+        return max_tokens
 
     def get_max_audio_tokens(self) -> int:
         config = self.get_hf_config()
@@ -148,7 +149,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         )
 
     def get_max_image_tokens(self) -> int:
-        width, height = self.get_max_image_size()
+        width, height = self.get_image_size_with_most_features()
         processor = self.get_hf_processor()
         multimodal_config = self.ctx.model_config.multimodal_config
         mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
@@ -158,8 +159,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         image_tokens = mm_tokens["num_image_tokens"][0]
         return image_tokens
 
-    def get_max_image_size(self):
-        return 10_000, 10_000  # hardcode for arbitrary very large size
+    def get_image_size_with_most_features(self) -> ImageSize:
+        return ImageSize(width=10_000, height=10_000)  # arbitrary very large size
 
 
 class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingInfo]):
@@ -199,7 +200,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 overrides=mm_options.get("audio"),
             )
         if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
-            target_width, target_height = self.info.get_max_image_size()
+            target_width, target_height = self.info.get_image_size_with_most_features()
             data["image"] = self._get_dummy_images(
                 width=target_width,
                 height=target_height,
@@ -215,21 +216,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
-    ):
-        """
-        Given the original multi-modal items for this modality
-        and HF-processed data, output the updates to perform.
+    ) -> Sequence[PromptUpdate]:
+        """No updates: `apply` locates placeholders via `mm_token_type_ids` instead.
 
-        The information returned by this method is used to update token inputs
-        which bypass the HF processor. It is also used to update the output of
-        HF processor if the HF process does not apply prompt updates to text
-        inputs.
-
-        Moreover, this information is critical to determine the token positions
-        in order to construct  :class:`~vllm-multimodal.input.PlaceholderRange`
-        for each multi-modal item.
+        HF processors have no generic contract for the token sequence they insert,
+        so it cannot be expressed as a `PromptUpdate`. Returning nothing is only
+        safe because `apply` is overridden; the base class would reject it.
         """
-        return None
+        return []
 
     def _get_modality_field_names(self, modality: str) -> set[str]:
         """Field names the sub-processor for `modality` produces."""
@@ -493,6 +487,21 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs),
         )
 
+        # Bypassing `_maybe_apply_prompt_updates` also bypasses its validation.
+        # `_validate_mm_placeholders` can't be reused because it is typed for the
+        # `PlaceholderFeaturesInfo` the prompt update machinery produces.
+        mm_item_counts = mm_items.get_all_counts()
+        self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
+        for modality, item_count in mm_item_counts.items():
+            num_placeholders = len(mm_placeholders.get(modality, []))
+            if num_placeholders != item_count:
+                raise RuntimeError(
+                    f"Expected there to be {item_count} prompt placeholders "
+                    f"corresponding to {item_count} {modality} items, but instead "
+                    f"found {num_placeholders} prompt placeholders! Make sure the "
+                    "prompt contains a placeholder token for each item."
+                )
+
         return mm_input(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
@@ -506,65 +515,109 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
-    def _get_encoder_cls(
-        self, modality: str = "image", **kwargs: dict
-    ) -> type["PreTrainedModel"]:
-        """
-        Get the encoder class from the model.
+    def _find_encoder_classes(
+        self, model: "PreTrainedModel"
+    ) -> dict[str, type["PreTrainedModel"]]:
+        """Modalities whose encoder cannot be told apart from the model itself are
+        omitted, as are those `get_encoder` rejects."""
+        encoder_classes: dict[str, type[PreTrainedModel]] = {}
+        for modality in _MODALITY_TO_TOKEN_TYPE_ID:
+            try:
+                encoder_cls = type(model.get_encoder(modality=modality))
+            except (TypeError, ValueError):
+                continue
+            if encoder_cls is not type(model):
+                encoder_classes[modality] = encoder_cls
+        return encoder_classes
 
-        Args:
-            kwargs: The kwargs to create the model.
+    @contextmanager
+    def _mark_model_components(self, vllm_config: "VllmConfig"):
+        model_config = vllm_config.model_config
+        encoder_classes = self._pre_trained_model_classes.encoders
+        if not encoder_classes:
+            logger.debug("No encoders identified, so no components will be marked")
+            yield
+            return
 
-        Returns:
-            The encoder class.
-        """
-        with torch.device("meta"):
-            model: PreTrainedModel = AutoModel.from_config(**kwargs)
-        encoder_cls = type(model.get_encoder(modality=modality))
-        logger.debug("Identified encoder class as: %s", encoder_cls)
-        if type(model) is encoder_cls:
-            raise ValueError(
-                "Unable to infer vision encoder class from the model. "
-                "You must either: update the model so that "
-                "https://huggingface.co/docs/transformers/en/main_classes/model#transformers.PreTrainedModel.get_encoder"
-                " can detect the vision encoder correctly, or remove "
-                "'compile_mm_encoder'."
+        if model_config.skip_tokenizer_init:
+            # Determining the supported modalities needs the HF processor, which in
+            # turn needs a tokenizer
+            mm_config = model_config.multimodal_config
+            if mm_config.mm_encoder_only or any(
+                mm_config.get_limit_per_prompt(modality) == 0
+                for modality in encoder_classes
+            ):
+                logger.warning_once(
+                    "Unable to determine the supported modalities without a "
+                    "tokenizer, so no model components will be skipped."
+                )
+            yield
+            return
+
+        # Modalities we don't serve report a limit of 999, which would stop their
+        # encoder ever being skipped
+        supported_modalities = MULTIMODAL_REGISTRY.get_processing_info(
+            model_config
+        ).supported_mm_limits
+
+        # One encoder often serves several modalities, and may only be skipped when
+        # all of them are disabled, so mark it once for the whole set
+        modalities_by_encoder = defaultdict(set)
+        for modality, encoder_cls in encoder_classes.items():
+            if modality in supported_modalities:
+                modalities_by_encoder[encoder_cls].add(modality)
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                self._mark_language_model(
+                    vllm_config, targets=self._pre_trained_model_classes.decoder
+                )
             )
-        del model
-        return encoder_cls
+            for encoder_cls, modalities in modalities_by_encoder.items():
+                stack.enter_context(
+                    self._mark_tower_model(vllm_config, modalities, targets=encoder_cls)
+                )
+            yield
 
-    def _decorate_for_torch_compile(self, **kwargs: dict):
+    def _decorate_for_torch_compile(self):
         """
         Decorate the model's decoder and encoder classes to indicate to vLLM that they
         support torch compile if `can_enable_torch_compile` and
         `should_torch_compile_mm_encoder` are True respectively.
-
-        Args:
-            kwargs: The kwargs to create the model, which are needed to get the decoder
-                and encoder classes.
         """
-        super()._decorate_for_torch_compile(**kwargs)
-        # Decorate the vision encoder model class to support torch compile if needed
+        super()._decorate_for_torch_compile()
+        # Decorate the encoder model classes to support torch compile if needed
         if self.compilation_config.compile_mm_encoder:
             self.check_version("5.0.0", "multimodal encoder compilation support")
+            encoder_classes = self._pre_trained_model_classes.encoders
+            if not encoder_classes:
+                raise ValueError(
+                    "Unable to infer any encoder classes from the model. "
+                    "You must either: update the model so that "
+                    "https://huggingface.co/docs/transformers/en/main_classes/model#transformers.PreTrainedModel.get_encoder"
+                    " can detect the encoders correctly, or remove "
+                    "'compile_mm_encoder'."
+                )
             logger.warning_once(
                 "Multimodal encoder compilation with the Transformers modeling backend "
                 "is an experimental feature. It relies on:\n"
-                "- The vision encoder being torch compilable.\n"
-                "- All vision encoder tensor inputs must be type hinted as either "
+                "- The encoder being torch compilable.\n"
+                "- All encoder tensor inputs must be type hinted as either "
                 "`torch.Tensor` or `torch.FloatTensor`.\n"
-                "- The 0-th dimension of all tensor inputs to the vision encoder being "
-                "the dynamic dimension (i.e., sequence length or number of patches).\n"
+                "- The 0-th dimension of all tensor inputs to the encoder being the "
+                "dynamic dimension (e.g. sequence length, number of patches).\n"
                 "Please report any issues you encounter to help us improve it."
             )
-            self._decorate_cls_for_torch_compile(
-                cls=self._get_encoder_cls(**kwargs),
-                # TODO: properly infer dynamic_arg_dims based on the encoder's forward
-                # method signature. Currently we assume dim 0 for all tensor inputs.
-                dynamic_arg_dims=None,
-                enable_if=should_torch_compile_mm_encoder,
-                is_encoder=True,
-            )
+            # One encoder can serve several modalities, and must only be decorated once
+            for encoder_cls in dict.fromkeys(encoder_classes.values()):
+                self._decorate_cls_for_torch_compile(
+                    cls=encoder_cls,
+                    # TODO: properly infer dynamic_arg_dims based on the encoder's
+                    # forward method signature. We assume dim 0 for all tensor inputs.
+                    dynamic_arg_dims=None,
+                    enable_if=should_torch_compile_mm_encoder,
+                    is_encoder=True,
+                )
 
     def forward(
         self,
@@ -633,13 +686,25 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             tokens_per_item = total_tokens // total_expected
             token_split_sizes = [s * tokens_per_item for s in split_sizes]
         elif total_expected > 0:
-            # Mismatch (profiling with dummy data) - pad/truncate
+            # TODO: make this an error once we know profiling never relies on it
             if total_tokens == 0:
                 raise ValueError(
                     "Encoder returned empty embeddings. "
                     f"Expected {total_expected} tokens from "
                     f"split_sizes={split_sizes}"
                 )
+            # Keep the counts out of the message: `warning_once` keys its cache on
+            # the args, so varying them would log on every new pair
+            logger.warning_once(
+                "Encoder returned a different number of tokens than expected; "
+                "padding or truncating to fit. The embeddings are not trustworthy "
+                "outside of memory profiling."
+            )
+            logger.debug(
+                "Encoder returned %s tokens but %s were expected",
+                total_tokens,
+                total_expected,
+            )
             if total_tokens < total_expected:
                 repeat_factor = (total_expected + total_tokens - 1) // total_tokens
                 embeddings = embeddings.repeat(repeat_factor, 1)
@@ -650,14 +715,14 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         return list(torch.split(embeddings, token_split_sizes, dim=0))
 
-    def _embed_audio(self, **kwargs) -> list[torch.Tensor] | None:
-        self.check_version("5.13.0", "audio models support")
+    def _process_audio_input(self, **kwargs) -> list[torch.Tensor] | None:
         input_features: torch.Tensor | None = kwargs.pop("input_features", None)
         if input_features is None:
             input_features = kwargs.pop("input_values", None)
         if input_features is None:
             return None
 
+        self.check_version("5.13.0", "audio models support")
         num_audio_tokens = kwargs.pop("num_audio_tokens")
         kwargs.pop("token_type_ids", None)
         kwargs.pop("mm_token_type_ids", None)
@@ -676,7 +741,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         split_sizes = num_audio_tokens.flatten().tolist()
         return self._split_embeddings(audio_embeddings, split_sizes)
 
-    def _embed_vision(self, **kwargs) -> list[torch.Tensor] | torch.Tensor | None:
+    def _process_image_input(self, **kwargs) -> list[torch.Tensor] | None:
         pixel_values: torch.Tensor | None = kwargs.pop("pixel_values", None)
         image_embeds: torch.Tensor | None = kwargs.pop("image_embeds", None)
         # Model might use `image_patches` instead of `pixel_values`
@@ -684,7 +749,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             pixel_values = kwargs.pop("image_patches", None)
 
         if image_embeds is not None:
-            return image_embeds
+            return [image_embeds]
 
         if pixel_values is None:
             return None
@@ -722,25 +787,14 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             split_sizes = num_image_patches.flatten().tolist()
             return self._split_embeddings(vision_embeddings, split_sizes)
 
-        return vision_embeddings
+        return list(vision_embeddings)
 
-    def embed_multimodal(self, **kwargs):
-        embeddings: tuple[torch.Tensor, ...] = ()
-        if "input_features" in kwargs or "input_values" in kwargs:
-            audio_embeddings = self._embed_audio(**kwargs)
-            if audio_embeddings is not None:
-                embeddings += tuple(audio_embeddings)
-        if (
-            "pixel_values" in kwargs
-            or "image_embeds" in kwargs
-            or "image_patches" in kwargs
-        ):
-            vision_embeddings = self._embed_vision(**kwargs)
-            if vision_embeddings is not None:
-                if isinstance(vision_embeddings, torch.Tensor):
-                    embeddings += (vision_embeddings,)
-                else:
-                    embeddings += tuple(vision_embeddings)
+    def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
+        # Each helper detects its own inputs. We are called once per modality, so the
+        # leftovers a helper forwards to the HF model can't belong to the other one.
+        embeddings: list[torch.Tensor] = []
+        for process_input in (self._process_audio_input, self._process_image_input):
+            embeddings.extend(process_input(**kwargs) or [])
         return embeddings
 
     def get_mrope_input_positions(
