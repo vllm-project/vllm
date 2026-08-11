@@ -32,6 +32,9 @@ class TraceReplayState:
         self.trace_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
         # CPU mirror used to skip the kernel launch when no request replays.
         self.use_trace = np.zeros(self.max_num_reqs, dtype=bool)
+        # Sticky: set once any request replays, so the per-step staged-write path
+        # is an O(1) check instead of an O(max_num_reqs) scan of use_trace.
+        self.any_trace = False
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         trace = sampling_params.trace_decode_token_ids
@@ -39,13 +42,14 @@ class TraceReplayState:
             self.trace_len.np[req_idx] = len(trace)
             self.trace_token_ids.stage_write(req_idx, 0, trace)
             self.use_trace[req_idx] = True
+            self.any_trace = True
         else:
             self.trace_len.np[req_idx] = 0
             self.use_trace[req_idx] = False
 
     def apply_staged_writes(self) -> None:
-        self.trace_len.copy_to_uva()
-        if np.any(self.use_trace):
+        if self.any_trace:
+            self.trace_len.copy_to_uva()
             self.trace_token_ids.apply_write()
 
     def apply_trace(
