@@ -269,6 +269,43 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
+# Keywords whose value is a subschema, or a list of subschemas.
+_SUBSCHEMA_KEYWORDS = ("items", "additionalProperties", "contains", "not")
+_SUBSCHEMA_LIST_KEYWORDS = ("anyOf", "oneOf", "allOf", "prefixItems", "items")
+
+
+def _resolve_ref_target(ref_tail: str, defs: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve the tail of a local ``$ref`` against *defs*.
+
+    The tail is usually a bare definition name, but tool schemas here are
+    caller-supplied and may point *into* a definition
+    (``#/$defs/Foo/properties/bar``).  Definition names may themselves contain
+    ``/``, so try the longest name first and walk whatever is left as JSON
+    Pointer tokens.  Returns ``None`` when the pointer does not resolve.
+    """
+    tokens = [t.replace("~1", "/").replace("~0", "~") for t in ref_tail.split("/")]
+    for split in range(len(tokens), 0, -1):
+        name = "/".join(tokens[:split])
+        if name not in defs:
+            continue
+        target: Any = defs[name]
+        for token in tokens[split:]:
+            if isinstance(target, dict) and token in target:
+                target = target[token]
+            elif (
+                isinstance(target, list)
+                and token.isdigit()
+                and int(token) < len(target)
+            ):
+                target = target[int(token)]
+            else:
+                target = None
+                break
+        if isinstance(target, dict):
+            return target
+    return None
+
+
 def _resolve_refs(
     schema: Any,
     defs: dict[str, Any],
@@ -278,9 +315,8 @@ def _resolve_refs(
     """Recursively resolve ``$ref`` pointers against *defs*.
 
     Handles both ``#/$defs/<name>`` (Pydantic v2) and ``#/definitions/<name>``
-    (JSON Schema draft-07) forms via *ref_prefix*.  JSON Pointer token
-    escapes (``~0`` → ``~``, ``~1`` → ``/``) are decoded.  *seen* bounds
-    recursive schemas so cyclic references are preserved as-is.
+    (JSON Schema draft-07) forms via *ref_prefix*.  *seen* bounds recursive
+    schemas so cyclic references are preserved as-is.
     """
     if not isinstance(schema, dict):
         return schema
@@ -292,9 +328,9 @@ def _resolve_refs(
             and ref_path.startswith(ref_prefix)
             and ref_path not in seen
         ):
-            def_name = ref_path[len(ref_prefix) :].replace("~1", "/").replace("~0", "~")
-            if def_name in defs:
-                resolved = dict(defs[def_name])
+            target = _resolve_ref_target(ref_path[len(ref_prefix) :], defs)
+            if target is not None:
+                resolved = dict(target)
                 for k, v in schema.items():
                     if k != "$ref":
                         resolved.setdefault(k, v)
@@ -303,7 +339,7 @@ def _resolve_refs(
 
     result: dict[str, Any] = {}
     for key, value in schema.items():
-        if key in ("anyOf", "oneOf", "allOf") and isinstance(value, list):
+        if key in _SUBSCHEMA_LIST_KEYWORDS and isinstance(value, list):
             result[key] = [
                 _resolve_refs(item, defs, ref_prefix, seen) for item in value
             ]
@@ -311,7 +347,7 @@ def _resolve_refs(
             result[key] = {
                 k: _resolve_refs(v, defs, ref_prefix, seen) for k, v in value.items()
             }
-        elif key == "items" and isinstance(value, dict):
+        elif key in _SUBSCHEMA_KEYWORDS and isinstance(value, dict):
             result[key] = _resolve_refs(value, defs, ref_prefix, seen)
         else:
             result[key] = value

@@ -1620,6 +1620,46 @@ class TestRefResolutionOnRequestPath:
         assert args["city"] == "Berlin"
         assert args["options"] == {"unit": "celsius", "include_forecast": True}
 
+    def test_pointer_into_definition_coerces(self, qwen3_tokenizer):
+        """A ``$ref`` pointing into a definition must still yield concrete types.
+
+        Caller-supplied schemas (zod-to-json-schema and friends) use this form
+        for a re-used sub-schema. Left unresolved it falls back to ``string``
+        and the argument comes back quoted.
+        """
+        tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="get_weather",
+                    parameters={
+                        "type": "object",
+                        "$defs": {
+                            "WeatherOptions": {
+                                "type": "object",
+                                "properties": {"days": {"type": "integer"}},
+                            },
+                        },
+                        "properties": {
+                            "days": {"$ref": "#/$defs/WeatherOptions/properties/days"},
+                        },
+                    },
+                ),
+            )
+        ]
+        parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
+        request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+        model_output = (
+            "<tool_call>\n<function=get_weather>\n"
+            "<parameter=days>\n7\n</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+        extracted = parser.extract_tool_calls(model_output, request=request)
+
+        args = json.loads(extracted.tool_calls[0].function.arguments)
+        assert args["days"] == 7
+
     @pytest.mark.parametrize("defs_key, ref_prefix", DEFS_NAMESPACES)
     def test_adjust_request_preserves_definitions(
         self, qwen3_tokenizer, defs_key, ref_prefix

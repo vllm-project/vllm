@@ -880,6 +880,115 @@ class TestFindToolPropertiesRefResolution:
         assert isinstance(result, dict)
 
 
+INNER_DEF = {
+    "Inner": {
+        "type": "object",
+        "properties": {"kind": {"type": "string"}, "n": {"type": "integer"}},
+    }
+}
+
+
+class TestRefResolutionCoverage:
+    """Every subschema position that can hold a ``$ref`` must be descended.
+
+    Asserting that no ``$ref`` survives anywhere is what distinguishes these
+    from the shapes that already resolved; asserting the resolved shape would
+    pass either way for the positions the recursion used to skip.
+    """
+
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            pytest.param(
+                {"type": "object", "additionalProperties": {"$ref": "#/$defs/Inner"}},
+                id="additionalProperties",
+            ),
+            pytest.param(
+                {
+                    "type": "array",
+                    "prefixItems": [
+                        {"$ref": "#/$defs/Inner"},
+                        {"$ref": "#/$defs/Inner"},
+                    ],
+                },
+                id="prefixItems",
+            ),
+            pytest.param(
+                {"type": "array", "items": [{"$ref": "#/$defs/Inner"}]},
+                id="items-as-list",
+            ),
+            pytest.param(
+                {"type": "array", "items": {"$ref": "#/$defs/Inner"}},
+                id="items-as-dict",
+            ),
+            pytest.param({"not": {"$ref": "#/$defs/Inner"}}, id="not"),
+            pytest.param(
+                {"type": "array", "contains": {"$ref": "#/$defs/Inner"}},
+                id="contains",
+            ),
+        ],
+    )
+    def test_no_ref_survives(self, schema):
+        params = {
+            "type": "object",
+            "$defs": INNER_DEF,
+            "properties": {"arg": schema},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert "$ref" not in json.dumps(props["arg"])
+
+    def test_pointer_into_definition_resolved(self):
+        """``#/$defs/Inner/properties/n`` must resolve to the integer subschema.
+
+        Tool schemas on this path are caller-supplied — zod-to-json-schema
+        emits this form for a re-used sub-schema — and an unresolved pointer
+        falls back to ``["string"]``, which is the double-encoding this whole
+        module exists to prevent.
+        """
+        params = {
+            "type": "object",
+            "$defs": INNER_DEF,
+            "properties": {"n": {"$ref": "#/$defs/Inner/properties/n"}},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["n"] == {"type": "integer"}
+        assert coerce_to_schema_type("42", extract_types_from_schema(props["n"])) == 42
+
+    def test_definition_name_containing_slash(self):
+        """A pointer is ambiguous with a name containing ``/``; prefer the name."""
+        params = {
+            "type": "object",
+            "$defs": {"v1/User": {"type": "object", "properties": {}}},
+            "properties": {"user": {"$ref": "#/$defs/v1/User"}},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["user"]["type"] == "object"
+
+    def test_unresolvable_pointer_left_alone(self):
+        params = {
+            "type": "object",
+            "$defs": INNER_DEF,
+            "properties": {"x": {"$ref": "#/$defs/Inner/properties/missing"}},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["x"] == {"$ref": "#/$defs/Inner/properties/missing"}
+
+    def test_cyclic_ref_still_bounded(self):
+        params = {
+            "type": "object",
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/$defs/Node"}},
+                }
+            },
+            "properties": {"root": {"$ref": "#/$defs/Node"}},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["root"]["type"] == "object"
+        assert props["root"]["properties"]["child"] == {"$ref": "#/$defs/Node"}
+
+
 class TestToolSchemaDefs:
     """Tests that _get_tool_schema_defs does not mutate tool params."""
 
