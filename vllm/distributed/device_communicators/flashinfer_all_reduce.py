@@ -361,17 +361,13 @@ class FlashInferAllReduce:
             return
         self.max_workspace_size = int(max_workspace_size * MiB)
         self.max_num_tokens = 0
-        self.workspace: Any = None
         self.disabled = False
 
     def _ensure_workspace(self, hidden_dim: int, dtype: torch.dtype) -> bool:
         """Ensure the all reduce workspace is initialized."""
         if self.max_num_tokens == 0:
-            self.max_num_tokens = self.max_workspace_size // (
-                hidden_dim * dtype.itemsize
-            )
-        # Re-fetch each call; destroy_fi_ar_workspace() may have cleared the
-        # process-wide singleton since last time.
+            element_size = torch.tensor([], dtype=dtype, device="cpu").element_size()
+            self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
         workspace = get_fi_ar_workspace(
             world_size=self.world_size,
             rank=self.rank,
@@ -383,7 +379,6 @@ class FlashInferAllReduce:
         if workspace is None:
             self.disabled = True
             return False
-        self.workspace = workspace
         return True
 
     def should_use_fi_ar(self, input_tensor: torch.Tensor) -> bool:
@@ -401,21 +396,32 @@ class FlashInferAllReduce:
 
         num_tokens, hidden_dim = input_tensor.shape
         if not self.max_num_tokens:
-            self.max_num_tokens = self.max_workspace_size // (
-                hidden_dim * input_tensor.dtype.itemsize
-            )
+            element_size = torch.tensor([], dtype=input_tensor.dtype).element_size()
+            self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
 
-        # Cheap reject before paying to create a workspace; not authoritative.
         if num_tokens > self.max_num_tokens:
             return False
 
         if not self._ensure_workspace(hidden_dim, input_tensor.dtype):
             return False
 
-        # Authoritative: a backend may devote only a fraction of the budget to
-        # one call (mnnvl splits its allocation into three Lamport buffers), so
-        # ask the workspace rather than trusting the token-count bound above.
-        return self.workspace.is_buffer_size_sufficient(
+        workspace = get_fi_ar_workspace(
+            world_size=self.world_size,
+            rank=self.rank,
+            max_token_num=self.max_num_tokens,
+            hidden_dim=hidden_dim,
+            dtype=input_tensor.dtype,
+            group=self.group,
+        )
+        assert workspace is not None
+        # The token-count bound above is derived from the whole workspace
+        # allocation budget, but a backend may use only a fraction of it per
+        # call.  mnnvl is Lamport-based and rotates through three buffers, so
+        # only ~1/3 of the budget is usable for any single all-reduce.  Ask the
+        # workspace directly so tensors sized between the real capacity and the
+        # budget do not reach the kernel and abort with "The buffer size in the
+        # given workspace is insufficient for the given problem size".
+        return workspace.is_buffer_size_sufficient(
             tp_size=self.world_size,
             num_tokens=num_tokens,
             hidden_dim=hidden_dim,
@@ -423,10 +429,18 @@ class FlashInferAllReduce:
         )
 
     def all_reduce(self, input_tensor: torch.Tensor) -> torch.Tensor:
-        num_tokens = input_tensor.shape[0]
+        num_tokens, hidden_dim = input_tensor.shape
+        workspace = get_fi_ar_workspace(
+            world_size=self.world_size,
+            rank=self.rank,
+            max_token_num=self.max_num_tokens,
+            hidden_dim=hidden_dim,
+            dtype=input_tensor.dtype,
+            group=self.group,
+        )
         return flashinfer_comm.allreduce_fusion(
             input=input_tensor,
-            workspace=self.workspace,
+            workspace=workspace,
             pattern=flashinfer_comm.AllReduceFusionPattern.kAllReduce,
             launch_with_pdl=True,
             trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
@@ -435,4 +449,3 @@ class FlashInferAllReduce:
     def destroy(self):
         if not self.disabled:
             destroy_fi_ar_workspace()
-        self.workspace = None
