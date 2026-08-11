@@ -243,18 +243,26 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # against pending D registrations on the P worker.
         self.push_finished_blocks: dict[ReqId, BlockIds] = {}
 
+    _MAX_TP_SIZE = 4096
+    _MAX_PP_SIZE = 256
+
     def _add_new_req(
         self,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
     ) -> ReqMeta:
+        tp_size = kv_transfer_params.get("tp_size", 1)
+        if not isinstance(tp_size, int) or tp_size < 1 or tp_size > self._MAX_TP_SIZE:
+            raise ValueError(f"Invalid tp_size in kv_transfer_params: {tp_size!r}")
+        pp_size = kv_transfer_params.get("pp_size", 1)
+        if not isinstance(pp_size, int) or pp_size < 1 or pp_size > self._MAX_PP_SIZE:
+            raise ValueError(f"Invalid pp_size in kv_transfer_params: {pp_size!r}")
         return ReqMeta(
             local_block_ids=local_block_ids,
             local_physical_block_ids=local_block_ids,
-            # P workers don't need to receive tp_size from proxy here.
-            tp_size=kv_transfer_params.get("tp_size", 1),
+            tp_size=tp_size,
             remote_block_size=kv_transfer_params.get("remote_block_size"),
-            pp_size=kv_transfer_params.get("pp_size", 1),
+            pp_size=pp_size,
         )
 
     def add_new_req_to_save(
