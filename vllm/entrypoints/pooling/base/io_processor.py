@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from concurrent.futures import Executor
 from typing import Any, Final, cast
 
 from vllm import (
@@ -10,21 +11,17 @@ from vllm import (
 )
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
     ChatTemplateConfig,
-    ChatTemplateContentFormatOption,
-    ConversationMessage,
 )
-from vllm.entrypoints.serve.engine.typing import RendererChatRequest, RendererRequest
-from vllm.inputs import EngineInput, SingletonPrompt
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
-from vllm.tool_parsers import ToolParser
+from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..typing import (
-    ALLOfflineInputsContext,
+    AnyOfflineInputsContext,
+    AnyRenderParam,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
     OfflineEncodeInputsContext,
@@ -66,14 +63,25 @@ class PoolingIOProcessor:
             chat_template_config.trust_request_chat_template
         )
 
+        self.template_kwargs = None
+        self.tool_dicts = None
+
+        # Shared thread pool executor for preprocessing
+        self._executor: Executor = self.renderer._executor
+        self.render_async = make_async(self.render, executor=self._executor)
+
     #######################################
     # online APIs
 
     def create_pooling_params(self, request):
         return request.to_pooling_params()
 
-    def pre_process_online(self, ctx: PoolingServeContext):
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
         request = ctx.request
+        renderer = self.renderer
+        requests: Sequence[AnyRenderParam]
 
         if isinstance(request, PoolingChatLikeRequest):
             self._validate_chat_template(
@@ -81,23 +89,86 @@ class PoolingIOProcessor:
                 chat_template_kwargs=request.chat_template_kwargs,
                 trust_request_chat_template=self.trust_request_chat_template,
             )
-            _, engine_inputs = self._preprocess_chat_online(
-                request,
-                request.messages,
-                default_template=self.chat_template,
-                default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=None,
+
+            num_requests = 1
+            default_template_kwargs = merge_kwargs(
+                self.template_kwargs,
+                dict(
+                    tools=self.tool_dicts,
+                    tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                ),
             )
+
+            mm_config = self.model_config.multimodal_config
+            tok_params = request.build_tok_params(self.model_config)
+            chat_params = request.build_chat_params(
+                self.chat_template, self.chat_template_content_format
+            ).with_defaults(
+                default_template_kwargs,
+                default_media_io_kwargs=(
+                    mm_config.media_io_kwargs if mm_config else None
+                ),
+            )
+
+            params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
+            seq_lora_requests = self._lora_request_to_seq(
+                ctx.lora_request, num_requests
+            )
+            seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
+
+            requests = [
+                EncodeChatRenderParams(
+                    conversations=request.messages,
+                    chat_params=chat_params,
+                    tok_params=tok_params,
+                    prompt_extras=ctx.prompt_extras,
+                    skip_mm_cache=False,
+                    params=params_seq[i],
+                    lora_requests=seq_lora_requests[i],
+                    priorities=seq_priority[i],
+                )
+                for i in range(num_requests)
+            ]
+
+            return requests
+
         elif isinstance(request, PoolingCompletionLikeRequest):
-            engine_inputs = self._preprocess_cmpl_online(
-                request,
-                prompt_input=request.input,
-                prompt_embeds=None,
+            model_config = self.model_config
+            prompts_seq = prompt_to_seq(request.input)
+            num_requests = len(prompts_seq)
+
+            parsed_prompts = [
+                (
+                    prompt
+                    if isinstance(prompt, bytes)
+                    else parse_model_prompt(model_config, prompt)
+                )
+                for prompt in prompts_seq
+            ]
+            tok_params = request.build_tok_params(model_config)
+
+            params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
+            seq_lora_requests = self._lora_request_to_seq(
+                ctx.lora_request, num_requests
             )
+            seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
+
+            requests = [
+                EncodeCMPLRenderParams(
+                    prompts=parsed_prompts[i],
+                    tok_params=tok_params,
+                    prompt_extras=ctx.prompt_extras,
+                    skip_mm_cache=False,
+                    params=params_seq[i],
+                    lora_requests=seq_lora_requests[i],
+                    priorities=seq_priority[i],
+                )
+                for i in range(num_requests)
+            ]
+
+            return requests
         else:
             raise ValueError(f"Invalid {self.name} request type")
-
-        ctx.engine_inputs = engine_inputs
 
     def post_process_online(
         self,
@@ -109,7 +180,7 @@ class PoolingIOProcessor:
     # offline APIs
 
     def get_request_factory_offline(
-        self, ctx: ALLOfflineInputsContext
+        self, ctx: AnyOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineEncodeInputsContext)
 
@@ -209,84 +280,6 @@ class PoolingIOProcessor:
             priorities=render_params["priorities"],
         )
 
-    def _preprocess_cmpl_online(
-        self,
-        request: RendererRequest,
-        prompt_input: str | list[str] | list[int] | list[list[int]] | None,
-        prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[EngineInput]:
-        renderer = self.renderer
-        model_config = self.model_config
-
-        prompts = list[SingletonPrompt | bytes]()
-        if prompt_embeds is not None:  # embeds take higher priority
-            prompts.extend(prompt_to_seq(prompt_embeds))
-        if prompt_input is not None:
-            prompts.extend(prompt_to_seq(prompt_input))
-
-        parsed_prompts = [
-            (
-                prompt
-                if isinstance(prompt, bytes)
-                else parse_model_prompt(model_config, prompt)
-            )
-            for prompt in prompts
-        ]
-        tok_params = request.build_tok_params(model_config)
-
-        return renderer.render_cmpl(
-            parsed_prompts,
-            tok_params,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := getattr(request, k, None)) is not None
-            },
-        )
-
-    def _preprocess_chat_online(
-        self,
-        request: RendererChatRequest,
-        messages: list[ChatCompletionMessageParam],
-        default_template: str | None,
-        default_template_content_format: ChatTemplateContentFormatOption,
-        default_template_kwargs: dict[str, Any] | None,
-        tool_dicts: list[dict[str, Any]] | None = None,
-        tool_parser: type[ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[EngineInput]]:
-        renderer = self.renderer
-
-        default_template_kwargs = merge_kwargs(
-            default_template_kwargs,
-            dict(
-                tools=tool_dicts,
-                tokenize=is_mistral_tokenizer(renderer.tokenizer),
-            ),
-        )
-
-        mm_config = self.model_config.multimodal_config
-
-        tok_params = request.build_tok_params(self.model_config)
-        chat_params = request.build_chat_params(
-            default_template, default_template_content_format
-        ).with_defaults(
-            default_template_kwargs,
-            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
-        )
-
-        (conversation,), (engine_input,) = renderer.render_chat(
-            [messages],
-            chat_params,
-            tok_params,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := getattr(request, k, None)) is not None
-            },
-        )
-
-        return conversation, [engine_input]
-
     def _validate_chat_template(
         self,
         request_chat_template: str | None,
@@ -341,10 +334,13 @@ class PoolingIOProcessor:
 
     def _priority_to_seq(
         self,
-        priority: Sequence[int] | None,
+        priority: int | Sequence[int] | None,
         num_requests: int,
     ) -> Sequence[int]:
         if priority is not None:
+            if isinstance(priority, int):
+                return [priority] * num_requests
+
             if len(priority) != num_requests:
                 raise ValueError(
                     f"The lengths of prompts ({num_requests}) "
