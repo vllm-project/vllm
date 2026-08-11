@@ -182,6 +182,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
                     start_of_start = current_text.find(self.start_token)
                     start_in_delta = max(0, start_of_start + len(self.start_token) - len(previous_text)) if start_of_start != -1 else 0
                     return DeltaMessage(reasoning=delta_text[start_in_delta:])
+        else:
             # not find thinking start token
             return DeltaMessage(content=delta_text)
 
