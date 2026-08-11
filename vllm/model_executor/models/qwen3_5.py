@@ -259,8 +259,6 @@ class Qwen3_5Model(Qwen3NextModel):
         )
         self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
             self.layers,
-            self.start_layer,
-            self.end_layer,
             Qwen3NextSparseMoeBlock,
             "mlp",
         )

@@ -1103,8 +1103,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         )
         self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
             self.layers,
-            self.start_layer,
-            self.end_layer,
             MiniMaxM3MoE,
             "block_sparse_moe",
         )

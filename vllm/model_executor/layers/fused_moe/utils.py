@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+from collections.abc import Iterable
 from math import prod
 from typing import TYPE_CHECKING
 
@@ -39,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -88,9 +90,7 @@ def resolve_fused_shared_expert_fusion(
 
 
 def resolve_model_fused_shared_expert_fusion(
-    layers: nn.ModuleList,
-    start_layer: int,
-    end_layer: int,
+    layers: nn.ModuleList | Iterable[nn.Module],
     moe_cls: type[nn.Module],
     moe_name: str,
 ) -> bool:
@@ -103,8 +103,9 @@ def resolve_model_fused_shared_expert_fusion(
 
     moe_layers = (
         moe_layer
-        for layer in layers[start_layer:end_layer]
-        if isinstance(moe_layer := get_moe_layer(layer), moe_cls)
+        for layer in layers
+        if not isinstance(layer, PPMissingLayer)
+        and isinstance(moe_layer := get_moe_layer(layer), moe_cls)
     )
 
     enabled = [

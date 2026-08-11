@@ -227,9 +227,7 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                 self.moe_layers.append(layer.mlp.experts)
         self.extract_moe_parameters(example_moe)
         self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
-            torch.nn.ModuleList(self.model.layers.values()),
-            0,
-            len(self.model.layers),
+            self.model.layers.values(),
             Glm4MoeLite,
             "mtp_block.mlp",
         )

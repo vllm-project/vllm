@@ -97,8 +97,6 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
         self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
             self.layers,
-            0,
-            len(self.layers),
             Qwen3NextSparseMoeBlock,
             "mlp",
         )

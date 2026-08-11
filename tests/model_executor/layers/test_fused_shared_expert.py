@@ -14,6 +14,7 @@ from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
 )
+from vllm.model_executor.models.utils import PPMissingLayer
 
 
 def test_determine_expert_counts_fuse_shared_experts_override(
@@ -128,19 +129,23 @@ def test_resolve_model_fused_shared_expert_fusion_requires_consistent_layers() -
     disabled_layers = nn.ModuleList([Layer(False)])
     mixed_layers = nn.ModuleList([Layer(True), Layer(False)])
     empty_layers = nn.ModuleList()
+    pipeline_layers = nn.ModuleList([Layer(True), PPMissingLayer()])
 
     assert fused_moe_utils.resolve_model_fused_shared_expert_fusion(
-        enabled_layers, 0, len(enabled_layers), MoE, "mlp"
+        enabled_layers, MoE, "mlp"
     )
     assert not fused_moe_utils.resolve_model_fused_shared_expert_fusion(
-        disabled_layers, 0, len(disabled_layers), MoE, "mlp"
+        disabled_layers, MoE, "mlp"
     )
     assert not fused_moe_utils.resolve_model_fused_shared_expert_fusion(
-        empty_layers, 0, len(empty_layers), MoE, "mlp"
+        empty_layers, MoE, "mlp"
+    )
+    assert fused_moe_utils.resolve_model_fused_shared_expert_fusion(
+        pipeline_layers, MoE, "mlp"
     )
     with pytest.raises(NotImplementedError, match="1 enabled and 1 disabled layers"):
         fused_moe_utils.resolve_model_fused_shared_expert_fusion(
-            mixed_layers, 0, len(mixed_layers), MoE, "mlp"
+            mixed_layers, MoE, "mlp"
         )
 
 

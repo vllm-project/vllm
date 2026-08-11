@@ -577,8 +577,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
             self.layers,
-            self.start_layer,
-            self.end_layer,
             DeepseekV4MoE,
             "ffn",
         )
