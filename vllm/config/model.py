@@ -671,6 +671,11 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
+        # Reject architectures this platform cannot run before any worker is
+        # spawned. `_try_load_model_cls` checks this too, but that only runs
+        # once the model is being loaded inside a worker.
+        current_platform.verify_model_arch(arch)
+
         # Set default tokenizer modes based on model architecture
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":
