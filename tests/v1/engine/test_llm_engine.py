@@ -236,3 +236,24 @@ def test_skip_tokenizer_initialization(model: str):
     assert len(completions) > 0
     assert completions[0].text == ""
     assert completions[0].token_ids
+
+
+def test_kv_sharing_fast_prefill_rejects_prompt_logprobs_zero():
+    """prompt_logprobs=0 is a meaningful, explicit request ("return the
+    prompt token's own logprob"), not "unset" -- it must be rejected by the
+    same admission-time check as any other prompt_logprobs value, before any
+    GPU work begins.
+    """
+    llm = LLM(
+        model=MODEL,
+        kv_sharing_fast_prefill=True,
+        enforce_eager=True,
+        dtype=DTYPE,
+        max_model_len=128,
+        gpu_memory_utilization=0.5,
+    )
+    with pytest.raises(ValueError, match="kv-sharing-fast-prefill"):
+        llm.generate(
+            "Hello, my name is",
+            SamplingParams(prompt_logprobs=0, max_tokens=5),
+        )
