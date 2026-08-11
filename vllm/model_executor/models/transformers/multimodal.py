@@ -746,12 +746,22 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
     ) -> "BatchFeature":
         """Ask for the replacement each placeholder expands to, and record it as
         per-item fields: its token ids, and the tokens or patches behind them."""
+        has_mm_data = any(mm_data.values())
         mm_data = {**mm_data, "return_text_replacement_offsets": True}
         hf_inputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
         offsets = hf_inputs.pop("text_replacement_offsets", None)
         # Some processors return an empty batch as a tensor rather than a list
         if offsets is None or len(offsets) == 0 or len(offsets[0]) == 0:
+            if has_mm_data:
+                raise ValueError(
+                    f"{type(self.info.get_hf_processor()).__name__} returned no "
+                    "text replacement offsets, so the Transformers modeling backend "
+                    "cannot locate the placeholder of each item. Its `__call__` has "
+                    "to reach `ProcessorMixin.get_text_with_replacements` with one "
+                    "replacement per item, which usually means implementing "
+                    "`replace_<modality>_token`. This has to be fixed in transformers."
+                )
             return hf_inputs
 
         tokenizer = self.info.get_tokenizer()

@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import patch
+
 import pytest
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
+from vllm.model_executor.models.transformers.multimodal import (
+    MultiModalProcessor,
+    OffsetsMultiModalProcessor,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
@@ -140,6 +146,37 @@ def test_non_embedding_tokens_excluded_from_placeholders():
     (placeholder,) = result["mm_placeholders"]["image"]
     assert placeholder.is_embed is not None
     assert 0 < int(placeholder.is_embed.sum()) < placeholder.length
+
+
+@pytest.mark.skipif(
+    MultiModalProcessor is not OffsetsMultiModalProcessor,
+    reason="Replacement offsets are only used from transformers 5.15.0 onwards",
+)
+def test_missing_replacement_offsets_names_the_processor():
+    """A processor that reports no replacement offsets cannot be served, which must
+    be said plainly rather than surfacing later as a field config mismatch."""
+    model_id = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    hf_processor_cls = type(mm_processor.info.get_hf_processor())
+    hf_call = hf_processor_cls.__call__
+
+    def without_offsets(self, *args, **kwargs):
+        hf_inputs = hf_call(self, *args, **kwargs)
+        hf_inputs.pop("text_replacement_offsets", None)
+        return hf_inputs
+
+    with (
+        patch.object(hf_processor_cls, "__call__", without_offsets),
+        pytest.raises(ValueError, match="LlavaOnevisionProcessor returned no"),
+    ):
+        mm_processor(
+            prompt="<image>\nWhat is the content of this image?",
+            mm_items=mm_processor.info.parse_mm_data(
+                {"image": ImageAsset("cherry_blossom").pil_image}
+            ),
+            hf_processor_mm_kwargs={},
+        )
 
 
 def test_text_only_prompt():
