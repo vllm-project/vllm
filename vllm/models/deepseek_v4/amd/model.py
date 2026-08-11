@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
@@ -17,7 +18,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
@@ -104,8 +105,50 @@ class DeepseekV4MLP(nn.Module):
         else:
             self.act_fn = SiluAndMul()
 
+        # gate_up_proj B-preshuffle (ColumnParallel -> no all-reduce); set at load.
+        self._gateup = rocm_aiter_ops.is_enabled()
+        # Block scale for the preshuffled gate_up weight; None = not preshuffled.
+        self._gateup_scale: torch.Tensor | None = None
+
+    def prepare_gateup_preshuffle(self) -> None:
+        # B-preshuffle the gate_up_proj weight in place (single weight).
+        if not self._gateup:
+            return
+        from vllm.model_executor.utils import replace_parameter
+
+        w = getattr(self.gate_up_proj, "weight", None)
+        ws = getattr(self.gate_up_proj, "weight_scale_inv", None)  # per-block scale
+        if w is None or ws is None or w.dim() != 2:
+            return
+        # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
+        if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
+            return
+        if ws.dtype == torch.float8_e8m0fnu:
+            from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+                _upcast_e8m0_to_fp32,
+            )
+
+            ws = _upcast_e8m0_to_fp32(ws).contiguous()
+        replace_parameter(
+            self.gate_up_proj,
+            "weight",
+            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+        )
+        self._gateup_scale = ws
+
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
+        if self._gateup_scale is not None and x.dim() == 2:
+            # gate_up via fp8 group-quant (col-major) + B-preshuffle GEMM.
+            x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
+            gate_up = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                x_fp8,
+                self.gate_up_proj.weight,
+                x_scale,
+                self._gateup_scale,
+                output_dtype=x.dtype,
+            )
+        else:
+            gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -236,7 +279,7 @@ class DeepseekV4MoE(nn.Module):
         self.experts_start_idx = self.tp_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             n_shared_experts=(
                 config.n_shared_experts if self.fuse_shared_experts else None
@@ -265,7 +308,7 @@ class DeepseekV4MoE(nn.Module):
 
         org_shape = hidden_states.shape
         if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
+            # In this case, the gate/router runs inside the MoERunner class
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
                 router_logits=hidden_states,
@@ -508,7 +551,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.rms_norm_eps = config.rms_norm_eps
 
         # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4Attention.attn_gemm_parallel_execute
+        # DeepseekV4Attention._run_parallel_input_projections
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
         # Disable them on ROCm because of hang issues.
@@ -573,13 +616,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             requires_grad=False,
         )
         self.hc_head_op = HCHeadOp()
-        # Pre-hc_head residual stream buffer for the MTP draft. Stable
-        # address (outside the cudagraph pool) so the copy_ in forward()
-        # refreshes it correctly across captured shapes.
-        # refreshes it correctly across captured shapes. Only allocated on
-        # the last PP rank — that's where MTP target hidden states are
-        # produced.
-        if get_pp_group().is_last_rank:
+        spec_config = vllm_config.speculative_config
+        needs_mtp_hidden_states = spec_config is not None and (
+            spec_config.use_eagle() or spec_config.uses_draft_model()
+        )
+        if get_pp_group().is_last_rank and needs_mtp_hidden_states:
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
@@ -679,9 +720,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
-        # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        num_tokens = hidden_states.shape[0]
-        self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+        if self._mtp_hidden_buffer is not None:
+            num_tokens = hidden_states.shape[0]
+            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
         hidden_states = self.hc_head_op(
             hidden_states,
@@ -708,6 +749,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+
+        def _resolve_param_name(name: str) -> str:
+            inv_name = f"{name}_inv"
+            if name not in params_dict and inv_name in params_dict:
+                return inv_name
+            return name
 
         # TP for attention
         tp_size = get_tensor_model_parallel_world_size()
@@ -762,10 +809,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
                 if is_pp_missing_parameter(name, self):
                     break
-                param = params_dict[name]
+                param_name = _resolve_param_name(name)
+                param = params_dict[param_name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
+                loaded_params.add(param_name)
                 break
             else:
                 if ".experts." in name:
@@ -816,12 +864,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 else:
                     if is_pp_missing_parameter(name, self):
                         continue
-                    param = params_dict[name]
+                    param_name = _resolve_param_name(name)
+                    param = params_dict[param_name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
+                    loaded_params.add(param_name)
                     continue
 
         return loaded_params
@@ -893,6 +942,7 @@ def _make_deepseek_v4_weights_mapper(
             "head.weight": "lm_head.weight",
             "embed.weight": "embed_tokens.weight",
             ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
+            ".input_scale": ".input_scale_2",
         },
         orig_to_new_substr=substr_map,
     )
@@ -904,6 +954,10 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     # Default mapper assumes the original FP4-expert checkpoint layout.
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
     hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -963,8 +1017,15 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        return loaded_params
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        # After per-layer quant finalize, so we preshuffle the final fp8 weights.
+        for module in self.modules():
+            if isinstance(module, DeepseekV4ROCMAiterMLAAttention):
+                module.prepare_attn_preshuffle()
+            elif isinstance(module, DeepseekV4MLP):
+                module.prepare_gateup_preshuffle()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

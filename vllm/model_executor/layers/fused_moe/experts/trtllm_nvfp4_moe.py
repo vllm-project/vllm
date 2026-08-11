@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
+    has_flashinfer_situ_activation,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -110,6 +111,27 @@ class TrtLlmNvFp4ExpertsBase:
             self.gemm1_alpha = None
             self.gemm1_beta = None
 
+        # SITU (Kimi SituGLU) TRTLLM-Gen kernel computes
+        # left=alpha*tanh(x0/alpha)*sigmoid(x0), right=beta*tanh(x1/beta),
+        # matching vLLM's situ_and_mul, so map situ beta -> gatedActAlpha
+        # (gemm1_alpha) and situ linear_beta -> gatedActBeta (gemm1_beta).
+        # These operate on the dequantized gate/up, so they are NOT folded by
+        # g1_alphas in process_weights_after_loading.
+        self.is_situ = moe_config.activation == MoEActivation.SITU
+        if self.is_situ:
+            situ_beta = moe_config.activation_situ_beta
+            situ_linear_beta = moe_config.activation_situ_linear_beta
+            assert situ_beta is not None and situ_beta > 0, (
+                "SITU requires activation_situ_beta > 0"
+            )
+            assert situ_linear_beta is not None and situ_linear_beta > 0, (
+                "TRTLLM SiTuGlu requires activation_situ_linear_beta > 0 "
+                "(the private cubin has no up-passthrough path)"
+            )
+            self.gemm1_alpha = _per_expert(situ_beta)
+            self.gemm1_beta = _per_expert(situ_linear_beta)
+            self.gemm1_clamp_limit = None
+
         logger.debug_once(
             "activation=%s, gemm1_alpha=%s, gemm1_beta=%s, gemm1_clamp_limit=%s",
             moe_config.activation,
@@ -142,7 +164,10 @@ class TrtLlmNvFp4ExpertsBase:
         # (via the in-place mul above) and never changes again, so this is a
         # static, per-expert constant. Register on the layer so EPLB
         # rearranges it alongside the other expert tensors.
-        if self.gemm1_clamp_limit is not None:
+        # SITU alpha/beta act on the dequantized gate/up (tanh clamps), not the
+        # raw GEMM1 accumulator, so they are registered as-is without the
+        # g1_alphas fold used by the SwiGLU-OAI clamp/beta below.
+        if self.gemm1_clamp_limit is not None and not self.is_situ:
             gemm1_clamp_limit = self.gemm1_clamp_limit / self.quant_config.g1_alphas
             layer.register_parameter(
                 "gemm1_clamp_limit",
@@ -155,7 +180,11 @@ class TrtLlmNvFp4ExpertsBase:
         # raw. Register both on the layer so EPLB rearranges them with the
         # other per-expert tensors.
         if self.gemm1_beta is not None:
-            gemm1_beta = self.gemm1_beta / self.quant_config.g1_alphas
+            gemm1_beta = (
+                self.gemm1_beta
+                if self.is_situ
+                else self.gemm1_beta / self.quant_config.g1_alphas
+            )
             layer.register_parameter(
                 "gemm1_beta",
                 torch.nn.Parameter(gemm1_beta, requires_grad=False),
@@ -197,7 +226,9 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports SiLU, RELU^2 non-gated, GELU, and clamped SwiGLU-OAI."""
+        """Supports SITU only when the installed FlashInfer exposes it."""
+        if activation == MoEActivation.SITU:
+            return has_flashinfer_situ_activation()
         return activation in [
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,

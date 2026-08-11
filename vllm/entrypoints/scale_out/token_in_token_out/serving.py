@@ -14,6 +14,7 @@ import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     clamp_prompt_logprobs,
@@ -33,7 +34,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import EngineInput, mm_input
+from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
@@ -143,7 +144,29 @@ class ServingTokens(GenerateBaseServing):
             return self.create_error_response(e)
 
         engine_input: EngineInput
-        if features := request.features:
+        if request.content_parts:
+            tracker = AsyncMultiModalItemTracker(self.model_config)
+            mm_parser = tracker.create_parser()
+            for part in request.content_parts:
+                ptype = part.get("type", "")
+                url = part.get("url")
+                uuid = part.get("uuid")
+                if ptype == "image_url":
+                    mm_parser.parse_image(url, uuid)
+                elif ptype == "audio_url":
+                    mm_parser.parse_audio(url, uuid)
+                elif ptype == "video_url":
+                    mm_parser.parse_video(url, uuid)
+            mm_data, mm_uuids = await tracker.resolve_items()
+            prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+            if mm_data:
+                prompt["multi_modal_data"] = mm_data
+            if mm_uuids:
+                prompt["multi_modal_uuids"] = mm_uuids
+            (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
+                [prompt]
+            )
+        elif features := request.features:
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
             mm_placeholders: dict[str, list[PlaceholderRange]] = {
                 modality: [
@@ -215,6 +238,7 @@ class ServingTokens(GenerateBaseServing):
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        session_id = self._get_session_id_from_headers(raw_request)
 
         result_generator = self.engine_client.generate(
             engine_input,
@@ -224,6 +248,7 @@ class ServingTokens(GenerateBaseServing):
             trace_headers=trace_headers,
             priority=request.priority,
             data_parallel_rank=data_parallel_rank,
+            session_id=session_id,
         )
 
         assert result_generator is not None

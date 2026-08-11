@@ -17,14 +17,20 @@ import pytest
 import torch
 from packaging import version
 
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+    QuarkConfig,
     QuarkLinearMethod,
     QuarkW8A8Fp8,
+    QuarkW8A8Fp8PerBlock,
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkW4A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    quant_dequant_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
@@ -52,6 +58,8 @@ QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
     importlib.metadata.version("amd-quark")
 ) >= version.parse(QUARK_MXFP4_MIN_VERSION)
 
+AITER_AVAILABLE = is_aiter_found_and_supported()
+
 DEVICE_TYPE = current_platform.device_type
 
 if QUARK_MXFP4_AVAILABLE:
@@ -72,6 +80,101 @@ except huggingface_hub.errors.RepositoryNotFoundError:
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+def test_quark_config_has_no_model_specific_fused_mappings():
+    config = QuarkConfig({})
+
+    assert "gate_up_proj" not in config.packed_modules_mapping
+    assert "fused_wqa_wkv" not in config.packed_modules_mapping
+
+
+def test_quark_config_preserves_existing_packed_modules_mapping():
+    class CustomQuarkConfig(QuarkConfig):
+        packed_modules_mapping = {"custom_proj": ["a", "b"]}
+
+    config = CustomQuarkConfig({})
+
+    assert config.packed_modules_mapping["custom_proj"] == ["a", "b"]
+
+
+def test_quark_fp8_w8a8_detects_per_block_config():
+    config = QuarkConfig({})
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "block_size": [128, 128],
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": True,
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+    assert config._is_fp8_w8a8(weight_config, input_config)
+
+
+def test_quark_fp8_w8a8_rejects_per_block_static_input():
+    config = QuarkConfig({})
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "block_size": [128, 128],
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": False,
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+    assert not config._is_fp8_w8a8(weight_config, input_config)
+
+
+def test_quark_fp8_w8a8_rejects_per_block_group_size_mismatch():
+    config = QuarkConfig({})
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "block_size": [128, 128],
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": True,
+        "group_size": 64,
+        "symmetric": True,
+    }
+
+    assert not config._is_fp8_w8a8(weight_config, input_config)
+
+
+def test_quark_w8a8_fp8_per_block_requires_block_size():
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": True,
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+    with pytest.raises(ValueError, match="requires `block_size`"):
+        QuarkW8A8Fp8PerBlock(weight_config, input_config)
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
@@ -487,6 +590,42 @@ def test_mxfp4_dequant_kernel_match_quark(
     assert torch.equal(out_hip, out_torch)
 
 
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.skipif(
+    not AITER_AVAILABLE,
+    reason="AITER is not found or not supported on the current platform",
+)
+@pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
+def test_mxfp4_dynamic_quant_match_quark(
+    float_dtype: torch.dtype, scalings: list[float]
+):
+    """`AiterMxfp4LinearKernel` quantizes weights dynamically through AITER's
+    `dynamic_mxfp4_quant`, while the emulation path quantizes/dequantizes
+    through Quark's `qdq_mxfp4`. Check that both agree on the same input.
+    """
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    torch.manual_seed(0)
+
+    hidden_size = 32 * 64
+    inp = (torch.rand(48, hidden_size, dtype=float_dtype, device=DEVICE_TYPE) - 0.5) * 2
+    for i in range(hidden_size // 32):
+        inp[:, i * 32 : (i + 1) * 32] = (
+            inp[:, i * 32 : (i + 1) * 32] * scalings[i % len(scalings)]
+        )
+
+    x_q, x_s = dynamic_mxfp4_quant(inp)
+    out_dynamic_quant = dq_mxfp4_torch(x_q, x_s, float_dtype)
+
+    out_quark_qdq = quant_dequant_mxfp4(inp)
+
+    assert torch.equal(out_dynamic_quant, out_quark_qdq)
+
+
 # Unit tests for ``is_layer_skipped`` fused-name handling.
 
 FUSED_MAPPING = {
@@ -562,11 +701,32 @@ def test_non_fused_layer_unaffected():
 
 
 def test_substr_match_on_fused_name():
-    # skip_with_substr=True path: fused-name substring match should also
+    # Substring matching: a fused-name match should also
     # short-circuit before shard expansion.
     assert is_layer_skipped(
         prefix="model.layers.0.self_attn.qkv_proj",
         ignored_layers=["self_attn.qkv_proj"],
         fused_mapping=FUSED_MAPPING,
-        skip_with_substr=True,
+        match_mode="substring",
+    )
+
+
+@pytest.mark.parametrize(
+    ("prefix", "ignored_layer", "expected"),
+    [
+        ("model.layers.0.self_attn.b_proj", "b_proj", True),
+        ("model.layers.0.self_attn.q_b_proj", "b_proj", False),
+        ("model.layers.0.self_attn.kv_b_proj", "b_proj", False),
+        ("model.layers.5.self_attn.g_proj", "5.self_attn.g_proj", True),
+        ("model.layers.6.self_attn.g_proj", "5.self_attn.g_proj", False),
+    ],
+)
+def test_suffix_match_at_module_boundary(prefix, ignored_layer, expected):
+    assert (
+        is_layer_skipped(
+            prefix=prefix,
+            ignored_layers=[ignored_layer],
+            match_mode="suffix",
+        )
+        is expected
     )
