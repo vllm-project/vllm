@@ -129,10 +129,18 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # INT8 requires at least 7.5 (Turing) on CUDA. ROCm CDNA GPUs
         # (e.g. MI2xx/MI3xx/gfx950) provide native INT8 matrix-core support and
         # the Triton int8_w8a8 fused MoE kernel handles them.
+        # XPU reaches the same Triton kernel through the same launcher, and both
+        # int8 activation-quant paths work there: per-token uses the Triton
+        # `per_token_quant_int8`, per-tensor resolves to the XPU branch of
+        # `scaled_int8_quant`, which is plain elementwise arithmetic.
         device_supports_int8 = (
-            current_platform.is_cuda()
-            and current_platform.has_device_capability((7, 5))
-        ) or current_platform.is_rocm()
+            (
+                current_platform.is_cuda()
+                and current_platform.has_device_capability((7, 5))
+            )
+            or current_platform.is_rocm()
+            or current_platform.is_xpu()
+        )
 
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_int8:
