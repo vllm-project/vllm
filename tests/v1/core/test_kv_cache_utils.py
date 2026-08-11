@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import importlib
+import logging
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -3034,3 +3035,128 @@ def test_resolve_block_hashes_rejects_mismatched_view():
     mismatched = BlockHashListWithBlockSize(raw, 2, 8)
     with pytest.raises(AssertionError):
         resolve_block_hashes(mismatched, 2, 4)
+
+
+def _eagle_drop_config(
+    method: str | None,
+    enable_prefix_caching: bool = True,
+    block_size: int = 16,
+    dcp: int = 1,
+):
+    """Minimal VllmConfig stand-in for the EAGLE/MTP prefix-cache drop helpers."""
+    eagle_methods = ("eagle", "eagle3", "mtp", "dflash", "dspark")
+    spec = (
+        None
+        if method is None
+        else SimpleNamespace(
+            method=method,
+            use_eagle=lambda: method in eagle_methods,
+        )
+    )
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=block_size,
+            enable_prefix_caching=enable_prefix_caching,
+            prefix_match_unit=None,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
+        speculative_config=spec,
+    )
+
+
+def _hybrid_eagle_kv_cache_config(block_size: int = 1072):
+    """Full-attention + align-mode Mamba groups, as built for Qwen3.5-style models."""
+    full_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((4096,),),
+        dtypes=(torch.bfloat16,),
+        mamba_cache_mode="align",
+    )
+    return KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["model.full_attn"], full_spec),
+            KVCacheGroupSpec(["model.mamba"], mamba_spec),
+        ],
+    )
+
+
+def test_eagle_prefix_cache_drop_tokens_hybrid_reports_enlarged_block():
+    # The Mamba group never drops; the full-attention group drops its whole
+    # (enlarged) block because hash_block_size == the group block size here.
+    kv_cache_config = _hybrid_eagle_kv_cache_config(block_size=1072)
+    assert (
+        kv_cache_utils.eagle_prefix_cache_drop_tokens(
+            kv_cache_config, _eagle_drop_config("mtp"), hash_block_size=1072
+        )
+        == 1072
+    )
+
+
+def test_eagle_prefix_cache_drop_tokens_uses_hash_granularity_when_available():
+    # With fine-grained partial hash hits the drop shrinks to one hash block.
+    kv_cache_config = _hybrid_eagle_kv_cache_config(block_size=1072)
+    assert (
+        kv_cache_utils.eagle_prefix_cache_drop_tokens(
+            kv_cache_config, _eagle_drop_config("mtp"), hash_block_size=16
+        )
+        == 16
+    )
+
+
+@pytest.mark.parametrize(
+    "method,enable_prefix_caching",
+    [
+        (None, True),  # no speculative decoding at all
+        ("ngram", True),  # not an EAGLE-style method: no hidden-state reuse
+        ("mtp", False),  # prefix caching off: nothing to lose
+    ],
+)
+def test_eagle_prefix_cache_drop_tokens_zero_when_inapplicable(
+    method, enable_prefix_caching
+):
+    kv_cache_config = _hybrid_eagle_kv_cache_config(block_size=1072)
+    vllm_config = _eagle_drop_config(method, enable_prefix_caching)
+    assert (
+        kv_cache_utils.eagle_prefix_cache_drop_tokens(
+            kv_cache_config, vllm_config, hash_block_size=1072
+        )
+        == 0
+    )
+
+
+def test_maybe_warn_eagle_prefix_cache_loss_warns_on_hybrid(caplog):
+    kv_cache_config = _hybrid_eagle_kv_cache_config(block_size=1072)
+    with caplog.at_level(logging.WARNING, logger="vllm.v1.core.kv_cache_utils"):
+        kv_cache_utils.maybe_warn_eagle_prefix_cache_loss(
+            kv_cache_config, _eagle_drop_config("mtp"), hash_block_size=1072
+        )
+    assert "1072 tokens per request are dropped" in caplog.text
+
+
+def test_maybe_warn_eagle_prefix_cache_loss_quiet_on_plain_attention(caplog):
+    # A single full-attention group at the nominal block size loses one small
+    # block: not worth a startup warning.
+    full_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["model.full_attn"], full_spec)],
+    )
+    with caplog.at_level(logging.WARNING, logger="vllm.v1.core.kv_cache_utils"):
+        kv_cache_utils.maybe_warn_eagle_prefix_cache_loss(
+            kv_cache_config, _eagle_drop_config("eagle3"), hash_block_size=16
+        )
+    assert caplog.text == ""

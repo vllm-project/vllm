@@ -95,6 +95,11 @@ logger = init_logger(__name__)
 NONE_HASH: BlockHash
 _CBOR_HASH_FUNCTIONS = frozenset({sha256_cbor, xxhash_cbor})
 
+# Minimum EAGLE/MTP prefix-cache drop (in tokens) worth a startup warning.
+# Hybrid models routinely land in the thousands; plain attention models stay
+# at the nominal block size and should stay quiet.
+_EAGLE_PREFIX_CACHE_WARN_TOKENS = 512
+
 
 def init_none_hash(hash_fn: Callable[[Any], bytes]):
     global NONE_HASH
@@ -666,6 +671,96 @@ def resolve_kv_cache_block_sizes(
             f"Got group block sizes={group_block_sizes}."
         )
     return scheduler_block_size, hash_block_size
+
+
+def eagle_prefix_cache_drop_tokens(
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    hash_block_size: int,
+) -> int:
+    """Worst-case per-request prefix-cache loss from the EAGLE/MTP block drop.
+
+    EAGLE-style speculation (including MTP) cannot reuse the KV of the last
+    matched block, because the drafter runs one token ahead of the verified
+    prefix. ``KVCacheCoordinator`` therefore drops one drop-unit off every
+    affected group's prefix-cache hit. Returns the largest such drop unit in
+    tokens, or 0 when nothing is dropped.
+
+    Mirrors the drop accounting in ``KVCacheCoordinator`` at group-spec
+    granularity: the manager types that opt into fine-grained hash lookup
+    (full attention and ``align``-mode Mamba) are identified by their spec.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not spec_config.use_eagle():
+        return 0
+    if not vllm_config.cache_config.enable_prefix_caching:
+        return 0
+
+    groups = kv_cache_config.kv_cache_groups
+    if not groups:
+        return 0
+
+    # Same fallback as KVCacheCoordinator: when no group is explicitly
+    # flagged, every group takes the drop.
+    affected = [g for g in groups if g.is_eagle_group] or groups
+
+    # Mirrors KVCacheCoordinator.enable_partial_hash_hits.
+    dcp = vllm_config.parallel_config.decode_context_parallel_size
+    partial_hash_hits = dcp == 1 and any(
+        isinstance(g.kv_cache_spec, MambaSpec)
+        and g.kv_cache_spec.mamba_cache_mode == "align"
+        and g.kv_cache_spec.block_size > hash_block_size
+        for g in groups
+    )
+
+    drops = []
+    for group in affected:
+        spec = group.kv_cache_spec
+        # Mamba's finder never drops; draft models have no mamba layers.
+        if isinstance(spec, MambaSpec):
+            continue
+        if partial_hash_hits and spec.block_size > hash_block_size:
+            drops.append(hash_block_size)
+        else:
+            drops.append(spec.block_size)
+    return max(drops, default=0)
+
+
+def maybe_warn_eagle_prefix_cache_loss(
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    hash_block_size: int,
+) -> None:
+    """Warn when the EAGLE/MTP block drop costs a large prefix-cache hit.
+
+    On hybrid (Mamba/GDN) models the KV cache manager enlarges the attention
+    block size to keep page sizes uniform, so the one-block drop can cost
+    thousands of tokens per request. This is expected behaviour rather than a
+    bug, but it is invisible in the logs today and is repeatedly reported as a
+    regression (see issue #38182).
+    """
+    drop_tokens = eagle_prefix_cache_drop_tokens(
+        kv_cache_config, vllm_config, hash_block_size
+    )
+    # Only speak up when the drop is much coarser than the requested block
+    # size; a 16- or 64-token drop is not worth a startup warning.
+    nominal = vllm_config.cache_config.block_size
+    if drop_tokens < max(_EAGLE_PREFIX_CACHE_WARN_TOKENS, nominal * 4):
+        return
+
+    logger.warning(
+        "Speculative decoding (method=%s) is enabled together with prefix "
+        "caching. EAGLE/MTP cannot reuse the KV of the last matched block, so "
+        "up to %d tokens per request are dropped from the prefix-cache hit "
+        "(the nominal block size is %d). Expect a lower "
+        "gpu_prefix_cache_hit_rate than a non-speculative baseline; the gap "
+        "widens with concurrency as eviction pressure rises. This is expected, "
+        "not a bug. If your workload relies on a high prefix-cache hit rate, "
+        "benchmark it against speculative decoding disabled.",
+        vllm_config.speculative_config.method,
+        drop_tokens,
+        nominal,
+    )
 
 
 def get_request_block_hasher(
