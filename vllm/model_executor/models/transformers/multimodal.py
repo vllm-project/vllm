@@ -18,7 +18,7 @@
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -53,7 +53,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -727,15 +726,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         kwargs.pop("token_type_ids", None)
         kwargs.pop("mm_token_type_ids", None)
 
-        context = nullcontext()
-        if current_platform.is_rocm():
-            context = torch.nn.attention.sdpa_kernel(
-                backends=[torch.nn.attention.SDPBackend.MATH]
-            )
-        with context:
-            audio_output = self.model.get_audio_features(
-                input_features, return_dict=True, **kwargs
-            )
+        audio_output = self.model.get_audio_features(
+            input_features, return_dict=True, **kwargs
+        )
         audio_embeddings = audio_output.pooler_output
 
         split_sizes = num_audio_tokens.flatten().tolist()
@@ -756,23 +749,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         num_image_patches = kwargs.pop("num_image_patches")
 
-        context = nullcontext()
-        if current_platform.is_rocm():
-            # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
-            # with flash_sdp and mem_efficient_sdp
-            # TODO: [ROCm] Fix accuracy issues with flash backend
-            logger.debug(
-                "ROCm platform detected. Forcing math SDP backend "
-                "for vision encoder. Currently ROCm platform has "
-                "accuracy issues with `flash_sdp` and"
-                "`mem_efficient_sdp` backends. See issue: "
-                "https://github.com/vllm-project/vllm/issues/30167"
-            )
-            context = torch.nn.attention.sdpa_kernel(
-                backends=[torch.nn.attention.SDPBackend.MATH]
-            )
-        with context:
-            vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
+        vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
 
         # Transformers `v5`, `self.get_image_features` returns a tuple
         # containing the features and optionally attentions/hidden_states
