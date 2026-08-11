@@ -498,20 +498,6 @@ _ARENA_MIN_BYTES = 8 * 1024 * 1024
 _TENSOR_ARENAS: dict[str, "ShmTensorArena"] = {}
 
 
-def _shm_tensor_arena_enabled() -> bool:
-    """Whether large CPU tensors are routed through the zero-copy arena.
-
-    Driven by ``ParallelConfig.enable_shm_tensor_arena`` (CLI flag
-    ``--enable-shm-tensor-arena`` / ``--no-enable-shm-tensor-arena``); defaults
-    to enabled when no vLLM config is in scope (e.g. standalone use / tests)."""
-    try:
-        from vllm.config import get_current_vllm_config
-
-        return bool(get_current_vllm_config().parallel_config.enable_shm_tensor_arena)
-    except Exception:
-        return True
-
-
 class ShmTensorArena:
     """Slotted shared-memory arena: one writer, n_reader zero-copy readers.
 
@@ -801,6 +787,7 @@ class MessageQueue:
         max_chunk_bytes: int = 1024 * 1024 * 24,
         max_chunks: int = 10,
         connect_ip: str | None = None,
+        enable_shm_tensor_arena: bool = True,
     ):
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
@@ -823,7 +810,7 @@ class MessageQueue:
             # Local readers only: remote readers receive the pickled bytes
             # over a socket and cannot map the arena, so the substitution
             # would break them.
-            if _shm_tensor_arena_enabled() and n_remote_reader == 0:
+            if enable_shm_tensor_arena and n_remote_reader == 0:
                 self.tensor_arena = ShmTensorArena(
                     n_local_reader,
                     _ARENA_SLOT_BYTES,
