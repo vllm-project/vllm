@@ -97,13 +97,13 @@ def _is_gfx1100_aiter_w8a8_capable() -> bool:
         import aiter
 
         package_file = getattr(aiter, "__file__", None)
-        if package_file is None or getattr(aiter, "AITER_TRITON_ONLY", False):
-            return False
-        config_path = Path(package_file).parent / _AITER_GFX1100_W8A8_CONFIG
-        return callable(getattr(aiter, "gemm_a8w8", None)) and config_path.is_file()
+        return bool(
+            package_file
+            and not getattr(aiter, "AITER_TRITON_ONLY", False)
+            and callable(getattr(aiter, "gemm_a8w8", None))
+            and (Path(package_file).parent / _AITER_GFX1100_W8A8_CONFIG).is_file()
+        )
     except Exception:
-        # Old, partially installed, or otherwise incompatible AITER packages
-        # must not make gfx1100 eligible for the custom W8A8 path.
         return False
 
 
@@ -1764,21 +1764,19 @@ class rocm_aiter_ops:
 
     @staticmethod
     def is_gfx1100() -> bool:
-        if not current_platform.is_rocm():
-            return False
         from vllm.platforms.rocm import on_gfx1100
 
-        return on_gfx1100()
+        return current_platform.is_rocm() and on_gfx1100()
+
+    @classmethod
+    def is_gfx1100_aiter_base_enabled(cls) -> bool:
+        """Whether gfx1100 can use AITER's independently gated Triton paths."""
+        return cls._AITER_ENABLED and IS_AITER_FOUND and cls.is_gfx1100()
 
     @classmethod
     def is_gfx1100_aiter_enabled(cls) -> bool:
         """Whether the installed AITER can safely provide gfx1100 W8A8."""
-        return (
-            cls._AITER_ENABLED
-            and IS_AITER_FOUND
-            and cls.is_gfx1100()
-            and _is_gfx1100_aiter_w8a8_capable()
-        )
+        return cls.is_gfx1100_aiter_base_enabled() and _is_gfx1100_aiter_w8a8_capable()
 
     @classmethod
     def is_gfx1100_linear_enabled(cls) -> bool:
@@ -1959,6 +1957,20 @@ class rocm_aiter_ops:
         except (ImportError, ModuleNotFoundError):
             return False
 
+    @staticmethod
+    def _gdn_decode_triton_kernels_importable() -> bool:
+        try:
+            from aiter.ops.triton.causal_conv1d_update_single_token import (  # noqa: F401
+                fused_reshape_causal_conv1d_update_single_token,
+            )
+            from aiter.ops.triton.gated_delta_net.fused_rearrange_sigmoid_gdr import (  # noqa: F401
+                fused_rearrange_sigmoid_gated_delta_rule,
+            )
+
+            return True
+        except (ImportError, ModuleNotFoundError):
+            return False
+
     @classmethod
     @if_aiter_supported
     def are_gdn_triton_kernels_available(cls) -> bool:
@@ -1977,7 +1989,10 @@ class rocm_aiter_ops:
 
     @classmethod
     def is_gfx1100_gdn_triton_kernels_available(cls) -> bool:
-        return cls.is_gfx1100_aiter_enabled() and cls._gdn_triton_kernels_importable()
+        return (
+            cls.is_gfx1100_aiter_base_enabled()
+            and cls._gdn_decode_triton_kernels_importable()
+        )
 
     @classmethod
     @if_aiter_supported
