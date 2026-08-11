@@ -7,7 +7,7 @@ import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -225,7 +225,10 @@ class EngineCoreClient(ABC):
         running state."""
         raise NotImplementedError
 
-    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def commit_elastic_ep(self) -> None:
+        raise NotImplementedError
+
+    async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -605,9 +608,12 @@ class MPClient(EngineCoreClient):
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses
-                ) as (engine_manager, coordinator, addresses, tensor_queue):
-                    self.resources.coordinator = coordinator
-                    self.resources.engine_manager = engine_manager
+                ) as engine_launch:
+                    self.resources.coordinator = engine_launch.coordinator
+                    self.resources.engine_manager = engine_launch.engine_manager
+                    coordinator = engine_launch.coordinator
+                    addresses = engine_launch.addresses
+                    tensor_queue = engine_launch.tensor_queue
 
                 self.stats_update_address = addresses.frontend_stats_publish_address
                 if coordinator is not None:
@@ -668,11 +674,6 @@ class MPClient(EngineCoreClient):
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
 
-            # Request objects which may contain pytorch-allocated tensors
-            # that we need to keep references to until zmq is done with the
-            # underlying data.
-            self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
-
             # Start monitoring engine core processes for unexpected failures
             self.start_engine_core_monitor()
 
@@ -703,14 +704,6 @@ class MPClient(EngineCoreClient):
     def ensure_alive(self):
         if self.resources.engine_dead:
             raise EngineDeadError()
-
-    def add_pending_message(self, tracker: zmq.MessageTracker, msg: Any):
-        if not tracker.done:
-            self.pending_messages.appendleft((tracker, msg))
-
-    def free_pending_messages(self):
-        while self.pending_messages and self.pending_messages[-1][0].done:
-            self.pending_messages.pop()
 
     def dp_engines_running(self) -> bool:
         return self.engines_running
@@ -893,17 +886,12 @@ class SyncMPClient(MPClient):
 
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         self.ensure_alive()
-        self.free_pending_messages()
         # (Identity, RequestType, SerializedRequest)
         msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
-
-        if len(msg) <= 3:
-            # No auxiliary buffers => no tensor backing buffers in request.
-            self.input_socket.send_multipart(msg, copy=False)
-            return
-
-        tracker = self.input_socket.send_multipart(msg, copy=False, track=True)
-        self.add_pending_message(tracker, request)
+        # Any zero-copy tensor/ndarray frames are kept alive by zmq itself
+        # until it's finished sending them (there is a ref chain from the underlying
+        # memoryview back to the original owning tensor/ndarray).
+        self.input_socket.send_multipart(msg, copy=False)
 
     def call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
@@ -1126,32 +1114,16 @@ class AsyncMPClient(MPClient):
             engine = self.core_engine
 
         message = (request_type.value, *self.encoder.encode(request))
-        return self._send_input_message(message, engine, request)
+        return self._send_input_message(message, engine)
 
     def _send_input_message(
-        self, message: tuple[bytestr, ...], engine: EngineIdentity, objects: Any
+        self, message: tuple[bytestr, ...], engine: EngineIdentity
     ) -> Awaitable[Any]:
-        """
-        objects is a reference to retain until zmq is finished with the
-        buffers, in case they were extracted from tensors in the request.
-        """
         self.ensure_alive()
-        self.free_pending_messages()
-
-        msg = (engine,) + message
-        if not objects or len(msg) <= 3:
-            # No auxiliary buffers => no tensor backing buffers in request.
-            return self.input_socket.send_multipart(msg, copy=False)
-
-        future: asyncio.Future[zmq.MessageTracker]
-        future = self.input_socket.send_multipart(msg, copy=False, track=True)
-
-        def add_pending(f: asyncio.Future[zmq.MessageTracker]):
-            with contextlib.suppress(BaseException):
-                self.add_pending_message(f.result(), objects)
-
-        future.add_done_callback(add_pending)
-        return future
+        # Any zero-copy tensor/ndarray frames are kept alive by zmq itself
+        # until it's finished sending them (there is a ref chain from the underlying
+        # memoryview back to the original owning tensor/ndarray).
+        return self.input_socket.send_multipart((engine,) + message, copy=False)
 
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method, *args, engine=self.core_engine)
@@ -1166,7 +1138,7 @@ class AsyncMPClient(MPClient):
             EngineCoreRequestType.UTILITY.value,
             *self.encoder.encode((self.client_index, call_id, method, args)),
         )
-        await self._send_input_message(message, engine, args)
+        await self._send_input_message(message, engine)
         self._ensure_output_queue_task()
         return await future
 
@@ -1490,6 +1462,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
 
         assert len(self.core_engines) > 1
+        self._prepared_elastic_ep: tuple[int, int] | None = None
 
         self.eng_start_index = (
             len(self.core_engines) * self.client_index
@@ -1603,31 +1576,16 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         if len(cache.pending_notifications[notification_type]) >= abs(
             cache.num_new_core_engines
         ):
-            if notification_type == EEPNotificationType.SHUTDOWN_COMPLETE:
-                assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
-                assert cache.num_new_core_engines < 0
-                old_dp_size = len(cache.existing_core_engines)
-                new_dp_size = old_dp_size + cache.num_new_core_engines
-                self.resources.engine_manager.scale_down_elastic_ep(
-                    old_dp_size, new_dp_size
-                )
-            else:
-                await asyncio.gather(
-                    *[
-                        self._call_utility_async(
-                            "eep_handle_engine_core_notification",
-                            notification_type,
-                            engine=engine,
-                        )
-                        for engine in cache.existing_core_engines
-                    ]
-                )
-            cache.pending_notifications[notification_type] = set()
-            if notification_type in [
-                EEPNotificationType.SHUTDOWN_COMPLETE,
-                EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY,
-            ]:
-                self.eep_scaling_cache = None
+            engine_manager = self.resources.engine_manager
+            assert isinstance(engine_manager, CoreEngineActorManager)
+            assert cache.num_new_core_engines < 0
+            old_dp_size = len(cache.existing_core_engines)
+            new_dp_size = old_dp_size + cache.num_new_core_engines
+            engine_manager.scale_down_elastic_ep(old_dp_size, new_dp_size)
+            self.vllm_config.parallel_config.data_parallel_size_local = len(
+                engine_manager.local_engine_actors
+            )
+            self.eep_scaling_cache = None
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if not request_ids or self.resources.engine_dead:
@@ -1651,31 +1609,46 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     ) -> None:
         await self._send_input(EngineCoreRequestType.ABORT, request_ids, engine)
 
-    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
-        """Scale elastic EP data parallel size"""
+    async def commit_elastic_ep(self) -> None:
+        """Commit prepared elastic EP scaling."""
+        prepared = self._prepared_elastic_ep
+        if prepared is None:
+            raise RuntimeError("Elastic EP scaling has not been prepared")
+        new_data_parallel_size, num_redundant_experts = prepared
         cur_data_parallel_size = len(self.core_engines)
-
-        assert new_data_parallel_size != cur_data_parallel_size, (
-            f"new_data_parallel_size {new_data_parallel_size} must be "
-            f"different from cur_data_parallel_size {cur_data_parallel_size}"
+        if new_data_parallel_size > cur_data_parallel_size:
+            await self._commit_scale_up_elastic_ep(new_data_parallel_size)
+        else:
+            await self._commit_scale_down_elastic_ep(new_data_parallel_size)
+        self.vllm_config.parallel_config.eplb_config.num_redundant_experts = (
+            num_redundant_experts
         )
+        self._prepared_elastic_ep = None
 
+    async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
+        """Prepare elastic EP scaling without routing requests to new engines."""
+        if (prepared := self._prepared_elastic_ep) is not None:
+            if prepared[0] == new_data_parallel_size:
+                return
+            raise RuntimeError("Elastic EP scaling is already prepared")
+        cur_data_parallel_size = len(self.core_engines)
         assert self.vllm_config.parallel_config.data_parallel_backend == "ray", (
             "Only ray DP backend supports scaling elastic EP"
         )
-
-        scale_up = new_data_parallel_size > cur_data_parallel_size
-
-        if scale_up:
-            await self._scale_up_elastic_ep(
-                cur_data_parallel_size, new_data_parallel_size
-            )
+        parallel_config = self.vllm_config.parallel_config
+        num_experts = self.vllm_config.model_config.get_num_experts()
+        num_redundant_experts = (
+            num_experts + parallel_config.eplb_config.num_redundant_experts
+        ) * new_data_parallel_size // cur_data_parallel_size - num_experts
+        if new_data_parallel_size < cur_data_parallel_size:
+            await self._prepare_scale_down_elastic_ep(new_data_parallel_size)
         else:
-            await self._scale_down_elastic_ep(
-                cur_data_parallel_size, new_data_parallel_size
+            await self._prepare_scale_up_elastic_ep(
+                new_data_parallel_size, num_redundant_experts
             )
+        self._prepared_elastic_ep = new_data_parallel_size, num_redundant_experts
 
-    async def _eep_wait_for_setup_switch_complete(self) -> None:
+    def _eep_wait_for_setup_switch_complete(self) -> asyncio.Future:
         """
         Wait for core engines to switch to the new setup.
 
@@ -1687,9 +1660,26 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         future = asyncio.get_running_loop().create_future()
         self.utility_results[EEP_NOTIFICATION_CALL_ID] = future
         self._ensure_output_queue_task()
-        await future
+        return future
 
-    def _setup_elastic_ep_reconfig_bootstrap(self) -> tuple[str, int]:
+    def _wait_for_new_engine_ready(self, new_core_engines: list[bytes]) -> None:
+        new_engine_identities = set(new_core_engines)
+        sync_input_socket = zmq.Socket.shadow(self.input_socket)
+        while new_engine_identities:
+            if not sync_input_socket.poll(timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000):
+                raise TimeoutError(
+                    f"Timed out waiting for new engine core processes to "
+                    f"start. Waited "
+                    f"{VLLM_ENGINE_READY_TIMEOUT_S}s (configured by "
+                    f"VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
+                    f"timeout, set the environment variable: "
+                    f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
+                )
+            identity, payload = sync_input_socket.recv_multipart()
+            new_engine_identities.discard(identity)
+            self._apply_ready_response(payload)
+
+    def _setup_elastic_ep_reconfig_bootstrap(self) -> None:
         from vllm.distributed.utils import create_tcp_store
         from vllm.utils.network_utils import get_open_ports_list
 
@@ -1709,36 +1699,36 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
         parallel_config._coord_store_port = store.port
         self._coord_store = store
-        return ip, store.port
 
-    async def _scale_up_elastic_ep(
-        self, cur_data_parallel_size: int, new_data_parallel_size: int
-    ) -> None:
-        """Scale up the data parallel size by creating new engine cores
-        and reconfiguring existing ones."""
-        cur_data_parallel_size = len(self.core_engines)
-
-        self.eep_scaling_cache = ElasticScalingCache(
-            existing_core_engines=self.core_engines.copy(),
-            num_new_core_engines=new_data_parallel_size - cur_data_parallel_size,
-            pending_notifications=dict(),
+    def _make_reconfig_request(
+        self,
+        new_data_parallel_size: int,
+        rank_type: ReconfigureRankType = ReconfigureRankType.KEEP_CURRENT_RANK,
+    ) -> ReconfigureDistributedRequest:
+        parallel_config = self.vllm_config.parallel_config
+        return ReconfigureDistributedRequest(
+            new_data_parallel_size=new_data_parallel_size,
+            new_data_parallel_rank=rank_type,
+            new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
+            new_data_parallel_master_ip=parallel_config.data_parallel_master_ip,
+            new_data_parallel_master_port=parallel_config.data_parallel_master_port,
+            new_data_parallel_master_port_list=parallel_config._data_parallel_master_port_list,
+            coord_store_port=parallel_config._coord_store_port,
         )
 
-        parallel_config = self.vllm_config.parallel_config
-        ip, coord_store_port = self._setup_elastic_ep_reconfig_bootstrap()
+    async def _prepare_scale_up_elastic_ep(
+        self,
+        new_data_parallel_size: int,
+        num_redundant_experts: int,
+    ) -> None:
+        """Prepare scale up by creating new engine cores and reconfiguring
+        existing ones."""
+        self._setup_elastic_ep_reconfig_bootstrap()
 
         # Phase 1: Send reconfig messages to existing engines
         reconfig_futures = []
         for engine in self.core_engines:
-            reconfig_request = ReconfigureDistributedRequest(
-                new_data_parallel_size=new_data_parallel_size,
-                new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_master_ip=ip,
-                new_data_parallel_master_port=parallel_config.data_parallel_master_port,
-                new_data_parallel_master_port_list=parallel_config._data_parallel_master_port_list,
-                coord_store_port=coord_store_port,
-            )
+            reconfig_request = self._make_reconfig_request(new_data_parallel_size)
             coro = self._call_utility_async(
                 "reinitialize_distributed", reconfig_request, engine=engine
             )
@@ -1746,51 +1736,54 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         # Phase 2: Create new engines
         assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
-        parallel_config.eplb_config.num_redundant_experts = 0
         start_new_worker_future = asyncio.to_thread(
             self.resources.engine_manager.scale_up_elastic_ep,
             self.vllm_config,
             new_data_parallel_size,
+            num_redundant_experts,
         )
-        wait_future = self._eep_wait_for_setup_switch_complete()
 
         # Phase 3: Wait for new engines to be created
         # and reconfig messages to be received
         await asyncio.gather(start_new_worker_future, *reconfig_futures)
+        ready_keys = [future.result() for future in reconfig_futures]
+        ready_keys.extend(
+            f"eep_ready/{rank}"
+            for rank in range(len(self.core_engines), new_data_parallel_size)
+        )
+        await asyncio.to_thread(self._coord_store.wait, ready_keys)
         logger.info("[Elastic EP] Successfully started new engines")
 
-        # Create new CoreEngine objects for the new engines
-        new_engine_identities = set()
-        for i in range(cur_data_parallel_size, new_data_parallel_size):
-            new_engine = i.to_bytes(2, "little")
-            self.core_engines.append(new_engine)
-            # NOTE(yongji): we don't update lb_engines here,
-            # we let run_engine_stats_update_task to update it.
-            new_engine_identities.add(new_engine)
+    async def _commit_scale_up_elastic_ep(self, new_data_parallel_size: int) -> None:
+        new_core_engines = [
+            rank.to_bytes(2, "little")
+            for rank in range(len(self.core_engines), new_data_parallel_size)
+        ]
 
-        # Wait for ready messages from new engines on the input socket
-        sync_input_socket = zmq.Socket.shadow(self.input_socket)
-        while new_engine_identities:
-            if not sync_input_socket.poll(
-                timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
-            ):
-                raise TimeoutError(
-                    f"Timed out waiting for new engine core processes to "
-                    f"start. Waited "
-                    f"{VLLM_ENGINE_READY_TIMEOUT_S}s (configured by "
-                    f"VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
-                    f"timeout, set the environment variable: "
-                    f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
-                )
-            identity, payload = sync_input_socket.recv_multipart()
-            new_engine_identities.discard(identity)
-            self._apply_ready_response(payload)
+        await self.pause_scheduler_async(mode="keep", clear_cache=False)
+        wait_future = self._eep_wait_for_setup_switch_complete()
+        finish_futures = [
+            asyncio.create_task(
+                self._call_utility_async("commit_prepared_elastic_ep", engine=engine)
+            )
+            for engine in self.core_engines
+        ]
+        try:
+            await asyncio.gather(*finish_futures)
+            await wait_future
+            self._wait_for_new_engine_ready(new_core_engines)
+        except Exception:
+            wait_future.cancel()
+            raise
 
-        # NOTE(yongji): Before we schedule any requests on the new workers,
-        # we should wait for them to switch to the new setup.
-        await wait_future
+        self.core_engines.extend(new_core_engines)
         # Update the parallel config
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+        parallel_config = self.vllm_config.parallel_config
+        parallel_config.data_parallel_size = new_data_parallel_size
+        if isinstance(self.resources.engine_manager, CoreEngineActorManager):
+            parallel_config.data_parallel_size_local = len(
+                self.resources.engine_manager.local_engine_actors
+            )
         # Notify coordinator about scale up through existing
         # stats_update_task connection
         self._ensure_stats_update_task()
@@ -1803,10 +1796,23 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "[Elastic EP] Scale up completed, new data parallel size: %s",
             new_data_parallel_size,
         )
+        await self.resume_scheduler_async()
 
-    async def _scale_down_elastic_ep(
-        self, cur_data_parallel_size: int, new_data_parallel_size: int
-    ) -> None:
+    async def _prepare_scale_down_elastic_ep(self, new_data_parallel_size: int) -> None:
+        self._setup_elastic_ep_reconfig_bootstrap()
+
+        reconfig_futures = []
+        for engine in self.core_engines[:new_data_parallel_size]:
+            reconfig_request = self._make_reconfig_request(new_data_parallel_size)
+            coro = self._call_utility_async(
+                "reinitialize_distributed", reconfig_request, engine=engine
+            )
+            reconfig_futures.append(asyncio.create_task(coro))
+
+        ready_keys = await asyncio.gather(*reconfig_futures)
+        await asyncio.to_thread(self._coord_store.wait, ready_keys)
+
+    async def _commit_scale_down_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale down the data parallel size by shutting down and
         reconfiguring existing engine cores."""
         cur_data_parallel_size = len(self.core_engines)
@@ -1817,50 +1823,51 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             pending_notifications=dict(),
         )
 
-        parallel_config = self.vllm_config.parallel_config
-        ip, coord_store_port = self._setup_elastic_ep_reconfig_bootstrap()
-
+        old_core_engines = self.core_engines
+        # NOTE(yongji): Immediately stop sending requests to the removing engines.
+        self.core_engines = old_core_engines[:new_data_parallel_size]
+        self.lb_engines = self.lb_engines[:new_data_parallel_size]
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
+        pause_modes = ["keep"] * new_data_parallel_size + ["abort"] * removed_dp_size
+        pause_futures = [
+            self._call_utility_async("pause_scheduler", mode, False, engine=engine)
+            for mode, engine in zip(pause_modes, old_core_engines)
+        ]
+        await asyncio.gather(*pause_futures)
         assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
         self.resources.engine_manager.remove_run_refs_for_scale_down(removed_dp_size)
+        wait_future = self._eep_wait_for_setup_switch_complete()
         reconfig_futures = []
-        for cur_dp_rank, engine in enumerate(self.core_engines):
-            reconfig_request = ReconfigureDistributedRequest(
-                new_data_parallel_size=new_data_parallel_size,
-                new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_master_ip=ip,
-                new_data_parallel_master_port=parallel_config.data_parallel_master_port,
-                new_data_parallel_master_port_list=parallel_config._data_parallel_master_port_list,
-                coord_store_port=coord_store_port,
-            )
-            if cur_dp_rank >= new_data_parallel_size:
-                reconfig_request.new_data_parallel_rank = (
-                    ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+        for cur_dp_rank, engine in enumerate(old_core_engines):
+            if cur_dp_rank < new_data_parallel_size:
+                coro = self._call_utility_async(
+                    "commit_prepared_elastic_ep", engine=engine
                 )
-            coro = self._call_utility_async(
-                "reinitialize_distributed", reconfig_request, engine=engine
-            )
+            else:
+                reconfig_request = self._make_reconfig_request(
+                    new_data_parallel_size,
+                    ReconfigureRankType.SHUTDOWN_CURRENT_RANK,
+                )
+                coro = self._call_utility_async(
+                    "reinitialize_distributed", reconfig_request, engine=engine
+                )
             reconfig_futures.append(asyncio.create_task(coro))
 
-        # NOTE(yongji): Immediately stop sending requests to the removing engines.
-        self.core_engines = self.core_engines[:new_data_parallel_size]
-        self.lb_engines = self.lb_engines[:new_data_parallel_size]
-        wait_future = self._eep_wait_for_setup_switch_complete()
+        try:
+            await asyncio.gather(*reconfig_futures)
 
-        await asyncio.gather(*reconfig_futures)
+            self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+            self._ensure_stats_update_task()
+            scale_down_marker = msgspec.msgpack.encode(
+                ("SCALE_ELASTIC_EP", new_data_parallel_size)
+            )
+            await self.first_req_send_socket.send(scale_down_marker)
+            await wait_future
+            await self.resume_scheduler_async()
+        except Exception:
+            wait_future.cancel()
+            raise
 
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        self._ensure_stats_update_task()
-        scale_down_marker = msgspec.msgpack.encode(
-            ("SCALE_ELASTIC_EP", new_data_parallel_size)
-        )
-        await self.first_req_send_socket.send(scale_down_marker)
-
-        # NOTE(yongji): Unlike scaling up,
-        # here we don't actually need to wait for the setup switch to complete.
-        # We may want to remove it in the future.
-        await wait_future
         logger.info(
             "[Elastic EP] Scale down completed, new data parallel size: %s",
             new_data_parallel_size,
