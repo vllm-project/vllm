@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """
 Convert a vLLM Recipes per-hardware JSON rendering into:
 
@@ -41,9 +44,7 @@ from typing import Any
 try:
     import yaml
 except ImportError as exc:
-    raise SystemExit(
-        "PyYAML is required. Install it with: pip install pyyaml"
-    ) from exc
+    raise SystemExit("PyYAML is required. Install it with: pip install pyyaml") from exc
 
 
 DEFAULT_API_BASE = "https://recipes.vllm.ai"
@@ -141,19 +142,11 @@ def search_models(
     if not q:
         return []
 
-    exact = [
-        model
-        for model in models
-        if str(model.get("hf_id", "")).lower() == q
-    ]
+    exact = [model for model in models if str(model.get("hf_id", "")).lower() == q]
     if exact:
         return exact
 
-    tokens = [
-        token
-        for token in q.replace("/", " ").replace("-", " ").split()
-        if token
-    ]
+    tokens = [token for token in q.replace("/", " ").replace("-", " ").split() if token]
     scored: list[tuple[float, dict[str, Any]]] = []
 
     for model in models:
@@ -178,9 +171,7 @@ def search_models(
 
         scored.append((score, model))
 
-    scored.sort(
-        key=lambda pair: (-pair[0], str(pair[1].get("hf_id", "")).lower())
-    )
+    scored.sort(key=lambda pair: (-pair[0], str(pair[1].get("hf_id", "")).lower()))
     return [model for _, model in scored[:limit]]
 
 
@@ -207,9 +198,7 @@ def choose_from_menu(items: list[Any], label_fn, prompt_text: str) -> Any:
         print(f"Enter a number from 1 to {len(items)}.")
 
 
-def select_model(
-    models: list[dict[str, Any]], requested: str | None
-) -> dict[str, Any]:
+def select_model(models: list[dict[str, Any]], requested: str | None) -> dict[str, Any]:
     query = requested
     while True:
         if not query:
@@ -245,9 +234,7 @@ def select_hardware(
         return selected, by_hardware[selected]
 
     print("\nAvailable hardware:")
-    selected = choose_from_menu(
-        hardware_ids, lambda value: value, "Select hardware: "
-    )
+    selected = choose_from_menu(hardware_ids, lambda value: value, "Select hardware: ")
     return selected, by_hardware[selected]
 
 
@@ -268,9 +255,7 @@ def discover_recipe_source(
 
     model_json_path = model.get("json")
     if not isinstance(model_json_path, str) or not model_json_path:
-        raise ValueError(
-            f"Selected model {model.get('hf_id')!r} has no JSON API path."
-        )
+        raise ValueError(f"Selected model {model.get('hf_id')!r} has no JSON API path.")
 
     model_json_url = api_url(api_base, model_json_path)
     model_data = load_json(model_json_url)
@@ -326,9 +311,7 @@ def is_option_token(token: str) -> bool:
         return True
     if token in SHORT_ALIASES or token == "-O":
         return True
-    if token.startswith("-O") and len(token) > 2:
-        return True
-    return False
+    return token.startswith("-O") and len(token) > 2
 
 
 def merge_value(dst: dict[str, Any], path: list[str], value: Any) -> None:
@@ -472,7 +455,8 @@ def recipe_argv(recipe: dict[str, Any]) -> list[Any]:
 
     # Give a useful failure for other known rendered shapes.
     multi_process_fields = [
-        k for k in (
+        k
+        for k in (
             "head_argv",
             "worker_argv",
             "worker_argvs",
@@ -485,8 +469,7 @@ def recipe_argv(recipe: dict[str, Any]) -> list[Any]:
     if multi_process_fields:
         raise ValueError(
             "This recipe is a multi-process deployment and cannot be represented "
-            "by one config.yml. Found fields: "
-            + ", ".join(multi_process_fields)
+            "by one config.yml. Found fields: " + ", ".join(multi_process_fields)
         )
 
     raise ValueError("Recipe JSON does not contain an `argv` field")
@@ -544,9 +527,7 @@ def main() -> int:
     try:
         source = args.source
         if source is None:
-            source = discover_recipe_source(
-                args.api_base, args.model, args.hardware
-            )
+            source = discover_recipe_source(args.api_base, args.model, args.hardware)
         elif args.model or args.hardware:
             raise ValueError(
                 "Do not combine a positional recipe JSON source with "
