@@ -3,9 +3,10 @@
 """
 Tests for INT8 (W8A8) fused-MoE oracle backend selection.
 
-These exercise ``select_int8_moe_backend`` only (no kernels are launched), so
-they run on any platform where the Triton INT8 MoE kernel is available — CUDA
-(SM >= 7.5) or ROCm — not just gfx950.
+These exercise ``select_int8_moe_backend`` only (no MoE kernels are launched),
+so they run on any platform where the Triton INT8 MoE kernel is available —
+CUDA (SM >= 7.5), ROCm, or XPU — not just gfx950. XPU currently enables the
+per-token scheme only, so the per-tensor scheme is skipped there.
 """
 
 import pytest
@@ -28,16 +29,28 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-# The Triton int8_w8a8 fused-MoE kernel is available on CUDA (Turing+) and on
-# ROCm CDNA GPUs. Gate on that rather than on a specific arch.
+# The Triton int8_w8a8 fused-MoE kernel is available on CUDA (Turing+), on
+# ROCm CDNA GPUs and on XPU. Gate on that rather than on a specific arch.
+# Both dynamic-activation schemes are offered on CUDA/ROCm; XPU is enabled for
+# the per-token scheme only (see TritonExperts._supports_quant_scheme).
 INT8_MOE_SUPPORTED = (
     current_platform.is_cuda() and current_platform.has_device_capability((7, 5))
 ) or current_platform.is_rocm()
+
+INT8_MOE_PER_TOKEN_SUPPORTED = INT8_MOE_SUPPORTED or current_platform.is_xpu()
 
 requires_int8_moe = pytest.mark.skipif(
     not INT8_MOE_SUPPORTED,
     reason="Requires a GPU with Triton INT8 MoE support (CUDA SM>=7.5 or ROCm)",
 )
+
+requires_int8_moe_per_token = pytest.mark.skipif(
+    not INT8_MOE_PER_TOKEN_SUPPORTED,
+    reason="Requires Triton INT8 MoE support (CUDA SM>=7.5, ROCm, or XPU)",
+)
+
+# So FusedMoEConfig.device names the device the test actually runs on.
+DEVICE = current_platform.device_type
 
 
 def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
@@ -53,31 +66,60 @@ def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         activation=MoEActivation.SILU,
         in_dtype=torch.bfloat16,
-        device="cuda",
+        device=DEVICE,
         routing_method=RoutingMethodType.Renormalize,
         moe_backend=moe_backend,
     )
 
 
-@requires_int8_moe
 @pytest.mark.parametrize(
     "weight_key,activation_key",
     [
-        # per-channel weight + dynamic per-token activation
-        (kInt8StaticChannelSym, kInt8DynamicTokenSym),
-        # per-tensor weight + dynamic per-tensor activation
-        (kInt8StaticTensorSym, kInt8DynamicTensorSym),
+        pytest.param(
+            kInt8StaticChannelSym,
+            kInt8DynamicTokenSym,
+            marks=requires_int8_moe_per_token,
+            id="per_channel_weight-per_token_act",
+        ),
+        pytest.param(
+            kInt8StaticTensorSym,
+            kInt8DynamicTensorSym,
+            marks=requires_int8_moe,
+            id="per_tensor_weight-per_tensor_act",
+        ),
     ],
 )
 def test_int8_dynamic_schemes_dispatch_to_triton(weight_key, activation_key):
     """Both dynamic-activation INT8 MoE schemes (per-channel + per-tensor
-    weights) select the Triton backend."""
+    weights) select the Triton backend, each on the platforms that offer it."""
     config = _make_int8_moe_config()
     backend, experts_cls = select_int8_moe_backend(
         config, weight_key=weight_key, activation_key=activation_key
     )
     assert backend == Int8MoeBackend.TRITON
     assert experts_cls is not None
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU-only behaviour")
+def test_scaled_int8_quant_is_available_on_xpu():
+    """The per-tensor scheme's activation quantization does work on XPU.
+
+    ``_int8_quantize`` sends per-tensor activations through
+    ``ops.scaled_int8_quant``, which has an XPU branch. Keeping the per-tensor
+    scheme off XPU is therefore a validation gap, not a missing op -- assert
+    that here so the stronger claim is not reintroduced.
+    """
+    from vllm import _custom_ops as ops
+
+    x = torch.randn(4, 16, device=DEVICE, dtype=torch.bfloat16)
+    scale = torch.full((1,), 0.05, device=DEVICE, dtype=torch.float32)
+
+    q, returned_scale, azp = ops.scaled_int8_quant(x, scale=scale)
+
+    assert q.dtype == torch.int8
+    assert q.shape == x.shape
+    assert azp is None
+    torch.testing.assert_close(returned_scale, scale)
 
 
 @requires_int8_moe
