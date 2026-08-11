@@ -481,10 +481,12 @@ ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b" # v0.5.3
 ARG LMCACHE_ROCM_ARCH="gfx942;gfx950"
 ARG COMMON_WORKDIR
+# Full clone: setuptools_scm needs tag history reachable from LMCACHE_REF to
+# derive the version, so --depth/--filter would regress it to a fallback.
 RUN git clone ${LMCACHE_REPO} ${COMMON_WORKDIR}/lmcache \
     && cd ${COMMON_WORKDIR}/lmcache \
     && git checkout ${LMCACHE_REF}
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     cd ${COMMON_WORKDIR}/lmcache \
     && uv pip install --system -r requirements/build.txt \
     && PYTORCH_ROCM_ARCH="${LMCACHE_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}" \
