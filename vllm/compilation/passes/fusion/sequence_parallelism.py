@@ -40,6 +40,11 @@ if hasattr(torch.ops._C, "scaled_fp4_quant"):
 SP_MIN_HIDDEN_SIZE: dict[int, int] = {
     90: 8192,  # H100: only for models with hidden_size >= 8192
     100: 8192,  # Blackwell family: only for models with hidden_size >= 8192
+    # SM120 is PCIe-only, where allreduce is far more expensive relative to
+    # compute, so SP pays off at much smaller shapes (measured on 4x RTX
+    # PRO 6000: fused gemm+RS/AG crosses over between 512 and 1024 tokens
+    # at hidden_size 4096).
+    120: 4096,
 }
 
 # Min size per GPU per device capability for sequence parallelism
@@ -49,6 +54,7 @@ SP_MIN_PER_GPU_SIZE_MB: dict[int, float] = {
     90: 8,  # 8MB per GPU for H100
     # Use a more conservative threshold on Blackwell so TP8 starts later.
     100: 32,
+    120: 2,  # PCIe-only; 2MB ~ 1024 tokens at hidden 4096 / tp4 / bf16
 }
 
 
