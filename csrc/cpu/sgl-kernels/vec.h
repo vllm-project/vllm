@@ -216,11 +216,12 @@ inline std::tuple<__m512bh, __m512bh> cvt_mxfp4_e2m1_bf16_intrinsic_lut(__m256i 
   // Emulate the bf16 multiply by the E8M0 scale as an integer add on the
   // exponent field, forcing zeros to stay zero.
   //
-  // vptestmw sets a lane's mask bit when (x & 0x7FFF) != 0, i.e. exactly for
-  // the lanes that are not +0.0 or -0.0, and the zero-masking form of vpaddw
-  // writes 0 to the lanes the mask leaves clear. That is the same predicate as
-  // the previous and/cmp/add/blend sequence and the same result on every lane,
-  // including the LUT's -0.0 entry, which both versions turn into +0.0.
+  // vptestmw sets a lane's mask bit when (x & 0x7FFF) != 0, i.e. for the lanes
+  // that are not +0.0 or -0.0. That is the *complement* of the mask the old
+  // and/cmp/add/blend sequence built, which selected the zero lanes; the
+  // zero-masking form of vpaddw then writes 0 where the mask is clear, so the
+  // two agree lane by lane. That includes the LUT's -0.0 entry, which both
+  // versions turn into +0.0.
   //
   // 2 instructions per vector instead of 4, no extra ISA requirement:
   // vptestmw is AVX512BW, which vpermw above already needs.
