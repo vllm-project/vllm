@@ -111,12 +111,12 @@ def _convert_awq_to_standard_format(
     )
     shifts = torch.arange(0, 32, size_bits, dtype=torch.int32, device=device)
 
-    # --- Convert qweight: (K, N // pack) packed_dim=1 -> (K // pack, N) packed_dim=0
+    # --- Convert qweight: (K, N // pack) packed_dim=1 → (K // pack, N) packed_dim=0
     qw = getattr(layer, w_q_name).data
     K, N_packed = qw.shape
     N = N_packed * pack_factor
 
-    # Unpack int32 -> individual values, fix AWQ ordering
+    # Unpack int32 → individual values, fix AWQ ordering
     unpacked = (qw.unsqueeze(-1) >> shifts) & mask  # (K, N_packed, pack_factor)
     unpacked = unpacked[:, :, reverse_order]
     unpacked = unpacked.reshape(K, N)  # (K, N)
@@ -244,8 +244,8 @@ class AutoAWQConfig(QuantizationConfig):
         modules_to_not_convert = cls.get_from_keys_or(
             config, ["modules_to_not_convert"], None
         )
-        # Normalize quant_method so downstream config consumers see a
-        # consistent value ("awq") regardless of the source checkpoint format.
+        # Ensure full_config uses "awq" as quant_method for MoE fallback compatibility.
+        # MoeWNA16Config only accepts "gptq" or "awq", so we normalize here.
         full_config = config.copy()
         full_config["quant_method"] = "awq"
         return cls(
