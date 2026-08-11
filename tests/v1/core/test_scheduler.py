@@ -1280,6 +1280,30 @@ def test_reset_connector_cache_no_connector_is_no_op_success():
     assert scheduler.reset_prefix_cache(reset_connector=True) is True
 
 
+def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        max_num_seqs=16,
+        max_num_batched_tokens=20,
+        num_speculative_tokens=4,
+        parallel_drafting=True,
+        skip_tokenizer_init=True,
+    )
+    speculative_config = scheduler.vllm_config.speculative_config
+    assert speculative_config is not None
+    assert scheduler.max_num_scheduled_tokens == 20
+    assert speculative_config.max_num_new_slots_for_drafting == 3
+
+    for request in create_requests(num_requests=2, num_tokens=10):
+        scheduler.add_request(request)
+
+    assert scheduler.schedule().num_scheduled_tokens == {"0": 10, "1": 4}
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",

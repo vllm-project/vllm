@@ -58,6 +58,7 @@ def _fwd_kernel(
     IS_CAUSAL: tl.constexpr,
     SLIDING_WINDOW_Q: tl.constexpr,
     SLIDING_WINDOW_K: tl.constexpr,
+    SINKS_BIAS_KEY0: tl.constexpr,
     USE_SINKS: tl.constexpr,
     Lk: tl.constexpr,
 ):
@@ -98,8 +99,15 @@ def _fwd_kernel(
     # initialize pointer to m and l
     if USE_SINKS:
         sink = tl.load(Sinks + cur_head) * 1.4426950408889634
-        m_i = tl.full([BLOCK_M], sink, dtype=tl.float32)
-        l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
+        if SINKS_BIAS_KEY0:
+            # Sinks bias the logit of key 0, so the softmax starts empty and
+            # normalizes over the biased scores as usual.
+            m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+            l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+        else:
+            # Sinks are a null logit that only inflates the denominator.
+            m_i = tl.full([BLOCK_M], sink, dtype=tl.float32)
+            l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     else:
         m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
         l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
@@ -160,6 +168,8 @@ def _fwd_kernel(
 
         qk = tl.dot(q, k)
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
+        if USE_SINKS and SINKS_BIAS_KEY0:
+            qk = tl.where(mask & (pos_k == 0), qk + sink, qk)
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
         p = tl.math.exp2(qk)
@@ -217,6 +227,7 @@ def context_attention_fwd(
     sliding_window_q: int | None = None,
     sliding_window_k: int | None = None,
     sinks: torch.Tensor | None = None,
+    sinks_bias_key0: bool = False,
 ):
     """
     q, k, v: [b * s, head, head_dim]
@@ -268,6 +279,7 @@ def context_attention_fwd(
         SLIDING_WINDOW_Q=sliding_window_q,
         SLIDING_WINDOW_K=sliding_window_k,
         USE_SINKS=sinks is not None,
+        SINKS_BIAS_KEY0=sinks_bias_key0,
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,
