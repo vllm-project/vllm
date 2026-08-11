@@ -426,6 +426,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.W_UK_T_dcp_qrep: torch.Tensor | None = None
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
+        self.register_buffer(
+            "_kimi_k3_fp8_calibration_amax",
+            torch.zeros((3, num_heads), dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_kimi_k3_fp8_static_descale",
+            torch.empty((0, num_heads), dtype=torch.float32),
+            persistent=False,
+        )
+        self._kimi_k3_fp8_calibration_state = {"armed": False}
         self.indexer = indexer
         self.non_causal_multi_token_decode = non_causal_multi_token_decode
         self.sliding_window = sliding_window
@@ -537,6 +548,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             indexer=indexer,
             **extra_impl_args,
         )
+        self.impl.layer_name = prefix
+        self.impl._kimi_k3_fp8_calibration_amax = self._kimi_k3_fp8_calibration_amax
+        self.impl._kimi_k3_fp8_static_descale = self._kimi_k3_fp8_static_descale
+        self.impl._kimi_k3_fp8_calibration_state = self._kimi_k3_fp8_calibration_state
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.use_direct_call = not current_platform.opaque_attention_op()
 
@@ -2553,6 +2568,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
+        self.layer_name = ""
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
@@ -2668,6 +2684,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     q=q[chunk.token_slice],
                     k=k,
                     v=v,
+                    layer_name=self.layer_name,
+                    calibration_amax=self._kimi_k3_fp8_calibration_amax,
+                    static_descale=self._kimi_k3_fp8_static_descale,
+                    calibration_armed=self._kimi_k3_fp8_calibration_state["armed"],
                 )
             )
 
@@ -2802,6 +2822,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     q=q[chunk.token_slice],
                     k=k,
                     v=v,
+                    layer_name=self.layer_name,
+                    calibration_amax=self._kimi_k3_fp8_calibration_amax,
+                    static_descale=self._kimi_k3_fp8_static_descale,
+                    calibration_armed=self._kimi_k3_fp8_calibration_state["armed"],
                 )
             )
 

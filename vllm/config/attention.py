@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import field
 from typing import Any, Literal
 
@@ -65,6 +66,15 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
+    rocm_kimi_k3_fp8_prefill_scale_path: str | None = None
+    """Path to a frozen Kimi-K3 FP8 prefill scale artifact."""
+
+    rocm_kimi_k3_fp8_prefill_scale_save_path: str | None = None
+    """Directory where Kimi-K3 FP8 calibration rank shards are written."""
+
+    rocm_kimi_k3_fp8_prefill_scale_margin: float = 1.1
+    """Safety multiplier applied when freezing calibrated per-head amax."""
+
     use_fp4_indexer_cache: bool = False
     """If set, use fp4 indexer cache for dsv32 family model (not support yet)"""
 
@@ -113,6 +123,19 @@ class AttentionConfig:
             # The alias selects only MiniMax's sparse decode kernel. Dense
             # layers still use the platform's normal automatic backend.
             self.backend = None
+        if (
+            self.rocm_kimi_k3_fp8_prefill_scale_path is not None
+            and self.rocm_kimi_k3_fp8_prefill_scale_save_path is not None
+        ):
+            raise ValueError(
+                "Kimi-K3 FP8 scale load and calibration save paths are "
+                "mutually exclusive"
+            )
+        margin = self.rocm_kimi_k3_fp8_prefill_scale_margin
+        if not math.isfinite(margin) or margin < 1.0:
+            raise ValueError(
+                "rocm_kimi_k3_fp8_prefill_scale_margin must be finite and >= 1"
+            )
 
     def compute_hash(self) -> str:
         """

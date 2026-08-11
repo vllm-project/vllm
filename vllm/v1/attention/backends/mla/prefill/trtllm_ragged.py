@@ -148,6 +148,11 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         k: torch.Tensor,
         v: torch.Tensor,
         out: torch.Tensor | None = None,
+        *,
+        layer_name: str = "",
+        calibration_amax: torch.Tensor | None = None,
+        static_descale: torch.Tensor | None = None,
+        calibration_armed: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
