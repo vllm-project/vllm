@@ -308,7 +308,8 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
+    'pip install av &&
+    cd tests &&
     pytest -v -s detokenizer || true &&
     pytest -v -s -m not cpu_test multimodal || true &&
     pytest -v -s utils_ || true'
