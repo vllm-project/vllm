@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_DECODE_BYTES: int = 268_435_456
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
+    VLLM_AUDIO_LOADER_BACKEND: str = "auto"
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
@@ -1014,6 +1015,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_IMAGE_PIXELS": lambda: int(
         os.getenv("VLLM_MAX_IMAGE_PIXELS", "178956970")
     ),
+    # Backend for Audio IO — selects the audio decoding library.
+    # - "auto": torchcodec, falling back to soundfile, then PyAV (default).
+    # - "soundfile": libsndfile only, no fallback.
+    # - "pyav": PyAV/FFmpeg only, no fallback.
+    # - "torchcodec": torchcodec only, no fallback. Decodes the whole stream
+    #   in a single call that releases the GIL, which is preferred when many
+    #   requests decode audio concurrently (e.g. audio extracted from video).
+    "VLLM_AUDIO_LOADER_BACKEND": lambda: os.getenv("VLLM_AUDIO_LOADER_BACKEND", "auto"),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
     # - "opencv_dynamic": duration-aware dynamic sampling.
@@ -2231,6 +2240,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_DECODE_BYTES",
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
         "VLLM_MAX_IMAGE_PIXELS",
+        "VLLM_AUDIO_LOADER_BACKEND",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",

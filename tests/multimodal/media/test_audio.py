@@ -10,7 +10,12 @@ import pytest
 import soundfile as sf
 
 from vllm.multimodal.media import AudioMediaIO
-from vllm.multimodal.media.audio import load_audio, load_audio_soundfile
+from vllm.multimodal.media import audio as audio_module
+from vllm.multimodal.media.audio import (
+    load_audio,
+    load_audio_soundfile,
+    load_audio_torchcodec,
+)
 
 from ...conftest import AudioTestAssets
 
@@ -157,4 +162,61 @@ def test_load_audio_threads_max_decode_bytes():
             sr=None,
             max_duration_s=600,
             max_decode_bytes=512 * 1024,
+        )
+
+
+@pytest.mark.parametrize("backend", ["soundfile", "pyav", "torchcodec"])
+def test_load_audio_backend_matches_default(backend, dummy_audio_bytes):
+    """Every explicit backend must decode to the same samples as `auto`."""
+    if backend == "torchcodec":
+        pytest.importorskip("torchcodec")
+    ref_audio, ref_sr = load_audio(BytesIO(dummy_audio_bytes), sr=None)
+    audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend=backend)
+    assert sr == ref_sr
+    np.testing.assert_allclose(ref_audio, audio, atol=1e-4)
+
+
+def test_load_audio_unknown_backend_rejected(dummy_audio_bytes):
+    """An unknown backend must fail loudly instead of silently degrading."""
+    with pytest.raises(ValueError, match="Unknown audio backend"):
+        load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="not_a_backend")
+
+
+def test_load_audio_auto_falls_back_without_torchcodec(dummy_audio_bytes):
+    """`auto` must fall back to the soundfile → PyAV chain when torchcodec
+    is not importable."""
+    ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
+    with patch.object(audio_module, "load_audio_torchcodec", side_effect=ImportError):
+        audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="auto")
+    assert sr == ref_sr
+    np.testing.assert_array_equal(ref_audio, audio)
+
+
+def test_audio_media_io_audio_backend_kwarg(dummy_audio_bytes):
+    """`audio_backend` selects the backend; unknown values fail at init."""
+    audio, sr = AudioMediaIO(audio_backend="pyav").load_bytes(dummy_audio_bytes)
+    assert isinstance(audio, np.ndarray)
+    assert sr == 16000
+    with pytest.raises(ValueError, match="Unknown audio_backend"):
+        AudioMediaIO(audio_backend="not_a_backend")
+
+
+def test_torchcodec_max_duration_rejected(dummy_audio_bytes):
+    """The decompression-bomb duration guard must hold for torchcodec too."""
+    pytest.importorskip("torchcodec")
+    with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
+        load_audio_torchcodec(
+            BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001
+        )
+
+
+def test_torchcodec_max_decode_bytes_rejected(dummy_audio_bytes):
+    """The decompression-bomb memory guard must hold for torchcodec too."""
+    pytest.importorskip("torchcodec")
+    audio, _ = load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
+    with pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_BYTES"):
+        load_audio_torchcodec(
+            BytesIO(dummy_audio_bytes),
+            sr=None,
+            max_decode_bytes=audio.nbytes - 1,
         )

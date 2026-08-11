@@ -1205,6 +1205,43 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
     ```
 
+#### Audio Decoding Backend
+
+vLLM decodes audio bytes into waveforms using a selectable decoding backend:
+
+| Backend | Description |
+| --- | --- |
+| `auto` (default) | torchcodec, falling back to soundfile, then PyAV |
+| `soundfile` | libsndfile only, no fallback |
+| `pyav` | PyAV (FFmpeg) only, no fallback |
+| `torchcodec` | TorchCodec (PyTorch-native) only, no fallback |
+
+Select the backend per server via `--media-io-kwargs`:
+
+```bash
+vllm serve Qwen/Qwen2.5-Omni-7B \
+  --media-io-kwargs '{"audio": {"audio_backend": "soundfile"}}'
+```
+
+Or set the global default via environment variable (`--media-io-kwargs`
+takes precedence):
+
+```bash
+export VLLM_AUDIO_LOADER_BACKEND=soundfile
+```
+
+!!! tip
+    `pyav` drives FFmpeg through a per-frame Python generator, so under
+    concurrency the Python/C crossings contend on the GIL. `torchcodec`
+    decodes each stream in a single call that releases the GIL for its whole
+    duration, which is why `auto` prefers it when many requests decode audio
+    concurrently, such as when audio tracks are extracted from video.
+
+!!! note
+    `torchcodec` ships as a requirement on CUDA, CPU and XPU builds. On other
+    platforms (e.g. ROCm, TPU) `auto` falls back to the soundfile → PyAV
+    chain unless you install it manually.
+
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
