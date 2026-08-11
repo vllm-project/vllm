@@ -830,14 +830,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         output, _ = self.out_proj(core_attn_out)
         return output
 
-    def _output_projection_normalized(
-        self,
-        core_attn_out: torch.Tensor,
-    ) -> torch.Tensor:
-        core_attn_out = core_attn_out.flatten(-2)
-        output, _ = self.out_proj(core_attn_out)
-        return output
-
     def forward_hip(
         self,
         hidden_states: torch.Tensor,
@@ -908,7 +900,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 core_attn_out,
                 layer_name=_encode_layer_name(self.prefix),
             )
-            return self._output_projection_normalized(core_attn_out)
+            output, _ = self.out_proj(core_attn_out.flatten(-2))
+            return output
 
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout

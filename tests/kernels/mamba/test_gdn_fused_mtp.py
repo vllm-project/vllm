@@ -160,7 +160,7 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
         head_v_dim=V,
         in_proj_qkvz=lambda _: (mixed_qkvz, None),
         in_proj_ba=lambda _: (ba, None),
-        _output_projection_normalized=lambda output: output,
+        out_proj=lambda x: (x, None),
     )
     layer.forward_cuda = types.MethodType(
         QwenGatedDeltaNetAttention.forward_cuda, layer
