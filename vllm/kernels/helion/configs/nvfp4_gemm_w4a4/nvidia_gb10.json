@@ -1,0 +1,122 @@
+[
+  {
+    "key": {
+      "m": 16,
+      "k": 128,
+      "n": 64
+    },
+    "config": {
+      "block_sizes": [
+        4,
+        2,
+        4
+      ],
+      "num_threads": [
+        0,
+        2,
+        1
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "cute_vector_widths": [
+        2,
+        4,
+        2
+      ]
+    }
+  },
+  {
+    "key": {
+      "m": 16,
+      "k": 256,
+      "n": 128
+    },
+    "config": {
+      "block_sizes": [
+        4,
+        4,
+        8
+      ],
+      "num_threads": [
+        0,
+        4,
+        1
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "cute_vector_widths": [
+        2,
+        8,
+        2
+      ]
+    }
+  },
+  {
+    "key": {
+      "m": 64,
+      "k": 128,
+      "n": 64
+    },
+    "config": {
+      "block_sizes": [
+        4,
+        8,
+        2
+      ],
+      "num_threads": [
+        0,
+        0,
+        1
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "cute_vector_widths": [
+        2,
+        8,
+        2
+      ]
+    }
+  },
+  {
+    "key": {
+      "m": 64,
+      "k": 256,
+      "n": 128
+    },
+    "config": {
+      "block_sizes": [
+        4,
+        8,
+        2
+      ],
+      "num_threads": [
+        0,
+        0,
+        1
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "cute_vector_widths": [
+        2,
+        8,
+        2
+      ]
+    }
+  }
+]

@@ -107,9 +107,6 @@ from vllm.model_executor.kernels.linear.nvfp4 import (
 from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
     CutlassNvFp4LinearKernel,
 )
-from vllm.model_executor.kernels.linear.nvfp4.helion import (
-    HelionNvFp4LinearKernel
-)
 from vllm.model_executor.kernels.linear.nvfp4.emulation import (
     EmulationNvFp4LinearKernel,
 )
@@ -123,6 +120,7 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferCutlassNvFp4LinearKernel,
     FlashInferTrtllmNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.helion import HelionNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
     MarlinNvFp4LinearKernel,
 )
