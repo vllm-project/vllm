@@ -91,6 +91,57 @@ def test_image_adjacent_inputs():
     assert len(result["mm_kwargs"]["image"]) == 2
 
 
+def test_batch_padding_removed_from_image_items():
+    """Emu3 pads every image up to the largest in the batch, which would leave an
+    item's data dependent on what it was processed with and so uncacheable."""
+    model_id = "BAAI/Emu3-Chat-hf"
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    image_token = mm_processor.info.get_hf_processor().image_token
+
+    images = [
+        ImageAsset("cherry_blossom").pil_image,
+        ImageAsset("cherry_blossom").pil_image.resize((256, 1024)),
+    ]
+    result = mm_processor(
+        prompt=f"{image_token} and {image_token}",
+        mm_items=mm_processor.info.parse_mm_data({"image": images}),
+        hf_processor_mm_kwargs={},
+    )
+
+    items = result["mm_kwargs"]["image"]
+    shapes = set()
+    for item in items:
+        height, width = item["image_sizes"].data.flatten().tolist()
+        pixel_values = item["pixel_values"].data
+        assert tuple(pixel_values.shape[-2:]) == (height, width)
+        shapes.add(tuple(pixel_values.shape))
+
+    # Both images would have been padded to a common shape had they been kept
+    assert len(shapes) == 2
+
+
+def test_non_embedding_tokens_excluded_from_placeholders():
+    """Gemma3 wraps each image in text that carries no embeddings, which must be
+    inside the placeholder range but masked out of it."""
+    model_id = "google/gemma-3-4b-it"
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+    hf_processor = mm_processor.info.get_hf_processor()
+    result = mm_processor(
+        prompt=f"{hf_processor.boi_token} What is this?",
+        mm_items=mm_processor.info.parse_mm_data(
+            {"image": ImageAsset("cherry_blossom").pil_image}
+        ),
+        hf_processor_mm_kwargs={},
+    )
+
+    (placeholder,) = result["mm_placeholders"]["image"]
+    assert placeholder.is_embed is not None
+    assert 0 < int(placeholder.is_embed.sum()) < placeholder.length
+
+
 def test_text_only_prompt():
     """An image model still accepts a prompt with no images."""
     model_id = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
