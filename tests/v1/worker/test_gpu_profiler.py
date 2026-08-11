@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+import threading
+import time
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
@@ -17,7 +19,11 @@ from vllm.config import (
 )
 from vllm.config.profiler import _is_uri_path
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import ProtonProfilerWrapper, WorkerProfiler
+from vllm.profiler.wrapper import (
+    ProtonProfilerWrapper,
+    TorchProfilerWrapper,
+    WorkerProfiler,
+)
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.worker.dp_utils import DPProfilerSync
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -432,6 +438,61 @@ class TestWorkerSyncedProfileStart:
         Worker._maybe_start_synced_profile(worker)
 
         worker._create_profiler.assert_not_called()
+
+
+class TestTorchProfilerWrapperAsyncExport:
+    """Tests that trace export runs off the calling thread instead of
+    blocking stop()/step() (see TorchProfilerWrapper._async_trace_ready).
+    Uses CPU-only activities so these run without a GPU."""
+
+    def _make_wrapper(self, tmp_path, on_trace_ready):
+        config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir=str(tmp_path),
+            torch_profiler_dump_cuda_time_total=False,
+        )
+        return TorchProfilerWrapper(
+            profiler_config=config,
+            worker_name="test-worker",
+            local_rank=0,
+            activities=["CPU"],
+            on_trace_ready=on_trace_ready,
+        )
+
+    def test_stop_does_not_block_on_slow_export(self, tmp_path):
+        calling_thread = threading.current_thread()
+        handler_thread: dict[str, threading.Thread] = {}
+        handler_done = threading.Event()
+
+        def slow_handler(prof):
+            handler_thread["thread"] = threading.current_thread()
+            time.sleep(0.3)
+            handler_done.set()
+
+        wrapper = self._make_wrapper(tmp_path, slow_handler)
+        wrapper.start()
+
+        start = time.perf_counter()
+        wrapper.stop()
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.2, "stop() should not block on the trace export"
+        assert handler_done.wait(timeout=2.0), "background export never completed"
+        assert handler_thread["thread"] is not calling_thread
+
+    def test_export_errors_are_caught_not_raised(self, tmp_path):
+        handler_done = threading.Event()
+
+        def failing_handler(prof):
+            handler_done.set()
+            raise RuntimeError("boom")
+
+        wrapper = self._make_wrapper(tmp_path, failing_handler)
+        wrapper.start()
+
+        wrapper.stop()  # must not raise even though the handler will
+
+        assert handler_done.wait(timeout=2.0)
 
 
 def test_profiler_entered_during_capture():
