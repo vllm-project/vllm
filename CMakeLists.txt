@@ -395,6 +395,34 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
   #
+  if(Torch_VERSION VERSION_GREATER_EQUAL "2.13" AND
+     Torch_VERSION VERSION_LESS "2.14")
+    # hotfix for https://github.com/pytorch/pytorch/pull/190493
+    # delete after we bump to 2.14
+    list(GET TORCH_INCLUDE_DIRS 0 TORCH_INCLUDE_DIR)
+    set(_stable_hdr_rel "torch/csrc/stable/stableivalue_conversions.h")
+    file(READ "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
+      TORCH_STABLE_STRING_CONTENTS)
+
+    if(TORCH_STABLE_STRING_CONTENTS MATCHES "auto strptr = new std::string")
+      set(TORCH_SHADOW_INCLUDE_DIR
+        "${CMAKE_CURRENT_BINARY_DIR}/torch_patched_headers")
+
+      file(MAKE_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}/torch/csrc/stable")
+      file(COPY_FILE
+        "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
+        "${TORCH_SHADOW_INCLUDE_DIR}/${_stable_hdr_rel}")
+
+      execute_process(
+        COMMAND patch --batch --forward -p1
+          "--input=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
+        WORKING_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}"
+        COMMAND_ERROR_IS_FATAL ANY)
+
+      include_directories(BEFORE "${TORCH_SHADOW_INCLUDE_DIR}")
+    endif()
+  endif()
+
   set(VLLM_STABLE_EXT_SRC
     "csrc/libtorch_stable/torch_bindings.cpp"
     "csrc/libtorch_stable/cuda_view.cu"
@@ -446,6 +474,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_a2a_lse_reduce.cu"
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_kv_gather.cu"
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_q_gather.cu")
+
     SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
     # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
