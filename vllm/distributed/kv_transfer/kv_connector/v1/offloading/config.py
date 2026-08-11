@@ -213,6 +213,7 @@ def build_offloading_config(
             pcp_size=parallel_config.prefill_context_parallel_size,
             dcp_size=parallel_config.decode_context_parallel_size,
             data_parallel_index=parallel_config.data_parallel_index,
+            data_parallel_size=parallel_config.data_parallel_size,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,

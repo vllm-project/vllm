@@ -326,13 +326,15 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
     ] == [1, 3]
 
 
-def test_preserves_data_parallel_index():
+def test_preserves_data_parallel_config():
     config = _make_vllm_config()
     config.parallel_config.data_parallel_index = 2
+    config.parallel_config.data_parallel_size = 4
 
     offloading_config = build_offloading_config(config, _make_kv_cache_config())
 
     assert offloading_config.parallel.data_parallel_index == 2
+    assert offloading_config.parallel.data_parallel_size == 4
 
 
 def test_resolves_heterogeneous_hybrid_block_sizes():
