@@ -31,6 +31,7 @@ vllm serve --config config.yaml
 | Model | Architecture | Supported | Recipe |
 | ------------------------------------ | ---------------------------------------- | --------- | ------ |
 | unsloth/gpt-oss-20b | GptOssForCausalLM | ✅ | — |
+| openai/gpt-oss-20b | GptOssForCausalLM | ✅ | — |
 | meta-llama/Llama-3.1-8B-Instruct | LlamaForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/meta-llama/Llama-3.1-8B-Instruct?hardware=xeon6) |
 | meta-llama/Llama-3.2-1B | LlamaForCausalLM | ✅ | — |
 | meta-llama/Llama-3.2-3B-Instruct | LlamaForCausalLM | ✅ | — |
@@ -50,14 +51,18 @@ vllm serve --config config.yaml
 | Qwen/Qwen3-4B | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-4B?hardware=xeon6) |
 | Qwen/Qwen3-8B | Qwen3ForCausalLM | ✅ | — |
 | Qwen/Qwen3-14B | Qwen3ForCausalLM | ✅ | — |
+| Qwen/Qwen3-14B-FP8 | Qwen3ForCausalLM | ✅ | — |
 | Qwen/Qwen3-14B-AWQ | Qwen3ForCausalLM | ✅ | — |
 | Qwen/Qwen3-30B-A3B | Qwen3MoeForCausalLM | ✅ | — |
+| Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 | Qwen3MoeForCausalLM | ✅ | — |
+| Qwen/QwQ-32B | Qwen2ForCausalLM | ✅ | — |
 | Qwen/QwQ-32B-AWQ | Qwen2ForCausalLM | ✅ | — |
 | Qwen/Qwen1.5-0.5B-Chat-GPTQ-Int4 | Qwen2ForCausalLM | ✅ | — |
 | RedHatAI/QwQ-32B-quantized.w8a8 | Qwen2ForCausalLM | ✅ | — |
 | zai-org/glm-4-9b-hf | GLMForCausalLM | ✅ | — |
 | google/gemma-7b | GemmaForCausalLM | ✅ | — |
 | microsoft/Phi-4-reasoning | Phi3ForCausalLM | ✅ | — |
+| mistralai/Mistral-7B-Instruct-v0.2 | MistralForCausalLM | ✅ | — |
 | TheBloke/Mistral-7B-Instruct-v0.2-AWQ | MistralForCausalLM | ✅ | — |
 
 ### Multimodal Language Models
@@ -72,6 +77,7 @@ vllm serve --config config.yaml
 | google/gemma-4-26B-A4B-it | Gemma4ForConditionalGeneration | ✅ | [Xeon 6](https://recipes.vllm.ai/Google/gemma-4-26B-A4B-it?hardware=xeon6) |
 | microsoft/Phi-4-multimodal-instruct | Phi4MMForCausalLM | ✅ | — |
 | Qwen/Qwen2.5-VL-7B-Instruct | Qwen2VLForConditionalGeneration | ✅ | — |
+| Qwen/Qwen3-VL-30B-A3B-Instruct | Qwen3VLMoeForConditionalGeneration | ✅ | — |
 | openai/whisper-large-v3 | WhisperForConditionalGeneration | ✅ | — |
 
 ✅ Runs and optimized.
