@@ -315,3 +315,151 @@ def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
 
     expected = (FIXTURES_DIR / f"test_output_{case_id}.txt").read_text()
     assert prompt == expected
+
+
+def _request_tools():
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather for a city",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }
+    ]
+
+
+def _encode_reference(messages):
+    from vllm.tokenizers.deepseek_v4_encoding import encode_messages
+
+    return encode_messages(messages, thinking_mode="thinking", reasoning_effort="low")
+
+
+def test_deepseek_v4_attaches_request_tools_to_existing_system_message():
+    """Request tools render on the existing system message, matching the Rust
+    renderer and the checkpoint reference encoding."""
+    messages = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "Weather in Paris?"},
+    ]
+
+    prompt = _tokenizer().apply_chat_template(
+        messages,
+        tools=_request_tools(),
+        tokenize=False,
+        thinking=True,
+        reasoning_effort="low",
+    )
+
+    expected = _encode_reference(
+        [{**messages[0], "tools": _request_tools()}, messages[1]]
+    )
+    assert prompt == expected
+    assert prompt.startswith("<｜begin▁of▁sentence｜>You are helpful.\n\n## Tools")
+    assert prompt.count("## Tools") == 1
+
+
+def test_deepseek_v4_synthetic_system_only_when_no_system_message():
+    """Without a system message, request tools still get a synthetic leading
+    system entry."""
+    messages = [{"role": "user", "content": "Weather in Paris?"}]
+
+    prompt = _tokenizer().apply_chat_template(
+        messages,
+        tools=_request_tools(),
+        tokenize=False,
+        thinking=True,
+        reasoning_effort="low",
+    )
+
+    expected = _encode_reference(
+        [{"role": "system", "tools": _request_tools()}, messages[0]]
+    )
+    assert prompt == expected
+    assert prompt.startswith("<｜begin▁of▁sentence｜>\n\n## Tools")
+
+
+def test_deepseek_v4_request_tools_override_system_message_tools():
+    """Mirrors the Rust renderer, whose system messages carry no tools field:
+    with both present, only the request-level tools are rendered."""
+    message_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "message_level_tool",
+                "description": "Should not be rendered",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    system_message = {
+        "role": "system",
+        "content": "You are helpful.",
+        "tools": message_tools,
+    }
+    user_message = {"role": "user", "content": "Weather in Paris?"}
+
+    prompt = _tokenizer().apply_chat_template(
+        [system_message, user_message],
+        tools=_request_tools(),
+        tokenize=False,
+        thinking=True,
+        reasoning_effort="low",
+    )
+
+    expected = _encode_reference(
+        [{**system_message, "tools": _request_tools()}, user_message]
+    )
+    assert prompt == expected
+    assert '"name": "get_weather"' in prompt
+    assert "message_level_tool" not in prompt
+
+
+def test_deepseek_v4_attaches_request_tools_to_first_system_message_only():
+    """With multiple system messages, only the first one (at any index) gets
+    the request tools, matching the Rust renderer."""
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "system", "content": "First system."},
+        {"role": "system", "content": "Second system."},
+        {"role": "user", "content": "Weather in Paris?"},
+    ]
+
+    prompt = _tokenizer().apply_chat_template(
+        messages,
+        tools=_request_tools(),
+        tokenize=False,
+        thinking=True,
+        reasoning_effort="low",
+    )
+
+    expected = _encode_reference(
+        [
+            messages[0],
+            {**messages[1], "tools": _request_tools()},
+            messages[2],
+            messages[3],
+        ]
+    )
+    assert prompt == expected
+    assert "First system.\n\n## Tools" in prompt
+    assert prompt.count("## Tools") == 1
+
+
+def test_deepseek_v4_request_tools_do_not_mutate_caller_messages():
+    import copy
+
+    messages = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "Weather in Paris?"},
+    ]
+    snapshot = copy.deepcopy(messages)
+
+    _tokenizer().apply_chat_template(messages, tools=_request_tools(), tokenize=False)
+
+    assert messages == snapshot
