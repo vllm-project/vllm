@@ -1234,6 +1234,11 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
                 and loaded_weight.dim() == 1
             ):
                 min_len = min(param.size(0), loaded_weight.size(0))
+                logger.warning(
+                    "1D weight size mismatch: param size %s vs loaded "
+                    "weight size %s. Truncating to %d elements. "
+                    "Remaining values will be zero-initialized.",
+                    param.size(), loaded_weight.size(), min_len)
                 param.data[:min_len].copy_(loaded_weight[:min_len])
             else:
                 assert param.size() == loaded_weight.size(), (
