@@ -352,6 +352,7 @@ def run_multi_api_server(args: argparse.Namespace):
                 output_address=addresses.outputs[0],
                 engine_start_index=expected_engine_start_index,
                 engine_count=expected_engine_count,
+                data_parallel_size=parallel_config.data_parallel_size,
                 stats_update_address=stats_update_address,
             )
         else:
