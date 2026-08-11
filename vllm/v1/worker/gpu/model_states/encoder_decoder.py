@@ -86,7 +86,8 @@ class EncoderDecoderModelState(ModelState):
             # so execute_mm_encoder preserves request order; use its return value
             # directly. No need to store in encoder_cache: cross-attention K/V are
             # written to the KV cache on the first step; decode steps use the cache.
-            self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            with self.encoder_runner.timed_encoder_operation(encoder_inputs.keys()):
+                self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
         else:
             # Decode steps: encoder K/V are in cross-attention KV cache.
             self.encoder_outputs = []
