@@ -953,9 +953,7 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
 
     logits = torch.randn(num_rows, stride, dtype=torch.float32, device="cuda")
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
-    _run_topk_backend(
-        "persistent_topk", logits, lengths, indices, top_k, stride
-    )
+    _run_topk_backend("persistent_topk", logits, lengths, indices, top_k, stride)
     torch.accelerator.synchronize()
 
     expected = logits[target_row, :long_seq_len].topk(top_k).indices
