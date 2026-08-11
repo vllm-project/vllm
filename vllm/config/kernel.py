@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, fields
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -151,6 +151,28 @@ MEGA_MOE_BACKENDS = frozenset(
         "flashinfer_moe_ep_mega_cutedsl",
     }
 )
+
+# Architectures whose model code implements the mega-MoE path. MTP and DSpark
+# draft variants inherit the setting from these target models.
+MEGA_MOE_ARCHITECTURES = frozenset(
+    {
+        "DeepseekV4ForCausalLM",
+        "DeepSeekV4MTPModel",
+    }
+)
+
+
+def validate_mega_moe_model(moe_backend: str, architectures: Iterable[str]) -> None:
+    """Reject mega-MoE backends for models that lack the mega-MoE path."""
+    if moe_backend not in MEGA_MOE_BACKENDS:
+        return
+    if not any(arch in MEGA_MOE_ARCHITECTURES for arch in architectures):
+        raise ValueError(
+            f"moe_backend={moe_backend!r} is only supported for DeepSeek-V4 "
+            f"models ({sorted(MEGA_MOE_ARCHITECTURES)}), but the model is "
+            f"{list(architectures)}."
+        )
+
 
 LinearBackend = Literal[
     "auto",
@@ -304,6 +326,11 @@ class KernelConfig:
     def set_platform_defaults(self, vllm_config: "VllmConfig") -> None:
         """Set platform-specific defaults for the kernel config."""
         from vllm.platforms import current_platform
+
+        if vllm_config.model_config is not None:
+            validate_mega_moe_model(
+                self.moe_backend, vllm_config.model_config.architectures
+            )
 
         platform_op_priority = current_platform.get_default_ir_op_priority(vllm_config)
         logger.debug(

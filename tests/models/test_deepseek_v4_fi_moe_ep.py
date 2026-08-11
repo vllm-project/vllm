@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 import torch
 
-from vllm.config.kernel import MEGA_MOE_BACKENDS
+from vllm.config.kernel import MEGA_MOE_BACKENDS, validate_mega_moe_model
 from vllm.utils.flashinfer_moe_ep import (
     _E2M1_LUT,
     FI_MOE_EP_BACKENDS,
@@ -89,6 +89,23 @@ def fake_flashinfer(monkeypatch):
 
 def test_fi_backend_strings_are_registered_mega_moe_backends():
     assert set(FI_MOE_EP_BACKENDS) <= MEGA_MOE_BACKENDS
+
+
+@pytest.mark.parametrize("moe_backend", sorted(MEGA_MOE_BACKENDS))
+def test_mega_moe_backend_rejected_for_non_dsv4(moe_backend):
+    """A mega-MoE backend with a non-DSv4 model must fail at config time
+    instead of silently falling through to the generic FusedMoE path."""
+    with pytest.raises(ValueError, match="only supported for DeepSeek-V4"):
+        validate_mega_moe_model(moe_backend, ["MixtralForCausalLM"])
+
+
+@pytest.mark.parametrize("moe_backend", sorted(MEGA_MOE_BACKENDS))
+def test_mega_moe_backend_accepted_for_dsv4(moe_backend):
+    validate_mega_moe_model(moe_backend, ["DeepseekV4ForCausalLM"])
+
+
+def test_non_mega_backend_ignores_architectures():
+    validate_mega_moe_model("auto", ["MixtralForCausalLM"])
 
 
 @pytest.mark.parametrize("moe_backend", sorted(MEGA_MOE_BACKENDS))
