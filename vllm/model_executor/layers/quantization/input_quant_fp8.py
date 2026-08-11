@@ -94,7 +94,7 @@ class QuantFP8(CustomOp):
             self.is_group_quant
             and self.use_ue8m0
             and self.use_deep_gemm_supported
-            # The packed kernel only supports the DeepGEMM group size.
+            and not self.static
             and self.group_size == 128
             and (DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0)
         ):
