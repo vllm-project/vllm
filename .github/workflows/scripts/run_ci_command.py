@@ -16,6 +16,7 @@ COMMAND_RUN_CI = "/ci run"
 COMMAND_RUN_CI_ALL = "/ci run all"
 COMMAND_RUN_CI_NIGHTLY = "/ci run nightly"
 COMMAND_RETRY_FAILED = "/ci retry"
+COMMAND_CANCEL_CI = "/ci cancel"
 RUN_CI_COMMAND_ENV = {
     COMMAND_RUN_CI: {},
     COMMAND_RUN_CI_ALL: {"RUN_ALL": "1"},
@@ -35,6 +36,7 @@ ACTIVE_BUILD_STATES = {
     "waiting_failed",
 }
 RETRY_STATES = "failed,timed_out,expired"
+CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 SETUP_STEP_KEYS = {
     "ensure-ci-base-amd",
     "pre-commit",
@@ -335,7 +337,9 @@ class BuildkiteClient:
         self,
         commit: str | None,
         *,
+        branch: str | None = None,
         metadata: tuple[str, str] | None = None,
+        states: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
         query = [
             ("exclude_jobs", "true"),
@@ -344,9 +348,12 @@ class BuildkiteClient:
         ]
         if commit:
             query.append(("commit", commit))
+        if branch:
+            query.append(("branch", branch))
         if metadata:
             key, value = metadata
             query.append((f"meta_data[{key}]", value))
+        query.extend(("state[]", state) for state in states)
         response = self._request(query=query)
         if not isinstance(response, list):
             raise ApiError(None, "Buildkite API returned an invalid build list.")
@@ -366,6 +373,10 @@ class BuildkiteClient:
             method="PUT",
             path=f"/{number}/retry_failed_jobs",
         )
+
+    def cancel_build(self, build_number: int) -> dict[str, Any]:
+        number = urllib.parse.quote(str(build_number), safe="")
+        return self._request(method="PUT", path=f"/{number}/cancel")
 
     def list_failed_jobs(self, build_number: int) -> list[dict[str, Any]]:
         number = urllib.parse.quote(str(build_number), safe="")
@@ -397,7 +408,7 @@ class BuildkiteClient:
 
 
 def parse_command(body: str) -> str | None:
-    if body in {*RUN_CI_COMMAND_ENV, COMMAND_RETRY_FAILED}:
+    if body in {*RUN_CI_COMMAND_ENV, COMMAND_RETRY_FAILED, COMMAND_CANCEL_CI}:
         return body
     return None
 
@@ -432,7 +443,7 @@ def authorize(
     if actor.casefold() != pr["user"]["login"].casefold():
         return (
             False,
-            "Only reviewers with write access can run CI before it is "
+            "Only reviewers with write access can use CI commands before CI is "
             "delegated to the PR author.",
         )
     if pr["draft"]:
@@ -650,7 +661,9 @@ def notify_authorized(
             "- `/ci retry` retries failed jobs in the CI build for the current "
             "PR head. If the current head has no CI build, it starts a new CI "
             "build for the current head containing only jobs that failed in "
-            "the latest earlier CI build for this PR.\n\n"
+            "the latest earlier CI build for this PR.\n"
+            "- `/ci cancel` cancels scheduled or running CI builds for this PR "
+            "branch.\n\n"
             f"{CI_AUTHORIZED_COMMENT_MARKER}"
         ),
     )
@@ -837,6 +850,38 @@ def handle_retry_failed(
     )
 
 
+def handle_cancel_ci(
+    *,
+    buildkite: BuildkiteClient,
+    pr: Mapping[str, Any],
+) -> str:
+    branch = pr["head"]["ref"]
+    builds = buildkite.list_builds(
+        None,
+        branch=branch,
+        states=CANCELABLE_BUILD_STATES,
+    )
+    cancelable_builds = [
+        build
+        for build in builds
+        if build.get("branch") == branch
+        and is_build_for_pr(build, pr["number"])
+        and build.get("state") in CANCELABLE_BUILD_STATES
+    ]
+    if not cancelable_builds:
+        return f"No cancelable CI build is running for branch `{branch}`."
+
+    for build in cancelable_builds:
+        buildkite.cancel_build(build["number"])
+
+    links = ", ".join(
+        f"[#{build['number']}]({build['web_url']})" for build in cancelable_builds
+    )
+    count = len(cancelable_builds)
+    noun = "build" if count == 1 else "builds"
+    return f"Requested cancellation of {count} CI {noun} for `{branch}`: {links}."
+
+
 def run(
     event: Mapping[str, Any],
     github: GitHubClient,
@@ -904,12 +949,17 @@ def run(
                 github=github,
                 pr=pr,
             )
-        else:
+        elif command == COMMAND_RETRY_FAILED:
             message = handle_retry_failed(
                 actor=actor,
                 buildkite=buildkite,
                 comment_id=comment_id,
                 github=github,
+                pr=pr,
+            )
+        else:
+            message = handle_cancel_ci(
+                buildkite=buildkite,
                 pr=pr,
             )
         add_reaction_safely(github, comment_id, "rocket")

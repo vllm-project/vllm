@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -109,6 +108,9 @@ class Fp8Config(QuantizationConfig):
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
         self.ignored_layers = ignored_layers or []
+        self.ignored_layers_match_mode: Literal["exact", "substring", "suffix"] = (
+            "exact"
+        )
         self.store_dtype = store_dtype
         if weight_block_size is not None:
             if not is_checkpoint_fp8_serialized:
@@ -178,6 +180,7 @@ class Fp8Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                match_mode=self.ignored_layers_match_mode,
             ):
                 return UnquantizedLinearMethod()
             if not self.is_checkpoint_fp8_serialized:
@@ -197,6 +200,7 @@ class Fp8Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                match_mode=self.ignored_layers_match_mode,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.store_dtype == "mxfp4":
@@ -671,11 +675,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
-        # AITER backend requires weights to be marked as shuffled.
-        if self.fp8_backend == Fp8MoeBackend.AITER:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
@@ -685,7 +684,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
-            layer=layer,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -715,7 +713,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert not self.block_quant
             assert w13_input_scale is not None and w2_input_scale is not None
             w13_input_scale, w2_input_scale = process_fp8_input_tensor_strategy_moe(
-                w13_input_scale, w2_input_scale
+                w13_input_scale,
+                w2_input_scale,
+                layer.moe_config.moe_parallel_config.enable_eplb,
             )
             replace_parameter(layer, "w13_input_scale", w13_input_scale)
             replace_parameter(layer, "w2_input_scale", w2_input_scale)
