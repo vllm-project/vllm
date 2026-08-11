@@ -22,7 +22,7 @@ DEFAULT_CI_BASE_METADATA_VERSION="3"
 # ROCm CI forces REMOTE_VLLM=0, so content identity covers only the selected
 # local-source stages rather than unreachable remote-fetch alternatives.
 DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
-DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm build_vllm_dependencies csrc-build"
+DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm build_vllm_dependencies rocm-triton-kernels csrc-build"
 DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py tools/install_protoc.sh build_rust.sh"
 DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust_input_0 rust-input rust-toolchain rust-build"
 # Docker's 128-character tag limit minus the longest cache prefix
@@ -46,8 +46,6 @@ BAKE_FILES=()
 BAKE_ALLOW_ARGS=()
 BAKE_TARGETS=()
 DEPENDENCY_CACHE_TARGETS=()
-ROCM_RUST_BUILD_MARKER="VLLM_ROCM_RUST_BUILD_EXECUTED"
-ROCM_RUST_CACHE_REPAIR_ON_MISS=0
 
 cleanup() {
     if [[ -n "${SCRIPT_TMP_DIR}" && -d "${SCRIPT_TMP_DIR}" ]]; then
@@ -291,42 +289,6 @@ compute_content_hash() {
     done | sha256sum | cut -d' ' -f1
 }
 
-validate_ci_retry_output_ignores() {
-    local source_root="$1"
-    local dockerignore="${source_root}/.dockerignore"
-    local extra_dockerignore=""
-    local required_rule=""
-    local -a required_rules=(
-        "/artifacts/vllm-rocm-install/"
-        "/bake-config-build-*.json"
-        "/wheel-export/"
-    )
-
-    while IFS= read -r -d '' extra_dockerignore; do
-        printf 'A Dockerfile-specific ignore file can invalidate the approved CI retry outputs: %q\n' \
-            "${extra_dockerignore}" >&2
-        return 1
-    done < <(
-        find "${source_root}" \
-            -path "${source_root}/.git" -prune -o \
-            -name '*.dockerignore' ! -path "${dockerignore}" -print0
-    )
-    if [[ ! -f "${dockerignore}" ]]; then
-        echo "The CI Docker context requires ${dockerignore}" >&2
-        return 1
-    fi
-    if grep -Eq '^[[:space:]]*!' "${dockerignore}"; then
-        echo "Dockerignore negations can invalidate the approved CI retry outputs" >&2
-        return 1
-    fi
-    for required_rule in "${required_rules[@]}"; do
-        if ! grep -Fxq -- "${required_rule}" "${dockerignore}"; then
-            echo "Missing required CI retry-output exclusion: ${required_rule}" >&2
-            return 1
-        fi
-    done
-}
-
 validate_ci_build_context_source() {
     local source_root="$1"
     local context_commit=""
@@ -336,13 +298,7 @@ validate_ci_build_context_source() {
     local mode=""
     local stage=""
     local path=""
-    local approved_retry_outputs=0
-    local empty_directory=""
-    local relative_directory=""
-    local first_untracked=""
-    local unexpected_untracked=0
     local index_modes_file="${SCRIPT_TMP_DIR}/git-index-modes"
-    local untracked_file="${SCRIPT_TMP_DIR}/git-untracked-files"
     local info_attributes=""
 
     if ! context_commit=$(git -C "${source_root}" rev-parse \
@@ -370,59 +326,8 @@ validate_ci_build_context_source() {
         echo "Staged changes cannot be omitted from the CI Docker context" >&2
         return 1
     fi
-    # The owned context contains only the pinned Git tree. Permit the three
-    # Docker-excluded outputs this wrapper can leave behind on a retry, but do
-    # not let Git or Docker ignore syntax silently classify any other input.
-    if ! git -C "${source_root}" ls-files --others -z > "${untracked_file}"; then
-        echo "Failed to inspect untracked CI Docker context inputs" >&2
-        return 1
-    fi
-    while IFS= read -r -d '' path; do
-        case "${path}" in
-            artifacts/vllm-rocm-install/*|wheel-export/*)
-                ((approved_retry_outputs += 1))
-                continue
-                ;;
-            bake-config-build-*.json)
-                if [[ "${path}" != */* ]]; then
-                    ((approved_retry_outputs += 1))
-                    continue
-                fi
-                ;;
-        esac
-        if [[ -z "${first_untracked}" ]]; then
-            first_untracked="${path}"
-        fi
-        ((unexpected_untracked += 1))
-    done < "${untracked_file}"
-    if ((unexpected_untracked > 0)); then
-        printf 'Untracked files cannot be omitted from the CI Docker context (%d; first: %q)\n' \
-            "${unexpected_untracked}" "${first_untracked}" \
-            >&2
-        return 1
-    fi
-    # Git has no entries for empty directories, but Docker can include them.
-    # Reject those too unless they are inside an approved retry-output tree.
-    while IFS= read -r -d '' empty_directory; do
-        relative_directory="${empty_directory#"${source_root}"/}"
-        case "${relative_directory}" in
-            artifacts/vllm-rocm-install|artifacts/vllm-rocm-install/*|wheel-export|wheel-export/*)
-                ((approved_retry_outputs += 1))
-                continue
-                ;;
-        esac
-        printf 'Empty untracked directory cannot be omitted from the CI Docker context: %q\n' \
-            "${relative_directory}" >&2
-        return 1
-    done < <(
-        find "${source_root}" \
-            -path "${source_root}/.git" -prune -o \
-            -type d -empty -print0
-    )
-    if ((approved_retry_outputs > 0)); then
-        validate_ci_retry_output_ignores "${source_root}" || return $?
-    fi
-
+    # Untracked and ignored worker outputs are intentionally absent: the
+    # pinned Git tree, rather than mutable checkout contents, is the contract.
     if ! info_attributes=$(git -C "${source_root}" \
         rev-parse --path-format=absolute --git-path info/attributes); then
         echo "Failed to locate repository-local Git attributes" >&2
@@ -472,65 +377,57 @@ validate_ci_build_context_source() {
     done < "${index_modes_file}"
 }
 
-copy_ci_git_metadata() {
+describe_ci_revision() {
+    git -C "$1" describe --tags --long --abbrev=10 \
+        --match '*[0-9]*' "$2" 2>/dev/null
+}
+
+write_ci_git_archival_metadata() {
     local source_root="$1"
     local context_root="$2"
-    local git_common_dir=""
-    local expected_head=""
-    local context_head=""
-    local context_alternates="${context_root}/.git/objects/info/alternates"
+    local commit="${ROCM_BUILD_CONTEXT_COMMIT}"
+    local commit_date=""
+    local describe=""
+    local is_shallow="false"
 
-    if ! git_common_dir=$(git -C "${source_root}" \
-        rev-parse --path-format=absolute --git-common-dir); then
-        echo "Failed to locate common Git metadata for the CI Docker context" >&2
-        return 1
-    fi
-
-    if ! mkdir -m 0700 -- "${context_root}/.git"; then
-        echo "Failed to create Git metadata for the CI Docker context" >&2
-        return 1
-    fi
-    if ! cp -R --reflink=auto --no-preserve=ownership -- \
-        "${git_common_dir}/." "${context_root}/.git/"; then
-        echo "Failed to copy Git metadata into the CI Docker context" >&2
-        return 1
-    fi
-    expected_head="${ROCM_BUILD_CONTEXT_COMMIT}"
-    if ! printf '%s\n' "${expected_head}" > "${context_root}/.git/HEAD" \
-        || ! cp -- "${ROCM_BUILD_CONTEXT_INDEX}" "${context_root}/.git/index"; then
-        echo "Failed to pin Git metadata to the CI Docker context revision" >&2
-        return 1
-    fi
-
-    # Buildkite mirror checkouts may borrow objects through an absolute
-    # alternates path. Internalize them before the context leaves the host.
-    if [[ -s "${context_alternates}" ]]; then
-        if ! git -C "${context_root}" repack -a -d; then
-            echo "Failed to internalize borrowed Git objects" >&2
-            return 1
-        fi
-        if ! rm -f -- "${context_alternates}"; then
-            echo "Failed to detach copied Git metadata from its object mirror" >&2
-            return 1
+    commit_date=$(git -C "${source_root}" show -s --format=%cI "${commit}") \
+        || return $?
+    is_shallow=$(git -C "${source_root}" rev-parse --is-shallow-repository) \
+        || return $?
+    if git -C "${source_root}" remote get-url origin >/dev/null 2>&1; then
+        # AMD agents use shallow, no-tag clones. Reach a release tag so one
+        # commit cannot acquire different versions from different depths.
+        echo "Fetching version tags for the canonical CI Docker context"
+        if [[ "${is_shallow}" == "true" ]]; then
+            (cd "${source_root}" && git_fetch_for_cache \
+                --tags --deepen=1000 origin) || return $?
+            if ! describe_ci_revision "${source_root}" "${commit}" >/dev/null; then
+                is_shallow=$(git -C "${source_root}" \
+                    rev-parse --is-shallow-repository) || return $?
+                if [[ "${is_shallow}" == "true" ]]; then
+                    echo "No version tag within 1,000 commits; fetching full history"
+                    (cd "${source_root}" && git_fetch_for_cache \
+                        --tags --unshallow origin) || return $?
+                fi
+            fi
+        else
+            (cd "${source_root}" && git_fetch_for_cache --tags origin) \
+                || return $?
         fi
     fi
-
-    if ! find "${context_root}/.git" -type d -exec chmod 0755 -- {} + \
-        || ! find "${context_root}/.git" -type f -exec chmod 0644 -- {} +; then
-        echo "Failed to canonicalize copied Git metadata modes" >&2
+    if ! describe=$(describe_ci_revision "${source_root}" "${commit}"); then
+        echo "No numeric version tag is reachable from the CI revision" >&2
         return 1
     fi
-
-    if ! context_head=$(git -C "${context_root}" rev-parse HEAD); then
-        echo "Failed to verify copied Git metadata" >&2
+    if [[ -e "${context_root}/.git_archival.txt" \
+        || -L "${context_root}/.git_archival.txt" ]]; then
+        echo "The source tree already contains .git_archival.txt" >&2
         return 1
     fi
-    if [[ "${context_head}" != "${expected_head}" ]] \
-        || ! git -C "${context_root}" diff --quiet --no-ext-diff -- \
-        || ! git -C "${context_root}" diff --cached --quiet --no-ext-diff HEAD --; then
-        echo "Copied Git metadata does not describe the CI Docker context" >&2
-        return 1
-    fi
+    printf 'node: %s\nnode-date: %s\ndescribe-name: %s\n' \
+        "${commit}" "${commit_date}" "${describe}" \
+        > "${context_root}/.git_archival.txt" \
+        && chmod 0644 -- "${context_root}/.git_archival.txt"
 }
 
 write_build_context_override() {
@@ -585,10 +482,15 @@ prepare_ci_build_context() {
         return 1
     fi
 
-    # Full-source wheel targets use Git for versioning. The ci_base graph does
-    # not reach those stages, so avoid copying repository history there.
+    # setuptools-scm understands Git's stable archive format, so full-source
+    # wheels retain their exact version without copying mutable Git history.
     if ! is_ci_base_target; then
-        copy_ci_git_metadata "${source_root}" "${context_root}" || return $?
+        write_ci_git_archival_metadata "${source_root}" "${context_root}" \
+            || return $?
+    fi
+    if [[ -e "${context_root}/.git" ]]; then
+        echo "Canonical CI Docker context unexpectedly contains .git" >&2
+        return 1
     fi
     ROCM_BUILD_CONTEXT_ROOT="${context_root}"
     BAKE_ALLOW_ARGS+=(--allow "fs.read=${ROCM_BUILD_CONTEXT_ROOT}")
@@ -2048,24 +1950,24 @@ should_export_content_cache_ref() {
 
     case "${mode}" in
         always)
-            echo "${cache_name} content cache export mode is always; exporting ${cache_ref}"
+            echo "${cache_name} content cache export mode is always"
             return 0
             ;;
         never)
-            echo "${cache_name} content cache export mode is never; not exporting ${cache_ref}"
+            echo "${cache_name} content cache export mode is never"
             return 1
             ;;
         missing|"")
             if registry_ref_exists_with_retry imagetools "${trusted_ref}"; then
-                echo "${cache_name} trusted content cache is visible; not exporting ${cache_ref}"
+                echo "${cache_name} trusted content cache is visible: ${trusted_ref}"
                 return 1
             fi
             if [[ "${cache_ref}" != "${trusted_ref}" ]] \
                 && registry_ref_exists_with_retry imagetools "${cache_ref}"; then
-                echo "${cache_name} scoped content cache is visible; not re-exporting ${cache_ref}"
+                echo "${cache_name} scoped content cache is visible: ${cache_ref}"
                 return 1
             fi
-            echo "${cache_name} content cache missing; will export ${cache_ref}"
+            echo "${cache_name} content cache is missing: ${cache_ref}"
             return 0
             ;;
         *)
@@ -2091,8 +1993,6 @@ write_rocm_cache_override() {
     local export_csrc_cache=1
     local export_rust_cache=1
 
-    ROCM_RUST_CACHE_REPAIR_ON_MISS=0
-
     if ! uses_rocm_csrc_cache && ! uses_rocm_rust_cache; then
         return 0
     fi
@@ -2105,7 +2005,7 @@ write_rocm_cache_override() {
     validate_cache_export_mode "${rocm_cache_to_mode}" "ROCM_FINAL_CACHE_TO_MODE"
     echo "ROCm content cache export mode: ${content_cache_export_mode}"
     echo "ROCm csrc cache export mode: ${csrc_cache_to_mode}"
-    echo "ROCm Rust cache export mode: ${rust_cache_to_mode}"
+    echo "ROCm Rust fallback cache export mode: ${rust_cache_to_mode}"
     echo "ROCm final image cache export mode: ${rocm_cache_to_mode}"
 
     if [[ -n "${ROCM_CSRC_CONTENT_CACHE_REF:-}" ]]; then
@@ -2139,19 +2039,20 @@ write_rocm_cache_override() {
                 "type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF}"
             )
         fi
-        if should_export_content_cache_ref \
+        # Legacy commit/branch exports are only needed while the exact-input
+        # content ref is absent. The exact ref itself is refreshed below.
+        if ! should_export_content_cache_ref \
             "${ROCM_RUST_CONTENT_CACHE_REF}" "ROCm Rust" \
             "${ROCM_RUST_TRUSTED_CONTENT_CACHE_REF}"; then
-            rust_cache_to+=(
-                "type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF},mode=${rust_cache_to_mode},ignore-error=true"
-            )
-        else
             export_rust_cache=0
-            if [[ "${content_cache_export_mode}" == "missing" ]]; then
-                # Registry visibility does not prove the Rust vertex is usable.
-                # If it executes, run_bake repairs the writable content ref.
-                ROCM_RUST_CACHE_REPAIR_ON_MISS=1
-            fi
+        fi
+        if [[ "${content_cache_export_mode}" != "never" ]]; then
+            # Refresh the exact-input ref in the original solve regardless of
+            # which local or remote cache supplied the Rust result.
+            rust_cache_to+=(
+                "type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF},mode=min,ignore-error=true"
+            )
+            echo "ROCm Rust exact-input cache will be refreshed (mode=min): ${ROCM_RUST_CONTENT_CACHE_REF}"
         fi
     fi
 
@@ -2189,6 +2090,16 @@ write_rocm_cache_override() {
         rocm_cache_to+=(
             "type=registry,ref=${cache_repo}:rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${rocm_cache_to_mode},ignore-error=true"
         )
+    fi
+
+    # Standalone image/wheel targets reach rust-build but not the cache-only
+    # exporter unless it is requested explicitly.
+    if ((${#rust_cache_to[@]} > 0)); then
+        case "${TARGET}" in
+            test-rocm-ci|export-wheel-rocm)
+                BAKE_TARGETS=("rust-rocm-ci" "${BAKE_TARGETS[@]}")
+                ;;
+        esac
     fi
 
     if [[ "${TARGET}" == "test-rocm-ci-with-wheel" ]]; then
@@ -2251,27 +2162,6 @@ EOF
 
     BAKE_FILES+=(-f "${CSRC_CACHE_OVERRIDE_PATH}")
     echo "Appended ROCm cache override with non-fatal registry exports"
-}
-
-rocm_rust_build_executed() {
-    grep -Fq "${ROCM_RUST_BUILD_MARKER}" "$1"
-}
-
-repair_rocm_rust_cache() {
-    local cache_to="type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF},mode=${ROCM_RUST_CACHE_TO_MODE:-max},ignore-error=false"
-
-    echo "--- :arrows_counterclockwise: Repairing ROCm Rust cache after compile miss"
-    echo "Cache ref: ${ROCM_RUST_CONTENT_CACHE_REF}"
-    if docker buildx bake \
-        "${BAKE_ALLOW_ARGS[@]}" \
-        "${BAKE_FILES[@]}" \
-        --set "rust-rocm-ci.cache-to=${cache_to}" \
-        --progress plain \
-        rust-rocm-ci; then
-        echo "ROCm Rust cache repair completed"
-    else
-        echo "+++ :warning: ROCm Rust cache repair failed; preserving the successful build" >&2
-    fi
 }
 
 extract_dependency_pins() {
@@ -2590,35 +2480,17 @@ seed_dependency_caches_if_needed() {
 
 run_bake() {
     local confirmation_ref="${IMAGE_TAG:-}"
-    local progress_mode="${BUILDKIT_PROGRESS:-plain}"
-    local progress_log="${SCRIPT_TMP_DIR}/buildkit-progress.log"
-    local -a build_command=(
-        docker buildx bake
-        "${BAKE_ALLOW_ARGS[@]}"
-        "${BAKE_FILES[@]}"
-        --progress "${progress_mode}"
-        "${BAKE_TARGETS[@]}"
-    )
 
     if is_ci_base_target && [[ -n "${CI_BASE_IMAGE_TAG_BUILD_REF:-}" ]]; then
         confirmation_ref="${CI_BASE_IMAGE_TAG_BUILD_REF}"
     fi
 
     echo "--- :docker: Building ${TARGET}"
-    if [[ "${ROCM_RUST_CACHE_REPAIR_ON_MISS}" == "1" \
-        && "${progress_mode}" == "plain" ]]; then
-        "${build_command[@]}" 2>&1 | tee "${progress_log}" || return $?
-        if rocm_rust_build_executed "${progress_log}"; then
-            repair_rocm_rust_cache
-        else
-            echo "ROCm Rust build step was cached"
-        fi
-    else
-        if [[ "${ROCM_RUST_CACHE_REPAIR_ON_MISS}" == "1" ]]; then
-            echo "Automatic ROCm Rust cache repair requires plain progress; continuing with ${progress_mode}"
-        fi
-        "${build_command[@]}"
-    fi
+    docker buildx bake \
+        "${BAKE_ALLOW_ARGS[@]}" \
+        "${BAKE_FILES[@]}" \
+        --progress "${BUILDKIT_PROGRESS:-plain}" \
+        "${BAKE_TARGETS[@]}"
 
     if is_ci_base_target; then
         if ! confirm_remote_image_push "${confirmation_ref}"; then
@@ -2734,8 +2606,8 @@ main() {
     maybe_skip_existing_image
     setup_builder
     prepare_git_cache_metadata
-    # Non-ci_base builds may deepen a shallow checkout above. Copy Git metadata
-    # only after that lookup so setuptools_scm sees the same history as before.
+    # Non-ci_base builds may deepen a shallow checkout above. Derive archival
+    # version metadata only after that lookup sees the available tag history.
     if ! is_ci_base_target; then
         prepare_ci_build_context
     fi
