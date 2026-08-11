@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
+    VLLM_MAX_AUDIO_DECODE_BYTES: int = 268_435_456
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
@@ -189,6 +190,9 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_DCP_Q_REPLICATE: bool = False
+    VLLM_USE_DIRECT_DCP_A2A: bool | None = None
+    VLLM_USE_DIRECT_DCP_Q_GATHER: bool | None = None
+    VLLM_USE_DIRECT_DCP_KV_GATHER: bool | None = None
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -985,6 +989,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # allocated.  Default is 600s (10 minutes).
     "VLLM_MAX_AUDIO_DECODE_DURATION_S": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_DECODE_DURATION_S", "600")
+    ),
+    # Maximum float32 PCM bytes that audio decoding may allocate.
+    # Guards against sample-rate forgery where an attacker inflates
+    # the header sample rate to bypass the duration guard while the
+    # actual frame count still causes a multi-GiB allocation.
+    # Default is 256 MiB (sufficient for 600s mono 48 kHz float32).
+    "VLLM_MAX_AUDIO_DECODE_BYTES": lambda: int(
+        os.getenv("VLLM_MAX_AUDIO_DECODE_BYTES", "268435456")
     ),
     # Maximum number of worker threads used for STT preprocessing. The default
     # intentionally caps at 2 because that performed best in profiling.
@@ -2048,6 +2060,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
     ),
+    # Direct DCP ops default on when applicable; set to 1 to enforce or 0 to disable.
+    "VLLM_USE_DIRECT_DCP_A2A": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_DIRECT_DCP_A2A")
+    ),
+    "VLLM_USE_DIRECT_DCP_Q_GATHER": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_DIRECT_DCP_Q_GATHER")
+    ),
+    "VLLM_USE_DIRECT_DCP_KV_GATHER": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_DIRECT_DCP_KV_GATHER")
+    ),
     # Whether to enable dual cuda streams for LoRA computation
     # (used by both BaseLinearLayerWithLoRA and FusedMoEWithLoRA to
     # overlap the base layer compute with the LoRA fast path).
@@ -2206,6 +2228,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
         "VLLM_MAX_AUDIO_DECODE_DURATION_S",
+        "VLLM_MAX_AUDIO_DECODE_BYTES",
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
         "VLLM_MAX_IMAGE_PIXELS",
         "VLLM_VIDEO_LOADER_BACKEND",
