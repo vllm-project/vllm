@@ -108,6 +108,9 @@ if TYPE_CHECKING:
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
+    VLLM_MAX_STOP_STRINGS: int = 4
+    VLLM_MAX_NUM_BAD_WORDS: int = 128
+    VLLM_MAX_BAD_WORDS_TOTAL_TOKENS: int = 1024
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
@@ -190,6 +193,9 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_DCP_Q_REPLICATE: bool = False
+    VLLM_USE_DIRECT_DCP_A2A: bool | None = None
+    VLLM_USE_DIRECT_DCP_Q_GATHER: bool | None = None
+    VLLM_USE_DIRECT_DCP_KV_GATHER: bool | None = None
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -1110,6 +1116,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # requests from a single API call. Default: 1024.
     "VLLM_MAX_COMPLETION_PROMPTS": lambda: int(
         os.environ.get("VLLM_MAX_COMPLETION_PROMPTS", "1024")
+    ),
+    # Maximum number of stop strings allowed in a single request.
+    "VLLM_MAX_STOP_STRINGS": lambda: int(os.environ.get("VLLM_MAX_STOP_STRINGS", "4")),
+    # Maximum number of bad-word token sequences generated per request.
+    "VLLM_MAX_NUM_BAD_WORDS": lambda: int(
+        os.environ.get("VLLM_MAX_NUM_BAD_WORDS", "128")
+    ),
+    # Maximum total number of bad-word tokens (summed across all bad words)
+    # allowed per request. Bounds the per-request GPU buffer width.
+    "VLLM_MAX_BAD_WORDS_TOTAL_TOKENS": lambda: int(
+        os.environ.get("VLLM_MAX_BAD_WORDS_TOTAL_TOKENS", "1024")
     ),
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
@@ -2056,6 +2073,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
+    ),
+    # Direct DCP ops default on when applicable; set to 1 to enforce or 0 to disable.
+    "VLLM_USE_DIRECT_DCP_A2A": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_DIRECT_DCP_A2A")
+    ),
+    "VLLM_USE_DIRECT_DCP_Q_GATHER": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_DIRECT_DCP_Q_GATHER")
+    ),
+    "VLLM_USE_DIRECT_DCP_KV_GATHER": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_DIRECT_DCP_KV_GATHER")
     ),
     # Whether to enable dual cuda streams for LoRA computation
     # (used by both BaseLinearLayerWithLoRA and FusedMoEWithLoRA to
