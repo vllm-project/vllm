@@ -1510,8 +1510,15 @@ class EagleModelMixin:
 
     def _cache_aux_pp_layout(self) -> None:
         """Resolve this rank's slot layout, off the forward path."""
-        from vllm.distributed.parallel_state import get_pp_group
+        from vllm.distributed.parallel_state import (
+            get_pp_group,
+            model_parallel_is_initialized,
+        )
 
+        # Models are also built outside a worker, where there is no PP group
+        # and so nothing to forward.
+        if not model_parallel_is_initialized():
+            return
         pp = get_pp_group()
         if pp.world_size < 2:
             return
@@ -1583,12 +1590,10 @@ class EagleModelMixin:
         """Expose this stage's own aux taps to the runner, keyed by global slot.
 
         Pure packing, so the forward stays capturable by full CUDA graphs; the
-        taps then ride the ``IntermediateTensors`` handoff.
+        taps then ride the ``IntermediateTensors`` handoff. Callers reach this
+        only off the last rank, which implies a PP world size above one.
         """
-        from vllm.distributed.parallel_state import get_pp_group
-
-        pp = get_pp_group()
-        if pp.world_size == 1 or pp.is_last_rank or not aux_hidden_states:
+        if not aux_hidden_states:
             return {}
         base = self._aux_slot_base_cached
         return {
@@ -1602,13 +1607,10 @@ class EagleModelMixin:
         """Collect earlier stages' aux taps on the last rank, in tap order.
 
         The handoff has already landed them in the persistent buffer, so reading
-        fixed slots keeps the forward capturable by full CUDA graphs.
+        fixed slots keeps the forward capturable by full CUDA graphs. Callers
+        gate on the last rank; the count is zero unless a split left taps
+        upstream, which cannot happen at a PP world size of one.
         """
-        from vllm.distributed.parallel_state import get_pp_group
-
-        pp = get_pp_group()
-        if not pp.is_last_rank or pp.world_size == 1:
-            return []
         total = self._aux_upstream_total_cached
         if total == 0:
             return []

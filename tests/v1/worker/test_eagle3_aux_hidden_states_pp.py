@@ -10,6 +10,8 @@ import pytest
 
 from vllm.distributed.utils import get_pp_indices
 from vllm.model_executor.models.interfaces import EagleModelMixin
+from vllm.model_executor.models.llama import LlamaModel
+from vllm.model_executor.models.qwen2 import Qwen2Model
 
 # Kimi-K3 / DSpark: 93 layers, target_layer_ids [2, 23, 47, 71, 89].
 # get_eagle3_aux_layers_from_config maps target_layer_ids -> +1.
@@ -65,3 +67,14 @@ def test_middle_stage_sends_only_local_taps():
     upstream = [a for a in AUX_IDS if a <= start]
     assert not set(local) & set(upstream)
     assert local == [a for a in AUX_IDS if start < a <= end]
+
+
+@pytest.mark.parametrize("model_cls", [LlamaModel, Qwen2Model])
+def test_forward_does_not_name_update(model_cls):
+    """Packing taps must not go through dict.update.
+
+    TorchDynamoWrapper.bytecode_hook refuses any compiled forward whose
+    bytecode names `update`, so a model that packs its taps that way cannot
+    start under cudagraphs. The same holds for the other opted-in models.
+    """
+    assert "update" not in model_cls.forward.__code__.co_names

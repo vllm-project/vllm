@@ -435,8 +435,13 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
-            tensors = {"hidden_states": hidden_states, "residual": residual}
-            tensors.update(self.pack_local_aux_for_last(aux_hidden_states))
+            # Merged by unpacking rather than dict.update: the compile wrapper
+            # rejects a forward whose bytecode names `update`.
+            tensors = {
+                "hidden_states": hidden_states,
+                "residual": residual,
+                **self.pack_local_aux_for_last(aux_hidden_states),
+            }
             return IntermediateTensors(tensors)
 
         hidden_states, _ = self.norm(hidden_states, residual)
