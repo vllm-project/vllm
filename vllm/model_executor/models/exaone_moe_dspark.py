@@ -75,6 +75,7 @@ class ExaoneMoeDSparkModel(DFlashQwen3Model):
             config.vocab_size,
             config.dspark_markov_rank,
             prefix=maybe_prefix(prefix, "mtp.markov_head"),
+            quant_config=self.quant_config,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
