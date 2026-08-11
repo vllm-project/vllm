@@ -101,13 +101,28 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     MINIMAX_M3_SPARSE = (
         "vllm.models.minimax_m3.common.sparse_attention.MiniMaxM3SparseBackend"
     )
+    CUTLASS_MSA = (
+        "vllm.models.minimax_m3.nvidia.sparse_attention_msa."
+        "MiniMaxM3SparseCutlassBackend"
+    )
+    TRITON_MSA = (
+        "vllm.models.minimax_m3.nvidia.sparse_attention_msa."
+        "MiniMaxM3SparseTritonBackend"
+    )
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
+    # HPC Attention Backend:
+    # powered by operators from https://github.com/Tencent/hpc-ops.
+    # Only supported on NVIDIA Hopper GPUs (e.g. H20, H200),
+    # currently limited to the Hy3 model,
+    # and requires a block size of 64.
+    HPC_ATTN = "vllm.v1.attention.backends.hpc_attn.HpcAttentionBackend"
     ROCM_AITER_UNIFIED_ATTN = (
         "vllm.v1.attention.backends.rocm_aiter_unified_attn."
         "RocmAiterUnifiedAttentionBackend"
     )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
+    CPU_MLA = "vllm.v1.attention.backends.mla.cpu_mla.CPUMLABackend"
     TURBOQUANT = "vllm.v1.attention.backends.turboquant_attn.TurboQuantAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
     # set to None to avoid alias with other backend, whose value is an empty string

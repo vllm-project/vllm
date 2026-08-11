@@ -4,13 +4,21 @@ from collections.abc import Sequence
 from typing import Any
 
 from vllm import PoolingParams, PoolingRequestOutput
-from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.plugins.io_processors import get_io_processor
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 
 from ..base.io_processor import PoolingIOProcessor
-from ..typing import OfflineInputsContext, OfflineOutputsContext, PoolingServeContext
+from ..typing import (
+    AnyOfflineInputsContext,
+    AnyRenderParam,
+    EncodeCMPLRenderParams,
+    OfflineEncodeInputsContext,
+    OfflineOutputsContext,
+    OfflinePluginInputsContext,
+    PoolingServeContext,
+    RequestFactory,
+)
 from .protocol import IOProcessorRequest, IOProcessorResponse
 
 logger = init_logger(__name__)
@@ -43,7 +51,9 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
     #######################################
     # online APIs
 
-    def pre_process_online(self, ctx: PoolingServeContext):
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
         assert isinstance(ctx.request, IOProcessorRequest)
 
         validated_prompt = self.io_processor.parse_data(ctx.request.data)
@@ -60,23 +70,32 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
             )
             for prompt in prompt_to_seq(raw_prompts)
         ]
+        num_requests = len(parsed_prompts)
 
         tok_params = ctx.request.build_tok_params(self.model_config)
-
-        ctx.engine_inputs = self.renderer.render_cmpl(
-            parsed_prompts,
-            tok_params,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := getattr(ctx.request, k, None)) is not None
-            },
-        )
 
         pooling_params = self.io_processor.merge_pooling_params()
         if pooling_params.task is None:
             pooling_params.task = "plugin"
         ctx.pooling_params = pooling_params
+
+        params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
+        seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
+        seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
+
+        requests = [
+            EncodeCMPLRenderParams(
+                prompts=parsed_prompts[i],
+                tok_params=tok_params,
+                prompt_extras=ctx.prompt_extras,
+                skip_mm_cache=False,
+                params=params_seq[i],
+                lora_requests=seq_lora_requests[i],
+                priorities=seq_priority[i],
+            )
+            for i in range(num_requests)
+        ]
+        return requests
 
     def post_process_online(
         self,
@@ -107,9 +126,11 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
     #######################################
     # offline APIs
 
-    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
+    def get_request_factory_offline(
+        self, ctx: AnyOfflineInputsContext
+    ) -> tuple[RequestFactory, int]:
+        assert isinstance(ctx, OfflinePluginInputsContext)
         assert isinstance(ctx.prompts, dict) and "data" in ctx.prompts
-        assert ctx.pooling_params is not None
 
         # Validate the request data is valid for the loaded plugin
         prompt_data = ctx.prompts.get("data")
@@ -126,20 +147,35 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
         prompts = self.io_processor.pre_process(prompt=validated_prompt)
         prompts_seq = prompt_to_seq(prompts)
 
+        num_requests = len(prompts_seq)
+
+        pooling_params: PoolingParams | Sequence[PoolingParams]
+        if ctx.pooling_params is None:
+            pooling_params = PoolingParams()
+        else:
+            pooling_params = ctx.pooling_params
+
         params_seq: list[PoolingParams] = [
             self.io_processor.merge_pooling_params(param)
             for param in self._params_to_seq(
-                ctx.pooling_params,
-                len(prompts_seq),
+                pooling_params,
+                num_requests,
             )
         ]
         for p in params_seq:
             if p.task is None:
                 p.task = "plugin"
 
-        ctx.pooling_params = params_seq
-        ctx.prompts = prompts_seq
-        return super().pre_process_offline(ctx)
+        return super().get_request_factory_offline(
+            OfflineEncodeInputsContext(
+                prompts=prompts_seq,
+                pooling_params=params_seq,
+                pooling_task="plugin",
+                tokenization_kwargs=ctx.tokenization_kwargs,
+                lora_request=ctx.lora_request,
+                priorities=ctx.priorities,
+            )
+        )
 
     def post_process_offline(
         self,

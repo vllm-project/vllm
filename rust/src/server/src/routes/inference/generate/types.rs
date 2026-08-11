@@ -1,5 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 
+use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
@@ -22,6 +26,9 @@ pub struct GenerateRequest {
     #[serde(default)]
     pub priority: i32,
     pub kv_transfer_params: Option<HashMap<String, Value>>,
+    pub ec_transfer_params: Option<HashMap<String, Value>>,
+    /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
+    pub content_parts: Option<Vec<MediaContentPart>>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
@@ -29,7 +36,9 @@ pub struct GenerateRequest {
 impl Normalizable for GenerateRequest {}
 
 /// Mirrors the Python vLLM `GenerateResponseChoice` class.
-#[serde_with::skip_serializing_none]
+///
+/// Do not skip serializing `None` fields here: non-streaming response types
+/// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseChoice {
     pub index: u32,
@@ -58,17 +67,16 @@ pub(super) struct GenerateStreamResponse {
 }
 
 /// Mirrors the Python vLLM `GenerateResponse` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponse {
     pub request_id: String,
     pub choices: Vec<GenerateResponseChoice>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
     pub kv_transfer_params: Option<Value>,
+    pub ec_transfer_params: Option<Value>,
 }
 
 /// Mirrors the Python vLLM `Logprob` class used in prompt-logprobs payloads.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateLogprob {
     pub logprob: f32,

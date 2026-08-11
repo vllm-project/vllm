@@ -9,6 +9,8 @@ import regex as re
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template should work here
@@ -171,6 +173,61 @@ async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
     assert choice.logprobs.token_logprobs is not None
     assert choice.logprobs.top_logprobs is not None
     assert 5 <= len(choice.logprobs.top_logprobs[0]) <= 6
+
+
+@pytest.mark.asyncio
+async def test_logprob_token_ids(client: openai.AsyncOpenAI):
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt="Hello",
+        max_tokens=1,
+        temperature=0.0,
+        logprobs=5,
+        extra_body={
+            "logprob_token_ids": [5000],
+            "allowed_token_ids": [42],
+            "return_tokens_as_token_ids": True,
+        },
+    )
+
+    choice = completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.tokens == ["token_id:42"]
+    assert choice.logprobs.top_logprobs is not None
+    assert set(choice.logprobs.top_logprobs[0]) == {
+        "token_id:42",
+        "token_id:5000",
+    }
+
+
+@pytest.mark.asyncio
+async def test_logprob_token_ids_stream(client: openai.AsyncOpenAI):
+    stream = await client.completions.create(
+        model=MODEL_NAME,
+        prompt="Hello",
+        max_tokens=1,
+        temperature=0.0,
+        logprobs=5,
+        stream=True,
+        extra_body={
+            "logprob_token_ids": [5000],
+            "allowed_token_ids": [42],
+            "return_tokens_as_token_ids": True,
+        },
+    )
+
+    returned_top_logprobs: list[dict[str, float]] = []
+    async for chunk in stream:
+        logprobs = chunk.choices[0].logprobs
+        if logprobs is not None and logprobs.top_logprobs is not None:
+            returned_top_logprobs.extend(
+                top_logprobs
+                for top_logprobs in logprobs.top_logprobs
+                if top_logprobs is not None
+            )
+
+    assert len(returned_top_logprobs) == 1
+    assert set(returned_top_logprobs[0]) == {"token_id:42", "token_id:5000"}
 
 
 @pytest.mark.asyncio
@@ -730,3 +787,38 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
                 "structured_outputs": {"grammar": invalid_simplified_sql_grammar}
             },
         )
+
+
+# Unit tests for bad_words in CompletionRequest.to_sampling_params()
+def test_completion_request_bad_words_to_sampling_params():
+    """bad_words should be forwarded to SamplingParams (parity with chat)."""
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        bad_words=["foo", "bar"],
+        max_tokens=10,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+
+    assert isinstance(sampling_params, SamplingParams)
+    assert sampling_params.bad_words == ["foo", "bar"]
+
+
+def test_completion_request_bad_words_default_empty():
+    """bad_words defaults to an empty list, matching the chat endpoint."""
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        max_tokens=10,
+    )
+
+    assert request.bad_words == []
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+    assert sampling_params.bad_words == []

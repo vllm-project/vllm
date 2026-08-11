@@ -65,15 +65,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.evs import (
-    compute_mrope_for_media,
-    compute_retained_tokens_count,
-    compute_retention_mask,
-    recompute_mrope_positions,
-)
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
@@ -81,6 +74,12 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.video_prune.evs import (
+    compute_mrope_for_media,
+    compute_retained_tokens_count,
+    compute_retention_mask,
+    recompute_mrope_positions,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -113,6 +112,7 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    FusedInputNorm,
     get_fp8_padded_hidden_size,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
@@ -613,6 +613,16 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
 
 
 class Qwen2_5_VisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".attn.q.": (".attn.qkv.", "q"),
+            ".attn.k.": (".attn.qkv.", "k"),
+            ".attn.v.": (".attn.qkv.", "v"),
+            ".mlp.gate_proj.": (".mlp.gate_up_proj.", 0),
+            ".mlp.up_proj.": (".mlp.gate_up_proj.", 1),
+        }
+    )
+
     def __init__(
         self,
         vision_config: Qwen2_5_VLVisionConfig,
@@ -1116,32 +1126,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("attn.qkv.", "attn.q.", "q"),
-            ("attn.qkv.", "attn.k.", "k"),
-            ("attn.qkv.", "attn.v.", "v"),
-            ("mlp.gate_up_proj.", "mlp.gate_proj.", 0),
-            ("mlp.gate_up_proj.", "mlp.up_proj.", 1),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
@@ -1269,6 +1255,7 @@ class Qwen2_5_VLForConditionalGeneration(
     )
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
@@ -1378,6 +1365,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
@@ -1452,6 +1440,8 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
+            pixel_values = self.input_norm(pixel_values, self.visual.dtype)
+
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
@@ -1508,6 +1498,10 @@ class Qwen2_5_VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
+            pixel_values_videos = self.input_norm(
+                pixel_values_videos, self.visual.dtype
+            )
+
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,

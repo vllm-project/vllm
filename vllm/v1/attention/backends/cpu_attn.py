@@ -68,6 +68,10 @@ class CPUAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """CPU attention supports decoder,
         encoder-only and encoder-decoder attention."""
@@ -141,7 +145,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         self.vllm_config = vllm_config
 
         parallel_config = vllm_config.parallel_config
-        self.num_kv_heads = vllm_config.model_config.get_num_kv_heads(parallel_config)
+        self.num_kv_heads = kv_cache_spec.num_kv_heads
         self.num_heads = vllm_config.model_config.get_num_attention_heads(
             parallel_config
         )
@@ -151,12 +155,12 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         if self.window_size is None:
             self.window_size = -1
         self.block_size = vllm_config.cache_config.block_size
-        kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
+        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
             self.dtype,
             self.block_size,
             self.head_dim,
-            kv_cache_dtype_str,
+            self.kv_cache_dtype,
         )
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
         self.is_encoder_only_attention = isinstance(
@@ -230,6 +234,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             isa=self.isa,
             enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
             dynamic_causal=dynamic_casual,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
 
         attn_metadata = CPUAttentionMetadata(
@@ -345,8 +350,11 @@ class CPUAttentionBackendImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # For encoder attention
-        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+        is_encoder_attention = self.attn_type in (
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER,
+        )
+        if is_encoder_attention:
             # For encoder attention,
             kv_cache = attn_metadata.encoder_cache
 
@@ -357,14 +365,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
         key_cache, value_cache = kv_cache.chunk(2, dim=2)
 
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
+        if is_encoder_attention:
             ops.cpu_attn_reshape_and_cache(
                 key,
                 value,
@@ -437,27 +438,24 @@ def _riscv_supports_rvv() -> bool:
     The RVV path is compiled whenever __riscv_v_min_vlen is defined, so
     we check that at least one supported zvl<N>b is advertised.
     """
+    # The C++ compile-time check is the ground truth: it knows which
+    # VLEN the binary was actually compiled for.  The cpuinfo check
+    # below is only a fast-path shortcut.
+    try:
+        import torch
+
+        if torch.ops._C.cpu_attn_has_isa("rvv"):
+            return True
+    except Exception:
+        pass
+
+    # Fallback: check /proc/cpuinfo for zvl128b/zvl256b.
     try:
         with open("/proc/cpuinfo") as f:
             cpuinfo = f.read()
     except OSError:
         return False
-    # If VLEN >= 512 is detected, the RVV kernel was not compiled.
-    if any(f"zvl{n}b" in cpuinfo for n in (512, 1024)):
-        return False
-
-    # zvl128b or zvl256b explicitly advertised -> RVV kernel available.
-    if any(f"zvl{n}b" in cpuinfo for n in (128, 256)):
-        return True
-
-    # No zvl<N>b flag at all (e.g. some hardware reports zve* without
-    # a VLEN hint).  Delegate to the C++ compile-time check instead.
-    try:
-        import torch
-
-        return torch.ops._C.cpu_attn_has_isa("rvv")
-    except Exception:
-        return False
+    return any(f"zvl{n}b" in cpuinfo for n in (128, 256))
 
 
 def _get_attn_isa(
