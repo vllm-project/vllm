@@ -38,7 +38,7 @@ def _set_spawn_method(monkeypatch):
 
 def _make_region(
     engine_id: str,
-    num_blocks: int = 4,
+    num_chunks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
     num_workers: int = 1,
     rank: int = 0,
@@ -46,9 +46,9 @@ def _make_region(
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
         engine_id=engine_id,
-        num_blocks=num_blocks,
+        num_chunks=num_chunks,
         rank=rank,
-        kv_bytes_per_block=num_workers * cpu_page_size,
+        kv_bytes_per_chunk=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
     )
 
@@ -97,16 +97,16 @@ def _region(engine_id: str, **kwargs):
 def _multi_region(
     engine_id: str,
     num_workers: int,
-    num_blocks: int = 4,
+    num_chunks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
 ):
     """Context manager: create one SharedOffloadRegion per rank, clean up on exit."""
     regions = [
         SharedOffloadRegion(
             engine_id=engine_id,
-            num_blocks=num_blocks,
+            num_chunks=num_chunks,
             rank=rank,
-            kv_bytes_per_block=num_workers * cpu_page_size,
+            kv_bytes_per_chunk=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
         )
         for rank in range(num_workers)
@@ -122,7 +122,7 @@ def _multi_region(
 def _race_construct(
     engine_id: str,
     num_workers: int,
-    num_blocks: int = 4,
+    num_chunks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
 ) -> tuple[list[SharedOffloadRegion], list[Exception]]:
     """Spawn num_workers threads that all race to construct SharedOffloadRegion."""
@@ -135,9 +135,9 @@ def _race_construct(
         try:
             regions[rank] = SharedOffloadRegion(
                 engine_id=engine_id,
-                num_blocks=num_blocks,
+                num_chunks=num_chunks,
                 rank=rank,
-                kv_bytes_per_block=num_workers * cpu_page_size,
+                kv_bytes_per_chunk=num_workers * cpu_page_size,
                 cpu_page_size=cpu_page_size,
             )
         except Exception as e:
@@ -154,7 +154,7 @@ def _race_construct(
 
 def _mp_race_construct_and_write(
     engine_id: str,
-    num_blocks: int,
+    num_chunks: int,
     rank: int,
     num_workers: int,
     cpu_page_size: int,
@@ -168,9 +168,9 @@ def _mp_race_construct_and_write(
     try:
         region = SharedOffloadRegion(
             engine_id=engine_id,
-            num_blocks=num_blocks,
+            num_chunks=num_chunks,
             rank=rank,
-            kv_bytes_per_block=num_workers * cpu_page_size,
+            kv_bytes_per_chunk=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
         )
         t = region.create_next_worker_view(cpu_page_size)
@@ -195,9 +195,9 @@ def iid():
 
 
 def test_create_next_worker_view_shape_and_stride(iid):
-    """Returned tensor must have shape (num_blocks, tensor_page_size) and
+    """Returned tensor must have shape (num_chunks, tensor_page_size) and
     stride (row_stride, 1) where row_stride = cpu_page_size * num_workers."""
-    with _region(iid, num_blocks=4, cpu_page_size=2 * PAGE_SIZE) as r:
+    with _region(iid, num_chunks=4, cpu_page_size=2 * PAGE_SIZE) as r:
         t = r.create_next_worker_view(PAGE_SIZE)
         assert t.shape == (4, PAGE_SIZE)
         # num_workers=1 → row_stride = cpu_page_size
@@ -215,7 +215,7 @@ def test_create_next_worker_view_storage_offset_rank0(iid):
 
 def test_create_next_worker_view_storage_offset_rank1(iid):
     """rank=1 worker's first tensor must start cpu_page_size bytes into the mmap."""
-    with _multi_region(iid, num_workers=2, num_blocks=4) as (r0, r1):
+    with _multi_region(iid, num_workers=2, num_chunks=4) as (r0, r1):
         t1 = r1.create_next_worker_view(PAGE_SIZE)
         assert t1.data_ptr() == r1._base.data_ptr() + PAGE_SIZE
         del t1
@@ -223,7 +223,7 @@ def test_create_next_worker_view_storage_offset_rank1(iid):
 
 def test_create_next_worker_view_row_stride_with_multiple_workers(iid):
     """With num_workers=4, row_stride must be 4 * cpu_page_size."""
-    with _region(iid, num_blocks=2, num_workers=4) as r:
+    with _region(iid, num_chunks=2, num_workers=4) as r:
         t = r.create_next_worker_view(PAGE_SIZE)
         assert t.stride(0) == 4 * PAGE_SIZE
         del t
@@ -294,12 +294,12 @@ def test_create_next_worker_view_overflow_does_not_mutate_cursor(iid):
 def test_create_next_worker_view_write_visible_in_raw_mmap(iid):
     """Writes into a create_next_worker_view view must appear at the correct
     raw mmap offset"""
-    with _region(iid, num_blocks=4) as r:
+    with _region(iid, num_chunks=4) as r:
         t = r.create_next_worker_view(PAGE_SIZE)
-        t[2, :] = 42  # write to block row 2
+        t[2, :] = 42  # write to chunk row 2
 
         raw = memoryview(r.mmap_obj)
-        # num_workers=1 → row_stride = PAGE_SIZE; block 2 starts at byte 2*PAGE_SIZE
+        # num_workers=1 → row_stride = PAGE_SIZE; chunk 2 starts at byte 2*PAGE_SIZE
         chunk = bytes(raw[2 * PAGE_SIZE : 3 * PAGE_SIZE])
         assert all(b == 42 for b in chunk)
         del raw, t
@@ -307,7 +307,7 @@ def test_create_next_worker_view_write_visible_in_raw_mmap(iid):
 
 def test_create_next_worker_view_multi_tensor_layout(iid):
     """Two tensors from the same worker land at consecutive byte offsets per row."""
-    with _region(iid, num_blocks=2, cpu_page_size=2 * PAGE_SIZE) as r:
+    with _region(iid, num_chunks=2, cpu_page_size=2 * PAGE_SIZE) as r:
         ta = r.create_next_worker_view(PAGE_SIZE)
         tb = r.create_next_worker_view(PAGE_SIZE)
 
@@ -328,7 +328,7 @@ def test_create_next_worker_view_multiprocess_slots(iid):
     """Each worker process calls create_next_worker_view and writes distinct data;
     the parent verifies each slot lands at the correct interleaved offset."""
     num_workers = 2
-    num_blocks = 4
+    num_chunks = 4
 
     ctx = get_mp_context()
     done_queue = ctx.Queue()
@@ -337,9 +337,9 @@ def test_create_next_worker_view_multiprocess_slots(iid):
     # Parent is rank 0 (creator); child is rank 1 (joiner).
     region = SharedOffloadRegion(
         engine_id=iid,
-        num_blocks=num_blocks,
+        num_chunks=num_chunks,
         rank=0,
-        kv_bytes_per_block=num_workers * PAGE_SIZE,
+        kv_bytes_per_chunk=num_workers * PAGE_SIZE,
         cpu_page_size=PAGE_SIZE,
     )
     try:
@@ -347,7 +347,7 @@ def test_create_next_worker_view_multiprocess_slots(iid):
             target=_mp_race_construct_and_write,
             args=(
                 iid,
-                num_blocks,
+                num_chunks,
                 1,
                 num_workers,
                 PAGE_SIZE,
@@ -365,12 +365,12 @@ def test_create_next_worker_view_multiprocess_slots(iid):
         assert result["error"] is None, result["error"]
 
         raw = memoryview(region.mmap_obj)
-        for blk in range(num_blocks):
+        for blk in range(num_chunks):
             row_start = blk * num_workers * PAGE_SIZE
             w0 = bytes(raw[row_start : row_start + PAGE_SIZE])
             w1 = bytes(raw[row_start + PAGE_SIZE : row_start + 2 * PAGE_SIZE])
-            assert all(b == 11 for b in w0), f"block {blk}: rank0 slot wrong"
-            assert all(b == 22 for b in w1), f"block {blk}: rank1 slot wrong"
+            assert all(b == 11 for b in w0), f"chunk {blk}: rank0 slot wrong"
+            assert all(b == 22 for b in w1), f"chunk {blk}: rank1 slot wrong"
 
         del raw, t0  # release before finally triggers cleanup
         cleanup_queue.put(True)
@@ -384,8 +384,8 @@ def test_create_next_worker_view_multiprocess_slots(iid):
 def test_create_next_worker_view_worker_isolation(iid):
     """Writes by worker 0 must not affect worker 1's slot and vice versa."""
     num_workers = 2
-    num_blocks = 4
-    with _multi_region(iid, num_workers=num_workers, num_blocks=num_blocks) as regions:
+    num_chunks = 4
+    with _multi_region(iid, num_workers=num_workers, num_chunks=num_chunks) as regions:
         t0 = regions[0].create_next_worker_view(PAGE_SIZE)
         t1 = regions[1].create_next_worker_view(PAGE_SIZE)
 
@@ -393,12 +393,12 @@ def test_create_next_worker_view_worker_isolation(iid):
         t1[:, :] = 22
 
         raw = memoryview(regions[0].mmap_obj)
-        for blk in range(num_blocks):
+        for blk in range(num_chunks):
             row_start = blk * num_workers * PAGE_SIZE
             w0 = bytes(raw[row_start : row_start + PAGE_SIZE])
             w1 = bytes(raw[row_start + PAGE_SIZE : row_start + 2 * PAGE_SIZE])
-            assert all(b == 11 for b in w0), f"block {blk}: worker0 slot corrupted"
-            assert all(b == 22 for b in w1), f"block {blk}: worker1 slot corrupted"
+            assert all(b == 11 for b in w0), f"chunk {blk}: worker0 slot corrupted"
+            assert all(b == 22 for b in w1), f"chunk {blk}: worker1 slot corrupted"
         del raw, t0, t1  # release before finally triggers cleanup
 
 
@@ -428,7 +428,7 @@ def test_file_exists_after_construction(iid):
 
 def test_file_has_correct_size(iid):
     """The mmap file size on disk must equal total_size_bytes."""
-    with _region(iid, num_blocks=4) as r:
+    with _region(iid, num_chunks=4) as r:
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
 
 
@@ -613,7 +613,7 @@ def test_multiprocess_race_construct_and_write(iid):
     """N processes race to construct the same SharedOffloadRegion, each writes
     fill_value = rank+1 into their slot; parent verifies interleaved layout."""
     num_workers = 4
-    num_blocks = 3
+    num_chunks = 3
 
     ctx = get_mp_context()
     done_queue = ctx.Queue()
@@ -624,7 +624,7 @@ def test_multiprocess_race_construct_and_write(iid):
             target=_mp_race_construct_and_write,
             args=(
                 iid,
-                num_blocks,
+                num_chunks,
                 rank,
                 num_workers,
                 PAGE_SIZE,
@@ -651,13 +651,13 @@ def test_multiprocess_race_construct_and_write(iid):
     with open(mmap_path, "rb") as f:
         raw = f.read()
 
-    for blk in range(num_blocks):
+    for blk in range(num_chunks):
         for w in range(num_workers):
             slot_start = (blk * num_workers + w) * PAGE_SIZE
             slot = raw[slot_start : slot_start + PAGE_SIZE]
             expected = w + 1  # fill_value = rank + 1
             assert all(b == expected for b in slot), (
-                f"block {blk}, worker {w}: expected {expected} but got wrong bytes"
+                f"chunk {blk}, worker {w}: expected {expected} but got wrong bytes"
             )
 
     # Unblock all workers to clean up.

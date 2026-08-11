@@ -26,7 +26,7 @@ from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 NUM_GPU_BLOCKS = [64]
-NUM_CPU_BLOCKS = [256]
+NUM_CPU_CHUNKS = [256]
 GPU_PAGE_SIZES = [512, 1024]
 BLOCKS_PER_CHUNK_VALUES = [1, 3]
 NUM_TENSORS = [4]
@@ -225,7 +225,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
 @pytest.mark.parametrize("gpu_page_size_bytes", GPU_PAGE_SIZES)
 @pytest.mark.parametrize("blocks_per_chunk", BLOCKS_PER_CHUNK_VALUES)
 @pytest.mark.parametrize("num_gpu_blocks", NUM_GPU_BLOCKS)
-@pytest.mark.parametrize("num_cpu_blocks", NUM_CPU_BLOCKS)
+@pytest.mark.parametrize("num_cpu_chunks", NUM_CPU_CHUNKS)
 @pytest.mark.parametrize("num_tensors", NUM_TENSORS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
@@ -241,7 +241,7 @@ def test_transfer(
     gpu_page_size_bytes: int,
     blocks_per_chunk: int,
     num_gpu_blocks: int,
-    num_cpu_blocks: int,
+    num_cpu_chunks: int,
     num_tensors: int,
     seed: int,
     device: str,
@@ -288,27 +288,27 @@ def test_transfer(
             SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
         )
         simulated_world_size = 2
-        kv_bytes_per_block = (
+        kv_bytes_per_chunk = (
             cpu_page_size if replicated_layout else cpu_page_size * simulated_world_size
         )
         mmap_region = SharedOffloadRegion(
             engine_id=str(uuid.uuid4()),
-            num_blocks=num_cpu_blocks,
+            num_chunks=num_cpu_chunks,
             rank=0,
-            kv_bytes_per_block=kv_bytes_per_block,
+            kv_bytes_per_chunk=kv_bytes_per_chunk,
             cpu_page_size=cpu_page_size,
         )
 
     worker = CPUOffloadingWorker(
         kv_caches=kv_caches,
         blocks_per_chunk=blocks_per_chunk,
-        num_cpu_blocks=num_cpu_blocks,
+        num_cpu_chunks=num_cpu_chunks,
         mmap_region=mmap_region,
     )
 
     # select block mappings
     gpu_blocks = random.sample(range(num_gpu_blocks), num_mappings * blocks_per_chunk)
-    cpu_blocks = random.sample(range(num_cpu_blocks), num_mappings)
+    cpu_blocks = random.sample(range(num_cpu_chunks), num_mappings)
 
     # expand cpu blocks to gpu-page granularity for uniform comparison:
     # each cpu block maps to blocks_per_chunk consecutive sub-blocks
@@ -410,7 +410,7 @@ def test_transfer(
 @pytest.mark.parametrize("gpu_page_size_bytes", GPU_PAGE_SIZES)
 @pytest.mark.parametrize("blocks_per_chunk", BLOCKS_PER_CHUNK_VALUES)
 @pytest.mark.parametrize("num_gpu_blocks", NUM_GPU_BLOCKS)
-@pytest.mark.parametrize("num_cpu_blocks", NUM_CPU_BLOCKS)
+@pytest.mark.parametrize("num_cpu_chunks", NUM_CPU_CHUNKS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
@@ -421,7 +421,7 @@ def test_transfer_multi_group(
     gpu_page_size_bytes: int,
     blocks_per_chunk: int,
     num_gpu_blocks: int,
-    num_cpu_blocks: int,
+    num_cpu_chunks: int,
     seed: int,
     device: str,
 ) -> None:
@@ -470,7 +470,7 @@ def test_transfer_multi_group(
     worker = CPUOffloadingWorker(
         kv_caches=canonical_kv_caches,
         blocks_per_chunk=blocks_per_chunk,
-        num_cpu_blocks=num_cpu_blocks,
+        num_cpu_chunks=num_cpu_chunks,
     )
 
     # group 0: aligned, group 1: empty, group 2: unaligned on CPU->GPU
@@ -479,7 +479,7 @@ def test_transfer_multi_group(
     total_cpu_blocks = sum(group_sizes_in_cpu_blocks)
     total_gpu_blocks_needed = total_cpu_blocks * blocks_per_chunk
     gpu_blocks_all = random.sample(range(num_gpu_blocks), total_gpu_blocks_needed)
-    cpu_blocks_all = random.sample(range(num_cpu_blocks), total_cpu_blocks)
+    cpu_blocks_all = random.sample(range(num_cpu_chunks), total_cpu_blocks)
 
     # split gpu/cpu blocks per group
     gpu_blocks_per_group: list[list[int]] = []
@@ -541,7 +541,7 @@ def test_transfer_multi_group(
                 cpu_blocks_expanded_per_group, gpu_blocks_per_group
             )
         ]
-        num_dst_sub_blocks = num_cpu_blocks * blocks_per_chunk
+        num_dst_sub_blocks = num_cpu_chunks * blocks_per_chunk
     else:
         handler = worker._load_handler
         src_spec = CPULoadStoreSpec(cpu_blocks)

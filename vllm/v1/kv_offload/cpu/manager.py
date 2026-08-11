@@ -41,7 +41,7 @@ class CPUOffloadingManager(OffloadingManager):
 
     def __init__(
         self,
-        num_chunk_slots: int,
+        num_chunks: int,
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
@@ -49,14 +49,14 @@ class CPUOffloadingManager(OffloadingManager):
         max_tracker_size: int = 64_000,
     ):
         self.medium: Medium = Medium.CPU
-        self._num_chunks: int = num_chunk_slots
+        self._num_chunks: int = num_chunks
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
         policy_cls = CachePolicyFactory.get_cache_policy_cls(
             cache_policy, cache_policy_module_path
         )
-        self._policy: CachePolicy = policy_cls(cache_capacity=num_chunk_slots)
+        self._policy: CachePolicy = policy_cls(cache_capacity=num_chunks)
         # Track chunks in the cache that are evictable, i.e. ref_cnt 0.
         self._num_evictable_cache_chunks: int = 0
         # Track chunks with an in-flight store (ref_cnt -1, not yet completed).
