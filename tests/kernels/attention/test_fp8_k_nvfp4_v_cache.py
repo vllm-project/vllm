@@ -22,6 +22,38 @@ def _to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, float]:
 
 
 @torch.inference_mode()
+def test_fp8_k_nvfp4_v_store_rejects_fp16() -> None:
+    page_size, num_heads, head_size = 64, 1, 128
+    total_dim = head_size + head_size // 2 + head_size // 16
+    packed_cache = torch.empty(
+        1,
+        page_size,
+        num_heads,
+        total_dim,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    key = torch.randn(
+        1, num_heads, head_size, dtype=torch.float16, device="cuda"
+    )
+    value = torch.randn_like(key)
+    slot_mapping = torch.zeros(1, dtype=torch.int64, device="cuda")
+    scale = torch.ones(1, dtype=torch.float32, device="cuda")
+
+    with pytest.raises(RuntimeError):
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
+            key,
+            value,
+            packed_cache,
+            packed_cache,
+            slot_mapping,
+            "fp8_k_nvfp4_v",
+            scale,
+            scale,
+        )
+
+
+@torch.inference_mode()
 def test_fp8_k_nvfp4_v_store_and_native_decode() -> None:
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 

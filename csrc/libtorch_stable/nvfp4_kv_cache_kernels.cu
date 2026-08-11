@@ -486,7 +486,7 @@ void reshape_and_cache_nvfp4_dispatch(
     const torch::stable::accelerator::DeviceGuard device_guard(
         key.get_device_index());
     const cudaStream_t stream = get_current_cuda_stream();
-    VLLM_STABLE_DISPATCH_HALF_TYPES(
+    VLLM_STABLE_DISPATCH_BFLOAT16(
         key.scalar_type(), "reshape_and_cache_fp8_k_nvfp4_v", [&] {
           vllm::reshape_and_cache_fp8_k_nvfp4_v_kernel<scalar_t>
               <<<dim3(num_tokens), dim3(num_threads), 0, stream>>>(
