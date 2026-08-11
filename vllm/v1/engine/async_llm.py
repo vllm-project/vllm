@@ -309,7 +309,7 @@ class AsyncLLM(EngineClient):
         if (
             self.vllm_config.cache_config.kv_sharing_fast_prefill
             and not is_pooling
-            and params.prompt_logprobs
+            and params.prompt_logprobs is not None
         ):
             raise VLLMValidationError(
                 "--kv-sharing-fast-prefill produces incorrect logprobs for "

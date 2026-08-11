@@ -10,6 +10,7 @@ from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import get_tokenizer
 
@@ -822,3 +823,16 @@ def test_completion_request_bad_words_default_empty():
         default_sampling_params={},
     )
     assert sampling_params.bad_words == []
+
+
+def test_completion_request_rejects_prompt_logprobs_zero_with_stream():
+    """prompt_logprobs=0 is a meaningful, explicit request (not "unset"), so
+    it must be rejected under stream=True just like any other prompt_logprobs
+    value, per the documented "not available when stream=True" rule."""
+    with pytest.raises(VLLMValidationError, match="not available when `stream=True`"):
+        CompletionRequest(
+            model="test-model",
+            prompt="Hello",
+            prompt_logprobs=0,
+            stream=True,
+        )

@@ -502,7 +502,7 @@ class CompletionRequest(OpenAIBaseModel):
                     value=field_value,
                 )
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
+            if data.get("stream"):
                 raise VLLMValidationError(
                     "`prompt_logprobs` are not available when `stream=True`.",
                     parameter="prompt_logprobs",
