@@ -77,9 +77,16 @@ class NixlFastKVEngineCoreBridge:
         self.notify_enabled = fast_notify_enabled(vllm_config) and hasattr(
             scheduler, "on_fast_kv_recv_finished"
         )
+        # Scheduler-side connector, for on_pd_kv_ready (early-arm).
+        self.connector_scheduler = getattr(
+            getattr(scheduler, "connector", None), "connector_scheduler", None
+        )
         self._ctx = zmq.Context()
         self._stop_event = threading.Event()
         self._dispatch_sock: zmq.Socket | None = None
+        # The dispatch socket is written from the busy loop and the notify
+        # thread; zmq sockets are not thread-safe.
+        self._dispatch_lock = threading.Lock()
         self._notify_t: threading.Thread | None = None
         if self.dispatch_enabled:
             path = fast_kv_dispatch_path(vllm_config)
@@ -114,7 +121,8 @@ class NixlFastKVEngineCoreBridge:
         if not reqs_to_recv:
             return
         try:
-            self._dispatch_sock.send(pickle.dumps(reqs_to_recv))
+            with self._dispatch_lock:
+                self._dispatch_sock.send(pickle.dumps(reqs_to_recv))
         except Exception:
             logger.exception(
                 "Fast KV dispatch failed; workers will pick the metadata up "
@@ -132,7 +140,11 @@ class NixlFastKVEngineCoreBridge:
             while not self._stop_event.is_set():
                 if not poller.poll(timeout=200):
                     continue
-                req_id, rank = pickle.loads(sock.recv())
+                msg = pickle.loads(sock.recv())
+                if len(msg) == 3 and msg[0] == "pd_ready":
+                    self._handle_pd_ready(msg[1], msg[2])
+                    continue
+                req_id, rank = msg
                 ranks = pending.setdefault(req_id, set())
                 ranks.add(rank)
                 if len(ranks) < self.world_size:
@@ -163,6 +175,35 @@ class NixlFastKVEngineCoreBridge:
             )
         finally:
             sock.close(linger=0)
+
+    def _handle_pd_ready(self, raw_request_id: str, kv_transfer_params: dict) -> None:
+        """Early-arm: merge the ready params into the armed request and
+        fast-publish its pull metadata. Runs on the notify thread."""
+        cs = self.connector_scheduler
+        if cs is None or not getattr(cs, "pd_early_arm_enabled", False):
+            return
+        try:
+            result = cs.on_pd_kv_ready(raw_request_id, kv_transfer_params)
+        except Exception:
+            logger.exception(
+                "on_pd_kv_ready failed for %s; the armed-timeout fallback "
+                "will recompute locally.",
+                raw_request_id,
+            )
+            return
+        if result is None or self._dispatch_sock is None:
+            # The next step's connector metadata delivers the pull.
+            return
+        req_id, req_meta = result
+        try:
+            with self._dispatch_lock:
+                self._dispatch_sock.send(pickle.dumps({req_id: req_meta}))
+        except Exception:
+            logger.exception(
+                "Fast publish of pd_ready pull metadata failed for %s; the "
+                "next step's connector metadata delivers it.",
+                req_id,
+            )
 
     def shutdown(self):
         self._stop_event.set()
