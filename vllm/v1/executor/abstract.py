@@ -253,39 +253,8 @@ class Executor(ABC):
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
-    @overload
-    def profile(
-        self,
-        is_start: bool = True,
-        profile_prefix: str | None = None,
-        non_block: Literal[False] = False,
-    ) -> None:
-        pass
-
-    @overload
-    def profile(
-        self,
-        is_start: bool = True,
-        profile_prefix: str | None = None,
-        non_block: Literal[True] = True,
-    ) -> Future[list[None]]:
-        pass
-
-    def profile(
-        self,
-        is_start: bool = True,
-        profile_prefix: str | None = None,
-        non_block: bool = False,
-    ) -> None | Future[list[None]]:
-        # The worker-side stop() only blocks long enough to halt CUDA
-        # collection; the slow part (trace export, optionally gzip'd) already
-        # runs on a background thread within the worker (see
-        # TorchProfilerWrapper._async_trace_ready), so non_block here is about
-        # not blocking *this* process's control loop on the RPC round trip
-        # to the worker(s), not about the export itself.
-        return self.collective_rpc(  # type: ignore[call-overload]
-            "profile", args=(is_start, profile_prefix), non_block=non_block
-        )
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        self.collective_rpc("profile", args=(is_start, profile_prefix))
 
     def save_sharded_state(
         self,
