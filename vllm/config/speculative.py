@@ -924,7 +924,11 @@ class SpeculativeConfig:
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
-                elif "dflash" in self.draft_model_config.model.lower():
+                elif (
+                    "dflash" in self.draft_model_config.model.lower()
+                    or "MuseGlimmerAssistantModel"
+                    in self.draft_model_config.architectures
+                ):
                     self.method = "dflash"
                 elif (
                     "dspark" in self.draft_model_config.model.lower()

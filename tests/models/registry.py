@@ -1179,6 +1179,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # required by current PrefixLM implementation
         max_num_batched_tokens=31872,
     ),
+    "MuseGlimmerForConditionalGeneration": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
+    ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
         "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
@@ -1475,6 +1478,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce for CI
         max_num_seqs=32,
         min_transformers_version="4.56.3",  # Required for Qwen3Next
+    ),
+    "MuseGlimmerAssistantModel": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
+        speculative_model="meta-models/Muse-Glimmer-30B-assistant",
+        use_original_num_layers=True,  # Draft head reads 5 target residual layers
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
     ),
     # [DSpark]
     "DSparkDraftModel": _HfExamplesInfo(
