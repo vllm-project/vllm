@@ -15,7 +15,7 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
-  - label: "XPU example Test"
+  - label: ":intel: (B70) Example Test"
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 50
@@ -36,7 +36,7 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh example'
-  - label: "XPU V1 test"
+  - label: ":intel: (B70) V1 test"
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 70
@@ -57,7 +57,7 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh v1'
-  - label: "XPU server test"
+  - label: ":intel: (B50) Server test"
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 45

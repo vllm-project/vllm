@@ -1,8 +1,8 @@
-group: Model Executor Intel
+group: XPU Model Executor
 depends_on:
   - image-build-xpu
 steps:
-- label: Model Executor (Intel)
+- label: ":intel: (B70) Model Executor"
   key: model-executor-intel
   timeout_in_minutes: 45
   device: intel_gpu

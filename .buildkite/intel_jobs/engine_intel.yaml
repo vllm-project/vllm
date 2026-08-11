@@ -1,8 +1,8 @@
-group: Engine Intel
+group: XPU Engine
 depends_on:
   - image-build-xpu
 steps:
-- label: Engine
+- label: ":intel: (B50) Engine"
   key: engine
   timeout_in_minutes: 40
   device: intel_gpu
@@ -40,7 +40,7 @@ steps:
       'cd tests &&
       pytest -v -s engine/test_arg_utils.py test_sequence.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py'
 
-- label: Engine (1 GPU)
+- label: ":intel: (B50) Engine"
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:
@@ -64,7 +64,7 @@ steps:
       pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py &&
       VLLM_XPU_ENABLE_XPU_GRAPH=1 pytest -v -s test_config.py'
 
-- label: V1 e2e (2 GPUs)
+- label: ":intel: (B50) V1 E2E"
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:
