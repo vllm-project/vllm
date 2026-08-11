@@ -5687,13 +5687,14 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.request_id not in req_to_blocks
 
 
-def _create_hybrid_mamba_connector_scheduler(
-    matched_tokens: int,
+def _create_hybrid_mamba_scheduler(
+    matched_tokens: int | None = None,
     block_size: int = 16,
     num_blocks: int = 100,
     supports_divergent_hits: bool = True,
+    mamba_cache_mode: str = "all",
 ) -> Scheduler:
-    """FA + Mamba ("all" cache mode) scheduler with a MockKVConnector."""
+    """FA + Mamba scheduler, optionally with a MockKVConnector."""
     model_config = ModelConfig(
         model="facebook/opt-125m",
         trust_remote_code=True,
@@ -5714,9 +5715,11 @@ def _create_hybrid_mamba_connector_scheduler(
         cache_config=CacheConfig(
             block_size=block_size,
             enable_prefix_caching=True,
-            mamba_cache_mode="all",
+            mamba_cache_mode=mamba_cache_mode,
         ),
-        kv_transfer_config=KVTransferConfig(
+        kv_transfer_config=None
+        if matched_tokens is None
+        else KVTransferConfig(
             kv_connector="MockKVConnector",
             kv_role="kv_both",
             kv_connector_extra_config={
@@ -5746,7 +5749,7 @@ def _create_hybrid_mamba_connector_scheduler(
                     block_size=block_size,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="all",
+                    mamba_cache_mode=mamba_cache_mode,
                 ),
             ),
         ],
@@ -5783,7 +5786,7 @@ def test_hybrid_per_group_hit_divergence_with_connector(
     every group is consistent at.
     """
     block_size = 16
-    scheduler = _create_hybrid_mamba_connector_scheduler(matched_tokens)
+    scheduler = _create_hybrid_mamba_scheduler(matched_tokens)
     manager = scheduler.kv_cache_manager
     assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
 
@@ -5855,7 +5858,7 @@ def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
     consistent boundary instead.
     """
     block_size = 16
-    scheduler = _create_hybrid_mamba_connector_scheduler(
+    scheduler = _create_hybrid_mamba_scheduler(
         matched_tokens,
         supports_divergent_hits=supports_divergent_local_hybrid_hits,
     )
@@ -5899,6 +5902,43 @@ def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
     output = scheduler.schedule()
     num_scheduled = output.num_scheduled_tokens[replay.request_id]
     assert replay.num_tokens - num_scheduled == expected_num_computed
+
+
+def test_prefix_cache_query_not_inflated_by_mamba_same_step_defer():
+    """Count a Mamba-deferred prefix-cache query only when admitted."""
+    block_size = 16
+    scheduler = _create_hybrid_mamba_scheduler(mamba_cache_mode="align")
+
+    requests = [
+        create_requests(
+            num_requests=1,
+            num_tokens=depth * block_size,
+            max_tokens=1,
+            same_prompt=True,
+            block_size=block_size,
+            req_ids=[f"branch{depth}"],
+        )[0]
+        for depth in (2, 3, 4)
+    ]
+    for request in requests:
+        scheduler.add_request(request)
+
+    num_steps = 0
+    while scheduler.waiting:
+        assert num_steps < 2 * len(requests), "requests never drained"
+        scheduler.schedule()
+        num_steps += 1
+
+    assert num_steps > 1
+    assert all(request.num_preemptions == 0 for request in requests)
+
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    assert (stats.requests, stats.queries) == (
+        len(requests),
+        sum(request.num_tokens for request in requests),
+    )
+    assert stats.preempted_requests == 0
 
 
 def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
