@@ -61,6 +61,8 @@ from typing_extensions import override
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
+    OffloadingCounterMetadata,
+    OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
@@ -103,10 +105,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of total blocking time spent querying secondary "
-                    "tiers for a request, accumulated from first lookup until "
-                    "the request is allocated or finishes, in seconds."
+                    "Histogram of blocking time spent in a per-block tier lookup "
+                    "that resolved as a hit or miss, labeled by tier, in seconds."
                 ),
+                labelnames=("tier",),
                 buckets=(
                     0.00001,
                     0.00005,
@@ -125,10 +127,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of wall-clock time from a request's first deferred "
-                    "secondary-tier lookup until the request is allocated or "
-                    "finishes, in seconds."
+                    "Histogram of wall-clock time from a per-block tier lookup "
+                    "first returning retry until that same tier lookup resolves "
+                    "as a hit or miss, labeled by tier, in seconds."
                 ),
+                labelnames=("tier",),
                 buckets=(
                     0.0001,
                     0.0005,
@@ -143,6 +146,100 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     10,
                 ),
             )
+        )
+        metrics[TieringOffloadingMetrics.READ_BYTES] = OffloadingCounterMetadata(
+            documentation=(
+                "Total bytes read from secondary tiers into the primary tier, "
+                "labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.READ_TIME] = OffloadingCounterMetadata(
+            documentation=(
+                "Total time spent reading from secondary tiers into the primary "
+                "tier, in seconds, labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.WRITE_BYTES] = OffloadingCounterMetadata(
+            documentation=(
+                "Total bytes written from the primary tier to secondary tiers, "
+                "labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.WRITE_TIME] = OffloadingCounterMetadata(
+            documentation=(
+                "Total time spent writing from the primary tier to secondary "
+                "tiers, in seconds, labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of failed secondary-tier promotion jobs, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.CASCADE_JOB_FAILURES] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of failed secondary-tier cascade jobs, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.BLOCK_QUERIES] = OffloadingCounterMetadata(
+            documentation=(
+                "Number of block lookup queries sent to a tier, labeled by tier."
+            ),
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.BLOCK_HITS] = OffloadingCounterMetadata(
+            documentation="Number of block lookup hits in a tier, labeled by tier.",
+            labelnames=("tier",),
+        )
+        metrics[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of promotion attempts that failed because the "
+                    "primary tier could not allocate space."
+                ),
+            )
+        )
+        metrics[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Current fraction of primary-tier space used by writes from "
+                    "secondary tiers, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Current fraction of primary-tier space used by reads to "
+                    "secondary tiers, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Number of active secondary-tier promotion jobs, labeled by tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS] = OffloadingGaugeMetadata(
+            documentation=(
+                "Number of active secondary-tier cascade jobs, labeled by tier."
+            ),
+            labelnames=("tier",),
         )
         secondary_tier_configs = extra_config.get("secondary_tiers", [])
         if not isinstance(secondary_tier_configs, list):
@@ -166,6 +263,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
+
+        # Set by create_worker when canonical_layout is enabled: True when
+        # every layer's canonical bytes are parallelism-agnostic (portable),
+        # False when some layers use the opaque fallback (exact-topology only)
+        self.all_layers_portable: bool | None = None
 
         # engine_id is unique per DP replica (suffixed with _dp{rank} in both
         # the Ray and multiprocessing paths), so it names a per-replica offload
@@ -297,12 +399,53 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             cpu_page_size=self.cpu_page_size_per_worker,
         )
         try:
+            if self.config.canonical_layout:
+                self._validate_canonical_refs(kv_caches)
             return CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_blocks=self.num_blocks,
                 mmap_region=worker_mmap,
+                canonical_layout=self.config.canonical_layout,
             )
         except Exception:
             worker_mmap.cleanup()
             raise
+
+    def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:
+        """Require a mapping on every ref and record layer portability.
+
+        Fails loudly rather than persist direct-layout bytes under a
+        canonical format identity."""
+        all_refs = [
+            ref for group_refs in kv_caches.group_data_refs for ref in group_refs
+        ]
+        if any(ref.mapping is None for ref in all_refs):
+            raise RuntimeError(
+                "canonical_layout was requested but the KV cache layout "
+                "could not be certified for canonical offload (offload "
+                "workers must be exactly the TP group, and packed / "
+                "cross-layer KV layouts are not supported). Remove "
+                "canonical_layout from kv_connector_extra_config."
+            )
+        self.all_layers_portable = all(
+            ref.mapping is not None and ref.mapping.parallelism_agnostic
+            for ref in all_refs
+        )
+        if self.config.parallel.is_parallelism_agnostic and not (
+            self.all_layers_portable
+        ):
+            # The scheduler-side storage namespace was already collapsed on
+            # the static portability claim; opaque per-topology bytes must
+            # not land in it.
+            raise RuntimeError(
+                "canonical_layout could not certify every layer as "
+                "parallelism-agnostic, but the storage namespace is shared "
+                "across topologies. Remove canonical_layout from "
+                "kv_connector_extra_config or disable parallel-agnostic "
+                "secondary tiers."
+            )
+        logger.info(
+            "Canonical KV layout enabled (all_layers_portable=%s)",
+            self.all_layers_portable,
+        )

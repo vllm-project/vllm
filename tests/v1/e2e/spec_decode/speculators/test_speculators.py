@@ -7,14 +7,20 @@ from tests.utils import single_gpu_only
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
-from ..utils import evaluate_llm_for_gsm8k, get_test_prompts
+from ..utils import (
+    assert_request_outputs_match,
+    evaluate_llm_for_gsm8k,
+    get_test_prompts,
+)
 
 
 @pytest.mark.parametrize(
     ["model_path", "expected_accuracy_threshold"],
     [
-        ("RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3", 0.7),  # ref: 75%-80%
-        ("RedHatAI/Qwen3-8B-speculator.eagle3", 0.8),  # ref: 87%-92%
+        # Measured reference: 75%-80%.
+        ("RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3", 0.72),
+        # Measured reference: 87%-92%.
+        ("RedHatAI/Qwen3-8B-speculator.eagle3", 0.84),
     ],
     ids=["llama3_eagle3_speculator", "qwen3_eagle3_speculator"],
 )
@@ -49,6 +55,7 @@ def test_speculators_model_integration(
     # First run: Direct speculator model (simplified integration)
     with vllm_runner(
         model_path,
+        block_size=None,
         trust_remote_code=False,
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
@@ -82,6 +89,7 @@ def test_speculators_model_integration(
     # Second run: Reference without speculative decoding
     with vllm_runner(
         verifier_model,
+        block_size=None,
         trust_remote_code=False,
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
@@ -90,15 +98,10 @@ def test_speculators_model_integration(
     ) as ref_runner:
         ref_outputs = ref_runner.llm.chat(test_prompts, sampling_config)
 
-    # Compare outputs
-    matches = sum(
-        1
-        for ref, spec in zip(ref_outputs, spec_outputs)
-        if ref.outputs[0].text == spec.outputs[0].text
-    )
-
     # Heuristic: expect at least 66% of prompts to match exactly
-    assert matches >= int(0.66 * len(ref_outputs)), (
-        f"Only {matches}/{len(ref_outputs)} outputs matched. "
-        f"Expected at least {int(0.66 * len(ref_outputs))} matches."
+    assert_request_outputs_match(
+        ref_outputs,
+        spec_outputs,
+        required_matches=int(0.66 * len(ref_outputs)),
+        context=f"speculator={model_path}, verifier={verifier_model}",
     )
