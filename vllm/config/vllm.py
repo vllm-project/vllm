@@ -66,9 +66,14 @@ else:
 
 logger = init_logger(__name__)
 
+MRV1_UNSUPPORTED_PIECEWISE_CUDAGRAPH_ARCHITECTURES = frozenset(
+    {"DeepseekV4ForCausalLM"}
+)
+
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
+        "DeepseekV4ForCausalLM",
         "GraniteMoeForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
@@ -702,6 +707,25 @@ class VllmConfig:
             return False
         return is_default_v2_architecture or not model_config.is_moe
 
+    def _validate_mrv1_piecewise_cudagraph(self) -> None:
+        if self.use_v2_model_runner:
+            return
+        model_config = self.model_config
+        if model_config is None:
+            return
+        if not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs():
+            return
+        architectures = getattr(model_config, "architectures", [])
+        if any(
+            arch in MRV1_UNSUPPORTED_PIECEWISE_CUDAGRAPH_ARCHITECTURES
+            for arch in architectures
+        ):
+            raise ValueError(
+                "DeepSeek V4 does not support PIECEWISE CUDA graphs with "
+                "Model Runner V1. Use Model Runner V2 or disable PIECEWISE "
+                "CUDA graphs."
+            )
+
     @property
     def needs_dp_coordinator(self) -> bool:
         """
@@ -779,6 +803,7 @@ class VllmConfig:
             quant_config.maybe_update_config(
                 model_config.model,
                 hf_config=model_config.hf_config,
+                revision=model_config.revision,
             )
             return quant_config
         return None
@@ -1588,6 +1613,8 @@ class VllmConfig:
                         "pipeline parallelism",
                     )
 
+        self._validate_mrv1_piecewise_cudagraph()
+
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():
             if (
@@ -1782,21 +1809,15 @@ class VllmConfig:
     def _set_max_num_scheduled_tokens(self):
         """
         In most cases, the scheduler may schedule a batch with as many tokens as the
-        worker is configured to handle. However for some speculative decoding methods,
-        the drafter model may insert additional slots into the batch when drafting.
-        To account for this, we need to decrease the max_num_scheduled_tokens by an
-        upper bound on the number of slots that can be added.
+        worker is configured to handle.
         """
         if self.speculative_config is not None:
             scheduled_token_delta = (
                 self.speculative_config.max_num_new_slots_for_drafting
-                * self.scheduler_config.max_num_seqs
             )
             max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
             if self.scheduler_config.max_num_scheduled_tokens is None:
-                self.scheduler_config.max_num_scheduled_tokens = (
-                    max_num_batched_tokens - scheduled_token_delta
-                )
+                self.scheduler_config.max_num_scheduled_tokens = max_num_batched_tokens
 
             if self.scheduler_config.max_num_scheduled_tokens <= 0:
                 raise ValueError(
@@ -1805,7 +1826,7 @@ class VllmConfig:
                     " the speculative decoding settings, which does not allow"
                     " any tokens to be scheduled. Increase max_num_batched_tokens"
                     " to accommodate the additional draft token slots, or decrease"
-                    " num_speculative_tokens or max_num_seqs."
+                    " num_speculative_tokens."
                 )
             if self.scheduler_config.max_num_scheduled_tokens < 8192:
                 logger.warning_once(
@@ -1814,19 +1835,14 @@ class VllmConfig:
                     " the speculative decoding settings. This may lead to suboptimal"
                     " performance. Consider increasing max_num_batched_tokens to"
                     " accommodate the additional draft token slots, or decrease"
-                    " num_speculative_tokens or max_num_seqs.",
+                    " num_speculative_tokens.",
                 )
 
-            max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens
-            if max_num_batched_tokens < max_num_scheduled_tokens + (
-                self.speculative_config.max_num_new_slots_for_drafting
-                * self.scheduler_config.max_num_seqs
-            ):
+            if max_num_batched_tokens <= scheduled_token_delta:
                 raise ValueError(
-                    f"VllmConfig received max_num_scheduled_tokens but it does not have"
-                    " enough slots to support the speculative decoding settings."
-                    f" It should be greater by at least {scheduled_token_delta}, but"
-                    f" got {max_num_batched_tokens=} and {max_num_scheduled_tokens=}."
+                    "VllmConfig does not have enough slots to schedule a token and"
+                    " support the speculative decoding settings."
+                    f" Got {max_num_batched_tokens=} and {scheduled_token_delta=}."
                 )
 
     def _set_cudagraph_sizes(self):

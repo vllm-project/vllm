@@ -24,9 +24,15 @@ logger = init_logger(__name__)
 
 
 class ModelArchConfigConvertorBase:
-    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        hf_text_config: PretrainedConfig,
+        revision: str | None = None,
+    ):
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
+        self.revision = revision
 
     def get_per_layer_hf_configs(
         self,
@@ -122,7 +128,7 @@ class ModelArchConfigConvertorBase:
         model_path = self.hf_config.name_or_path
         if not model_path:
             return qk_rope_head_dim
-        raw = get_hf_file_to_dict("config.json", model_path)
+        raw = get_hf_file_to_dict("config.json", model_path, self.revision)
         if raw and "qk_rope_head_dim" in raw:
             correct = raw["qk_rope_head_dim"]
             if correct != qk_rope_head_dim:
@@ -595,16 +601,26 @@ def _strip_mimo_v2_attention_chunk_size(
 
 
 class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        hf_text_config: PretrainedConfig,
+        revision: str | None = None,
+    ):
         if getattr(hf_config, "vision_config", None):
             hf_config.architectures = ["MiMoV2OmniForCausalLM"]
-        super().__init__(hf_config, hf_text_config)
+        super().__init__(hf_config, hf_text_config, revision)
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
 
 class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
-        super().__init__(hf_config, hf_text_config)
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        hf_text_config: PretrainedConfig,
+        revision: str | None = None,
+    ):
+        super().__init__(hf_config, hf_text_config, revision)
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
     def get_num_hidden_layers(self) -> int:

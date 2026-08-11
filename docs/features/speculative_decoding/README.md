@@ -1,6 +1,6 @@
 # Speculative Decoding
 
-This document shows how to use [Speculative Decoding](https://arxiv.org/pdf/2302.01318) with vLLM to reduce inter-token latency under medium-to-low QPS (query per second), memory-bound workloads.
+This document shows how to use [Speculative Decoding](https://arxiv.org/pdf/2302.01318) with vLLM to reduce inter-token latency under medium-to-low QPS (queries per second), memory-bound workloads.
 
 To train your own draft models for optimized speculative decoding, see [vllm-project/speculators](speculators.md) for seamless training and integration with vLLM.
 
@@ -88,7 +88,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
 | `rejection_sample_method` | `string` | `strict` | `strict`, `probabilistic`, or `synthetic`. |
 | `synthetic_acceptance_rate` | `float` | `None` | Average acceptance rate to target when `rejection_sample_method` is `synthetic`. Valid range is `[0, 1]`. |
- | `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) is not yet supported when this option is enabled. |
+| `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) is not yet supported when this option is enabled. |
 
 !!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not
@@ -202,7 +202,7 @@ speculative decoding, breaking down the guarantees into three key areas:
     >   distribution. [View Test Code](https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252)
     > - **Greedy Sampling Equality**: Confirms that greedy sampling with speculative decoding matches greedy sampling
     >   without it. This verifies that vLLM's speculative decoding framework, when integrated with the vLLM forward pass and the vLLM rejection sampler,
-    >   provides a lossless guarantee. Almost all of the tests in [tests/spec_decode/e2e](../../../tests/v1/spec_decode).
+    >   provides a lossless guarantee. Almost all of the tests in [tests/spec_decode/e2e](../../../tests/v1/spec_decode)
     >   verify this property using [this assertion implementation](https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291)
 
 3. **vLLM Logprob Stability**
@@ -222,7 +222,7 @@ For mitigation strategies, please refer to the FAQ entry *Can the output of a pr
 ## Known Feature Incompatibility
 
 1. Pipeline parallelism is not composable with speculative decoding as of `vllm<=0.15.0`
-2. Speculative decoding with a draft models is not supported in `vllm<=0.10.0`
+2. Speculative decoding with draft models is not supported in `vllm<=0.10.0`
 
 ## Resources for vLLM contributors
 

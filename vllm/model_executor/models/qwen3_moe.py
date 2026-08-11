@@ -142,7 +142,6 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -163,11 +162,6 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         self.gate = ReplicatedLinear(
             config.hidden_size,
@@ -227,19 +221,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the MoERunner class
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=hidden_states
-            )
-        else:
-            # Actually this will be dead code, since we always pass gate into
-            # MoERunner in the current implementation. But we keep this code
-            # here for clarity and future flexibility.
-            router_logits, _ = self.gate(hidden_states)
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
-            )
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=hidden_states
+        )
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(

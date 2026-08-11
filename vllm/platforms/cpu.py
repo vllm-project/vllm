@@ -54,12 +54,15 @@ class CpuPlatform(Platform):
         elif self.get_cpu_architecture() == CpuArchEnum.ARM and sys.platform.startswith(
             "darwin"
         ):
-            if (
-                subprocess.check_output(
-                    ["sysctl -n hw.optional.arm.FEAT_BF16"], shell=True
-                ).strip()
+            # sysctl exits non-zero when the OID is absent, so check_output would
+            # raise instead of letting the fp16/fp32 fallback below run.
+            bf16 = (
+                subprocess.run(
+                    ["sysctl", "-n", "hw.optional.arm.FEAT_BF16"], capture_output=True
+                ).stdout.strip()
                 == b"1"
-            ):
+            )
+            if bf16:
                 return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         elif self.get_cpu_architecture() == CpuArchEnum.RISCV:
