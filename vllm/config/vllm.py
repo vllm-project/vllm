@@ -69,6 +69,14 @@ logger = init_logger(__name__)
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
+        # Gemma 4 is V2-by-default for its dense variants (via the `not is_moe`
+        # branch below), but the MoE variant (26B A4B) would otherwise fall back
+        # to V1, where the Gemma4 MTP drafter is wired with the wrong input dim:
+        # pre_projection expects 2 * backbone_hidden but the V1 path feeds
+        # backbone_hidden + draft_hidden, so the engine dies with
+        # "a and b must have same reduction dim, but got [s, 3840] X [5632, 1024]".
+        # Listing the architecture keeps dense and MoE Gemma 4 on the same runner.
+        "Gemma4ForConditionalGeneration",
         "GraniteMoeForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
