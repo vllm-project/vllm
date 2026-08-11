@@ -707,17 +707,32 @@ class PlaceholderFeaturesInfo:
 
 
 class _MatchedUpdate(NamedTuple):
+    """A resolved update selected for a match in the original prompt."""
+
     priority: int
+    """The original item order used to preserve match tie-breaking."""
+
     update: ResolvedPromptUpdate
+    """The selected update for the multimodal item."""
+
     update_idx: int
+    """The selected update's index within the item's alternatives."""
+
     match: PromptTargetMatch
+    """The target range in the original prompt."""
 
 
 _UpdateQueue: TypeAlias = deque[tuple[int, Sequence[ResolvedPromptUpdate]]]
+"""
+Items with the same ordered match rules, stored as `(priority, alternatives)`.
+"""
+
 _QueueMatch: TypeAlias = tuple[_UpdateQueue, PromptTargetMatch, int]
+"""A queue together with its next match and selected alternative index."""
 
 
 def _target_key(target: UpdateTarget) -> tuple[str, object]:
+    """Return a hashable key that preserves target matching semantics."""
     if isinstance(target, PromptIndex):
         return ("index", id(target))
     if isinstance(target, str):
@@ -732,6 +747,7 @@ def _compile_prompt_update_queues(
     tuple[tuple[UpdateMode, tuple[str, object]], ...],
     _UpdateQueue,
 ]:
+    """Group items with identical match rules into ordered queues."""
     queues_by_signature = dict[
         tuple[tuple[UpdateMode, tuple[str, object]], ...],
         _UpdateQueue,
@@ -759,6 +775,7 @@ def _find_queue_match(
     start_idx: int,
     mode: UpdateMode | None = None,
 ) -> tuple[PromptTargetMatch, int] | None:
+    """Find the first matching alternative for the next queued item."""
     _, updates = queue[0]
     for update_idx, update in enumerate(updates):
         if mode is not None and update.mode != mode:
@@ -775,6 +792,7 @@ def _find_queue_match(
 
 
 def _next_priority(queue: _UpdateQueue) -> int:
+    """Return the original priority of the next queued item."""
     priority, _ = queue[0]
     return priority
 
@@ -784,6 +802,7 @@ def _plan_prompt_updates(
     mm_prompt_updates: "MultiModalPromptUpdates",
     tokenizer: TokenizerLike | None,
 ) -> tuple[list[_MatchedUpdate], "MultiModalPromptUpdatesApplyResult"]:
+    """Plan non-overlapping prompt updates before rendering the output."""
     queues = list(_compile_prompt_update_queues(mm_prompt_updates).values())
     result: MultiModalPromptUpdatesApplyResult = {
         modality: [None] * len(items) for modality, items in mm_prompt_updates.items()
