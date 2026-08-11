@@ -39,7 +39,7 @@ pub use renderer::{
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
-    ChatToolChoice, GenerationPromptMode, ReasoningEffort, SamplingParams,
+    ChatToolChoice, GenerationPromptMode, ReasoningEffort, ResolvedToolContext, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;

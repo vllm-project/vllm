@@ -75,7 +75,7 @@ impl HarmonyChatOutputProcessor {
         Ok(Self {
             encoding: harmony_encoding()?,
             tool_calls_enabled: request.tool_parsing_enabled(),
-            parallel_tool_calls: request.parallel_tool_calls,
+            parallel_tool_calls: request.parallel_tool_calls(),
         })
     }
 }
