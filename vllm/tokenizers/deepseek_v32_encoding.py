@@ -119,7 +119,10 @@ def find_last_user_index(messages: list[dict[str, Any]]) -> int:
 
 
 def render_message(
-    index: int, messages: list[dict[str, Any]], thinking_mode: str
+    index: int,
+    messages: list[dict[str, Any]],
+    thinking_mode: str,
+    last_user_idx: int | None = None,
 ) -> str:
     if not (0 <= index < len(messages)):
         raise ValueError(
@@ -130,7 +133,9 @@ def render_message(
 
     prompt = ""
     msg = messages[index]
-    last_user_idx = find_last_user_index(messages)
+    last_user_idx = (
+        find_last_user_index(messages) if last_user_idx is None else last_user_idx
+    )
 
     role = msg.get("role")
     content = msg.get("content")
@@ -294,9 +299,14 @@ def encode_messages(
     if thinking_mode == "thinking" and drop_thinking:
         full_messages = drop_thinking_messages(full_messages)
 
+    last_user_idx = find_last_user_index(full_messages)
+
     for idx in range(len(messages)):
         prompt += render_message(
-            idx + len(context), full_messages, thinking_mode=thinking_mode
+            idx + len(context),
+            full_messages,
+            thinking_mode=thinking_mode,
+            last_user_idx=last_user_idx,
         )
 
     return prompt
