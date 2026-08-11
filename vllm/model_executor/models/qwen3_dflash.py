@@ -181,6 +181,33 @@ def _kv_scale_vector(proj: nn.Module, q_size: int, kv_size: int) -> torch.Tensor
     return s[q_size:]  # per-channel: K/V rows
 
 
+def _project_kv_per_layer(
+    normed: torch.Tensor,
+    kv_projections: Iterable[tuple[nn.Module, int | None]],
+    *,
+    per_layer_input: bool = False,
+    stack: bool = False,
+) -> torch.Tensor:
+    """Per-layer quantized K/V projection (correct for every quant scheme).
+
+    ``kv_projections`` maps each layer to ``(projection, q_size)``; ``q_size``
+    is the number of Q rows/columns to drop, or ``None`` for K-only projections
+    that have no Q rows. ``per_layer_input=True`` feeds each layer its own slice
+    of a layer-major (grouped) input (laguna); otherwise all layers share
+    ``normed``. ``stack=True`` keeps the layer axis (laguna bmm path), otherwise
+    layers are concatenated along the feature axis (qwen3 / gemma4 layouts).
+    Each projection's bias is applied here (packed kernels return it separately).
+    """
+    outs = []
+    for i, (proj, q_size) in enumerate(kv_projections):
+        src = normed[i] if per_layer_input else normed
+        out, bias = proj(src)
+        if bias is not None:
+            out = out + bias
+        outs.append(out if q_size is None else out[..., q_size:])
+    return torch.stack(outs, dim=0) if stack else torch.cat(outs, dim=-1)
+
+
 def _resolve_layer_attention(
     config: Qwen3Config, layer_idx: int
 ) -> tuple[int | None, bool]:
@@ -711,13 +738,7 @@ class DFlashQwen3Model(nn.Module):
         Q rows are projected and discarded (packed kernels cannot compute only
         the K/V rows); each layer's bias is applied in its module.
         """
-        outs = []
-        for proj, q_size in self._kv_projections:
-            out, bias = proj(normed)
-            if bias is not None:
-                out = out + bias
-            outs.append(out[..., q_size:])
-        return torch.cat(outs, dim=-1)
+        return _project_kv_per_layer(normed, self._kv_projections)
 
     def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---

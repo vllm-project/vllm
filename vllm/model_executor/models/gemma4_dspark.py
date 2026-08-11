@@ -28,6 +28,7 @@ from .qwen3_dflash import (
     DFlashQwen3Model,
     _dflash_layer_causal,
     _decide_context_kv_strategy,
+    _project_kv_per_layer,
 )
 from .qwen3_dspark import DSparkMarkovHead, Qwen3DSparkForCausalLM
 from .utils import extract_layer_index, maybe_prefix
@@ -260,13 +261,9 @@ class Gemma4DSparkModel(DFlashQwen3Model):
             all_k_flat = F.linear(normed, self._fused_k_weight, self._fused_k_bias)
         else:
             # Per-layer quantized k_proj projection (k_eq_v: K == V source).
-            per_layer = []
-            for proj in self._k_projections:
-                out, bias = proj(normed)
-                if bias is not None:
-                    out = out + bias
-                per_layer.append(out)
-            all_k_flat = torch.cat(per_layer, dim=-1)
+            all_k_flat = _project_kv_per_layer(
+                normed, [(p, None) for p in self._k_projections]
+            )
         all_k = (
             all_k_flat.view(num_ctx, num_layers, num_kv_heads, head_dim)
             .permute(1, 0, 2, 3)

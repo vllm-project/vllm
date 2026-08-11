@@ -35,6 +35,7 @@ from .qwen3_dflash import (
     ContextKVStrategy,
     DFlashQwen3Model,
     _decide_context_kv_strategy,
+    _project_kv_per_layer,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -215,13 +216,12 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
                 all_kv_flat += self._kv_biases[:, None, :]
         else:
             # Per-layer quantized projection; each layer uses its own normed input.
-            per_layer = []
-            for i, (proj, q_size) in enumerate(self._kv_projections):
-                out, bias = proj(normed_context_states[i])
-                if bias is not None:
-                    out = out + bias
-                per_layer.append(out[..., q_size:])
-            all_kv_flat = torch.stack(per_layer, dim=0)
+            all_kv_flat = _project_kv_per_layer(
+                normed_context_states,
+                self._kv_projections,
+                per_layer_input=True,
+                stack=True,
+            )
         all_kv = (
             all_kv_flat.view(num_layers, num_ctx, 2, num_kv_heads, head_dim)
             .permute(2, 0, 1, 3, 4)
@@ -230,16 +230,6 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         all_k = all_kv[0]
         all_v = all_kv[1]
         return all_k, all_v
-
-    def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
-        all_k_normed = torch.empty_like(all_k)
-        ops.rms_norm(
-            all_k_normed,
-            all_k,
-            self._k_norm_weights,
-            self._rms_norm_eps,
-        )
-        return all_k_normed
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
