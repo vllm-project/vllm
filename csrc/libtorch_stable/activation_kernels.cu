@@ -3,7 +3,12 @@
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/util/Float8_e4m3fn.h>
 
+#ifndef USE_ROCM
+  #include <cuda_fp8.h>
+#endif
+
 #include <cmath>
+#include <type_traits>
 
 #include "../cuda_compat.h"
 #include "async_util.cuh"
@@ -477,6 +482,30 @@ __global__ void swigluoai_and_mul_kernel(
 // Compute is done in fp32 and written straight to `out` -- no intermediate
 // tensors and no full-tensor fp32 upcast (the pure-torch forward_native
 // allocated ~8 fp32 temporaries per call, which blows up MoE profiling).
+// Single shared implementation of the SITU math, called from every kernel
+// below (situ_and_mul_kernel, situ_and_mul_quant_scalar_kernel,
+// situ_and_mul_quant_pipelined_kernel). Deliberately __noinline__: CUDA does
+// NOT guarantee bit-identical codegen for the "same" formula written out (or
+// even __forceinline__'d) in different call contexts -- FMA contraction can
+// fuse a caller's surrounding multiply/add into an inlined callee differently
+// depending on what's around it. A version of this that duplicated the
+// formula inline diverged from situ_and_mul_kernel's output by 1 ULP on a
+// small fraction of elements (~0.1-0.2%), enough to occasionally flip which
+// fp8 bucket a value quantizes to; switching the shared helper from
+// __forceinline__ to __noinline__ (below) is what actually made it bit-exact
+// -- __forceinline__ alone only changed which elements diverged, not whether
+// any did, confirming the divergence came from FMA contraction across the
+// inline boundary rather than from the formula itself.
+__device__ __noinline__ float situ_activation(float g, float u, float beta,
+                                               float linear_beta,
+                                               bool clamp_up, float inv_beta,
+                                               float inv_linear_beta) {
+  const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
+  const float up_out =
+      clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
+  return gate_out * up_out;
+}
+
 template <typename scalar_t>
 __global__ void situ_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
@@ -494,10 +523,8 @@ __global__ void situ_and_mul_kernel(
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
     const float g = (float)VLLM_LDG(&gate_ptr[idx]);
     const float u = (float)VLLM_LDG(&up_ptr[idx]);
-    const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
-    const float up_out =
-        clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
-    out_ptr[idx] = (scalar_t)(gate_out * up_out);
+    out_ptr[idx] = (scalar_t)situ_activation(g, u, beta, linear_beta, clamp_up,
+                                             inv_beta, inv_linear_beta);
   }
 }
 
@@ -505,12 +532,36 @@ __global__ void situ_and_mul_kernel(
 // clamp(val / scale) and casts (round-to-nearest-even) to fp8. `fp8_max` is the
 // representable max for the target fp8 type (448 for e4m3fn), passed from the
 // host to avoid device-side numeric_limits.
+// c10::Float8_e4m3fn's `static_cast` operator is a software/bit-manipulation
+// implementation of float->fp8 rounding; it does NOT necessarily round ties
+// the same way as the hardware cvt instruction (`__nv_cvt_float_to_fp8`,
+// PTX `cvt.rn.satfinite.e4m3.f32`) that scaled_fp8_conversion (see
+// quantization/w8a8/fp8/common.cuh + nvidia/quant_utils.cuh) uses on SM80+,
+// and that Triton's `.to(tl.float8e4nv)` also lowers to -- humming's
+// quant_input is a Triton kernel. Using `static_cast` here instead of the
+// hardware instruction was the root cause of a ~0.1-0.2%-of-elements
+// quantization mismatch against humming's output: on exact or near-exact
+// ties between two representable fp8 values, the two implementations
+// occasionally round to different buckets.
+__device__ __forceinline__ c10::Float8_e4m3fn cvt_fp8_hw(float x) {
+#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  return c10::Float8_e4m3fn(__nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E4M3),
+                            c10::Float8_e4m3fn::from_bits());
+#else
+  return static_cast<c10::Float8_e4m3fn>(x);
+#endif
+}
+
 template <typename fp8_type>
 __device__ __forceinline__ fp8_type quant_to_fp8(float val, float inv_scale,
                                                  float fp8_max) {
   float x = val * inv_scale;
   x = fmaxf(-fp8_max, fminf(x, fp8_max));
-  return static_cast<fp8_type>(x);
+  if constexpr (std::is_same_v<fp8_type, c10::Float8_e4m3fn>) {
+    return cvt_fp8_hw(x);
+  } else {
+    return static_cast<fp8_type>(x);
+  }
 }
 
 // Fused SITU (Kimi SituGLU) activation + per-token dynamic FP8 quantization.
@@ -548,10 +599,8 @@ __global__ void situ_and_mul_quant_scalar_kernel(
   for (int idx = tid; idx < d; idx += nthreads) {
     const float g = (float)VLLM_LDG(&gate_ptr[idx]);
     const float u = (float)VLLM_LDG(&up_ptr[idx]);
-    const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
-    const float up_out =
-        clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
-    const float act = (float)(scalar_t)(gate_out * up_out);
+    const float act = (float)(scalar_t)situ_activation(
+        g, u, beta, linear_beta, clamp_up, inv_beta, inv_linear_beta);
     thread_max = fmaxf(thread_max, fabsf(act));
   }
 
@@ -568,7 +617,15 @@ __global__ void situ_and_mul_quant_scalar_kernel(
   }
 
   const float absmax = fmaxf(s_reduce[0], 1e-30f);
-  const float scale = absmax / fp8_max;
+  // humming's calc_scale computes `absmax / 448` as a Triton kernel, where
+  // 448 is a compile-time constant; Triton (like most LLVM-based compilers)
+  // constant-folds division by a literal into a multiply by the precomputed
+  // reciprocal, which is NOT bit-identical to a true division for divisors
+  // that aren't exact powers of 2. A true `absmax / fp8_max` here disagreed
+  // with humming's output by 1 ULP on ~5% of rows -- rare, but occasionally
+  // enough to push a value across a quantization bucket boundary. Matching
+  // the reciprocal-multiply form exactly reproduces Triton's rounding.
+  const float scale = absmax * (1.0f / fp8_max);
   if (tid == 0) scale_out[row] = scale;
   const float inv_scale = 1.0f / scale;
 
@@ -576,10 +633,8 @@ __global__ void situ_and_mul_quant_scalar_kernel(
   for (int idx = tid; idx < d; idx += nthreads) {
     const float g = (float)VLLM_LDG(&gate_ptr[idx]);
     const float u = (float)VLLM_LDG(&up_ptr[idx]);
-    const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
-    const float up_out =
-        clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
-    const float act = (float)(scalar_t)(gate_out * up_out);
+    const float act = (float)(scalar_t)situ_activation(
+        g, u, beta, linear_beta, clamp_up, inv_beta, inv_linear_beta);
     out_ptr[idx] = quant_to_fp8<fp8_type>(act, inv_scale, fp8_max);
   }
 }
@@ -657,10 +712,9 @@ __global__ void situ_and_mul_quant_pipelined_kernel(
     const float inv_linear_beta = clamp_up ? 1.0f / linear_beta : 0.0f;
 
     auto situ = [&](float g, float u) -> float {
-      const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
-      const float up_out =
-          clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
-      return (float)(scalar_t)(gate_out * up_out);
+      return (float)(scalar_t)situ_activation(g, u, beta, linear_beta,
+                                              clamp_up, inv_beta,
+                                              inv_linear_beta);
     };
 
     // Always commits exactly one group, even when this thread has nothing to
@@ -729,7 +783,15 @@ __global__ void situ_and_mul_quant_pipelined_kernel(
 #pragma unroll
     for (int w = 0; w < NUM_WARPS; w++) absmax = fmaxf(absmax, s_warp_max[w]);
     absmax = fmaxf(absmax, 1e-30f);
-    const float scale = absmax / fp8_max;
+    // humming's calc_scale computes `absmax / 448` as a Triton kernel, where
+  // 448 is a compile-time constant; Triton (like most LLVM-based compilers)
+  // constant-folds division by a literal into a multiply by the precomputed
+  // reciprocal, which is NOT bit-identical to a true division for divisors
+  // that aren't exact powers of 2. A true `absmax / fp8_max` here disagreed
+  // with humming's output by 1 ULP on ~5% of rows -- rare, but occasionally
+  // enough to push a value across a quantization bucket boundary. Matching
+  // the reciprocal-multiply form exactly reproduces Triton's rounding.
+  const float scale = absmax * (1.0f / fp8_max);
     const float inv_scale = 1.0f / scale;
     if (tid == 0) scale_out[row] = scale;
 
@@ -776,10 +838,8 @@ __global__ void masked_situ_and_mul_kernel(
     scalar_t* out_ptr = out + row * d;
     const float g = (float)VLLM_LDG(&gate_ptr[idx]);
     const float u = (float)VLLM_LDG(&up_ptr[idx]);
-    const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
-    const float up_out =
-        clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
-    out_ptr[idx] = (scalar_t)(gate_out * up_out);
+    out_ptr[idx] = (scalar_t)situ_activation(g, u, beta, linear_beta, clamp_up,
+                                             inv_beta, inv_linear_beta);
   }
 }
 
