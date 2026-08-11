@@ -74,17 +74,13 @@ impl EngineRoutingState {
     ///
     /// Scheduler stats can raise the load estimate above the frontend-local
     /// view, but they should not lower it below requests this frontend has
-    /// already admitted. Waiting requests still get the same extra penalty
-    /// as the original `waiting * 4 + running` score.
+    /// already admitted.
     fn routing_score(&self) -> usize {
-        const WAITING_WEIGHT: usize = 4;
-
         let Some(stats) = self.last_scheduler_stats else {
             return self.inflight;
         };
 
-        let scheduler_total = stats.running + stats.waiting;
-        self.inflight.max(scheduler_total) + stats.waiting * (WAITING_WEIGHT - 1)
+        self.inflight.max(stats.running + stats.waiting)
     }
 
     /// Replace the local routing view with a fresh real scheduler snapshot.
@@ -165,15 +161,16 @@ impl RequestRegistry {
 
     fn choose_engine_for_request(&mut self, data_parallel_rank: Option<u32>) -> Result<EngineId> {
         if let Some(rank) = data_parallel_rank {
-            // Route to the engine at the specified rank index.
-            let engine_id = EngineId::from_engine_index(rank);
-            return self
-                .routing_per_engine
-                .contains_key(&engine_id)
-                .then_some(engine_id)
+            let engine_id = u16::try_from(rank).ok().map(EngineId::from_engine_index);
+            return engine_id
+                .filter(|engine_id| self.routing_per_engine.contains_key(engine_id))
                 .ok_or_else(|| Error::InvalidDataParallelRank {
                     rank,
-                    num_engines: self.routing_per_engine.len() as u32,
+                    connected_ranks: self
+                        .routing_per_engine
+                        .keys()
+                        .filter_map(EngineId::engine_index)
+                        .collect(),
                 });
         }
 
@@ -347,6 +344,9 @@ impl RequestRegistry {
     }
 
     fn apply_scheduler_counts(&mut self, engine_index: u32, next: EngineLoadSnapshot) -> bool {
+        let Ok(engine_index) = u16::try_from(engine_index) else {
+            return false;
+        };
         let engine_id = EngineId::from_engine_index(engine_index);
         let Some(state) = self.routing_per_engine.get_mut(&engine_id) else {
             return false;
@@ -750,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn routing_score_keeps_extra_waiting_penalty() {
+    fn routing_score_counts_waiting_without_extra_penalty() {
         let state = EngineRoutingState {
             inflight: 1,
             last_scheduler_stats: Some(EngineLoadSnapshot {
@@ -759,7 +759,7 @@ mod tests {
             }),
         };
 
-        assert_eq!(state.routing_score(), 14);
+        assert_eq!(state.routing_score(), 5);
     }
 
     #[test]
@@ -844,26 +844,26 @@ mod tests {
             error,
             crate::error::Error::InvalidDataParallelRank {
                 rank: 2,
-                num_engines: 2,
-            }
+                connected_ranks,
+            } if connected_ranks == vec![0, 1]
         ));
     }
 
     #[test]
-    fn register_with_rank_on_single_engine_only_accepts_zero() {
-        let engine_0 = EngineId::from_engine_index(0);
-        let mut registry = RequestRegistry::new(&[connected_engine(engine_0.clone())]);
+    fn register_with_rank_uses_global_engine_identity() {
+        let engine_3 = EngineId::from_engine_index(3);
+        let mut registry = RequestRegistry::new(&[connected_engine(engine_3.clone())]);
 
-        let (chosen, _) = registry.register("req-ok".to_string(), None, Some(0)).unwrap();
-        assert_eq!(chosen, engine_0);
+        let (chosen, _) = registry.register("req-ok".to_string(), None, Some(3)).unwrap();
+        assert_eq!(chosen, engine_3);
 
-        let error = registry.register("req-bad".to_string(), None, Some(1)).unwrap_err();
+        let error = registry.register("req-bad".to_string(), None, Some(0)).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::InvalidDataParallelRank {
-                rank: 1,
-                num_engines: 1,
-            }
+                rank: 0,
+                connected_ranks,
+            } if connected_ranks == vec![3]
         ));
     }
 

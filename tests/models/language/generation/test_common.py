@@ -126,16 +126,14 @@ def test_models(
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
+    if current_platform.is_rocm() and model == "TitanML/tiny-mixtral":
+        # Its single-token router selects LLMM1, whose low-precision
+        # accumulation can change the top-2 experts. Keep the optimized kernel
+        # enabled generally, but use the reference GEMM for this accuracy test.
+        monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
+
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-        if model == "TitanML/tiny-mixtral":
-            # Untrained model: near-uniform logits make argmax sensitive to
-            # AITER's bfloat16 rounding error. Route the plain rms_norm and the
-            # fused MoE (whose near-uniform router logits flip expert selection
-            # under ~1 ULP drift) through the native kernels for this model.
-            # See ROCm/aiter#3806 for the tracking issue and minimal repro.
-            monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", "0")
-            monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
     elif use_rocm_aiter and model not in AITER_MODEL_LIST:
         # Skip model that are not using AITER tests.
         # When more AITER kernels are added, this list will not be
