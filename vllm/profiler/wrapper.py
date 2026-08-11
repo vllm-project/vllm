@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -198,6 +199,36 @@ class TorchProfilerWrapper(WorkerProfiler):
                 use_gzip=profiler_config.torch_profiler_use_gzip,
             )
 
+        def _async_trace_ready(prof: torch.profiler.profile) -> None:
+            """Runs the trace export (JSON serialization + optional gzip) on a
+            background thread instead of inline on whatever called
+            profiler.step()/stop() -- normally this worker's own request-
+            handling loop.
+
+            By the time this fires, Kineto has already stopped collecting and
+            holds a complete, immutable snapshot of the trace in memory (the
+            CUDA-side stop happens synchronously just before this callback, as
+            part of the same profiler.stop()/step() call) -- so none of this
+            touches CUDA or the model-execution stream anymore, and it's safe
+            to run concurrently with whatever this worker does next.
+
+            This matters because export_chrome_trace() with gzip enabled
+            writes the full uncompressed JSON to a temp file, rereads it, and
+            recompresses it with single-threaded stdlib gzip -- for a
+            multi-hundred-MB-to-GB trace this can take tens of seconds, during
+            which (without this) the worker cannot schedule its next step.
+            """
+
+            def run() -> None:
+                try:
+                    trace_handler(prof)
+                except Exception as e:
+                    logger.warning("Failed to export profiler trace: %s", e)
+
+            threading.Thread(
+                target=run, name="vllm-profiler-trace-export", daemon=True
+            ).start()
+
         self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
 
         # Create profiler schedule if warmup or wait iterations are configured
@@ -225,7 +256,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             profile_memory=profiler_config.torch_profiler_with_memory,
             with_stack=profiler_config.torch_profiler_with_stack,
             with_flops=profiler_config.torch_profiler_with_flops,
-            on_trace_ready=trace_handler,
+            on_trace_ready=_async_trace_ready,
         )
 
         # Track if we're using a schedule (need to call step())
