@@ -6,7 +6,7 @@ FLUTE-paper optimizations applied:
   1. Grouped Q heads: grid over (B, Hk, splits) instead of (B, Hq, splits).
      Each program loads BLOCK_M Q heads sharing a KV head into a 2D tile,
      enabling tl.dot on tensor cores (MFMA/WMMA) for both Q·K and P·V.
-  2. Vectorized pair LUT: precompute pair_table[i][j] = (T[i], T[j])
+  2. Vectorized pair LUT: precompute `pair_table[i][j] = (T[i], T[j])`
      offline. At runtime, extract adjacent index pairs and fetch two
      dequantized centroids with a single gather, halving LUT lookups.
   3. exp2 instead of exp: scores pre-scaled by log2(e) so the hardware-
