@@ -767,7 +767,8 @@ class GPUModelRunner(
                 ),
                 # We currently don't know whether a particular custom logits processor
                 # uses output token ids so we set this conservatively. Thinking-budget
-                # tracking is requested dynamically when a budgeted request is in the batch.
+                # tracking is requested dynamically when a budgeted request is in the
+                # batch.
                 logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
                 is_pooling_model=self.is_pooling_model,
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,

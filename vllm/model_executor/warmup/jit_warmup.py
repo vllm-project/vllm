@@ -684,10 +684,7 @@ class JitWarmupRegistry:
         registrations.append((args, kwargs))
 
     def __len__(self) -> int:
-        return sum(
-            len(registrations)
-            for registrations in self._registrations.values()
-        )
+        return sum(len(registrations) for registrations in self._registrations.values())
 
     def warmup(self) -> None:
         """Expand registrations and compile each owner/key pair once."""
