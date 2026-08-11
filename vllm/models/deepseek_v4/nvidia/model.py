@@ -65,6 +65,12 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.eager_scratch import DeepseekV4EagerScratchPool
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
@@ -515,6 +521,7 @@ class DeepseekV4MoE(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
+        use_sequence_parallel: bool = False,
     ):
         super().__init__()
 
@@ -522,6 +529,7 @@ class DeepseekV4MoE(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.prefix = prefix
+        self.use_sequence_parallel = use_sequence_parallel
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
@@ -595,6 +603,7 @@ class DeepseekV4MoE(nn.Module):
                 swiglu_limit=self.swiglu_limit,
                 quant_config=quant_config,
                 reduce_results=self.use_mega_moe,
+                is_sequence_parallel=use_sequence_parallel,
                 prefix=f"{prefix}.shared_experts",
             )
 
@@ -689,6 +698,7 @@ class DeepseekV4MoE(nn.Module):
             router_logits_dtype=torch.float32,
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=eplb_config.num_redundant_experts,
+            is_sequence_parallel=self.use_sequence_parallel,
         )
 
     def forward(
@@ -736,20 +746,11 @@ class DeepseekV4MoE(nn.Module):
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
         org_shape = hidden_states.shape
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the MoERunner class
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=hidden_states,
-                input_ids=input_ids,
-            )
-        else:
-            router_logits, _ = self.gate(hidden_states)
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=hidden_states,
+            input_ids=input_ids,
+        )
 
         return final_hidden_states.view(org_shape)
 
@@ -792,6 +793,17 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     return DeepseekV4FlashMLAAttention
 
 
+def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
+    parallel_config = vllm_config.parallel_config
+    use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+    return (
+        parallel_config.pipeline_parallel_size == 1
+        and parallel_config.enable_expert_parallel
+        and parallel_config.tensor_parallel_size > 1
+        and (use_mega_moe or parallel_config.data_parallel_size > 1)
+    )
+
+
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -805,6 +817,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
+        self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.rms_norm_eps = config.rms_norm_eps
         self.attn = _select_dsv4_attn_cls(vllm_config)(
@@ -814,7 +827,13 @@ class DeepseekV4DecoderLayer(nn.Module):
             aux_stream_list=aux_stream_list,
             eager_scratch_pool=eager_scratch_pool,
         )
-        self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
+        if self.use_sequence_parallel:
+            self.attn.wo_b.reduce_results = False
+        self.ffn = DeepseekV4MoE(
+            vllm_config,
+            prefix=f"{prefix}.ffn",
+            use_sequence_parallel=self.use_sequence_parallel,
+        )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.ffn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -932,8 +951,12 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_eps=attn_norm_eps,
             )
 
-        # attn_norm is fused into mhc_pre_tilelang / mhc_fused_post_pre above.
+        if self.use_sequence_parallel:
+            x = sp_all_gather(x)[: positions.shape[0]]
+
         x = self.attn(positions, x, None)
+        if self.use_sequence_parallel:
+            x = sp_reduce_scatter(x)
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon
@@ -972,6 +995,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
+        self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently requires expert parallel. "
@@ -985,7 +1009,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.rms_norm_eps = config.rms_norm_eps
 
         # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4Attention.attn_gemm_parallel_execute
+        # DeepseekV4Attention._run_parallel_input_projections
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
@@ -1114,6 +1138,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if self.use_mega_moe:
             input_ids = input_ids.to(torch.int64)
 
+        full_num_tokens = positions.shape[0]
+        if self.use_sequence_parallel:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                forward_context = get_forward_context()
+                forward_context.is_padding = sp_padding_mask(
+                    forward_context.is_padding, hidden_states
+                )
+            hidden_states = sp_shard(hidden_states)
+            input_ids = sp_shard(input_ids)
+
         residual, post_mix, res_mix = None, None, None
         aux_hidden_states: list[torch.Tensor] = []
         final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
@@ -1134,7 +1168,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_recon = mhc_post_tilelang(
                     hidden_states, residual, post_mix, res_mix
                 )
-                aux_hidden_states.append(aux_recon.mean(dim=1))
+                aux_hidden_state = aux_recon.mean(dim=1)
+                if self.use_sequence_parallel:
+                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+                aux_hidden_states.append(aux_hidden_state)
                 final_aux_recon = aux_recon
         if layer is not None:
             # Reuse if the last layer was captured as an aux hidden state
@@ -1147,6 +1184,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
+
+        if self.use_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
@@ -1194,7 +1234,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # ranks land on the zero pad). SP / unquantized ones need no padding.
         pad_shared_expert = (
             getattr(self.quant_config, "weight_block_size", None) is not None
-            and not self.parallel_config.use_sequence_parallel_moe
+            and not self.use_sequence_parallel
         )
 
         for name, loaded_weight in weights:

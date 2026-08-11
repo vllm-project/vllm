@@ -17,15 +17,53 @@ from vllm.transformers_utils.config import (
     ConfigFormat,
     get_safetensors_params_metadata,
 )
+from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
 
 
 class ModelArchConfigConvertorBase:
-    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        hf_text_config: PretrainedConfig,
+        revision: str | None = None,
+    ):
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
+        self.revision = revision
+
+    def get_per_layer_hf_configs(
+        self,
+    ) -> list[tuple[PretrainedConfig, PretrainedConfig]] | None:
+        """`(hf_config, hf_text_config)` per layer, or `None` if homogeneous.
+
+        This is the only place that decides whether a checkpoint is heterogeneous
+        and how many layers it has, so a convertor can declare variation that
+        Transformers does not express (see `Gemma4ModelArchConfigConvertor`).
+
+        Each pair is converted independently and the results are diffed, so a
+        convertor that overrides this must not also collapse a varying field in
+        its getters: the collapse would then be applied per layer and every layer
+        would report the same value.
+        """
+        config_het = getattr(self.hf_config, "is_heterogeneous", False)
+        text_het = getattr(self.hf_text_config, "is_heterogeneous", False)
+        if not (config_het or text_het):
+            return None
+        # The text config decides the layer count when it is the heterogeneous one:
+        # its stack is what vLLM builds attention layers for.
+        source = self.hf_text_config if text_het else self.hf_config
+        return [
+            (
+                self.hf_config.per_layer_config[i] if config_het else self.hf_config,
+                self.hf_text_config.per_layer_config[i]
+                if text_het
+                else self.hf_text_config,
+            )
+            for i in range(len(source.per_layer_config))
+        ]
 
     def get_architectures(self) -> list[str]:
         # Sometimes we get here from `vllm_config.with_hf_config(text_config)` where
@@ -90,7 +128,7 @@ class ModelArchConfigConvertorBase:
         model_path = self.hf_config.name_or_path
         if not model_path:
             return qk_rope_head_dim
-        raw = get_hf_file_to_dict("config.json", model_path)
+        raw = get_hf_file_to_dict("config.json", model_path, self.revision)
         if raw and "qk_rope_head_dim" in raw:
             correct = raw["qk_rope_head_dim"]
             if correct != qk_rope_head_dim:
@@ -163,6 +201,19 @@ class ModelArchConfigConvertorBase:
         if not num_experts:
             num_experts = self.get_num_experts_from_block_configs()
         return num_experts
+
+    def get_num_experts_per_token(self) -> int:
+        names = [
+            "num_experts_per_tok",
+            "num_experts_per_token",
+            "top_k_experts",
+            "moe_topk",
+            "moe_top_k",
+        ]
+        num_experts_per_token = getattr_iter(self.hf_text_config, names, 0)
+        if isinstance(num_experts_per_token, list):
+            return max(num_experts_per_token, default=0)
+        return num_experts_per_token or 0
 
     @final
     @classmethod
@@ -279,6 +330,7 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
             "bailing_hybrid_mtp",
+            "bailing_hybrid_v3_mtp",
         ):
             # check is deepseek_v4 model
             if hasattr(self.hf_text_config, "compress_ratios"):
@@ -368,6 +420,35 @@ class ModelArchConfigConvertorBase:
         return derived_max_model_len, max_len_key
 
     def convert(self, supports_multimodal: bool = True) -> ModelArchitectureConfig:
+        if (per_layer := self.get_per_layer_hf_configs()) is None:
+            return self.convert_layer(supports_multimodal)
+
+        if self.is_deepseek_mla():
+            raise NotImplementedError(
+                "Heterogeneous MLA models are not supported: `get_head_size` "
+                "patches the config in place for them, which a per-layer "
+                "conversion would apply to a throwaway copy."
+            )
+        # Convert each layer and let the result work out which fields differ.
+        # Reading a varying attribute off the global config would raise, so the
+        # whole-model config has to be built up from the layers.
+        return ModelArchitectureConfig.from_layers(
+            [
+                type(self)(*configs).convert_layer(supports_multimodal)
+                for configs in per_layer
+            ]
+        )
+
+    def convert_layer(
+        self, supports_multimodal: bool = True
+    ) -> ModelArchitectureConfig:
+        """Convert one homogeneous config, without resolving per-layer values.
+
+        `convert` calls this once per layer, so it must not recurse back into
+        per-layer resolution: the configs it receives are already layer-specific,
+        and they can still carry the attributes that made the model look
+        heterogeneous in the first place.
+        """
         model_arch_config = ModelArchitectureConfig(
             architectures=self.get_architectures(),
             model_type=self.hf_config.model_type,
@@ -379,6 +460,7 @@ class ModelArchConfigConvertorBase:
             vocab_size=self.get_vocab_size(),
             total_num_kv_heads=self.get_total_num_kv_heads(),
             num_experts=self.get_num_experts(),
+            num_experts_per_token=self.get_num_experts_per_token(),
             quantization_config=self.get_quantization_config(),
             is_deepseek_mla=self.is_deepseek_mla(),
             is_mm_prefix_lm=self.is_mm_prefix_lm(supports_multimodal),
@@ -519,16 +601,26 @@ def _strip_mimo_v2_attention_chunk_size(
 
 
 class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        hf_text_config: PretrainedConfig,
+        revision: str | None = None,
+    ):
         if getattr(hf_config, "vision_config", None):
             hf_config.architectures = ["MiMoV2OmniForCausalLM"]
-        super().__init__(hf_config, hf_text_config)
+        super().__init__(hf_config, hf_text_config, revision)
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
 
 class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
-        super().__init__(hf_config, hf_text_config)
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        hf_text_config: PretrainedConfig,
+        revision: str | None = None,
+    ):
+        super().__init__(hf_config, hf_text_config, revision)
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
     def get_num_hidden_layers(self) -> int:
@@ -558,6 +650,12 @@ class Qwen3NextMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 class BailingHybridMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+
+
+class BailingHybridV3MTPModelArchConfigConvertor(
+    BailingHybridMTPModelArchConfigConvertor
+):
+    pass
 
 
 class Qwen3_5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -601,13 +699,26 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
             == "vision"
         )
 
-    def get_head_size(self) -> int:
-        # Gemma4 uses dual head dimensions: head_dim (sliding attention)
-        # and global_head_dim (full attention).  Return the largest so
-        # that attention backends allocate buffers large enough for both.
-        head_dim = getattr(self.hf_text_config, "head_dim", 0)
-        global_head_dim = getattr(self.hf_text_config, "global_head_dim", 0)
-        return max(head_dim, global_head_dim) or super().get_head_size()
+    def get_per_layer_hf_configs(
+        self,
+    ) -> list[tuple[PretrainedConfig, PretrainedConfig]] | None:
+        # Gemma4 uses a larger head dimension, and sometimes more KV heads, on its
+        # full attention layers than on its sliding ones. Transformers >= 5.15.0
+        # says so in the config; before that the values are flat attributes picked
+        # apart by `layer_types`, so build the per-layer configs here instead. Both
+        # then reach the base convertor as ordinary homogeneous configs.
+        if getattr(self.hf_text_config, "is_heterogeneous", False):
+            return super().get_per_layer_hf_configs()
+        text_config = self.hf_text_config
+        if not getattr(text_config, "layer_types", None):
+            return None
+        # `num_hidden_layers` is what the stack is built from, and it is what
+        # Transformers sizes `per_layer_config` by. `layer_types` can be longer,
+        # e.g. when a test truncates the layer count to build a small model.
+        return [
+            (self.hf_config, gemma4_layer_config(text_config, layer_idx))
+            for layer_idx in range(self.get_num_hidden_layers())
+        ]
 
 
 class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -682,6 +793,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "moss_audio": MossAudioModelArchConfigConvertor,
     "mpt": MPTModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
+    "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
