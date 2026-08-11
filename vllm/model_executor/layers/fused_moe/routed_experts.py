@@ -226,9 +226,15 @@ class RoutedExperts(PluggableLayer):
 
     @property
     def expert_map(self) -> torch.Tensor | None:
-        return (
-            self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
-        )
+        # AITER fused-MoE kernels consume the 0/1 expert_mask; every other
+        # backend consumes the canonical -1/local-slot map. Ask the active
+        # experts kernel which it wants (only AITER sets consumes_expert_mask)
+        # rather than keying on the global VLLM_ROCM_USE_AITER switch, which
+        # does not reflect the per-layer kernel actually selected.
+        moe_kernel = getattr(self.quant_method, "moe_kernel", None)
+        if moe_kernel is not None and moe_kernel.fused_experts.consumes_expert_mask:
+            return self.expert_mask
+        return self._expert_map
 
     def update_expert_map_info(self):
         # Update local attributes from ExpertMapManager

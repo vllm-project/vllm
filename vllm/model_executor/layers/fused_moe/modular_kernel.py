@@ -470,6 +470,12 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
 
 # TODO: add supported activations method (return string)
 class FusedMoEExperts(ABC):
+    # ROCm AITER kernels consume a 0/1 local-expert mask (with a trailing
+    # sentinel slot); every other backend consumes the canonical -1/local-slot
+    # expert_map. RoutedExperts.expert_map reads this flag to pick which to hand
+    # the active experts kernel.
+    consumes_expert_mask: bool = False
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,

@@ -425,14 +425,14 @@ def test_mxfp8_linear_emulation_bf16_at_load(
 
 
 # ── EP expert_mask handling for the FlyDSL (AITER_MXFP8) MoE ────────────────
-# Regression for the EP + aiter-master-switch interaction: under expert
-# parallelism ``RoutedExperts.expert_map`` hands the experts either the 0/1
-# ``expert_mask`` (aiter master ON, ``rocm_aiter_fmoe_enabled``) or vLLM's -1
-# index map (master OFF). ``AiterMxfp8Experts.apply`` must forward the right 0/1
-# mask to aiter in BOTH cases. The old code always rebuilt the mask via
-# ``(expert_map >= 0)``; on the already-0/1 mask that collapses to all-ones (no
-# experts masked out) and EP output becomes garbage (no accuracy).
-def _capture_expert_mask(expert_map, *, rocm_aiter_fmoe_enabled, global_num_experts):
+# The map/mask choice lives in ``RoutedExperts.expert_map``: it hands AITER
+# experts (``consumes_expert_mask``) the precomputed 0/1 ``expert_mask`` and
+# everyone else the canonical -1 index map, keyed on the resolved experts kernel
+# rather than the global VLLM_ROCM_USE_AITER switch. ``AiterMxfp8Experts.apply``
+# forwards that mask to aiter unchanged (it no longer rebuilds it via
+# ``(expert_map >= 0)``, which collapsed an already-0/1 mask to all-ones and
+# produced EP garbage).
+def _capture_expert_mask(expert_mask, *, global_num_experts):
     """Drive the real ``AiterMxfp8Experts.apply`` mask branch and capture the
     ``expert_mask`` it forwards to ``rocm_aiter_ops.fused_moe``."""
     from types import SimpleNamespace
@@ -444,9 +444,6 @@ def _capture_expert_mask(expert_map, *, rocm_aiter_fmoe_enabled, global_num_expe
     )
 
     experts = object.__new__(AiterMxfp8Experts)  # bypass heavy __init__
-    experts.moe_config = SimpleNamespace(
-        rocm_aiter_fmoe_enabled=rocm_aiter_fmoe_enabled
-    )
     experts.quant_config = SimpleNamespace(gemm1_clamp_limit=None)
     experts.w1_scale_val = None
     experts.w2_scale_val = None
@@ -474,7 +471,7 @@ def _capture_expert_mask(expert_map, *, rocm_aiter_fmoe_enabled, global_num_expe
             topk_ids=ti,
             activation=None,
             global_num_experts=global_num_experts,
-            expert_map=expert_map,
+            expert_map=expert_mask,
             a1q_scale=None,
             a2_scale=None,
             workspace13=None,
@@ -486,33 +483,45 @@ def _capture_expert_mask(expert_map, *, rocm_aiter_fmoe_enabled, global_num_expe
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
-def test_aiter_mxfp8_ep_expert_mask_both_master_modes():
-    """Both aiter-master forms must yield the SAME correct 0/1 aiter mask;
-    guards the EP+master regression (mask must not collapse to all-ones)."""
-    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
-        determine_expert_map,
+def test_aiter_mxfp8_apply_forwards_expert_mask_unchanged():
+    """AiterMxfp8Experts.apply forwards the precomputed 0/1 mask to aiter as-is
+    (no re-derivation that would collapse an already-0/1 mask to all-ones)."""
+    # 0/1 local-expert mask over global ids + trailing sentinel (rank owns 0..3).
+    ep_mask = torch.tensor(
+        [1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=torch.int32, device=DEVICE
     )
+    got = _capture_expert_mask(ep_mask, global_num_experts=8)
+    assert torch.equal(got.cpu().to(torch.int32), ep_mask.cpu().to(torch.int32))
+    assert got.sum().item() == 4  # the 4 local experts, not all 9
 
-    E, ep_size, ep_rank = 8, 2, 0  # rank owns global experts 0..3
-    # master OFF: vLLM's -1 index map
-    _, idx_map, _ = determine_expert_map(ep_size, ep_rank, E, return_expert_mask=False)
-    # master ON: 0/1 mask (+ trailing sentinel) that RoutedExperts forwards
-    _, _, ep_mask = determine_expert_map(ep_size, ep_rank, E, return_expert_mask=True)
 
-    idx_map = idx_map.to(DEVICE)
-    ep_mask = ep_mask.to(DEVICE)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+def test_routed_experts_expert_map_delegates_to_kernel():
+    """RoutedExperts.expert_map returns the 0/1 mask only for kernels that set
+    ``consumes_expert_mask`` (AITER), and the canonical -1 map otherwise -- keyed
+    on the resolved kernel, not the global aiter switch."""
+    from types import SimpleNamespace
 
-    # Expected aiter expert_mask: 0/1 over global ids + trailing sentinel slot.
-    expected = torch.tensor([1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=torch.int32)
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
-    got_off = _capture_expert_mask(
-        idx_map, rocm_aiter_fmoe_enabled=False, global_num_experts=E
-    )
-    got_on = _capture_expert_mask(
-        ep_mask, rocm_aiter_fmoe_enabled=True, global_num_experts=E
-    )
+    canonical = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32)
+    mask = torch.tensor([1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=torch.int32)
 
-    assert torch.equal(got_off.cpu().to(torch.int32), expected)
-    # master ON forwards the prebuilt mask unchanged (NOT collapsed to all-ones)
-    assert torch.equal(got_on.cpu().to(torch.int32), ep_mask.cpu().to(torch.int32))
-    assert got_on.sum().item() == 4  # exactly the 4 local experts, not all 9
+    def resolve(consumes_mask, *, has_moe_kernel=True):
+        moe_kernel = (
+            SimpleNamespace(
+                fused_experts=SimpleNamespace(consumes_expert_mask=consumes_mask)
+            )
+            if has_moe_kernel
+            else None
+        )
+        layer = SimpleNamespace(
+            _expert_map=canonical,
+            expert_mask=mask,
+            quant_method=SimpleNamespace(moe_kernel=moe_kernel),
+        )
+        return RoutedExperts.expert_map.fget(layer)
+
+    assert torch.equal(resolve(True), mask)  # AITER kernel -> 0/1 mask
+    assert torch.equal(resolve(False), canonical)  # non-AITER -> canonical map
+    assert torch.equal(resolve(False, has_moe_kernel=False), canonical)  # non-modular
