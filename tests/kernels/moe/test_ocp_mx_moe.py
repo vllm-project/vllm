@@ -1628,7 +1628,7 @@ def test_aiter_mxfp4_bf16_only_pads_dsv4_for_active_shared_expert_fusion(
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
     )
-    from vllm.models.deepseek_v4.amd.mxfp4 import DeepseekV4AmdMxfp4MoEMethod
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 
     moe_parallel_config = replace(
         FusedMoEParallelConfig.make_no_parallel(),
@@ -1646,11 +1646,11 @@ def test_aiter_mxfp4_bf16_only_pads_dsv4_for_active_shared_expert_fusion(
         routing_method=RoutingMethodType.DeepseekV4,
         moe_parallel_config=moe_parallel_config,
         in_dtype=torch.bfloat16,
+        num_fused_shared_experts=num_fused_shared_experts,
     )
-    method = object.__new__(DeepseekV4AmdMxfp4MoEMethod)
+    method = object.__new__(Mxfp4MoEMethod)
     method.moe = moe_config
     method.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
-    method.num_fused_shared_experts = num_fused_shared_experts
 
     rounded_shape = method.maybe_roundup_sizes(
         hidden_size=7168,

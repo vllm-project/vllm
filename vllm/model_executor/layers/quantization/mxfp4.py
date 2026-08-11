@@ -567,6 +567,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             hidden_size,
             intermediate_size_per_partition,
             activation=self.moe.activation,
+            routing_method=self.moe.routing_method,
+            num_fused_shared_experts=self.moe.num_fused_shared_experts,
         )
 
     def create_weights(

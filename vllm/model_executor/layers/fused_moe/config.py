@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Union
 
@@ -1289,6 +1289,9 @@ class FusedMoEConfig:
 
     # The activation type.
     in_dtype: torch.dtype
+
+    # Number of shared experts appended to the routed-expert allocation.
+    num_fused_shared_experts: int = field(default=0, kw_only=True)
 
     # Defaults to in_dtype if not specified.
     router_logits_dtype: torch.dtype | None = None

@@ -642,6 +642,8 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     hidden_size: int,
     intermediate_size: int,
     activation: MoEActivation | None = None,
+    routing_method: RoutingMethodType | None = None,
+    num_fused_shared_experts: int = 0,
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
     if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and activation == MoEActivation.SITU:
@@ -649,6 +651,17 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
         # no-op for K3's shapes) rather than the generic ROCm 256 round-up,
         # which would inflate weights and OOM.
+        intermediate_size = round_up(intermediate_size, 128)
+        hidden_size = round_up(hidden_size, 128)
+    elif (
+        backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+        and activation == MoEActivation.SILU
+        and routing_method == RoutingMethodType.DeepseekV4
+        and num_fused_shared_experts == 0
+    ):
+        # DSV4's AITER A16W4 SiLU kernel handles its native TP8 I384 shard.
+        # Shared-expert fusion retains the generic I512 layout used by its
+        # currently validated FHMoE profile.
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif backend == Mxfp4MoeBackend.EMULATION:
