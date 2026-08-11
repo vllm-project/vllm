@@ -474,7 +474,7 @@ def test_load_is_ordered_after_compute_stream(default_vllm_config) -> None:
                 [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size)]
             ],
         ),
-        block_size_factor=1,
+        blocks_per_chunk=1,
         num_cpu_blocks=num_blocks,
         mmap_region=None,
     )
