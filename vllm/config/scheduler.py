@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Callable
 from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -20,6 +21,68 @@ logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
 SchedulerPolicy = Literal["fcfs", "priority"]
+
+
+@config
+class SchedulerPluginSpec:
+    """Configuration for one scheduler plugin instance."""
+
+    name: str = ""
+    """Registered scheduler plugin name."""
+
+    weight: float = 1.0
+    """Score multiplier when the plugin is enabled at the Score extension point."""
+
+    args: dict[str, Any] = Field(default_factory=dict)
+    """Keyword arguments passed to the plugin constructor."""
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("scheduler plugin name must not be empty")
+        if not math.isfinite(self.weight):
+            raise ValueError("scheduler plugin weight must be finite")
+
+
+@config
+class SchedulerPluginProfile:
+    """Plugins enabled at each scheduler extension point."""
+
+    queue_sort: SchedulerPluginSpec | None = None
+    """Plugin enabled at the QueueSort extension point."""
+
+    filters: list[SchedulerPluginSpec] = Field(default_factory=list)
+    """Plugins enabled at the Filter extension point in execution order."""
+
+    scores: list[SchedulerPluginSpec] = Field(default_factory=list)
+    """Plugins enabled at the Score extension point."""
+
+    preemption: SchedulerPluginSpec | None = None
+    """Plugin enabled at the Preemption extension point."""
+
+    candidate_window: int = Field(default=0, ge=0)
+    """Maximum Filter-approved candidates evaluated by Score."""
+
+    candidate_scan_limit: int = Field(default=0, ge=0)
+    """Maximum QueueSort-ordered candidates inspected per selection.
+
+    A zero value lets the scheduler derive a bounded scan limit from
+    ``candidate_window``.
+    """
+
+    def __post_init__(self) -> None:
+        if (self.filters or self.scores) and self.candidate_window == 0:
+            raise ValueError(
+                "scheduler plugin candidate_window must be positive when "
+                "Filter or Score plugins are enabled"
+            )
+        if (
+            self.candidate_scan_limit
+            and self.candidate_scan_limit < self.candidate_window
+        ):
+            raise ValueError(
+                "scheduler plugin candidate_scan_limit must be greater than "
+                "or equal to candidate_window"
+            )
 
 
 @config
@@ -103,6 +166,10 @@ class SchedulerConfig:
       of arrival.
     - "priority" means requests are handled based on given priority (lower
       value means earlier handling) and time of arrival deciding any ties)."""
+
+    scheduler_plugin_profile: SchedulerPluginProfile | None = None
+    """Optional scheduler extension-point configuration. If unset, `policy`
+    selects the equivalent built-in QueueSort and Preemption plugins."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to

@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Iterator
 from enum import Enum
+from itertools import islice
 
 from vllm.v1.request import Request
 
@@ -71,6 +72,14 @@ class RequestQueue(ABC):
         """Iterate over the queue according to the policy."""
         pass
 
+    @abstractmethod
+    def iter_requests(self, limit: int) -> Iterator[Request]:
+        """Iterate over at most ``limit`` requests in queue order.
+
+        Implementations must not materialize or order the full queue.
+        """
+        pass
+
 
 class FCFSRequestQueue(deque[Request], RequestQueue):
     """A first-come-first-served queue that supports deque operations."""
@@ -126,6 +135,10 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to FCFS policy."""
         return super().__iter__()
+
+    def iter_requests(self, limit: int) -> Iterator[Request]:
+        """Iterate over at most ``limit`` requests in FCFS order."""
+        return islice(super().__iter__(), limit)
 
 
 class PriorityRequestQueue(RequestQueue):
@@ -196,6 +209,22 @@ class PriorityRequestQueue(RequestQueue):
         heap_copy = self._heap[:]
         while heap_copy:
             yield heapq.heappop(heap_copy)
+
+    def iter_requests(self, limit: int) -> Iterator[Request]:
+        """Iterate over at most ``limit`` requests in priority order."""
+        if limit <= 0 or not self._heap:
+            return
+
+        candidates = [(self._heap[0], 0)]
+        for _ in range(min(limit, len(self._heap))):
+            request, position = heapq.heappop(candidates)
+            yield request
+            left = 2 * position + 1
+            right = left + 1
+            if left < len(self._heap):
+                heapq.heappush(candidates, (self._heap[left], left))
+            if right < len(self._heap):
+                heapq.heappush(candidates, (self._heap[right], right))
 
 
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:

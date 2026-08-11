@@ -14,6 +14,8 @@ from vllm.config import (
     KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
+    SchedulerPluginProfile,
+    SchedulerPluginSpec,
     SpeculativeConfig,
     VllmConfig,
 )
@@ -29,6 +31,20 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.plugins import (
+    FCFSSchedulerPlugin,
+    FilterPlugin,
+    FilterResult,
+    PrioritySchedulerPlugin,
+    SchedulerPluginManager,
+    SchedulingCycleState,
+    ScorePlugin,
+)
+from vllm.v1.core.sched.plugins.manager import BUILTIN_SCHEDULER_PLUGINS
+from vllm.v1.core.sched.request_queue import (
+    FCFSRequestQueue,
+    PriorityRequestQueue,
+)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
@@ -51,6 +67,36 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
+
+
+class _RejectRequestPlugin(FilterPlugin):
+    name = "test-reject-request"
+
+    def __init__(self, request_id: str) -> None:
+        self.request_id = request_id
+
+    def filter(
+        self,
+        request: Request,
+        state: SchedulingCycleState,
+    ) -> FilterResult:
+        if request.request_id == self.request_id:
+            return FilterResult.reject("rejected by test")
+        return FilterResult.allow()
+
+
+class _PriorityScorePlugin(ScorePlugin):
+    name = "test-priority-score"
+
+    def score(self, request: Request, state: SchedulingCycleState) -> float:
+        return float(request.priority)
+
+
+class _RequestIdScorePlugin(ScorePlugin):
+    name = "test-request-id-score"
+
+    def score(self, request: Request, state: SchedulingCycleState) -> float:
+        return float(request.request_id)
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
@@ -2427,6 +2473,355 @@ def test_memory_leak():
 
     # Confirm no memory leak.
     assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("policy", "plugin_cls", "queue_cls"),
+    [
+        ("fcfs", FCFSSchedulerPlugin, FCFSRequestQueue),
+        ("priority", PrioritySchedulerPlugin, PriorityRequestQueue),
+    ],
+)
+def test_builtin_scheduling_policy_uses_plugin(
+    policy: str,
+    plugin_cls: type,
+    queue_cls: type,
+):
+    manager = SchedulerPluginManager(policy)
+
+    assert isinstance(manager.queue_sort_plugin, plugin_cls)
+    assert isinstance(manager.preemption_plugin, plugin_cls)
+    assert isinstance(manager.create_request_queue(), queue_cls)
+
+
+@pytest.mark.skip_global_cleanup
+def test_fcfs_plugin_preserves_queue_and_preemption_order():
+    manager = SchedulerPluginManager("fcfs")
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    requests = create_requests(num_requests=3)
+    waiting.add_request(requests[0])
+    skipped.add_request(requests[1])
+
+    assert manager.select_queue(waiting, skipped) is skipped
+    assert manager.select_preemption_victim(requests) is requests[-1]
+
+
+@pytest.mark.skip_global_cleanup
+def test_priority_plugin_preserves_queue_and_preemption_order():
+    manager = SchedulerPluginManager("priority")
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    requests = create_requests(num_requests=3)
+    priorities = (2, 0, 1)
+    for request, priority in zip(requests, priorities):
+        request.priority = priority
+    waiting.add_request(requests[0])
+    skipped.add_request(requests[1])
+
+    assert manager.select_queue(waiting, skipped) is skipped
+    assert manager.select_preemption_victim(requests) is requests[0]
+
+
+@pytest.mark.skip_global_cleanup
+def test_scheduler_plugin_profile_requires_candidate_window():
+    with pytest.raises(ValueError, match="candidate_window"):
+        SchedulerPluginProfile(scores=[SchedulerPluginSpec(name="test-priority-score")])
+
+
+@pytest.mark.skip_global_cleanup
+def test_scheduler_plugins_filter_and_combine_scores(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        BUILTIN_SCHEDULER_PLUGINS,
+        _RejectRequestPlugin.name,
+        _RejectRequestPlugin,
+    )
+    monkeypatch.setitem(
+        BUILTIN_SCHEDULER_PLUGINS,
+        _PriorityScorePlugin.name,
+        _PriorityScorePlugin,
+    )
+    monkeypatch.setitem(
+        BUILTIN_SCHEDULER_PLUGINS,
+        _RequestIdScorePlugin.name,
+        _RequestIdScorePlugin,
+    )
+    profile = SchedulerPluginProfile(
+        filters=[
+            SchedulerPluginSpec(
+                name=_RejectRequestPlugin.name,
+                args={"request_id": "0"},
+            )
+        ],
+        scores=[
+            SchedulerPluginSpec(name=_PriorityScorePlugin.name, weight=1.0),
+            SchedulerPluginSpec(name=_RequestIdScorePlugin.name, weight=20.0),
+        ],
+        candidate_window=3,
+    )
+    manager = SchedulerPluginManager("fcfs", profile)
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    requests = create_requests(num_requests=3)
+    requests[0].priority = 100
+    requests[1].priority = 1
+    requests[2].priority = 0
+    for request in requests:
+        waiting.add_request(request)
+
+    selection = manager.select_candidate(
+        waiting,
+        skipped,
+        block_size=16,
+        token_budget=128,
+        encoder_budget=0,
+        num_running_requests=0,
+        now=max(request.arrival_time for request in requests),
+    )
+
+    assert selection is not None
+    assert selection.request is requests[2]
+    assert list(waiting) == requests
+
+
+@pytest.mark.skip_global_cleanup
+def test_zero_plugin_scores_preserve_queue_sort_order(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        BUILTIN_SCHEDULER_PLUGINS,
+        _PriorityScorePlugin.name,
+        _PriorityScorePlugin,
+    )
+    profile = SchedulerPluginProfile(
+        scores=[SchedulerPluginSpec(name=_PriorityScorePlugin.name)],
+        candidate_window=2,
+    )
+    manager = SchedulerPluginManager("fcfs", profile)
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    requests = create_requests(num_requests=2)
+    for request in requests:
+        request.priority = 0
+        waiting.add_request(request)
+
+    selection = manager.select_candidate(
+        waiting,
+        skipped,
+        block_size=16,
+        token_budget=128,
+        encoder_budget=0,
+        num_running_requests=0,
+    )
+
+    assert selection is not None
+    assert selection.request is requests[0]
+
+
+@pytest.mark.skip_global_cleanup
+def test_scheduler_plugin_candidate_window_bounds_reordering(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        BUILTIN_SCHEDULER_PLUGINS,
+        _PriorityScorePlugin.name,
+        _PriorityScorePlugin,
+    )
+    profile = SchedulerPluginProfile(
+        scores=[SchedulerPluginSpec(name=_PriorityScorePlugin.name)],
+        candidate_window=2,
+    )
+    manager = SchedulerPluginManager("fcfs", profile)
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    requests = create_requests(num_requests=3)
+    priorities = (1, 2, 100)
+    for request, priority in zip(requests, priorities):
+        request.priority = priority
+        waiting.add_request(request)
+
+    selection = manager.select_candidate(
+        waiting,
+        skipped,
+        block_size=16,
+        token_budget=128,
+        encoder_budget=0,
+        num_running_requests=0,
+    )
+
+    assert selection is not None
+    assert selection.request is requests[1]
+
+
+@pytest.mark.skip_global_cleanup
+def test_scheduler_plugin_scan_limit_advances_past_filtered_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        BUILTIN_SCHEDULER_PLUGINS,
+        _RejectRequestPlugin.name,
+        _RejectRequestPlugin,
+    )
+    requests = create_requests(num_requests=3)
+    profile = SchedulerPluginProfile(
+        filters=[
+            SchedulerPluginSpec(
+                name=_RejectRequestPlugin.name,
+                args={"request_id": requests[0].request_id},
+            )
+        ],
+        candidate_window=1,
+        candidate_scan_limit=3,
+    )
+    manager = SchedulerPluginManager("fcfs", profile)
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    for request in requests:
+        waiting.add_request(request)
+
+    selection = manager.select_candidate(
+        waiting,
+        skipped,
+        block_size=16,
+        token_budget=128,
+        encoder_budget=0,
+        num_running_requests=0,
+    )
+
+    assert selection is not None
+    assert selection.request is requests[1]
+
+
+@pytest.mark.skip_global_cleanup
+def test_scheduler_plugin_scan_limit_must_cover_candidate_window():
+    with pytest.raises(ValueError, match="candidate_scan_limit"):
+        SchedulerPluginProfile(
+            scores=[SchedulerPluginSpec(name="test-priority-score")],
+            candidate_window=2,
+            candidate_scan_limit=1,
+        )
+
+
+@pytest.mark.parametrize("policy", ["fcfs", "priority"])
+@pytest.mark.skip_global_cleanup
+def test_scheduler_plugin_candidate_window_avoids_full_queue_materialization(
+    policy: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        BUILTIN_SCHEDULER_PLUGINS,
+        _PriorityScorePlugin.name,
+        _PriorityScorePlugin,
+    )
+    profile = SchedulerPluginProfile(
+        scores=[SchedulerPluginSpec(name=_PriorityScorePlugin.name)],
+        candidate_window=2,
+    )
+    manager = SchedulerPluginManager(policy, profile)
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    requests = create_requests(num_requests=10)
+    for request in requests:
+        request.priority = 0
+        waiting.add_request(request)
+
+    if isinstance(waiting, FCFSRequestQueue):
+        monkeypatch.setattr(
+            type(waiting),
+            "__iter__",
+            Mock(side_effect=AssertionError("full queue iteration")),
+        )
+    else:
+
+        class _NoSliceList(list[Request]):
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    raise AssertionError("full heap copy")
+                return super().__getitem__(index)
+
+        assert isinstance(waiting, PriorityRequestQueue)
+        waiting._heap = _NoSliceList(waiting._heap)
+
+    selection = manager.select_candidate(
+        waiting,
+        skipped,
+        block_size=16,
+        token_budget=128,
+        encoder_budget=0,
+        num_running_requests=0,
+    )
+
+    assert selection is not None
+    assert selection.request is requests[0]
+
+
+@pytest.mark.skip_global_cleanup
+def test_all_filtered_candidates_remain_queued(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        BUILTIN_SCHEDULER_PLUGINS,
+        _RejectRequestPlugin.name,
+        _RejectRequestPlugin,
+    )
+    requests = create_requests(num_requests=1)
+    profile = SchedulerPluginProfile(
+        filters=[
+            SchedulerPluginSpec(
+                name=_RejectRequestPlugin.name,
+                args={"request_id": requests[0].request_id},
+            )
+        ],
+        candidate_window=1,
+    )
+    manager = SchedulerPluginManager("fcfs", profile)
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    waiting.add_request(requests[0])
+
+    selection = manager.select_candidate(
+        waiting,
+        skipped,
+        block_size=16,
+        token_budget=128,
+        encoder_budget=0,
+        num_running_requests=0,
+    )
+
+    assert selection is None
+    assert list(waiting) == requests
+
+
+@pytest.mark.skip_global_cleanup
+def test_scheduler_score_plugin_selects_non_head_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        BUILTIN_SCHEDULER_PLUGINS,
+        _PriorityScorePlugin.name,
+        _PriorityScorePlugin,
+    )
+    profile = SchedulerPluginProfile(
+        scores=[SchedulerPluginSpec(name=_PriorityScorePlugin.name)],
+        candidate_window=2,
+    )
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        scheduler_plugin_profile=profile,
+    )
+    requests = create_requests(num_requests=2)
+    requests[0].priority = 0
+    requests[1].priority = 10
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert [request.req_id for request in output.scheduled_new_reqs] == ["1"]
+    assert list(scheduler.waiting) == [requests[0]]
 
 
 def create_scheduler_with_priority(
