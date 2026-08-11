@@ -879,3 +879,35 @@ async def test_download_bytes_backslash_bypass():
         await download_bytes_from_url(
             bypass_url, allowed_media_domains=["evil.internal"]
         )
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_addr"),
+    [
+        (["--host", "127.0.0.1"], "127.0.0.1"),
+        (["--url", "127.0.0.2"], "127.0.0.2"),
+        (["--host", "127.0.0.1", "--url", "127.0.0.2"], "127.0.0.1"),
+        ([], "0.0.0.0"),
+    ],
+)
+def test_metrics_server_binds_to_the_requested_host(argv, expected_addr):
+    """`--url` is deprecated in favour of `--host`, so `run-batch` must honour
+    `--host` and fall back to `--url` only when `--host` was not given. Binding
+    somewhere the caller did not ask for is the failure that matters here: the
+    default is every interface."""
+    from vllm.entrypoints.cli.run_batch import RunBatchSubcommand
+    from vllm.entrypoints.openai.run_batch import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    parser = make_arg_parser(FlexibleArgumentParser())
+    args = parser.parse_args(
+        ["-i", "in.jsonl", "-o", "out.jsonl", "--model", CHAT_MODEL_NAME, "--enable-metrics", *argv]
+    )
+
+    with (
+        patch("prometheus_client.start_http_server") as mock_server,
+        patch("vllm.entrypoints.openai.run_batch.main", new=AsyncMock()),
+    ):
+        RunBatchSubcommand.cmd(args)
+
+    assert mock_server.call_args.kwargs["addr"] == expected_addr
