@@ -307,9 +307,7 @@ class Scheduler(SchedulerInterface):
         self.mamba_partial_cache_hit = (
             self.need_mamba_block_aligned_split
             and self.hash_block_size < self.block_size
-            and getattr(
-                self.kv_cache_manager.coordinator, "enable_partial_hash_hits", True
-            )
+            and self.kv_cache_manager.coordinator.enable_partial_hash_hits
         )
 
         # Counts of non-empty steps scheduled / processed. update_from_output

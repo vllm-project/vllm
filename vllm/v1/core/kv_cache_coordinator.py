@@ -65,6 +65,8 @@ class KVCacheCoordinator(ABC):
     Coordinate the KV cache of different KV cache groups.
     """
 
+    enable_partial_hash_hits = False
+
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,
@@ -589,23 +591,21 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             and g.kv_cache_spec.block_size > hash_block_size
             for g in kv_cache_config.kv_cache_groups
         )
-        unsupported_partial_hit_managers = {
-            type(manager).__name__
-            for manager in self.single_type_managers
-            if not manager.supports_fine_grained_hash_lookup
-            and manager.block_size != hash_block_size
-        }
-        self.enable_partial_hash_hits = (
-            dcp_world_size == 1
-            and has_partial_mamba_group
-            and not unsupported_partial_hit_managers
-        )
-        if has_partial_mamba_group and unsupported_partial_hit_managers:
-            logger.warning_once(
-                "Disabling fine-grained prefix-cache hits because these KV "
-                "cache managers require block-aligned lookups: %s.",
-                ", ".join(sorted(unsupported_partial_hit_managers)),
-            )
+        self.enable_partial_hash_hits = dcp_world_size == 1 and has_partial_mamba_group
+        if self.enable_partial_hash_hits:
+            unsupported_partial_hit_managers = {
+                type(manager).__name__
+                for manager in self.single_type_managers
+                if not manager.supports_fine_grained_hash_lookup
+                and manager.block_size != hash_block_size
+            }
+            if unsupported_partial_hit_managers:
+                self.enable_partial_hash_hits = False
+                logger.warning_once(
+                    "Disabling fine-grained prefix-cache hits because these KV "
+                    "cache managers require block-aligned lookups: %s.",
+                    ", ".join(sorted(unsupported_partial_hit_managers)),
+                )
         self.verify_and_split_kv_cache_groups()
 
     @property
