@@ -165,6 +165,9 @@ class StreamingParserEngine:
         )
 
         self.skip_tool_parsing = False
+        # Whether a separate reasoning parser consumes the reasoning segment.
+        # Configuration-level, so it survives per-request ``reset()``.
+        self.reasoning_consumer_attached = True
         self.reset(initial_state=initial_state)
 
     def _reset_args_state(self) -> None:
@@ -320,6 +323,16 @@ class StreamingParserEngine:
     def _on_terminal(self, terminal: str, value: str) -> list[SemanticEvent]:
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
+
+        if (
+            transition is not None
+            and transition.surface_reasoning_end_when_unconsumed
+            and not self.reasoning_consumer_attached
+        ):
+            # The rule drops this delimiter only because a reasoning parser
+            # already consumed the real one. With none attached it is the only
+            # boundary marker the client will ever see, so emit it instead.
+            return self._emit_for_state(value)
 
         if transition is None:
             if self._has_drops and terminal == DROP_TERMINAL:

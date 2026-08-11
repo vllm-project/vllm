@@ -40,6 +40,12 @@ class Transition:
     next_state: ParserState
     events: tuple[EventType, ...] = field(default_factory=tuple)
     skip_in_token_id_mode: bool = False
+    #: Set on a rule that absorbs a reasoning end delimiter only because a
+    #: reasoning parser already consumed the real one. With no reasoning
+    #: consumer attached the engine surfaces the delimiter instead of
+    #: dropping it. Leave ``False`` where the terminal ends something other
+    #: than reasoning, such as a block or channel closer.
+    surface_reasoning_end_when_unconsumed: bool = False
 
 
 @dataclass(frozen=True)

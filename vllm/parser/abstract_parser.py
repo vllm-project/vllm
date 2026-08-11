@@ -127,6 +127,15 @@ class Parser:
         if self.__class__.tool_parser_cls is not None:
             self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
 
+        if self._reasoning_parser is None:
+            # Nothing will consume the reasoning segment, so an engine-backed
+            # tool parser must surface its end delimiter rather than absorb it.
+            declare = getattr(
+                self._tool_parser, "set_reasoning_consumer_attached", None
+            )
+            if declare is not None:
+                declare(False)
+
         self._engine_based = (
             self._reasoning_parser is None
             or self._reasoning_parser.engine_based_streaming

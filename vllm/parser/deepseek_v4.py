@@ -151,6 +151,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
             (ParserState.CONTENT, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (),
+                surface_reasoning_end_when_unconsumed=True,
             ),
             # Absorb a duplicate <think> while already reasoning
             (ParserState.REASONING, "THINK_START"): Transition(

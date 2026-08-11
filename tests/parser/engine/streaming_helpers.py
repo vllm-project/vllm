@@ -135,3 +135,31 @@ def simulate_reasoning_streaming(
         prev_text = cur_text
         prev_ids = list(cur_ids)
     return "".join(reasoning_parts), "".join(content_parts)
+
+
+def collect_parse_deltas(
+    parser,
+    request,
+    chunks: list[str],
+) -> tuple[str, str]:
+    """Feed text chunks through ``parse_delta()`` and accumulate the result.
+
+    Returns the concatenated ``(reasoning, content)`` seen by a client.
+    """
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
+    for index, chunk in enumerate(chunks):
+        delta = parser.parse_delta(
+            delta_text=chunk,
+            delta_token_ids=[],
+            request=request,
+            prompt_token_ids=[],
+            finished=index == len(chunks) - 1,
+        )
+        if delta is None:
+            continue
+        if delta.reasoning:
+            reasoning_parts.append(delta.reasoning)
+        if delta.content:
+            content_parts.append(delta.content)
+    return "".join(reasoning_parts), "".join(content_parts)

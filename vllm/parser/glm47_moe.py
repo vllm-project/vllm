@@ -114,6 +114,7 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
             (ParserState.CONTENT, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (),
+                surface_reasoning_end_when_unconsumed=True,
             ),
         }
         if thinking

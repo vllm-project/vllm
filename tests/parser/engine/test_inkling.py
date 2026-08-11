@@ -13,10 +13,11 @@ import json
 
 import pytest
 
-from tests.parser.engine.conftest import make_mock_tokenizer
+from tests.parser.engine.conftest import make_mock_tokenizer, make_unpaired_tool_parser
 from tests.parser.engine.streaming_helpers import (
     collect_content,
     collect_function_name,
+    collect_parse_deltas,
     collect_tool_arguments,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -25,6 +26,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine_config import ParserState
+from vllm.parser.engine.registered_adapters import InklingParserToolAdapter
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.inkling import InklingParser, _inkling_arg_converter, inkling_config
 from vllm.parser.parser_manager import ParserManager
@@ -869,3 +871,53 @@ def test_content_tool_start_emits_reasoning_end_in_reasoning_pass():
         EventType.TEXT_CHUNK,
     ]
     assert events[1].value == TOOL_JSON
+
+
+class TestUnpairedToolParserKeepsBlockEndAbsorbed:
+    """``<|end_message|>`` ends every Inkling block kind, not just thinking.
+
+    The engine labels it ``THINK_END``, so surfacing an unconsumed reasoning
+    end purely by that label would emit the special token as visible content.
+    Inkling's ``(CONTENT, THINK_END)`` rule therefore does not opt in to
+    ``surface_reasoning_end_when_unconsumed``.
+    """
+
+    def test_streaming_text_block_does_not_leak_block_end(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = make_unpaired_tool_parser(InklingParserToolAdapter, mock_tokenizer)
+
+        _, content = collect_parse_deltas(
+            parser,
+            mock_request,
+            [MSG_MODEL, TEXT_START, "hello", END_MESSAGE],
+        )
+
+        assert content == "hello"
+
+    def test_streaming_tool_block_does_not_leak_block_end(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = make_unpaired_tool_parser(InklingParserToolAdapter, mock_tokenizer)
+
+        _, content = collect_parse_deltas(
+            parser,
+            mock_request,
+            [MSG_MODEL, TOOL_JSON, '{"name":"f","args":{}}', END_MESSAGE],
+        )
+
+        assert END_MESSAGE not in content
+
+    def test_non_streaming_text_block_does_not_leak_block_end(
+        self, mock_tokenizer, mock_request
+    ):
+        """A tool block keeps the engine's cleaned content, exposing a leak."""
+        parser = make_unpaired_tool_parser(InklingParserToolAdapter, mock_tokenizer)
+        text = f"{MSG_MODEL}{TEXT_START}hello{END_MESSAGE}{MSG_MODEL}" + _tool_block(
+            "f", "{}"
+        )
+
+        _, content, tools = parser.parse(text, mock_request, enable_auto_tools=True)
+
+        assert content == "hello"
+        assert [t.name for t in tools] == ["f"]

@@ -128,6 +128,7 @@ def minimax_m2_config() -> ParserEngineConfig:
             (ParserState.CONTENT, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (),
+                surface_reasoning_end_when_unconsumed=True,
             ),
             (ParserState.REASONING, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
