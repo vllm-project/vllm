@@ -64,6 +64,21 @@ def test_prefix_caching_xxhash_from_cli():
     assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash_cbor"
 
 
+@pytest.mark.parametrize("hash_algo", ["xxhash", "xxhash_cbor"])
+def test_prefix_caching_xxhash_requires_xxhash_package_from_cli(
+    monkeypatch: pytest.MonkeyPatch, hash_algo: str
+):
+    import vllm.utils.hashing as hashing
+
+    monkeypatch.setattr(hashing, "_xxhash", None)
+
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--prefix-caching-hash-algo", hash_algo])
+
+    with pytest.raises(ModuleNotFoundError, match="pip install xxhash"):
+        EngineArgs.from_cli_args(args=args).create_engine_config()
+
+
 def test_defaults_with_usage_context():
     engine_args = EngineArgs(model="facebook/opt-125m")
     vllm_config: VllmConfig = engine_args.create_engine_config(UsageContext.LLM_CLASS)
