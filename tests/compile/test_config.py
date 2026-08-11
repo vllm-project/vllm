@@ -612,15 +612,14 @@ def test_default_cudagraph_capture_size_unchanged_without_speculation(max_num_se
         compilation_config=compilation_config,
     )
 
-    VllmConfig._set_cudagraph_sizes(config)
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=False,
+    ):
+        VllmConfig._set_cudagraph_sizes(config)
 
-    default_max_graph_size = (
-        1024 if current_platform.is_device_capability_family(100) else 512
-    )
-    assert compilation_config.max_cudagraph_capture_size == min(
-        max_num_seqs * 2,
-        default_max_graph_size,
-    )
+    assert compilation_config.max_cudagraph_capture_size == min(max_num_seqs * 2, 512)
 
 
 def test_default_cudagraph_capture_size_covers_a_single_speculative_token():
@@ -643,7 +642,16 @@ def test_default_cudagraph_capture_size_covers_a_single_speculative_token():
 
     VllmConfig._set_cudagraph_sizes(config)
 
-    assert compilation_config.max_cudagraph_capture_size == 600
+    default_max_graph_size = (
+        1024 if current_platform.is_device_capability_family(100) else 512
+    )
+    expected_size_ceiling = max(
+        default_max_graph_size,
+        min(300, default_max_graph_size) * 2,
+    )
+    assert compilation_config.max_cudagraph_capture_size == min(
+        1200, expected_size_ceiling
+    )
     assert 600 in compilation_config.cudagraph_capture_sizes
 
 
