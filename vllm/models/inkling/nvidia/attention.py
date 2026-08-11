@@ -257,7 +257,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 fa_md.slot_mapping,
                 off_k,
                 off_v,
-                self.conv_owner.block_size,
+                self.conv_owner.cache_block_size,
                 log_scaling if not self.is_local else None,
             )
             q = q.view(num_tokens, self.num_heads, self.head_dim)
