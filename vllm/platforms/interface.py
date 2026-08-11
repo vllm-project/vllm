@@ -6,10 +6,13 @@ import functools
 import os
 import platform
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
+import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -25,6 +28,16 @@ if TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.cudagraph_utils import ModelCudaGraphManager
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
+    from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
+    from vllm.v1.worker.gpu.sample.sampler import Sampler
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
+    from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 else:
     FlexibleArgumentParser = object
 
@@ -84,6 +97,36 @@ class CpuArchEnum(enum.Enum):
     RISCV = enum.auto()
     OTHER = enum.auto()
     UNKNOWN = enum.auto()
+
+
+@dataclass(frozen=True)
+class RunnerComponents:
+    """Concrete V2 model runner components for the active platform.
+
+    `cls` fields are constructor references instantiated by the runner;
+    `factory` fields are functions that build an object the runner cannot
+    construct directly (because construction needs model/config introspection).
+    All fields share the same shape: a ``Callable`` the runner invokes.
+    """
+
+    input_batch_cls: "type[InputBatch]"
+    cudagraph_manager_cls: "type[ModelCudaGraphManager]"
+    sampler_cls: "type[Sampler]"
+    pcp_manager_cls: "type[PCPManager]"
+    block_tables_cls: "type[BlockTables]"
+    rejection_sampler_cls: "type[RejectionSampler]"
+    pooling_runner_cls: "type[PoolingRunner]"
+    model_state_factory: (
+        "Callable["
+        "[VllmConfig, nn.Module, EncoderCache | None, torch.device], ModelState]"
+    )
+    # Returns a BaseSpeculator subclass. Untyped Callable because the runner
+    # duck-types speculator attributes that live only on concrete classes.
+    speculator_factory: Callable
+    ubatch_runner_factory: (
+        "Callable["
+        "[VllmConfig, torch.device, ModelState, Any, Any, int], UBatchRunner | None]"
+    )
 
 
 class DeviceCapability(NamedTuple):
@@ -1032,6 +1075,40 @@ class Platform:
     def get_lora_vocab_padding_size(cls) -> int:
         """Returns how much padding the LoRA logits need for kernels."""
         return 256
+
+    def get_runner_component(self) -> "RunnerComponents":
+        """Return the default (GPU) component classes for the V2 model runner.
+
+        The V2 model runner fetches its internal component classes here once
+        in ``__init__`` and instantiates them directly. Hardware backends
+        override this method to substitute their own implementations
+        (e.g. ``InputBatch`` subclasses or a different graph manager) without
+        copying the runner. ``dataclasses.replace`` can be used to swap only
+        the pieces that differ.
+        """
+        from vllm.v1.worker.gpu.block_table import BlockTables
+        from vllm.v1.worker.gpu.cudagraph_utils import ModelCudaGraphManager
+        from vllm.v1.worker.gpu.input_batch import InputBatch
+        from vllm.v1.worker.gpu.model_states import init_model_state
+        from vllm.v1.worker.gpu.pcp_manager import PCPManager
+        from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
+        from vllm.v1.worker.gpu.sample.sampler import Sampler
+        from vllm.v1.worker.gpu.spec_decode import init_speculator
+        from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
+        from vllm.v1.worker.gpu.ubatch_utils import maybe_build_ubatch_runner
+
+        return RunnerComponents(
+            input_batch_cls=InputBatch,
+            cudagraph_manager_cls=ModelCudaGraphManager,
+            sampler_cls=Sampler,
+            pcp_manager_cls=PCPManager,
+            block_tables_cls=BlockTables,
+            rejection_sampler_cls=RejectionSampler,
+            pooling_runner_cls=PoolingRunner,
+            model_state_factory=init_model_state,
+            speculator_factory=init_speculator,
+            ubatch_runner_factory=maybe_build_ubatch_runner,
+        )
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

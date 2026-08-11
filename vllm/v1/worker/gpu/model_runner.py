@@ -58,6 +58,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
@@ -76,7 +77,10 @@ from vllm.v1.outputs import (
     RoutedExpertsTensors,
 )
 from vllm.v1.watermarking import create_watermarker
-from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
+from vllm.v1.watermarking.gpu_sampler import (
+    GPUWatermarkSampler,
+    _watermark_sampler_cls,
+)
 from vllm.v1.watermarking.spec_decode import (
     create_speculative_target_watermarker,
     speculative_target_watermark_key,
@@ -96,7 +100,6 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
     init_kv_cache,
 )
-from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import set_default_max_concurrency
 from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -135,7 +138,6 @@ from vllm.v1.worker.gpu.lora_utils import (
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
-from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
@@ -148,7 +150,6 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
-from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
     maybe_create_adaptive_verification_manager,
@@ -169,7 +170,6 @@ from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
-    maybe_build_ubatch_runner,
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
@@ -220,6 +220,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
         self.output_copy_stream = torch.cuda.Stream(self.device)
+
+        # Component objects for the V2 model runner, provided by the platform.
+        # Hardware backends override `Platform.get_runner_component()`
+        # to substitute their own implementations instead of copying the runner.
+        self.runner_components = current_platform.get_runner_component()
 
         # Pipeline parallelism.
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
@@ -275,7 +280,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
-                self.speculator = init_speculator(self.vllm_config, self.device)
+                self.speculator = self.runner_components.speculator_factory(
+                    self.vllm_config, self.device
+                )
 
             if self.speculative_config.method in (
                 "eagle3",
@@ -423,7 +430,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Initialize the components that require the model.
-        self.model_state = init_model_state(
+        self.model_state = self.runner_components.model_state_factory(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
 
@@ -467,13 +474,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "custom_logits_processors": custom_logits_processors,
             }
             if self.vllm_config.watermark_config is None:
-                self.sampler = Sampler(**sampler_kwargs)
+                self.sampler = self.runner_components.sampler_cls(**sampler_kwargs)
             else:
                 wm_config = self.vllm_config.watermark_config
                 watermarker = create_watermarker(wm_config)
                 if self.speculative_config is not None:
                     watermarker = create_speculative_target_watermarker(watermarker)
-                self.sampler = GPUWatermarkSampler(
+                watermark_sampler_cls = _watermark_sampler_cls(
+                    self.runner_components.sampler_cls
+                )
+                self.sampler = watermark_sampler_cls(
                     watermarker,
                     deduplicate_contexts=wm_config.deduplicate_contexts,
                     deduplicate_contexts_max_history=(
@@ -487,7 +497,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config._check_watermarking_unsupported(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
-                self.rejection_sampler = RejectionSampler(
+                self.rejection_sampler = self.runner_components.rejection_sampler_cls(
                     self.sampler,
                     self.speculative_config,
                     self.device,
@@ -508,7 +518,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         if self.is_pooling_model and self.is_last_pp_rank:
-            self.pooling_runner = PoolingRunner(self.model, self.vllm_config)
+            self.pooling_runner = self.runner_components.pooling_runner_cls(
+                self.model, self.vllm_config
+            )
         eplb_models_added |= self.eplb.maybe_register_model(
             self.model,
             self.model_config,
@@ -656,7 +668,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             additional_attn_cg_support=additional_attn_cg_support,
         )
 
-        self.block_tables = BlockTables(
+        self.block_tables = self.runner_components.block_tables_cls(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
@@ -673,9 +685,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             self.supports_mm_inputs,
             self.block_tables,
-            cls=self.pcp_manager_cls,
+            cls=self.runner_components.pcp_manager_cls,
         )
-        self.ubatch_runner = maybe_build_ubatch_runner(
+        self.ubatch_runner = self.runner_components.ubatch_runner_factory(
             self.vllm_config,
             self.device,
             self.model_state,
@@ -709,7 +721,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_profiling=is_profiling,
             piecewise_capture_available=piecewise_capture_available,
         )
-        self.cudagraph_manager = ModelCudaGraphManager(
+        self.cudagraph_manager = self.runner_components.cudagraph_manager_cls(
             self.vllm_config,
             self.device,
             cudagraph_mode,
@@ -717,6 +729,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             lora_capture_cases=self.lora_capture_cases,
             varlen_decode=self.adaptive_verification is not None,
             ubatch_runner=self.ubatch_runner,
+            input_batch_cls=self.runner_components.input_batch_cls,
         )
         if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:
             self.fast_prefill = FastPrefillHelper(
@@ -915,7 +928,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
-        dummy_input_batch = InputBatch.make_dummy(
+        dummy_input_batch = self.runner_components.input_batch_cls.make_dummy(
             num_reqs, num_reqs, self.input_buffers
         )
 
@@ -1424,7 +1437,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
-        input_batch = InputBatch(
+        input_batch = self.runner_components.input_batch_cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs_padded,
@@ -1739,7 +1752,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
-            input_batch = InputBatch.make_dummy(
+            input_batch = self.runner_components.input_batch_cls.make_dummy(
                 dummy_num_reqs,
                 batch_desc.num_tokens,
                 self.input_buffers,
@@ -2300,11 +2313,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     ########### EPLB methods end ###########
-
-    # Out-of-tree hardware runners can select a PCP manager class.
-    @property
-    def pcp_manager_cls(self) -> type[pcp.PCPManager]:
-        return pcp.PCPManager
 
 
 class ExecuteModelState(NamedTuple):

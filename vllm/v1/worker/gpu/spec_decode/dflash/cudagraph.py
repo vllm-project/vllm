@@ -31,8 +31,9 @@ def _prepare_dflash_inputs_to_capture(
     max_model_len: int,
     skip_attn: bool,
     causal: bool | Mapping[int, bool],
+    input_batch_cls: type[InputBatch] = InputBatch,
 ) -> AttentionState:
-    input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+    input_batch = input_batch_cls.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
@@ -106,6 +107,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
                 max_model_len,
                 skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
                 causal=causal,
+                input_batch_cls=self.input_batch_cls,
             )
             attn_metadata, slot_mappings = attn_state
 
