@@ -2853,7 +2853,7 @@ class rocm_aiter_ops:
         X: torch.Tensor,
         W: torch.Tensor,
         w_scale: torch.Tensor,
-        Y: torch.Tensor,
+        Y: torch.Tensor | None = None,
         transpose_bm: bool | None = False,
         prequant: bool | None = False,
         y_scale: torch.Tensor | None = None,

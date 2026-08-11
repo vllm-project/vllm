@@ -264,7 +264,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.math_utils import cdiv, round_down, round_up
+from vllm.utils.math_utils import cdiv, next_power_of_2, round_down, round_up
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -602,12 +602,27 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
+        # aiter fp4 bmm only supports powers of two for K, else it returns garbage
+        # (GLM-5.2 192, DSv3.2 128)
+        fp4_bmm_k_supported = (
+            next_power_of_2(self.qk_nope_head_dim) == self.qk_nope_head_dim
+            and next_power_of_2(self.kv_lora_rank) == self.kv_lora_rank
+        )
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         self.is_aiter_triton_fp4_bmm_enabled = (
             rocm_aiter_ops.is_fp4bmm_enabled()
             and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
+            and fp4_bmm_k_supported
         )
+        if rocm_aiter_ops.is_fp4bmm_enabled() and not fp4_bmm_k_supported:
+            logger.warning_once(
+                "aiter fp4 bmm is disabled because qk_nope_head_dim=%d and "
+                "kv_lora_rank=%d are not both powers of two; using the fp8 bmm "
+                "instead. Set VLLM_ROCM_USE_AITER_FP8BMM=0 to fall back to torch.bmm.",
+                self.qk_nope_head_dim,
+                self.kv_lora_rank,
+            )
 
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
@@ -877,9 +892,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_q_pe = mqa_pe_padded
 
             if self.is_aiter_triton_fp4_bmm_enabled:
-                from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-                mqa_ql_nope = batched_gemm_a16wfp4(
+                mqa_ql_nope = rocm_aiter_ops.batched_gemm_a16wfp4(
                     mqa_q_nope,
                     self.W_K,
                     self.W_K_scale,
@@ -1064,8 +1077,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             self.W_K, self.W_K_scale = quark_quantize_weight_to_mxfp4(W_UK)
             # Convert from (L, N, P) to (N, L, P)
-            self.W_K = self.W_K.transpose(0, 1)
-            self.W_K_scale = self.W_K_scale.transpose(0, 1)
+            # contiguous: aiter's fp4 bmm returns NaN on strided weights
+            self.W_K = self.W_K.transpose(0, 1).contiguous()
+            self.W_K_scale = self.W_K_scale.transpose(0, 1).contiguous()
 
             self.W_V, self.W_V_scale = quark_quantize_weight_to_mxfp4(
                 W_UV.permute(1, 2, 0)
