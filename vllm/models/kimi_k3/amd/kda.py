@@ -38,6 +38,7 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
 )
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     chunk_kda_with_fused_gate,
     fused_recurrent_kda,
@@ -229,12 +230,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        self._forward(
-            mixed_qkv=mixed_qkv,
-            g1=g1,
-            g2=g2,
-            beta=beta,
-            core_attn_out=core_attn_out,
+        torch.ops.vllm.kimi_kda_attention_core(
+            mixed_qkv,
+            g1,
+            g2,
+            beta,
+            core_attn_out,
+            self.prefix,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
@@ -528,3 +530,48 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         else:
             assert core_attn_out_spec is not None
         core_attn_out.copy_(self.o_norm(core_attn_out, g2))
+
+
+def kimi_kda_attention_core(
+    mixed_qkv: torch.Tensor,
+    g1: torch.Tensor,
+    g2: torch.Tensor,
+    beta: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Custom-op wrapper around the KDA conv1d + recurrent/chunk core.
+
+    ``core_attn_out`` is mutated in place. Registering this as a custom op
+    (and listing it in ``splitting_ops``) keeps the KDA branch visible to
+    torch.compile: without it the call has no compiler-visible effect and
+    the whole linear-attention path is eliminated from the graph.
+    """
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._forward(
+        mixed_qkv=mixed_qkv,
+        g1=g1,
+        g2=g2,
+        beta=beta,
+        core_attn_out=core_attn_out,
+    )
+
+
+def kimi_kda_attention_core_fake(
+    mixed_qkv: torch.Tensor,
+    g1: torch.Tensor,
+    g2: torch.Tensor,
+    beta: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="kimi_kda_attention_core",
+    op_func=kimi_kda_attention_core,
+    mutates_args=["core_attn_out"],
+    fake_impl=kimi_kda_attention_core_fake,
+)
