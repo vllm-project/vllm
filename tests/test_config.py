@@ -37,6 +37,72 @@ from vllm.v1.attention.backend import AttentionCGSupport
 DEVICE_TYPE = current_platform.device_type
 
 
+def _scheduled_token_config(
+    max_num_batched_tokens: int,
+    max_num_scheduled_tokens: int | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(max_num_new_slots_for_drafting=3),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_scheduled_tokens=max_num_scheduled_tokens,
+            max_num_seqs=3,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("max_num_batched_tokens", "expected_budget"),
+    [(9, 0), (8, -1)],
+)
+def test_scheduled_token_budget_error_includes_inputs(
+    max_num_batched_tokens: int, expected_budget: int
+):
+    config = _scheduled_token_config(max_num_batched_tokens)
+
+    with pytest.raises(ValueError) as exc_info:
+        VllmConfig._set_max_num_scheduled_tokens(config)
+
+    message = str(exc_info.value)
+    assert f"max_num_batched_tokens={max_num_batched_tokens}" in message
+    assert "max_num_seqs=3" in message
+    assert "max_num_new_slots_for_drafting=3" in message
+    assert "scheduled_token_delta=9" in message
+    assert f"max_num_scheduled_tokens={expected_budget}" in message
+
+
+def test_scheduled_token_budget_of_one_includes_inputs_in_warning():
+    config = _scheduled_token_config(max_num_batched_tokens=10)
+
+    with patch.object(vllm_config_module.logger, "warning_once") as warning_once:
+        VllmConfig._set_max_num_scheduled_tokens(config)
+
+    assert config.scheduler_config.max_num_scheduled_tokens == 1
+    message = warning_once.call_args.args[0]
+    assert "max_num_batched_tokens=10" in message
+    assert "max_num_seqs=3" in message
+    assert "max_num_new_slots_for_drafting=3" in message
+    assert "scheduled_token_delta=9" in message
+    assert "max_num_scheduled_tokens=1" in message
+
+
+def test_explicit_scheduled_token_budget_error_includes_inputs():
+    config = _scheduled_token_config(
+        max_num_batched_tokens=10,
+        max_num_scheduled_tokens=2,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        VllmConfig._set_max_num_scheduled_tokens(config)
+
+    message = str(exc_info.value)
+    assert "max_num_batched_tokens=10" in message
+    assert "max_num_seqs=3" in message
+    assert "max_num_new_slots_for_drafting=3" in message
+    assert "scheduled_token_delta=9" in message
+    assert "max_num_scheduled_tokens=2" in message
+
+
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
     config = VllmConfig()
