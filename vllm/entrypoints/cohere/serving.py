@@ -155,7 +155,13 @@ _FINISH_REASON_MAP: dict[str | None, CohereFinishReason] = {
 }
 
 
-def _map_finish_reason(reason: str | None) -> CohereFinishReason:
+def _map_finish_reason(
+    reason: str | None, stop_reason: int | str | None = None
+) -> CohereFinishReason:
+    # vLLM reports both EOS and matched stop strings as finish_reason="stop".
+    # The latter is distinguished by the matched string in stop_reason.
+    if reason == "stop" and isinstance(stop_reason, str):
+        return "STOP_SEQUENCE"
     return _FINISH_REASON_MAP.get(reason, "COMPLETE")
 
 
@@ -1006,7 +1012,10 @@ class CohereServingChatV2(OpenAIServingChat):
 
         return CohereChatV2Response(
             id=response.id or f"chat_{int(time.time() * 1000)}",
-            finish_reason=_map_finish_reason(choice.finish_reason),
+            finish_reason=_map_finish_reason(
+                choice.finish_reason,
+                choice.stop_reason,
+            ),
             message=assistant_msg,
             usage=usage,
             kv_transfer_params=response.kv_transfer_params,
@@ -1328,6 +1337,7 @@ class CohereServingChatV2(OpenAIServingChat):
                     yield self._build_message_end_event(
                         chunk_id=chunk.id,
                         finish_reason=state.finish_reason,
+                        stop_reason=state.stop_reason,
                         usage_chunk=chunk,
                     )
                     state.ended = True
@@ -1336,6 +1346,7 @@ class CohereServingChatV2(OpenAIServingChat):
                 choice = chunk.choices[0]
                 if choice.finish_reason is not None:
                     state.finish_reason = choice.finish_reason
+                    state.stop_reason = choice.stop_reason
 
                 delta = choice.delta
 
@@ -1391,6 +1402,7 @@ class CohereServingChatV2(OpenAIServingChat):
             yield self._build_message_end_event(
                 chunk_id=state.last_chunk_id,
                 finish_reason=state.finish_reason,
+                stop_reason=state.stop_reason,
                 usage_chunk=None,
             )
             state.ended = True
@@ -1594,10 +1606,11 @@ class CohereServingChatV2(OpenAIServingChat):
         self,
         chunk_id: str,
         finish_reason: str | None,
+        stop_reason: int | str | None = None,
         usage_chunk: ChatCompletionStreamResponse | None = None,
     ) -> str:
         delta: dict[str, Any] = {
-            "finish_reason": _map_finish_reason(finish_reason),
+            "finish_reason": _map_finish_reason(finish_reason, stop_reason),
         }
         if usage_chunk is not None and usage_chunk.usage is not None:
             prompt = usage_chunk.usage.prompt_tokens
@@ -1659,6 +1672,7 @@ class _StreamState:
         self.started: bool = False
         self.ended: bool = False
         self.finish_reason: str | None = None
+        self.stop_reason: int | str | None = None
         self.last_chunk_id: str = ""
         self.active_block: ContentBlockType | None = None
         self.active_block_index: int | None = None
