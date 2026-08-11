@@ -484,22 +484,19 @@ __global__ void swigluoai_and_mul_kernel(
 // allocated ~8 fp32 temporaries per call, which blows up MoE profiling).
 // Single shared implementation of the SITU math, called from every kernel
 // below (situ_and_mul_kernel, situ_and_mul_quant_scalar_kernel,
-// situ_and_mul_quant_pipelined_kernel). Deliberately __noinline__: CUDA does
-// NOT guarantee bit-identical codegen for the "same" formula written out (or
-// even __forceinline__'d) in different call contexts -- FMA contraction can
-// fuse a caller's surrounding multiply/add into an inlined callee differently
-// depending on what's around it. A version of this that duplicated the
-// formula inline diverged from situ_and_mul_kernel's output by 1 ULP on a
-// small fraction of elements (~0.1-0.2%), enough to occasionally flip which
-// fp8 bucket a value quantizes to; switching the shared helper from
-// __forceinline__ to __noinline__ (below) is what actually made it bit-exact
-// -- __forceinline__ alone only changed which elements diverged, not whether
-// any did, confirming the divergence came from FMA contraction across the
-// inline boundary rather than from the formula itself.
-__device__ __noinline__ float situ_activation(float g, float u, float beta,
-                                               float linear_beta,
-                                               bool clamp_up, float inv_beta,
-                                               float inv_linear_beta) {
+// situ_and_mul_quant_pipelined_kernel), so there's exactly one implementation
+// of the SITU math instead of it being duplicated inline in each kernel.
+// __forceinline__: this is called from inside #pragma-unrolled per-element
+// loops, so an actual out-of-line call (register spills for caller-saved
+// state across the call, argument marshaling) would spike register pressure
+// for no benefit -- inlining vs. not made no difference to the fp8
+// quantization mismatch bug this file used to have (that bug was in the
+// scale computation's rounding, see situ_and_mul_quant_pipelined_kernel's
+// `scale = absmax * (1.0f / fp8_max)` below, not in this function).
+__device__ __forceinline__ float situ_activation(float g, float u, float beta,
+                                                  float linear_beta,
+                                                  bool clamp_up, float inv_beta,
+                                                  float inv_linear_beta) {
   const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
   const float up_out =
       clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
