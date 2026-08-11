@@ -118,6 +118,7 @@ async def build_and_serve(
     sock: socket.socket,
     args: Namespace,
     peer_loads: tuple[MutableSequence[int], int] | None = None,
+    snapshot_control_path: str | None = None,
     **uvicorn_kwargs,
 ) -> asyncio.Task:
     """Build FastAPI app, initialize state, and start serving.
@@ -133,7 +134,12 @@ async def build_and_serve(
     model_config = engine_client.model_config
 
     logger.info("Supported tasks: %s", supported_tasks)
-    app = build_app(args, supported_tasks, model_config)
+    app = build_app(
+        args,
+        supported_tasks,
+        model_config,
+        snapshot_control_path=snapshot_control_path,
+    )
     await init_app_state(engine_client, app.state, args, supported_tasks)
 
     logger.info("Starting vLLM server on %s", listen_address)
@@ -191,8 +197,17 @@ async def run_server_worker(
         args,
         client_config=client_config,
     ) as engine_client:
+        snapshot_control_path = (
+            client_config.get("snapshot_control_path") if client_config else None
+        )
         shutdown_task = await build_and_serve(
-            engine_client, listen_address, sock, args, peer_loads, **uvicorn_kwargs
+            engine_client,
+            listen_address,
+            sock,
+            args,
+            peer_loads=peer_loads,
+            snapshot_control_path=snapshot_control_path,
+            **uvicorn_kwargs,
         )
     # NB: Await server shutdown only after the backend context is exited
     try:
