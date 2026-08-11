@@ -15,7 +15,6 @@ from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
@@ -86,32 +85,26 @@ logger = init_logger(__name__)
 
 # The hash seed for the first block of any prefix block sequence.
 #
-# We use a random value to avoid hash collisions or PYTHONHASHSEED environment
-# variable if set such that processes can share the seed if needed. This aligns
-# with the behavior of Python's hash() function, which also uses a random seed
-# if PYTHONHASHSEED is not set.
+# It is derived deterministically from a fixed default seed so that independent
+# vLLM processes compute identical block hashes for identical content, which lets
+# them share a prefix cache (e.g. KV cache reuse across nodes) without extra
+# configuration. Setting the PYTHONHASHSEED environment variable overrides the
+# default seed. A deterministic seed does not weaken collision resistance for
+# cryptographic hash algorithms, and ``cache_salt`` remains the mechanism for
+# intentional cache isolation.
 #
 # The function `init_none_hash` initializes this variable globally.
 NONE_HASH: BlockHash
-_CBOR_HASH_FUNCTIONS = frozenset({sha256_cbor, xxhash_cbor})
+
+# Fixed seed used when the PYTHONHASHSEED environment variable is not set.
+DEFAULT_NONE_HASH_SEED = "vllm-none-hash"
 
 
 def init_none_hash(hash_fn: Callable[[Any], bytes]):
     global NONE_HASH
 
-    hash_seed = os.getenv("PYTHONHASHSEED")
-    if hash_seed is None and hash_fn in _CBOR_HASH_FUNCTIONS:
-        logger.warning(
-            "PYTHONHASHSEED is not set. This will lead to non-reproducible "
-            "block-hashes when using CBOR-based hash functions such as "
-            "sha256_cbor or xxhash_cbor. Consider setting PYTHONHASHSEED to a "
-            "fixed value for reproducibility."
-        )
-
-    if hash_seed is None:
-        NONE_HASH = BlockHash(os.urandom(32))
-    else:
-        NONE_HASH = BlockHash(hash_fn(hash_seed))
+    hash_seed = os.getenv("PYTHONHASHSEED", DEFAULT_NONE_HASH_SEED)
+    NONE_HASH = BlockHash(hash_fn(hash_seed))
 
 
 @dataclass(slots=True)

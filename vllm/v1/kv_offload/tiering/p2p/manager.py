@@ -19,6 +19,7 @@ from typing_extensions import override
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED
 from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadKey,
@@ -247,20 +248,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             **kwargs: Reserved for future tier-specific options.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
-        # Block hashes chain from NONE_HASH, seeded from PYTHONHASHSEED
-        # (see init_none_hash in v1/core/kv_cache_utils.py). Peers with
-        # different seeds compute different hashes for identical content, so
-        # lookups silently miss and no KV crosses the wire. Require it here so
-        # a misconfigured P2P instance fails at startup rather than degrading
-        # silently; the value is also verified against each peer on handshake.
-        hash_seed = os.getenv("PYTHONHASHSEED")
-        if hash_seed is None:
-            raise ValueError(
-                "PYTHONHASHSEED must be set for P2P KV offload so that block "
-                "hashes match across instances. Set it to a fixed value (e.g. "
-                "PYTHONHASHSEED=0) on every P2P peer."
-            )
-        self._hash_seed = hash_seed
+        # Block hashes chain from NONE_HASH, seeded from the same value used by
+        # init_none_hash (see v1/core/kv_cache_utils.py): PYTHONHASHSEED if set,
+        # otherwise a fixed default. Peers with different seeds compute
+        # different hashes for identical content, so lookups silently miss and
+        # no KV crosses the wire. The effective seed is advertised and verified
+        # against each peer during the handshake, so a mismatch is rejected
+        # loudly instead of degrading silently.
+        self._hash_seed = os.getenv("PYTHONHASHSEED", DEFAULT_NONE_HASH_SEED)
         if host is None:
             host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
         if port is None:

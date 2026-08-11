@@ -152,10 +152,10 @@ Inside that subdirectory, blocks are sharded across hash-prefix subdirectories t
 
 #### Cross-Process Sharing
 
-To enable KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC), the `PYTHONHASHSEED` environment variable must be set to the same fixed value (e.g., `"0"`) on every instance. Without this, each process initializes `NONE_HASH` (the chain-hash seed for block content hashes) with random bytes, producing different block filenames for identical token content.
+KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH` (the chain-hash seed for block content hashes) is derived from a fixed default seed, so identical token content produces identical block filenames across instances. To use a custom shared seed instead, set the `PYTHONHASHSEED` environment variable to the same value on every instance.
 
 ```bash
-PYTHONHASHSEED=0 vllm serve ...
+PYTHONHASHSEED=<shared-value> vllm serve ...
 ```
 
 ### Object Store (OBJ)
@@ -182,13 +182,13 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `region` | no | `""` | Bucket region, if the endpoint requires one. |
 | `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
 
-Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) requirement (`PYTHONHASHSEED`) applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
+Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 
 ### P2P (Including P/D)
 
 The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
 
-The `PYTHONHASHSEED` environment variable must be set to the same fixed value (e.g. `"0"`) on all nodes so that block content hashes match across instances (see [Cross-Process Sharing](#cross-process-sharing)). This is enforced: a P2P instance started without `PYTHONHASHSEED` set fails at startup, and each peer's value is verified during the connect handshake — a peer advertising a different `PYTHONHASHSEED` is rejected.
+Block content hashes must match across instances for peers to exchange blocks (see [Cross-Process Sharing](#cross-process-sharing)). This works by default via the deterministic `NONE_HASH` seed, so setting `PYTHONHASHSEED` is optional. If you do set it, it must be the same value on all nodes. Each peer's effective seed is verified during the connect handshake — a peer advertising a different seed is rejected.
 
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |

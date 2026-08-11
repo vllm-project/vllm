@@ -95,13 +95,12 @@ class FileSystemTierManager(SecondaryTierManager):
     get_finished_jobs() polls job completion and returns completed JobResults.
 
     Cross-process sharing:
-        In order to enable KV cache sharing between multiple vLLM instances
-        using the same ``root_dir`` (e.g., via a shared PVC) the environment
-        variable ``PYTHONHASHSEED`` must be set to the same fixed value
-        (e.g., "0") on all instances. Without this, each process initializes
-        ``NONE_HASH`` (the chain-hash seed for block content hashes) with
-        random bytes, producing different block filenames for identical token
-        content.
+        KV cache sharing between multiple vLLM instances using the same
+        ``root_dir`` (e.g., via a shared PVC) works by default: ``NONE_HASH``
+        (the chain-hash seed for block content hashes) is derived from a fixed
+        default seed, so identical token content produces identical block
+        filenames across instances. Setting the ``PYTHONHASHSEED`` environment
+        variable to the same value on all instances overrides the default seed.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE

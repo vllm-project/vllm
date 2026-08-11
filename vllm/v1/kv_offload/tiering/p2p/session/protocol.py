@@ -125,9 +125,10 @@ class ConnectMsg:
         BLOCK_LEN: Size in bytes of each block (must match between peers).
         CONFIG_FINGERPRINT: SHA-256 prefix of the model configuration.
             Peers with different fingerprints are incompatible.
-        HASH_SEED: The peer's PYTHONHASHSEED. Block hashes chain from a seed
-            derived from it, so peers with different values compute different
-            hashes for identical content and must not exchange blocks.
+        HASH_SEED: The peer's effective prefix-cache hash seed (PYTHONHASHSEED
+            if set, otherwise the built-in default). Block hashes chain from a
+            seed derived from it, so peers with different values compute
+            different hashes for identical content and must not exchange blocks.
     """
 
     TYPE = "connect"

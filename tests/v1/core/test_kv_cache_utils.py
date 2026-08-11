@@ -199,14 +199,20 @@ def new_mamba_spec(
 def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils
 
-    # case 1: PYTHONHASHSEED is not set, use random
+    # case 1: PYTHONHASHSEED is not set -> deterministic default seed so that
+    # independent processes compute identical block hashes for identical
+    # content (e.g. for KV cache reuse across nodes).
     with monkeypatch.context() as m:
         m.delenv("PYTHONHASHSEED", raising=False)
         reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
         reloaded_kv_cache_utils.init_none_hash(hash_fn)
-        assert reloaded_kv_cache_utils.NONE_HASH is not None
-        assert isinstance(reloaded_kv_cache_utils.NONE_HASH, bytes)
-        assert reloaded_kv_cache_utils.NONE_HASH != b""
+        none_hash = reloaded_kv_cache_utils.NONE_HASH
+        assert isinstance(none_hash, bytes)
+        assert none_hash != b""
+        assert none_hash == hash_fn(reloaded_kv_cache_utils.DEFAULT_NONE_HASH_SEED)
+        # deterministic across re-initialization within the same environment
+        reloaded_kv_cache_utils.init_none_hash(hash_fn)
+        assert none_hash == reloaded_kv_cache_utils.NONE_HASH
 
     # case 2: PYTHONHASHSEED is set, use the seed and hash_fn
     with monkeypatch.context() as m:

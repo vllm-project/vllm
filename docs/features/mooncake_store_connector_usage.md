@@ -235,10 +235,10 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 
 ### Reproducible Block Hashes Across Processes
 
-The `MooncakeStoreConnector` relies on consistent block hashes across all vLLM processes sharing the distributed store. Because Python randomizes its hash seed per process by default, identical prompts can produce different block hashes on different processes — preventing cross-process prefix cache hits.
+The `MooncakeStoreConnector` relies on consistent block hashes across all vLLM processes sharing the distributed store. Block hashes chain from `NONE_HASH`, which is derived from a fixed default seed, so identical prompts produce identical block hashes across processes by default — enabling cross-process prefix cache hits without extra configuration.
 
-Set a fixed `PYTHONHASHSEED` on every instance that shares the store (DP ranks, separate prefiller/decoder nodes, and any other vLLM process pointed at the same Mooncake store):
+To use a custom shared seed instead, set the same `PYTHONHASHSEED` on every instance that shares the store (DP ranks, separate prefiller/decoder nodes, and any other vLLM process pointed at the same Mooncake store):
 
 ```bash
-PYTHONHASHSEED=0 vllm serve ...
+PYTHONHASHSEED=<shared-value> vllm serve ...
 ```
