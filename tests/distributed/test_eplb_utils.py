@@ -23,6 +23,7 @@ from vllm.distributed.eplb.eplb_state import (
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.distributed.eplb.policy import AbstractEplbPolicy, EplbStats
 from vllm.distributed.eplb.rebalance_execute import (
+    AsyncEplbCycleComplete,
     AsyncEplbLayerResult,
     TransferMetadata,
 )
@@ -228,6 +229,92 @@ def test_commit_eplb_maps_for_layer():
 
     # Layer 1 untouched
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
+
+
+def _make_async_model_state(num_layers: int, num_experts: int) -> EplbModelState:
+    phy2log = torch.arange(num_experts).repeat(num_layers, 1)
+    model_state = _make_model_state(
+        phy2log=phy2log,
+        log2phy=phy2log.unsqueeze(-1).clone(),
+        logcnt=torch.ones(num_layers, num_experts, dtype=torch.long),
+    )
+    model_state.model.num_moe_layers = num_layers
+    model_state.model.expert_weights = [[] for _ in range(num_layers)]
+    model_state.rebalanced = True
+    return model_state
+
+
+def _layer_result(
+    layer_idx: int, new_map: torch.Tensor, completes_cycle: bool
+) -> AsyncEplbLayerResult:
+    num_experts = new_map.numel()
+    return AsyncEplbLayerResult(
+        layer_idx=layer_idx,
+        new_physical_to_logical_map=new_map,
+        transfer_metadata=TransferMetadata(
+            is_unchanged=np.ones(num_experts, dtype=bool),
+            is_received_locally=np.zeros(num_experts, dtype=bool),
+            recv_primary_mask=np.zeros(num_experts, dtype=bool),
+            recv_count=0,
+            recv_expert_ids=np.full(num_experts, -1),
+            recv_dst_rows=np.full(num_experts, -1),
+        ),
+        completes_cycle=completes_cycle,
+        consumed_event=CpuGpuEvent(),
+    )
+
+
+def test_move_to_workspace_completes_empty_cycle():
+    """A cycle with no changed layer must still clear `rebalanced`."""
+    model_state = _make_async_model_state(num_layers=3, num_experts=4)
+    result = AsyncEplbCycleComplete(consumed_event=CpuGpuEvent())
+    model_state.pending_result = result
+
+    model_state._move_to_workspace(ep_rank=0)
+
+    assert not model_state.rebalanced
+    assert model_state.pending_result is None
+    assert model_state.num_committed_layers == 3
+    assert result.consumed_event._recorded.is_set()
+
+
+@pytest.mark.parametrize("completes_cycle", [False, True])
+def test_move_to_workspace_completion_follows_result_not_layer_index(completes_cycle):
+    """Unchanged layers are skipped, so the last changed layer is not necessarily the
+    physically last one and only `completes_cycle` can end the cycle.
+    """
+    num_layers, num_experts = 3, 4
+    model_state = _make_async_model_state(num_layers, num_experts)
+    new_map = torch.tensor([1, 0, 3, 2])
+    result = _layer_result(1, new_map, completes_cycle)
+    model_state.pending_result = result
+
+    model_state._move_to_workspace(ep_rank=0)
+
+    assert model_state.rebalanced == (not completes_cycle)
+    assert model_state.num_committed_layers == (num_layers if completes_cycle else 2)
+    assert torch.equal(model_state.physical_to_logical_map[1], new_map)
+    assert torch.equal(model_state.physical_to_logical_map[0], torch.arange(4))
+    assert model_state.pending_result is None
+    assert result.consumed_event._recorded.is_set()
+
+
+def test_drain_async_stops_on_completing_result_before_last_layer(dist_init):
+    """Draining must stop at the result that completes the cycle, even when it
+    is not for the physically last layer; the old layer-index check would spin.
+    """
+    model_state = _make_async_model_state(num_layers=3, num_experts=4)
+    result = _layer_result(1, torch.tensor([1, 0, 3, 2]), completes_cycle=True)
+    model_state.pending_result = result
+    state = EplbState(ParallelConfig(), torch.device("cpu"))
+    state.is_async = True
+    state.model_states = {"m": model_state}
+
+    state.drain_async()
+
+    assert not model_state.rebalanced
+    assert model_state.pending_result is None
+    assert result.consumed_event._recorded.is_set()
 
 
 def _make_eplb_state() -> EplbState:
@@ -490,6 +577,7 @@ def test_async_rearrangement_interval_starts_after_last_layer_commit(dist_init):
                 layer_idx=next_layer,
                 new_physical_to_logical_map=phy2log[next_layer],
                 transfer_metadata=unchanged,
+                completes_cycle=next_layer == num_layers - 1,
                 consumed_event=CpuGpuEvent(),
             )
             next_layer = (next_layer + 1) % num_layers

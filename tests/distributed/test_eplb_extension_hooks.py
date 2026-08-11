@@ -299,7 +299,13 @@ def test_async_commit_updates_maps_before_buffer_acknowledgement(
         stream=None,
         is_profile=False,
     )
-    result = AsyncEplbLayerResult(0, target[0], metadata, CpuGpuEvent())
+    result = AsyncEplbLayerResult(
+        layer_idx=0,
+        new_physical_to_logical_map=target[0],
+        transfer_metadata=metadata,
+        completes_cycle=True,
+        consumed_event=CpuGpuEvent(),
+    )
     model_state.pending_result = result
     model_state.rebalanced = True
     if fail_commit:

@@ -13,12 +13,47 @@ from vllm.logger import init_logger
 
 from .eplb_utils import CpuGpuEvent, device_stream
 from .migration_scheduler import schedule_migration_batches_for_layers
-from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
+from .rebalance_execute import (
+    AsyncEplbCycleComplete,
+    AsyncEplbLayerResult,
+    AsyncEplbResult,
+    transfer_layer,
+)
 
 if TYPE_CHECKING:
     from .eplb_state import EplbModelState, EplbState
 
 logger = init_logger(__name__)
+
+
+def _publish_result_and_wait(
+    state: "EplbState",
+    model_state: "EplbModelState",
+    result: AsyncEplbResult,
+    stream: torch.Stream,
+    reset_epoch: int,
+) -> bool:
+    """Hand `result` to the main thread and block until it is consumed.
+
+    Returns:
+        False if a fault recovery reset EPLB meanwhile, so the rebalance must be
+        abandoned.
+
+    """
+    model_state.pending_result = result
+    # A fault recovery happened during the transfer, so the main thread will
+    # never consume this result. Drop it and abandon the rebalance.
+    if state.ft_reset_epoch != reset_epoch:
+        model_state.pending_result = None
+        return False
+
+    result.consumed_event.wait(stream=stream)
+    # Host-issued writes into expert_buffer (e.g. NIXL RDMA reads) are not
+    # stream-ordered, so wait until move_from_buffer has run on the GPU.
+    stream.synchronize()
+    assert model_state.pending_result is None
+    # Woken by an FT reset's record, not a normal consume.
+    return state.ft_reset_epoch == reset_epoch
 
 
 def start_async_worker(
@@ -108,7 +143,6 @@ def _transfer_cycle(
 
     assert state.is_async
     for model_state in state.model_states.values():
-        layer_idx = 0
         # Set the async worker's CUDA stream on the communicator
         model_state.communicator.set_stream(stream)
         num_layers = model_state.model.num_moe_layers
@@ -123,8 +157,28 @@ def _transfer_cycle(
             model_state, state, physical_to_logical_map_cpu, stream
         )
 
+        changed_layers = [
+            layer_idx
+            for layer_idx in range(num_layers)
+            if not torch.equal(
+                physical_to_logical_map_cpu[layer_idx],
+                new_physical_to_logical_map[layer_idx],
+            )
+        ]
+        if not changed_layers:
+            # Nothing to transfer, but the main thread still has to clear
+            # model_state.rebalanced.
+            empty_cycle = AsyncEplbCycleComplete(consumed_event=CpuGpuEvent())
+            if not _publish_result_and_wait(
+                state, model_state, empty_cycle, stream, reset_epoch
+            ):
+                return
+
         migration_batches_by_layer = None
-        if state.parallel_config.eplb_config.migration_batching_enabled:
+        if (
+            changed_layers
+            and state.parallel_config.eplb_config.migration_batching_enabled
+        ):
             profile_name = "eplb: schedule migration batches"
             num_local_experts = model_state.model.expert_weights[0][0].shape[0]
             # The placement snapshots stay fixed for this rebalance cycle.
@@ -138,13 +192,14 @@ def _transfer_cycle(
                     new_physical_to_logical_map.numpy(),
                 )
 
-        # Execute one EPLB layer transfer per model forward pass. Each iteration
-        # of this loop will copy the new set of expert weights into
+        # Execute one changed EPLB layer transfer per model forward pass. Each
+        # iteration of this loop will copy the new set of expert weights into
         # model_state.expert_buffer, which will be consumed by the main thread in
         # move_to_workspace.
         # We sync the rebalanced flag across ranks before each iteration so
         # all ranks make a coordinated decision to continue or stop.
-        while layer_idx < num_layers:
+        num_transferred = 0
+        for changed_idx, layer_idx in enumerate(changed_layers):
             model_state.worker_progress = 2 * layer_idx
             flag = torch.tensor(
                 [int(model_state.rebalanced)],
@@ -195,36 +250,26 @@ def _transfer_cycle(
             # it. Record is called by the main thread after move_from_buffer().
             consumed_event = CpuGpuEvent()
 
-            model_state.pending_result = AsyncEplbLayerResult(
+            result = AsyncEplbLayerResult(
                 layer_idx=layer_idx,
                 new_physical_to_logical_map=new_physical_to_logical_map[layer_idx],
                 transfer_metadata=transfer_metadata,
+                completes_cycle=changed_idx == len(changed_layers) - 1,
                 consumed_event=consumed_event,
             )
             model_state.worker_progress = 2 * layer_idx + 1
-            # A fault recovery happened during the transfer, so the main
-            # thread will never consume this result. Drop it and abandon
-            # the rebalance.
-            if state.ft_reset_epoch != reset_epoch:
-                model_state.pending_result = None
-                return
-
             # Block this thread until the main thread and main stream
             # finish copying model_state.expert_buffer into
             # model_state.model.expert_weights[layer_idx]
-            consumed_event.wait(stream=stream)
-            # Host-issued writes into expert_buffer (e.g. NIXL RDMA reads) are not
-            # stream-ordered, so wait until move_from_buffer has run on the GPU.
-            stream.synchronize()
-            assert model_state.pending_result is None
-            # Woken by an FT reset's record, not a normal consume.
-            if state.ft_reset_epoch != reset_epoch:
+            if not _publish_result_and_wait(
+                state, model_state, result, stream, reset_epoch
+            ):
                 return
-            layer_idx += 1
+            num_transferred += 1
         if ep_rank == 0:
             logger.info(
                 "Async EPLB rearranged %d/%d layers of %s in %.2f s.",
-                layer_idx,
+                num_transferred,
                 num_layers,
                 model_state.model_name,
                 time.perf_counter() - t_start,
