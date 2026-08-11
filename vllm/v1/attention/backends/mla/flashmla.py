@@ -94,6 +94,7 @@ class FlashMLABackend(MLACommonBackend):
         use_sparse: bool,
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
+        has_sliding_window: bool,
     ) -> str | None:
         if use_sparse:
             from vllm.v1.attention.ops.flashmla import is_flashmla_sparse_supported

@@ -92,6 +92,7 @@ class FlashAttnMLABackend(MLACommonBackend):
         use_sparse: bool,
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
+        has_sliding_window: bool,
     ) -> str | None:
         if not flash_attn_supports_mla():
             return "FlashAttention MLA not supported on this device"

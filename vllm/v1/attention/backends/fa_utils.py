@@ -230,6 +230,7 @@ def flash_attn_supports_kv_cache_dtype(
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
+    requires_local_attention: bool = False,
 ) -> bool:
     if kv_cache_dtype == "fp8_e5m2":
         return False
@@ -240,6 +241,7 @@ def flash_attn_supports_kv_cache_dtype(
         head_size=head_size,
         head_size_v=head_size_v,
         has_sinks=has_sinks,
+        requires_local_attention=requires_local_attention,
     )
     return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
         fa_version == 4 and current_platform.is_device_capability_family(100)

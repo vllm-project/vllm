@@ -218,6 +218,7 @@ class FlashAttentionBackend(AttentionBackend):
         use_sparse: bool,
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
+        has_sliding_window: bool,
     ) -> str | None:
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
@@ -229,6 +230,7 @@ class FlashAttentionBackend(AttentionBackend):
                 head_size=head_size,
                 head_size_v=head_size,
                 has_sinks=has_sink,
+                requires_local_attention=has_sliding_window,
             )
         ):
             return "FP8 KV cache requires FA3 on SM90 or FA4 on SM100"
@@ -879,6 +881,7 @@ class FlashAttentionImpl(AttentionImpl):
             head_size=head_size,
             head_size_v=head_size,
             has_sinks=sinks is not None,
+            requires_local_attention=sliding_window is not None,
         ):
             raise NotImplementedError(
                 f"FlashAttention does not support {self.kv_cache_dtype}"

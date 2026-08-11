@@ -82,6 +82,7 @@ class FlashAttnMLASparseBackend(AttentionBackend):
         use_sparse: bool,
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
+        has_sliding_window: bool,
     ) -> str | None:
         if kv_cache_dtype not in (None, "auto", "float16", "bfloat16"):
             return (

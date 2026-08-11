@@ -173,6 +173,7 @@ class FlashInferMLABackend(MLACommonBackend):
         use_sparse: bool,
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
+        has_sliding_window: bool,
     ) -> str | None:
         # FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128, 192]
         from vllm.config import get_current_vllm_config

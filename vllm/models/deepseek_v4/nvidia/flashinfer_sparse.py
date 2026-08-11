@@ -126,6 +126,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
         use_sparse: bool,
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
+        has_sliding_window: bool,
     ) -> str | None:
         if device_capability.major == 10:
             if kv_cache_dtype == "fp8_ds_mla":

@@ -313,6 +313,7 @@ class AttentionBackend(ABC):
         use_sparse: bool,
         use_mm_prefix: bool,
         device_capability: "DeviceCapability",
+        has_sliding_window: bool,
     ) -> str | None:
         return None
 
@@ -387,6 +388,7 @@ class AttentionBackend(ABC):
             use_sparse,
             use_mm_prefix,
             device_capability,
+            has_sliding_window,
         )
         if combination_reason is not None:
             invalid_reasons.append(combination_reason)
