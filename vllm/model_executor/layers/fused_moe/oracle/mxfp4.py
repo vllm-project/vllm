@@ -43,9 +43,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
-from vllm.platforms import current_platform
+from vllm.platforms import PlatformEnum, current_platform
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import round_up
+
+from .base import filter_backends_for_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -147,6 +149,61 @@ TRTLLM_BACKENDS = (
 TRITON_BACKENDS = (
     Mxfp4MoeBackend.TRITON,
     Mxfp4MoeBackend.TRITON_UNFUSED,
+)
+
+_CUDA = frozenset({PlatformEnum.CUDA})
+_ROCM = frozenset({PlatformEnum.ROCM})
+_XPU = frozenset({PlatformEnum.XPU})
+_CPU = frozenset({PlatformEnum.CPU})
+_CUDA_ALIKE = frozenset({PlatformEnum.CUDA, PlatformEnum.ROCM})
+_TRITON_PLATFORMS = frozenset({PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU})
+
+_MXFP4_BACKEND_PLATFORMS = {
+    Mxfp4MoeBackend.DEEPGEMM_MXFP4: _CUDA,
+    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8: _CUDA,
+    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16: _CUDA,
+    Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8: _CUDA,
+    Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16: _CUDA,
+    Mxfp4MoeBackend.BATCHED_MARLIN: _CUDA,
+    Mxfp4MoeBackend.MARLIN: _CUDA,
+    Mxfp4MoeBackend.AITER_MXFP4_BF16: _ROCM,
+    Mxfp4MoeBackend.AITER_MXFP4_FP8: _ROCM,
+    Mxfp4MoeBackend.AITER_MXFP4_MXFP4: _ROCM,
+    Mxfp4MoeBackend.TRITON: _CUDA_ALIKE,
+    Mxfp4MoeBackend.TRITON_UNFUSED: _CUDA_ALIKE,
+    Mxfp4MoeBackend.XPU: _XPU,
+    Mxfp4MoeBackend.CPU: _CPU,
+    Mxfp4MoeBackend.EMULATION: _TRITON_PLATFORMS,
+    Mxfp4MoeBackend.HUMMING: _CUDA,
+}
+
+_GPT_OSS_AUTO_BACKENDS = (
+    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+    Mxfp4MoeBackend.AITER_MXFP4_BF16,
+    Mxfp4MoeBackend.AITER_MXFP4_FP8,
+    Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+    Mxfp4MoeBackend.TRITON,
+    Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+    Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+    # TRITON_UNFUSED has a bug with MTP support.
+    # TODO: Re-enable after the kernel is fixed.
+    Mxfp4MoeBackend.MARLIN,
+    Mxfp4MoeBackend.BATCHED_MARLIN,
+    Mxfp4MoeBackend.XPU,
+    Mxfp4MoeBackend.CPU,
+    Mxfp4MoeBackend.EMULATION,
+)
+
+_DEEPSEEK_AUTO_BACKENDS = (
+    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+    Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+    # TRITON_UNFUSED has a bug with MTP support.
+    # TODO: Re-enable after the kernel is fixed.
+    Mxfp4MoeBackend.MARLIN,
+    Mxfp4MoeBackend.BATCHED_MARLIN,
+    Mxfp4MoeBackend.AITER_MXFP4_BF16,
+    Mxfp4MoeBackend.XPU,
 )
 
 
@@ -314,49 +371,24 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
 def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     """Available backends in priority order, BF16-act variant before
     activation-quantized variant within each vendor family."""
-    _AVAILABLE_BACKENDS = [
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        Mxfp4MoeBackend.AITER_MXFP4_BF16,
-        Mxfp4MoeBackend.AITER_MXFP4_FP8,
-        Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
-        Mxfp4MoeBackend.TRITON,
-        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
-        # TRITON_UNFUSED has bug with MTP support
-        # TODO re-enable after kernel is fixed
-        # TRITON_UNFUSED
-        Mxfp4MoeBackend.MARLIN,
-        Mxfp4MoeBackend.BATCHED_MARLIN,
-        Mxfp4MoeBackend.XPU,
-        Mxfp4MoeBackend.EMULATION,
-    ]
-    return _AVAILABLE_BACKENDS
+    return filter_backends_for_platform(
+        _GPT_OSS_AUTO_BACKENDS, _MXFP4_BACKEND_PLATFORMS
+    )
 
 
 def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """
-    Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
-    TRTLLM MXFP8; SM90 falls through to Triton_unfused or Marlin (the
-    backend-level ``is_supported_config`` check filters by device capability).
+    Get platform-appropriate backends in priority order. Exact device and
+    deployment support remains with each backend's ``is_supported_config``.
     """
+    backends = filter_backends_for_platform(
+        _DEEPSEEK_AUTO_BACKENDS, _MXFP4_BACKEND_PLATFORMS
+    )
     if current_platform.is_rocm():
-        return [
-            Mxfp4MoeBackend.AITER_MXFP4_BF16,
-            Mxfp4MoeBackend.EMULATION,
-        ]
-    if current_platform.is_xpu():
-        return [Mxfp4MoeBackend.XPU]
-    _AVAILABLE_BACKENDS = [
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        Mxfp4MoeBackend.DEEPGEMM_MXFP4,
-        # TRITON_UNFUSED has bug with MTP support
-        # TODO re-enable after kernel is fixed
-        # TRITON_UNFUSED
-        Mxfp4MoeBackend.MARLIN,
-        Mxfp4MoeBackend.BATCHED_MARLIN,
-    ]
-    return _AVAILABLE_BACKENDS
+        # Generic ROCm MXFP4 keeps emulation as its final fallback. Other
+        # platforms intentionally retain the existing native-only policy.
+        backends.append(Mxfp4MoeBackend.EMULATION)
+    return backends
 
 
 def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
@@ -531,9 +563,10 @@ def select_mxfp4_moe_backend(
                 logger.debug_once(_make_log_unsupported(backend, reason))
                 unsupported_reasons.append((backend, reason))
 
+    # XPU and CPU kernels consume unquantized activations. Preserve their
+    # platform fallback when a model-level activation override filtered them
+    # out of the quantized candidate list above.
     if current_platform.is_xpu():
-        backend = Mxfp4MoeBackend.XPU
-        logger.info_once(_make_log_backend(backend))
         return _return_or_raise(
             Mxfp4MoeBackend.XPU,
             config,
@@ -543,8 +576,6 @@ def select_mxfp4_moe_backend(
         )
 
     if current_platform.is_cpu():
-        backend = Mxfp4MoeBackend.CPU
-        logger.info_once(_make_log_backend(backend))
         return _return_or_raise(
             Mxfp4MoeBackend.CPU,
             config,

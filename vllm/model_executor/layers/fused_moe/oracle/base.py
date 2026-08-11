@@ -21,6 +21,7 @@ pre-class code.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Collection, Mapping, Sequence
 from enum import Enum
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -32,11 +33,36 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.platforms import PlatformEnum, current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 BackendT = TypeVar("BackendT", bound=Enum)
+
+
+def filter_backends_for_platform(
+    backends: Sequence[BackendT],
+    backend_platforms: Mapping[BackendT, Collection[PlatformEnum]],
+) -> list[BackendT]:
+    """Apply a coarse platform filter to an ordered backend list.
+
+    This only removes backend families that cannot run on the current
+    platform. Kernel classes remain the source of truth for exact device and
+    deployment support through ``is_supported_config``.
+
+    Out-of-tree, unspecified, and not-yet-classified backends fail open so
+    future registered kernels retain the existing exact-support behavior.
+    """
+    platform = current_platform._enum
+    if platform in (PlatformEnum.OOT, PlatformEnum.UNSPECIFIED):
+        return list(backends)
+    return [
+        backend
+        for backend in backends
+        if (platforms := backend_platforms.get(backend)) is None
+        or platform in platforms
+    ]
 
 
 class MoEKernelOracle(ABC, Generic[BackendT]):
