@@ -846,6 +846,37 @@ async fn unary_generate_missing_prompt_returns_invalid_argument() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn unary_generate_unconnected_data_parallel_rank_returns_invalid_argument() {
+    let (mut client, server_task, _engine_task) = grpc_test_server(
+        EngineId::from_engine_index(3),
+        default_stream_output_specs(),
+    )
+    .await;
+
+    let mut request = tonic::Request::new(pb::GenerateRequest {
+        request_id: "test-unconnected-dp-rank".to_string(),
+        model: "test-model".to_string(),
+        prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "x-data-parallel-rank",
+        "0".parse().expect("valid metadata value"),
+    );
+
+    let status = client
+        .generate(request)
+        .await
+        .expect_err("rank 0 should not select globally ranked engine 3");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("connected ranks: [3]"));
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn unary_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
     let (mut client, server_task, _engine_task) =
         grpc_test_server(b"engine-grpc-min-above-max", default_stream_output_specs()).await;
@@ -1524,7 +1555,9 @@ async fn control_aggregates_multi_engine_capacity() {
     ready_1.data_parallel_rank = 1;
 
     let engine_tasks = [ready_0, ready_1].map(|ready| {
-        let engine_id = EngineId::from_engine_index(ready.data_parallel_rank);
+        let engine_id = EngineId::from_engine_index(
+            ready.data_parallel_rank.try_into().expect("test rank fits engine identity"),
+        );
         MockEngineTask::new(spawn_mock_engine_task_with_ready(
             handshake_address.clone(),
             engine_id,
@@ -1552,10 +1585,8 @@ async fn control_aggregates_multi_engine_capacity() {
         Llm::new(client),
         Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
     );
-    let service = ControlServiceImpl::new(Arc::new(AppState::new(
-        vec!["test-model".to_string()],
-        chat,
-    )));
+    let state = AppState::new(vec!["test-model".to_string()], chat).with_data_parallel_size(4);
+    let service = ControlServiceImpl::new(Arc::new(state));
 
     let server = pb::control_server::Control::get_server_info(
         &service,
@@ -1566,6 +1597,7 @@ async fn control_aggregates_multi_engine_capacity() {
     .into_inner();
     assert_eq!(server.max_model_len, 4_096);
     assert_eq!(server.total_kv_blocks, 30);
+    assert_eq!(server.parallelism.unwrap().data_parallel_size, 4);
 
     drop(engine_tasks);
 }
