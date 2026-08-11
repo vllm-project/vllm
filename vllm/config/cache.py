@@ -95,6 +95,13 @@ class CacheConfig:
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
+    deterministic_prefix_caching: bool = False
+    """Whether to split cache misses so their final prefill chunk matches the
+    local prefix-cache hit path. This improves numerical reproducibility at the
+    cost of an additional scheduler step for some requests. Only applies when
+    prefix caching is enabled; it does not provide general batch invariance.
+    Fine-grained hybrid prefix caching with EAGLE-style speculative decoding is
+    not supported."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:
 
@@ -216,6 +223,7 @@ class CacheConfig:
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
+            "deterministic_prefix_caching",
             "prefix_caching_hash_algo",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
@@ -252,6 +260,15 @@ class CacheConfig:
         if value is None:
             return value
         return handler(value)
+
+    @model_validator(mode="after")
+    def _validate_deterministic_prefix_caching(self) -> "CacheConfig":
+        if self.deterministic_prefix_caching and not self.enable_prefix_caching:
+            logger.warning(
+                "--deterministic-prefix-caching requires prefix caching; disabling it"
+            )
+            self.deterministic_prefix_caching = False
+        return self
 
     @model_validator(mode="after")
     def _apply_block_size_default(self) -> "CacheConfig":

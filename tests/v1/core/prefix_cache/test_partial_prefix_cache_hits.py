@@ -113,6 +113,37 @@ def test_mamba_align_split_partial_tail_schedule():
     assert split(self=mock, request=req2, num_new_tokens=1000) == 512
 
 
+def test_deterministic_prefix_split_composes_with_partial_mamba_hits():
+    """The physical-block and partial-tail stops must both make progress."""
+    block_size = 16
+    hash_block_size = 8
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        block_size=block_size,
+        max_num_scheduled_tokens=64,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        use_eagle=False,
+        hash_block_size=hash_block_size,
+        mamba_partial_cache_hit=True,
+    )
+    request = make_request("0", [0] * 31, hash_block_size, sha256)
+    chunks = []
+
+    while request.num_computed_tokens < request.num_tokens:
+        num_new_tokens = request.num_tokens - request.num_computed_tokens
+        num_new_tokens = Scheduler._mamba_block_aligned_split(
+            mock, request, num_new_tokens
+        )
+        num_new_tokens = Scheduler._prefix_cache_aligned_split(
+            mock, request, num_new_tokens, request.num_computed_tokens
+        )
+        assert num_new_tokens > 0
+        chunks.append(num_new_tokens)
+        request.num_computed_tokens += num_new_tokens
+
+    assert chunks == [16, 8, 7]
+
+
 def test_mamba_align_split_when_block_exceeds_scheduling_budget():
     """Sub-block chunks make progress only when no step can fit a full block."""
     block_size = 11392

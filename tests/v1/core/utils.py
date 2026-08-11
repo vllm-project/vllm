@@ -52,6 +52,7 @@ def create_scheduler(
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
     enable_prefix_caching: bool = False,
+    deterministic_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
     use_kv_connector: None | bool | str | MockKVConfig = None,
@@ -111,6 +112,7 @@ def create_scheduler(
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
+        deterministic_prefix_caching=deterministic_prefix_caching,
     )
     kv_transfer_config = None
     if isinstance(use_kv_connector, MockKVConfig):

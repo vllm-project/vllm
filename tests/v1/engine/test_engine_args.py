@@ -19,11 +19,24 @@ def test_prefix_caching_from_cli():
     assert vllm_config.cache_config.enable_prefix_caching, (
         "V1 turns on prefix caching by default."
     )
+    assert not vllm_config.cache_config.deterministic_prefix_caching
+
+    args = parser.parse_args(["--deterministic-prefix-caching"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.cache_config.enable_prefix_caching
+    assert vllm_config.cache_config.deterministic_prefix_caching
 
     # Turn it off possible with flag.
     args = parser.parse_args(["--no-enable-prefix-caching"])
     vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
     assert not vllm_config.cache_config.enable_prefix_caching
+
+    args = parser.parse_args(
+        ["--no-enable-prefix-caching", "--deterministic-prefix-caching"]
+    )
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert not vllm_config.cache_config.enable_prefix_caching
+    assert not vllm_config.cache_config.deterministic_prefix_caching
 
     # Turn it on with flag.
     args = parser.parse_args(["--enable-prefix-caching"])

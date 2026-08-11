@@ -308,6 +308,19 @@ class Scheduler(SchedulerInterface):
             self.need_mamba_block_aligned_split
             and self.hash_block_size < self.block_size
         )
+        self.deterministic_prefix_caching = (
+            self.cache_config.enable_prefix_caching
+            and self.cache_config.deterministic_prefix_caching
+        )
+        if (
+            self.deterministic_prefix_caching
+            and self.use_eagle
+            and self.mamba_partial_cache_hit
+        ):
+            raise ValueError(
+                "Deterministic prefix caching is not supported with EAGLE-style "
+                "speculative decoding and fine-grained hybrid prefix-cache hits."
+            )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
         # is called once per scheduled step in FIFO order, so these stay in sync.
@@ -435,6 +448,27 @@ class Scheduler(SchedulerInterface):
         )
         return blocks, num_local, shared_prefix_boundary, False
 
+    def _prefix_cache_aligned_split(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_computed_tokens: int,
+    ) -> int:
+        """Clip a cache miss where a complete local cache hit would end."""
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if num_computed_tokens >= prefill_end:
+            return num_new_tokens
+
+        max_cache_hit_length = max(request.num_tokens - 1, 0)
+        split_pos = max_cache_hit_length // self.block_size * self.block_size
+        if self.use_eagle:
+            split_pos = max(split_pos - self.block_size, 0)
+
+        end = num_computed_tokens + num_new_tokens
+        if num_computed_tokens < split_pos < end:
+            return split_pos - num_computed_tokens
+        return num_new_tokens
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -534,6 +568,11 @@ class Scheduler(SchedulerInterface):
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(
                     request, num_new_tokens
+                )
+
+            if self.deterministic_prefix_caching:
+                num_new_tokens = self._prefix_cache_aligned_split(
+                    request, num_new_tokens, request.num_computed_tokens
                 )
 
             # Schedule encoder inputs.
@@ -917,6 +956,11 @@ class Scheduler(SchedulerInterface):
                         )
                         if num_new_tokens == 0:
                             break
+
+                    if self.deterministic_prefix_caching:
+                        num_new_tokens = self._prefix_cache_aligned_split(
+                            request, num_new_tokens, num_computed_tokens
+                        )
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:

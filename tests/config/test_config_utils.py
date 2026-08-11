@@ -216,6 +216,11 @@ def test_cache_config_hash_ignores_kv_cache_sizing_knobs():
     assert CacheConfig(gpu_memory_utilization=0.5).compute_hash() == base_hash
 
 
+def test_cache_config_hash_ignores_deterministic_prefix_caching():
+    base_hash = CacheConfig().compute_hash()
+    assert CacheConfig(deterministic_prefix_caching=True).compute_hash() == base_hash
+
+
 def test_envs_compile_factors_relocation_invariant(tmp_path):
     """Relocating HOME or the XDG roots must not change the compile-cache
     env hash.

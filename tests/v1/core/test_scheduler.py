@@ -1561,6 +1561,157 @@ def _model_output(scheduler, output, sampled):
     )
 
 
+@pytest.mark.parametrize(
+    ("deterministic", "num_tokens", "expected"),
+    [
+        (False, 31, 31),
+        (True, 15, 15),
+        (True, 16, 16),
+        (True, 17, 16),
+        (True, 31, 16),
+        (True, 32, 16),
+        (True, 33, 32),
+    ],
+)
+def test_deterministic_prefix_cache_initial_split(
+    deterministic: bool, num_tokens: int, expected: int
+):
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        deterministic_prefix_caching=deterministic,
+        block_size=16,
+        max_model_len=64,
+    )
+    (request,) = create_requests(num_requests=1, num_tokens=num_tokens, block_size=16)
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[request.request_id] == expected
+
+
+def test_deterministic_prefix_cache_splits_running_prefill():
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        deterministic_prefix_caching=True,
+        block_size=16,
+        max_num_seqs=1,
+        max_num_batched_tokens=10,
+        max_model_len=64,
+    )
+    (request,) = create_requests(num_requests=1, num_tokens=31, block_size=16)
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 10
+    _model_output(scheduler, output, [[]])
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 6
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "cold_chunks", "warm_suffix"),
+    [
+        (31, [16, 15], 15),
+        (32, [16, 16], 16),
+    ],
+)
+def test_deterministic_prefix_cache_miss_and_hit_use_same_suffix(
+    num_tokens: int, cold_chunks: list[int], warm_suffix: int
+):
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        deterministic_prefix_caching=True,
+        block_size=16,
+        max_model_len=64,
+    )
+    cold, warm = create_requests(
+        num_requests=2,
+        num_tokens=num_tokens,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=16,
+        req_ids=["cold", "warm"],
+    )
+    scheduler.add_request(cold)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[cold.request_id] == cold_chunks[0]
+    _model_output(scheduler, output, [[]])
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[cold.request_id] == cold_chunks[1]
+    _model_output(scheduler, output, [[100]])
+    assert cold.request_id in scheduler.finished_req_ids
+
+    scheduler.add_request(warm)
+    output = scheduler.schedule()
+    assert output.scheduled_new_reqs[0].num_computed_tokens == 16
+    assert output.num_scheduled_tokens[warm.request_id] == warm_suffix
+
+
+def test_deterministic_prefix_cache_resplits_preempted_request():
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        deterministic_prefix_caching=True,
+        block_size=16,
+        max_model_len=64,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=32,
+        max_tokens=2,
+        ignore_eos=True,
+        block_size=16,
+        req_ids=["resume"],
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 16
+    _model_output(scheduler, output, [[]])
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 16
+    _model_output(scheduler, output, [[100]])
+    assert (
+        request.num_prompt_tokens,
+        request.num_tokens,
+        request.num_output_tokens,
+    ) == (32, 33, 1)
+
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert request.num_computed_tokens == 0
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 32
+    _model_output(scheduler, output, [[]])
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 1
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [
+        (32, 32),
+        (48, 16),
+    ],
+)
+def test_deterministic_prefix_cache_accounts_for_eagle_drop(
+    num_tokens: int, expected: int
+):
+    request = create_requests(num_requests=1, num_tokens=num_tokens, block_size=16)[0]
+    scheduler = Mock(block_size=16, use_eagle=True)
+
+    result = Scheduler._prefix_cache_aligned_split(
+        scheduler, request, num_tokens, num_computed_tokens=0
+    )
+
+    assert result == expected
+
+
 def test_spec_decode_padding_first_decode_step():
     """A request taking its first decode step (whole prompt already computed via
     a prefix-cache hit) is padded with placeholder (-1) spec tokens so it enters
