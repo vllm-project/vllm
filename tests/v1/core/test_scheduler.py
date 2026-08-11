@@ -28,7 +28,9 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
@@ -132,6 +134,34 @@ def test_finish_request():
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         assert request.request_id not in scheduler.requests
         assert len(scheduler.waiting) == 9 - i
+
+
+def test_schedule_drops_stale_running_request():
+    scheduler = _make_minimal_empty_scheduler()
+    stale_req = create_requests(num_requests=1, req_ids=["stale_req"])[0]
+    stale_req.status = RequestStatus.RUNNING
+    stale_req.num_computed_tokens = stale_req.num_tokens
+    scheduler.running.append(stale_req)
+
+    scheduler_output = scheduler.schedule()
+
+    assert scheduler.running == []
+    assert scheduler_output.num_scheduled_tokens == {}
+    assert scheduler_output.scheduled_cached_reqs.req_ids == []
+    _assert_request_not_scheduled(scheduler_output, stale_req.request_id)
+
+
+def test_schedule_drops_stale_waiting_request():
+    scheduler = _make_minimal_empty_scheduler()
+    stale_req = create_requests(num_requests=1, req_ids=["stale_req"])[0]
+    scheduler.waiting.add_request(stale_req)
+
+    scheduler_output = scheduler.schedule()
+
+    assert len(scheduler.waiting) == 0
+    assert scheduler_output.num_scheduled_tokens == {}
+    assert scheduler_output.scheduled_new_reqs == []
+    _assert_request_not_scheduled(scheduler_output, stale_req.request_id)
 
 
 def test_get_num_unfinished_requests():
