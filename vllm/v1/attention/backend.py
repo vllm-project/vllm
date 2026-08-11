@@ -633,6 +633,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     supports_update_block_table: bool = False
     # Whether the builder constructor requires the block-table width.
     requires_block_table_width: ClassVar[bool] = False
+    # Whether all step-dependent draft decode metadata can be updated in place,
+    # allowing one metadata build to be reused across autoregressive draft steps.
+    supports_draft_decode_metadata_update: bool = False
 
     @abstractmethod
     def __init__(
@@ -756,6 +759,16 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             common_attn_metadata=common_attn_metadata,
             fast_build=True,
         )
+
+    def update_draft_decode_metadata(self, metadata: M) -> None:
+        """Update step-dependent draft decode metadata in place.
+
+        The fused draft loop may call this method during full CUDA graph
+        capture. CUDA graph replay does not run this Python method, so
+        implementations must emit capture-safe operations and keep replayed
+        tensor state in persistent storage.
+        """
+        raise NotImplementedError
 
     def use_cascade_attention(
         self,
