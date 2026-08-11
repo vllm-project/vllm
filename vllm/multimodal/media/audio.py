@@ -52,10 +52,9 @@ except (ImportError, RuntimeError):
 # 4 = unsupported encoding     (codec not supported by this libsndfile build)
 _BAD_SF_CODES = {0, 1, 3, 4}
 
-# Audio decoding backends selectable via `load_audio(backend=...)`,
-# `--media-io-kwargs '{"audio": {"audio_backend": ...}}'`, or
-# VLLM_AUDIO_LOADER_BACKEND. "auto" tries torchcodec, then soundfile,
-# then PyAV.
+# Audio decoding backends selectable via `load_audio(backend=...)` or
+# `--media-io-kwargs '{"audio": {"audio_backend": ...}}'`.
+# "auto" tries torchcodec, then soundfile, then PyAV.
 AUDIO_BACKENDS = ("auto", "soundfile", "pyav", "torchcodec")
 
 # Slack on the torchcodec decode window when enforcing `max_duration_s`, so an
@@ -376,12 +375,12 @@ def load_audio(
     """Load audio using the selected decoding backend.
 
     Args:
-        backend: One of ``AUDIO_BACKENDS``. ``None`` (default) resolves to
-            ``VLLM_AUDIO_LOADER_BACKEND``. ``"auto"`` tries torchcodec,
-            then falls back to the soundfile → PyAV chain; the other values
-            select a single backend with no fallback.
+        backend: One of ``AUDIO_BACKENDS``. ``None`` (default) selects
+            ``"auto"``, which tries torchcodec, then falls back to the
+            soundfile → PyAV chain; the other values select a single
+            backend with no fallback.
     """
-    backend = backend or envs.VLLM_AUDIO_LOADER_BACKEND
+    backend = backend or "auto"
     if backend not in AUDIO_BACKENDS:
         raise ValueError(
             f"Unknown audio backend {backend!r}. "
@@ -478,9 +477,8 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
 
         # Allow per-server override of the audio decoding backend, e.g.:
         #   --media-io-kwargs '{"audio": {"audio_backend": "torchcodec"}}'
-        # Overrides the global VLLM_AUDIO_LOADER_BACKEND env var. Validate
-        # eagerly so a misconfigured deployment fails at startup rather
-        # than per request.
+        # Validate eagerly so a misconfigured deployment fails at startup
+        # rather than per request.
         backend = kwargs.pop("audio_backend", None)
         if backend is not None and backend not in AUDIO_BACKENDS:
             raise ValueError(

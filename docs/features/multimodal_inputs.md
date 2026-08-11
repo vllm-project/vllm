@@ -1223,13 +1223,6 @@ vllm serve Qwen/Qwen2.5-Omni-7B \
   --media-io-kwargs '{"audio": {"audio_backend": "soundfile"}}'
 ```
 
-Or set the global default via environment variable (`--media-io-kwargs`
-takes precedence):
-
-```bash
-export VLLM_AUDIO_LOADER_BACKEND=soundfile
-```
-
 !!! tip
     `pyav` drives FFmpeg through a per-frame Python generator, so under
     concurrency the Python/C crossings contend on the GIL. `torchcodec`
