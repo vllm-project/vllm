@@ -12,6 +12,7 @@ from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
+from vllm.tool_parsers.step3p5_tool_parser import Step3p5ToolParser
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +47,12 @@ TOOL_CALL_ONLY = (
 )
 
 TOOL_ARGUMENTS = '{"city": "Dallas"}'
+
+STEP_TOOL_CALL = """<tool_call>
+<function=get_weather>
+<parameter=city>Dallas</parameter>
+</function>
+</tool_call>"""
 
 
 @pytest.fixture(scope="module")
@@ -196,6 +203,35 @@ def test_parse_tool_only(tokenizer):
     )
 
     assert reasoning is None
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "get_weather"
+    assert json.loads(tool_calls[0].arguments) == {"city": "Dallas"}
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        },
+    ],
+    ids=["required", "named"],
+)
+def test_parse_non_json_required_and_named_uses_tool_parser(tool_choice):
+    class StepParser(DelegatingParser):
+        tool_parser_cls = Step3p5ToolParser
+
+    parser = StepParser(SimpleNamespace(), tools=TOOLS)
+    request = make_request(tools=TOOLS, tool_choice=tool_choice)
+    reasoning, content, tool_calls = parser.parse(
+        STEP_TOOL_CALL, request, enable_auto_tools=True
+    )
+
+    assert reasoning is None
+    assert not content or not content.strip()
     assert tool_calls is not None
     assert len(tool_calls) == 1
     assert tool_calls[0].name == "get_weather"
