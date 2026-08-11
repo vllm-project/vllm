@@ -18,7 +18,7 @@ use crate::metrics::steady_state;
 use crate::output::console::print_results;
 use crate::output::json::{append_result, build_result_json, compute_result_filename, save_result};
 use crate::rate_control::compute_schedule;
-use crate::ready_checker::wait_for_endpoint;
+use crate::ready_checker::run_initial_ready_check;
 
 /// Pre-resolve the hostname in `base_url` and pin all resolved IPs on the
 /// client builder via [`reqwest::ClientBuilder::resolve_to_addrs`].  This
@@ -358,6 +358,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         (id, Some(name))
     };
 
+    run_initial_ready_check(config, &client, &model_id, &model_name).await?;
+
     // Load tokenizer (if needed)
     let tokenizer = if config.skip_tokenizer_init {
         None
@@ -680,26 +682,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         chat_messages_json: first.chat_messages_json.clone(),
         prompt_list: first.prompt_list.clone(),
     };
-
-    // Ready check
-    if config.ready_check_timeout_sec > 0 {
-        tracing::info!("starting initial single-prompt test run");
-        let test_output = wait_for_endpoint(
-            config.backend,
-            &client,
-            &test_input,
-            config.ready_check_timeout_sec,
-            5,
-        )
-        .await?;
-        if !test_output.success {
-            return Err(BenchError::Backend(format!(
-                "Initial test run failed: {}",
-                test_output.error
-            )));
-        }
-        tracing::info!("initial single-prompt test run completed");
-    }
 
     // Verify and fix prompt token lengths against the server's /tokenize endpoint.
     // Runs after the ready check so a still-starting server isn't mistaken for a

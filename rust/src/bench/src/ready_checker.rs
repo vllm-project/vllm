@@ -1,13 +1,60 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::backends::{RequestFuncInput, RequestFuncOutput, get_backend};
 use crate::cli::BackendKind;
+use crate::config::BenchConfig;
 use crate::error::{BenchError, Result};
+
+/// Wait for the configured backend before tokenizer and dataset initialization.
+pub async fn run_initial_ready_check(
+    config: &BenchConfig,
+    client: &reqwest::Client,
+    model_id: &str,
+    model_name: &Option<String>,
+) -> Result<()> {
+    if config.dry_run || config.ready_check_timeout_sec == 0 {
+        return Ok(());
+    }
+
+    let prompt_list = (config.backend == BackendKind::VllmRerank).then(|| {
+        Arc::from([
+            Arc::<str>::from("test query"),
+            Arc::<str>::from("test document"),
+        ])
+    });
+    let test_input = RequestFuncInput {
+        prompt: Arc::from("test"),
+        api_url: config.api_url.clone(),
+        prompt_len: 1,
+        output_len: 1,
+        model: model_id.to_string(),
+        model_name: model_name.clone(),
+        logprobs: config.logprobs,
+        extra_headers: config.extra_headers.clone(),
+        extra_body: config.extra_body.clone(),
+        ignore_eos: config.ignore_eos,
+        prompt_list,
+        ..Default::default()
+    };
+
+    tracing::info!("starting initial single-prompt test run");
+    wait_for_endpoint(
+        config.backend,
+        client,
+        &test_input,
+        config.ready_check_timeout_sec,
+        5,
+    )
+    .await?;
+    tracing::info!("initial single-prompt test run completed");
+    Ok(())
+}
 
 /// Wait for the serving endpoint to become available.
 ///

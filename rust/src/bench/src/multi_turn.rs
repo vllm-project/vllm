@@ -83,6 +83,8 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         (id, Some(name))
     };
 
+    crate::ready_checker::run_initial_ready_check(config, &client, &model_id, &model_name).await?;
+
     // Load tokenizer
     let tokenizer = if config.skip_tokenizer_init {
         None
@@ -242,42 +244,6 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         println!("  Total turns: {total_turns}");
         println!("  Total user message tokens: {total_user_tokens}");
         return Ok(serde_json::json!({"dry_run": true, "mode": "multi_turn"}));
-    }
-
-    // Ready check with a simple single request
-    if config.ready_check_timeout_sec > 0 {
-        let first_turn = &conversations[0].turns[0];
-        let test_input = RequestFuncInput {
-            prompt: first_turn.user_message.clone(),
-            api_url: config.api_url.clone(),
-            prompt_len: first_turn.user_message_len,
-            output_len: first_turn.expected_output_len,
-            model: model_id.clone(),
-            model_name: model_name.clone(),
-            logprobs: config.logprobs,
-            extra_headers: config.extra_headers.clone(),
-            extra_body: config.extra_body.clone(),
-            ignore_eos: config.ignore_eos,
-            request_id: None,
-            ..Default::default()
-        };
-
-        tracing::info!("starting initial single-prompt test run");
-        let test_output = crate::ready_checker::wait_for_endpoint(
-            config.backend,
-            &client,
-            &test_input,
-            config.ready_check_timeout_sec,
-            5,
-        )
-        .await?;
-        if !test_output.success {
-            return Err(BenchError::Backend(format!(
-                "Initial test run failed: {}",
-                test_output.error
-            )));
-        }
-        tracing::info!("initial single-prompt test run completed");
     }
 
     // For random datasets in multi-turn mode, auto-set min_tokens to enforce
