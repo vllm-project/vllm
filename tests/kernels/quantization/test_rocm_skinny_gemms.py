@@ -140,7 +140,7 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
     GrpsShrB = min(N_p2 // 16, 4)
     # Given the above, how many CUs would we need?
     CuNeeded = rndup_cus * GrpsShrB
-    # candidate for atomic reduce count splitk?
+    # Deterministic reduction stores one float workspace value per K shard.
     fits_wvsplitkrc = (N_p2 * m * ((k + 512 - 1) // 512)) <= 128 * 1024 * 12
     fits_wvsplitkrc &= CuNeeded <= cu_count
 
@@ -150,8 +150,8 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
     xavier = (
         math.sqrt(2 / k) if xnorm else 1
     )  # normalize to avoid large output-bias deltas
-    A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
-    B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    A = torch.randn(n, k, dtype=dtype, device="cuda") * xavier
+    B = torch.randn(m, k, dtype=dtype, device="cuda") * xavier
     if padded_a:
         A = pad_fp8(A)
 
@@ -167,7 +167,12 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
     out = ops.wvSplitKrc(A, B, cu_count, BIAS)
 
     if xnorm:
-        torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-8)
+        # The O(1) bias lifts outputs to ~O(1), where one bf16 ULP (~3.9e-3, the
+        # worst measured divergence) exceeds 1e-3. Bump atol to 5e-3 only for
+        # biased bf16 (above that ULP, still under finfo(bf16).eps); keep 1e-3
+        # otherwise.
+        atol = 5e-3 if (dtype == torch.bfloat16 and BIAS is not None) else 1e-3
+        torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-8)
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
 

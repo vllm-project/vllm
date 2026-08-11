@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Native Harmony output processing for `gpt_oss`.
 //!
 //! Unlike the default text-first pipeline, this processor consumes
@@ -72,7 +75,7 @@ impl HarmonyChatOutputProcessor {
         Ok(Self {
             encoding: harmony_encoding()?,
             tool_calls_enabled: request.tool_parsing_enabled(),
-            parallel_tool_calls: request.parallel_tool_calls,
+            parallel_tool_calls: request.parallel_tool_calls(),
         })
     }
 }
@@ -370,6 +373,7 @@ async fn harmony_assistant_event_stream(
                         usage: finished.usage,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
+                        ec_transfer_params: finished.ec_transfer_params,
                     })
                     .await;
                 }

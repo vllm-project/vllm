@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -50,6 +53,7 @@ fn request_output(
         stop_reason,
         events: None,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -75,6 +79,7 @@ fn request_output_with_logprobs(
         stop_reason,
         events: None,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -297,7 +302,7 @@ fn sample_request(request_id: &str) -> ChatRequest {
 
 fn sample_tool_request(request_id: &str) -> ChatRequest {
     let mut request = sample_request(request_id);
-    request.tools = vec![ChatTool {
+    let tools = vec![ChatTool {
         name: "get_weather".to_string(),
         description: Some("Get weather".to_string()),
         parameters: serde_json::json!({
@@ -307,7 +312,13 @@ fn sample_tool_request(request_id: &str) -> ChatRequest {
         }),
         strict: None,
     }];
-    request.tool_choice = ChatToolChoice::Auto;
+    request.tool_context = vllm_chat::ResolvedToolContext::new(
+        &request.messages,
+        tools,
+        Some(ChatToolChoice::Auto),
+        true,
+    )
+    .expect("tool context should resolve");
     request
 }
 

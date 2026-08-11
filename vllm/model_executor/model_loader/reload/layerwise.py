@@ -9,12 +9,12 @@ import torch
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .meta import (
-    SKIP_TENSORS,
+    SKIP_LOAD_TENSORS,
     capture_layer_to_meta,
     get_numel_loaded,
     materialize_layer,
@@ -109,6 +109,8 @@ def initialize_layerwise_reload(model: torch.nn.Module):
 
         # Save current tensors for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)
+        # snapshot now: restore_layer_on_meta drops alias buffers from the live set
+        info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
 
         # Restore layer parameters/buffers onto meta device
         restore_layer_on_meta(layer, info)
@@ -138,7 +140,7 @@ def _wrap_parameters_weight_loader(layer: torch.nn.Module) -> None:
     """Wrap each parameter's weight loader."""
     # Note that nested wrapping will occur for shared tensors
     for name, tensor in get_layer_tensors(layer).items():
-        if name in SKIP_TENSORS:
+        if name in SKIP_LOAD_TENSORS:
             continue
         if _get_weight_loader(tensor).__name__ != "online_process_loader":
             tensor.weight_loader = make_online_process_loader(layer, name)
@@ -194,7 +196,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Do not online process attention layers, must wait until finalize
-        if isinstance(layer, (Attention, MLAAttention)):
+        if is_deferred_attention_layer(layer):
             return ret
 
         # Log warnings allocating excessive buffers on device
@@ -247,8 +249,8 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             info.reset()
             continue
 
-        # Attention/MLA layers are processed after all other layers
-        if isinstance(layer, (Attention, MLAAttention)):
+        # Deferred attention-like layers are processed after all other layers
+        if is_deferred_attention_layer(layer):
             deferred_attn.append((layer, info))
             continue
 
@@ -259,10 +261,12 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
                 _layerwise_process(layer, info)
                 continue
 
-            # reloading: place kernel tensors back as a fallback
-            elif info.load_numel_total > 0:  # type: ignore[operator]
+            # reloading: place kernel tensors back as a fallback. Always place, even
+            # when nothing is loadable (load_numel_total == 0), so parameter-alias
+            # buffers on such layers are restored rather than left deleted.
+            if info.load_numel_total > 0:  # type: ignore[operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
-                _place_kernel_tensors(layer, info)
+            _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
         # if the created weight has extra padding elements which are not loaded
@@ -289,15 +293,13 @@ def finalize_layerwise_reload(*args, **kwargs):
 def _finalize_attention_layer(
     layer: torch.nn.Module, info: LayerReloadingInfo, model_config: ModelConfig
 ) -> None:
-    if info.load_numel > 0 and info.kernel_tensors is not None:
+    if info.kernel_tensors is None:
+        if info.load_numel > 0:
+            _layerwise_process(layer, info)
+    elif info.load_numel > 0:
         # Reload with new scale weights from checkpoint
         _place_kernel_tensors(layer, info)
         _reload_attention_scales(layer, info)
-    elif info.load_numel > 0 or info.kernel_tensors is None:
-        raise ValueError(
-            "Layerwise loading of attention layers is not supported. "
-            "Attention must always process after linears."
-        )
     else:
         _place_kernel_tensors(layer, info)
     layer.process_weights_after_loading(model_config.dtype)
@@ -311,19 +313,18 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
     processing, since we use .data.copy_() to preserve kernel tensor
     references."""
     quant_method = getattr(layer, "quant_method", None)
-    if quant_method is None:
-        return
-
-    # Re-create scale Parameters with sentinel values so unloaded scales
-    # are correctly detected by process_weights_after_loading
-    quant_method.create_weights(layer)
+    if quant_method is not None:
+        # Re-create scale Parameters with sentinel values so unloaded scales
+        # are correctly detected by process_weights_after_loading
+        quant_method.create_weights(layer)
 
     for name, args in info.loaded_weights:
         param = getattr(layer, name)
         args.arguments["param"] = param
         _get_weight_loader(param)(*args.args, **args.kwargs)
 
-    quant_method.process_weights_after_loading(layer)
+    if quant_method is not None:
+        quant_method.process_weights_after_loading(layer)
 
     _copy_and_restore_kernel_tensors(layer, info)
 
@@ -360,6 +361,11 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
         quant_method.process_weights_after_loading(layer)
+        # Re-reconcile parameter TP state: process_weights_after_loading may
+        # have re-created Parameters (stamped with the global rank), which would
+        # otherwise break replicated (disable_tp) weights on a subsequent reload.
+        if hasattr(layer, "update_param_tp_status"):
+            layer.update_param_tp_status()
 
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)
@@ -388,10 +394,14 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
     kernel tensor references on the layer. Preserves cudagraph references."""
     assert info.kernel_tensors is not None
     parameters, buffers = info.kernel_tensors
+    non_persistent = info.kernel_non_persistent_buffers
+    loaded_tensor_names = {name for name, _ in info.loaded_weights}
     for name, param in parameters.items():
         param.data.copy_(getattr(layer, name))
     for name, buffer in buffers.items():
         if name not in layer._buffers:
+            continue
+        if name in non_persistent and name not in loaded_tensor_names:
             continue
         buffer.data.copy_(getattr(layer, name))
 
@@ -404,7 +414,8 @@ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     assert info.kernel_tensors is not None
     parameters, buffers = info.kernel_tensors
+    non_persistent = info.kernel_non_persistent_buffers
     for name, param in parameters.items():
         layer.register_parameter(name, param)
     for name, buffer in buffers.items():
-        layer.register_buffer(name, buffer)
+        layer.register_buffer(name, buffer, persistent=name not in non_persistent)

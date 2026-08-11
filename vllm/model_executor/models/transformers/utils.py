@@ -16,7 +16,11 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from functools import lru_cache
+from itertools import chain
+from operator import attrgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -30,6 +34,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import is_rope_parameters_nested
 
@@ -181,6 +186,98 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
     )
 
 
+def attrsetter(attr: str) -> Callable[[object, object], None]:
+    """Set a possibly nested attribute, like the inverse of attrgetter."""
+    parent, _, name = attr.rpartition(".")
+
+    def setter(obj: object, value: object):
+        attr_parent = attrgetter(parent)(obj) if parent else obj
+        setattr(attr_parent, name, value)
+
+    return setter
+
+
+class _UninitializedEmbedding(nn.Embedding):
+    """Make `__init__` inert, so that `VocabParallelEmbedding.__init__`'
+    call to `super().__init__` does not invoke `nn.Embedding.__init__`."""
+
+    def __init__(self):
+        pass
+
+
+class _VocabParallelEmbeddingBase(VocabParallelEmbedding, _UninitializedEmbedding):
+    """Orders `VocabParallelEmbedding` ahead of `nn.Embedding` in the MRO, so that
+    `super().forward(...)` in an `nn.Embedding` subclass reaches vLLM's embedding."""
+
+
+@lru_cache
+def _rebase_on_vocab_parallel(cls: type[nn.Embedding]) -> type[VocabParallelEmbedding]:
+    """Subclass `cls` so that `VocabParallelEmbedding` supersedes its `nn.Embedding`.
+
+    Args:
+        cls: The `nn.Embedding` subclass to rebase. Cached, so a given `cls` always
+            maps to the same class.
+    Returns:
+        The new class, to assign to `__class__` of an instance of `cls`.
+    """
+    return type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})
+
+
+def replace_embedding_class(
+    embedding: nn.Module,
+    quant_config: "QuantizationConfig | None" = None,
+    *,
+    prefix: str = "",
+) -> nn.Module:
+    """Replace the `nn.Embedding` in `embedding` with `VocabParallelEmbedding`.
+
+    Args:
+        embedding: The module returned by `model.get_input_embeddings()`.
+        quant_config: Quantization config for the new embedding.
+        prefix: Qualname of `embedding`, used to look up its quantization method.
+    Returns:
+        The module to install with `model.set_input_embeddings()`. Composing and
+        inheriting modules are mutated in place and returned as-is.
+    Raises:
+        ValueError: If `embedding` composes anything other than one `nn.Embedding`,
+            which would leave the input embedding weights ambiguous.
+    """
+    # If `embedding` composes its `nn.Embedding`, recurse into it
+    if not isinstance(embedding, nn.Embedding):
+        composed = [
+            (name, module)
+            for name, module in embedding.named_modules()
+            if isinstance(module, nn.Embedding)
+        ]
+        if len(composed) != 1:
+            raise ValueError(
+                f"Expected {type(embedding).__name__} to be an `nn.Embedding` or to "
+                f"compose exactly one, but found {len(composed)}."
+            )
+        name, module = composed[0]
+        new_embedding = replace_embedding_class(
+            module, quant_config, prefix=maybe_prefix(prefix, name)
+        )
+        attrsetter(name)(embedding, new_embedding)
+        return embedding
+
+    kwargs = dict(
+        num_embeddings=embedding.num_embeddings,
+        embedding_dim=embedding.embedding_dim,
+        params_dtype=embedding.weight.dtype,
+        quant_config=quant_config,
+        prefix=prefix,
+    )
+    # If `embedding` is a bare `nn.Embedding`, simple replace
+    if type(embedding) is nn.Embedding:
+        return VocabParallelEmbedding(**kwargs)
+
+    # Otherwise `embedding` inherits `nn.Embedding`, rebase it in place
+    embedding.__class__ = _rebase_on_vocab_parallel(type(embedding))
+    VocabParallelEmbedding.__init__(embedding, **kwargs)
+    return embedding
+
+
 def recursive_replace_linear(
     model: nn.Module,
     quant_config: "QuantizationConfig | None",
@@ -207,6 +304,11 @@ def recursive_replace_linear(
                 setattr(module, child_name, new_module)
 
     _recursive_replace(model, prefix=prefix)
+
+
+def named_state(module: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
+    """`module`'s own state (i.e. named parameters and buffers)."""
+    return chain(module.named_parameters(), module.named_buffers())
 
 
 def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
