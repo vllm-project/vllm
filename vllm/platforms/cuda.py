@@ -382,7 +382,7 @@ class CudaPlatformBase(Platform):
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
-            except Exception as e:
+            except (ImportError, OSError) as e:
                 logger.debug(
                     "Attention backend %s is unavailable", backend.name, exc_info=True
                 )
@@ -414,7 +414,7 @@ class CudaPlatformBase(Platform):
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
-            except Exception as e:
+            except (ImportError, OSError) as e:
                 raise ValueError(
                     f"Selected backend {selected_backend} is not valid for "
                     f"this configuration. Reason: [{type(e).__name__}: {e}]"

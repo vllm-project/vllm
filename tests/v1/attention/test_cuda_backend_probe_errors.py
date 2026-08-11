@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for error handling in the CUDA attention backend probe.
 
-Backend probing must treat any failure to import or validate a backend as
-"this backend is unavailable" rather than terminating engine init; see
-https://github.com/vllm-project/vllm/issues/51658.
+Environment-shaped probe failures (missing packages, unreadable caches,
+broken driver installs) must mark the backend unavailable rather than
+terminating engine init; programming errors must still propagate.
+See https://github.com/vllm-project/vllm/issues/51658.
 """
 
 from unittest.mock import MagicMock, patch
@@ -37,12 +38,10 @@ SM90 = DeviceCapability(major=9, minor=0)
     [
         ImportError("flashinfer is not installed"),
         PermissionError(13, "Permission denied", "/root/.cache/flashinfer"),
-        RuntimeError("CUDA error: no kernel image is available"),
         OSError("libcuda.so.1: cannot open shared object file"),
-        AttributeError("module has no attribute 'get_builder_cls'"),
     ],
 )
-def test_get_valid_backends_records_probe_failure(exc):
+def test_get_valid_backends_records_environment_failure(exc):
     with patch("vllm.platforms.cuda._get_attn_backend_class", side_effect=exc):
         valid, invalid_reasons = CudaPlatform.get_valid_backends(
             device_capability=SM90,
@@ -55,10 +54,30 @@ def test_get_valid_backends_records_probe_failure(exc):
         assert reasons == [f"{type(exc).__name__}: {exc}"]
 
 
+@pytest.mark.parametrize(
+    "exc",
+    [
+        RuntimeError("CUDA error: no kernel image is available"),
+        AttributeError("module has no attribute 'get_builder_cls'"),
+        KeyboardInterrupt(),
+    ],
+)
+def test_get_valid_backends_propagates_unexpected_errors(exc):
+    with (
+        patch("vllm.platforms.cuda._get_attn_backend_class", side_effect=exc),
+        pytest.raises(type(exc)),
+    ):
+        CudaPlatform.get_valid_backends(
+            device_capability=SM90,
+            attn_selector_config=SELECTOR_CONFIG,
+            num_heads=32,
+        )
+
+
 def test_get_valid_backends_keeps_probing_after_failure():
     healthy = MagicMock()
     healthy.validate_configuration.return_value = []
-    side_effects = [RuntimeError("probe failed")] + [healthy] * 32
+    side_effects = [OSError("probe failed")] + [healthy] * 32
 
     with patch("vllm.platforms.cuda._get_attn_backend_class", side_effect=side_effects):
         valid, invalid_reasons = CudaPlatform.get_valid_backends(
@@ -71,11 +90,11 @@ def test_get_valid_backends_keeps_probing_after_failure():
 
 
 def test_selected_backend_probe_failure_raises_value_error_with_cause():
-    exc = RuntimeError("CUDA error: device-side assert triggered")
+    exc = OSError("libcuda.so.1: cannot open shared object file")
     with (
         patch("vllm.platforms.cuda._get_attn_backend_class", side_effect=exc),
         patch.object(CudaPlatform, "get_device_capability", return_value=SM90),
-        pytest.raises(ValueError, match="RuntimeError") as excinfo,
+        pytest.raises(ValueError, match="OSError") as excinfo,
     ):
         CudaPlatform.get_attn_backend_cls(
             selected_backend=AttentionBackendEnum.FLASH_ATTN,
@@ -83,18 +102,3 @@ def test_selected_backend_probe_failure_raises_value_error_with_cause():
             num_heads=32,
         )
     assert excinfo.value.__cause__ is exc
-
-
-def test_probe_does_not_swallow_keyboard_interrupt():
-    with (
-        patch(
-            "vllm.platforms.cuda._get_attn_backend_class",
-            side_effect=KeyboardInterrupt,
-        ),
-        pytest.raises(KeyboardInterrupt),
-    ):
-        CudaPlatform.get_valid_backends(
-            device_capability=SM90,
-            attn_selector_config=SELECTOR_CONFIG,
-            num_heads=32,
-        )
