@@ -3,7 +3,7 @@
 
 import dataclasses
 from contextlib import AbstractContextManager
-from typing import Protocol, TypeAlias
+from typing import Protocol, TypeAlias, runtime_checkable
 
 import torch
 
@@ -34,6 +34,16 @@ class MemAllocator(Protocol):
     def get_current_usage(self) -> int: ...
 
 
+@runtime_checkable
+class DiscardMemAllocator(MemAllocator, Protocol):
+    def discard(self, tags: tuple[str, ...] | str) -> None: ...
+
+
+@runtime_checkable
+class DiagnosticMemAllocator(MemAllocator, Protocol):
+    def allocation_diagnostics(self) -> dict[str, object]: ...
+
+
 def get_mem_allocator_instance() -> MemAllocator:
     if current_platform.is_cuda_alike():
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -50,3 +60,21 @@ def get_mem_allocator_instance() -> MemAllocator:
         f"{type(current_platform).__name__} "
         f"(device_type={current_platform.device_type})."
     )
+
+
+def get_discard_mem_allocator_instance() -> DiscardMemAllocator:
+    allocator = get_mem_allocator_instance()
+    if not isinstance(allocator, DiscardMemAllocator):
+        raise NotImplementedError(
+            f"{type(allocator).__name__} does not support selective discard"
+        )
+    return allocator
+
+
+def get_diagnostic_mem_allocator_instance() -> DiagnosticMemAllocator:
+    allocator = get_mem_allocator_instance()
+    if not isinstance(allocator, DiagnosticMemAllocator):
+        raise NotImplementedError(
+            f"{type(allocator).__name__} does not expose allocation diagnostics"
+        )
+    return allocator

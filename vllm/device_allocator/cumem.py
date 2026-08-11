@@ -59,6 +59,8 @@ def get_pluggable_allocator(
     python_malloc_fn: Callable[[HandleType], None],
     python_free_func: Callable[[int], HandleType],
 ) -> torch.cuda.memory.CUDAPluggableAllocator:
+    if lib_name is None:
+        raise RuntimeError("cumem allocator library is not loaded")
     init_module(python_malloc_fn, python_free_func)
     new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
         lib_name, "my_malloc", "my_free"
@@ -339,21 +341,19 @@ class CuMemAllocator:
         torch.accelerator.empty_cache()
 
         for ptr, data in self.pointer_to_data.items():
-            if not data.is_asleep:
-                continue
             if tags is None or data.tag in tags:
                 handle = data.handle
-                create_and_map(handle)
-                data.is_asleep = False
+                if data.is_asleep:
+                    create_and_map(handle)
+                    data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
-                    if cpu_backup_tensor is not None:
-                        size_in_bytes = (
-                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        )
-                        cpu_ptr = cpu_backup_tensor.data_ptr()
-                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                        data.cpu_backup_tensor = None
+                    size_in_bytes = (
+                        cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
+                    )
+                    cpu_ptr = cpu_backup_tensor.data_ptr()
+                    libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
+                    data.cpu_backup_tensor = None
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
@@ -424,3 +424,29 @@ class CuMemAllocator:
             handle = data.handle
             sum_bytes += handle[1]
         return sum_bytes
+
+    def allocation_diagnostics(self) -> dict[str, object]:
+        tags: dict[str, dict[str, Any]] = {}
+        for ptr, data in sorted(self.pointer_to_data.items()):
+            tag = tags.setdefault(
+                data.tag,
+                {
+                    "logical_bytes": 0,
+                    "allocation_count": 0,
+                    "virtual_addresses": [],
+                    "mapped_virtual_addresses": [],
+                    "host_backup_bytes": 0,
+                },
+            )
+            size = data.handle[1]
+            tag["logical_bytes"] += size
+            tag["allocation_count"] += 1
+            tag["virtual_addresses"].append(ptr)
+            if not data.is_asleep:
+                tag["mapped_virtual_addresses"].append(ptr)
+            if data.cpu_backup_tensor is not None:
+                tag["host_backup_bytes"] += (
+                    data.cpu_backup_tensor.numel()
+                    * data.cpu_backup_tensor.element_size()
+                )
+        return {"tags": tags}
