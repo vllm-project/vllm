@@ -744,6 +744,7 @@ class GPUModelRunner(
         self._init_kernel_block_sizes = [placeholder_block_size]
         self._init_max_num_blocks = [placeholder_max_num_blocks]
         self._init_slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT]
+        # captures infrastructure kernels whose config depends on finalized KV-cache/block-table geometry.
         with self.jit_warmup_registry.activate():
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,

@@ -525,8 +525,8 @@ class ComputeSlotMappingKernel(VllmJitKernel["ComputeSlotMappingKernel.CompileKe
         int32_ptr = TritonWarmupTensor(torch.int32)
         int64_ptr = TritonWarmupTensor(torch.int64)
         warmup(
-            2,
-            2,
+            2, # arbitrary, num_tokens in do_not_specialize
+            2, # arbitrary, max_num_tokens in do_not_specialize
             int32_ptr,
             int64_ptr,
             int32_ptr,
