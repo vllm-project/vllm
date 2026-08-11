@@ -606,11 +606,11 @@ class Platform:
         return None
 
     @classmethod
-    def _find_non_ssm_backend_across_pp(
+    def _find_non_ssm_backend_source(
         cls,
         vllm_config: "VllmConfig",
-    ) -> "type[AttentionBackend] | None":
-        """Find the first non-SSM backend across all pipeline stages."""
+    ) -> tuple["type[AttentionBackend] | None", Any | None, int | None]:
+        """Find the PP rank that owns the first non-SSM backend."""
         backend_cls = cls._find_non_ssm_backend(vllm_config)
 
         from vllm.distributed.parallel_state import (
@@ -619,40 +619,51 @@ class Platform:
         )
 
         if not model_parallel_is_initialized():
-            return backend_cls
+            return backend_cls, None, 0 if backend_cls is not None else None
 
         pp_group = get_pp_group()
         if pp_group.world_size == 1:
-            return backend_cls
+            return backend_cls, None, 0 if backend_cls is not None else None
 
-        local_backend_id = (
-            backend_cls.full_cls_name() if backend_cls is not None else None
-        )
-        backend_ids: list[tuple[str, str] | None] = [None] * pp_group.world_size
+        backend_presence = [False] * pp_group.world_size
         torch.distributed.all_gather_object(
-            backend_ids,
-            local_backend_id,
+            backend_presence,
+            backend_cls is not None,
             group=pp_group.cpu_group,
         )
 
-        selected_backend_id = next(
-            (backend_id for backend_id in backend_ids if backend_id is not None),
+        backend_rank = next(
+            (rank for rank, is_present in enumerate(backend_presence) if is_present),
             None,
         )
-        if selected_backend_id is None:
-            return None
+        if backend_rank != pp_group.rank_in_group:
+            backend_cls = None
+        return backend_cls, pp_group, backend_rank
 
-        if selected_backend_id == local_backend_id:
-            return backend_cls
+    @staticmethod
+    def _sync_block_size_config_across_pp(
+        vllm_config: "VllmConfig", pp_group: Any, backend_rank: int
+    ) -> None:
+        cache_config = vllm_config.cache_config
+        block_size_config = None
+        if pp_group.rank_in_group == backend_rank:
+            block_size_config = (
+                cache_config.block_size,
+                cache_config.mamba_block_size,
+                cache_config.mamba_page_size_padded,
+                cache_config.skip_page_size_padded,
+            )
 
-        import importlib
-
-        module_name, qualname = selected_backend_id
-        selected_backend: Any = importlib.import_module(module_name)
-        for attr in qualname.split("."):
-            selected_backend = getattr(selected_backend, attr)
-
-        return selected_backend
+        block_size_config = pp_group.broadcast_object(
+            block_size_config, src=backend_rank
+        )
+        assert block_size_config is not None
+        (
+            cache_config.block_size,
+            cache_config.mamba_block_size,
+            cache_config.mamba_page_size_padded,
+            cache_config.skip_page_size_padded,
+        ) = block_size_config
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -670,34 +681,40 @@ class Platform:
         if not model_config:
             return
 
-        backend_cls = cls._find_non_ssm_backend_across_pp(vllm_config)
-        if backend_cls is None:
+        backend_cls, pp_group, backend_rank = cls._find_non_ssm_backend_source(
+            vllm_config
+        )
+        if backend_rank is None:
             return
 
-        # Phase 1: Pick block size from backend (skip if user set --block-size)
-        if not cache_config.user_specified_block_size:
-            with set_current_vllm_config(vllm_config):
-                preferred = backend_cls.get_preferred_block_size(
-                    CacheConfig.DEFAULT_BLOCK_SIZE
-                )
-            if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
-                logger.info(
-                    "Setting kv cache block size to %d for %s backend.",
-                    preferred,
-                    backend_cls.get_name(),
-                )
-            cache_config.block_size = preferred
+        if backend_cls is not None:
+            # Phase 1: Pick block size from backend (skip if user set --block-size)
+            if not cache_config.user_specified_block_size:
+                with set_current_vllm_config(vllm_config):
+                    preferred = backend_cls.get_preferred_block_size(
+                        CacheConfig.DEFAULT_BLOCK_SIZE
+                    )
+                if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
+                    logger.info(
+                        "Setting kv cache block size to %d for %s backend.",
+                        preferred,
+                        backend_cls.get_name(),
+                    )
+                cache_config.block_size = preferred
 
-        # Phase 2: Align block/mamba sizes for hybrid models
-        # (may override user settings).
-        if model_config.is_hybrid:
-            cls._align_hybrid_block_size(vllm_config, backend_cls)
+            # Phase 2: Align block/mamba sizes for hybrid models
+            # (may override user settings).
+            if model_config.is_hybrid:
+                cls._align_hybrid_block_size(vllm_config, backend_cls)
 
-        # Phase 3: Align block/page sizes when multiple KV dtypes share the
-        # block pool (e.g. nvfp4 primary + unquantized skip layers).
-        # May override the user's --block-size.
-        if cache_config.kv_cache_dtype_skip_layers:
-            cls._align_heterogeneous_kv_block_size(vllm_config, backend_cls)
+            # Phase 3: Align block/page sizes when multiple KV dtypes share the
+            # block pool (e.g. nvfp4 primary + unquantized skip layers).
+            # May override the user's --block-size.
+            if cache_config.kv_cache_dtype_skip_layers:
+                cls._align_heterogeneous_kv_block_size(vllm_config, backend_cls)
+
+        if pp_group is not None:
+            cls._sync_block_size_config_across_pp(vllm_config, pp_group, backend_rank)
 
     @classmethod
     def _align_heterogeneous_kv_block_size(
