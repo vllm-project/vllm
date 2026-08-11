@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import json
 import os
 import queue
 import signal
@@ -33,6 +34,7 @@ from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalCacheMissError
+from vllm.snapshot.process import process_starttime, rebind_stdio
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -1008,6 +1010,7 @@ class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
+    ENGINE_CORE_IO_DETACH = b"ENGINE_CORE_IO_DETACH"
     addresses: EngineZmqAddresses
 
     @instrument(span_name="EngineCoreProc init")
@@ -1020,6 +1023,7 @@ class EngineCoreProc(EngineCore):
         log_stats: bool,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
+        enable_engine_snapshot: bool = False,
         *,
         engine_index: int = 0,
     ):
@@ -1033,6 +1037,21 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
+        self._engine_snapshot_enabled = enable_engine_snapshot
+        self._snapshot_identity = identity
+        self._snapshot_nonce: str | None = None
+        self._snapshot_generation = 0
+        self._snapshot_id: str | None = None
+        self._snapshot_config_hash: str | None = None
+        self._snapshot_marker_path: str | None = None
+        self._snapshot_persistence = "durable"
+        self._snapshot_io_stop = threading.Event()
+        self._snapshot_input_stopped = threading.Event()
+        self._snapshot_output_stopped = threading.Event()
+        self._snapshot_io_lock = threading.Lock()
+        self._snapshot_io_active = False
+        self._snapshot_parent_pid = os.getppid()
+        self._snapshot_parent_starttime = process_starttime(self._snapshot_parent_pid)
 
         # Receiver for tensor IPC
         self.tensor_ipc_receiver: TensorIpcReceiver | None = None
@@ -1093,37 +1112,14 @@ class EngineCoreProc(EngineCore):
             # and to overlap some serialization/deserialization with the
             # model forward pass.
             # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-            ready_event = threading.Event()
-            input_thread = threading.Thread(
-                target=self.process_input_sockets,
-                args=(
-                    addresses.inputs,
-                    addresses.coordinator_input,
-                    identity,
-                    ready_event,
-                ),
-                daemon=True,
-            )
-            input_thread.start()
-
-            self.output_thread = threading.Thread(
-                target=self.process_output_sockets,
-                args=(
-                    addresses.outputs,
-                    addresses.coordinator_output,
-                    self.engine_index,
-                ),
-                daemon=True,
-            )
-            self.output_thread.start()
-
-            # Don't complete handshake until DP coordinator ready message is
-            # received.
-            while not ready_event.wait(timeout=10):
-                if not input_thread.is_alive():
-                    raise RuntimeError("Input socket thread died during startup")
-                assert addresses.coordinator_input is not None
-                logger.info("Waiting for READY message from DP Coordinator...")
+            self._start_snapshot_io_threads()
+            if self._engine_snapshot_enabled:
+                self._snapshot_control_thread = threading.Thread(
+                    target=self._snapshot_io_control_loop,
+                    daemon=True,
+                    name="engine-snapshot-io-control",
+                )
+                self._snapshot_control_thread.start()
 
     @contextmanager
     def _perform_handshakes(
@@ -1270,6 +1266,9 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
+
+        if kwargs.get("enable_engine_snapshot", False):
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR2})
 
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
@@ -1579,15 +1578,18 @@ class EngineCoreProc(EngineCore):
         )
         return True
 
-    @staticmethod
     def _invoke_utility_method(
-        name: str, get_result: Callable, output: UtilityOutput, enqueue_output: Callable
+        self,
+        name: str,
+        get_result: Callable,
+        output: UtilityOutput,
+        enqueue_output: Callable,
     ):
         try:
             result = get_result()
             if isinstance(result, Future):
                 # Defer utility output handling until future completion.
-                callback = lambda future: EngineCoreProc._invoke_utility_method(
+                callback = lambda future: self._invoke_utility_method(
                     name, future.result, output, enqueue_output
                 )
                 result.add_done_callback(callback)
@@ -1597,6 +1599,8 @@ class EngineCoreProc(EngineCore):
             logger.exception("Invocation of %s method failed", name)
             output.failure_message = f"Call to {name} method failed: {str(e)}"
         enqueue_output(output)
+        if name == "snapshot_detach_io" and output.failure_message is None:
+            self._begin_snapshot_io_detach()
 
     @staticmethod
     def _convert_msgspec_args(method, args):
@@ -1669,7 +1673,132 @@ class EngineCoreProc(EngineCore):
             supports_draft_weight_updates=(
                 self.model_executor.supports_draft_weight_updates()
             ),
+            snapshot_generation=self._snapshot_generation,
+            snapshot_nonce=self._snapshot_nonce,
+            snapshot_id=self._snapshot_id,
+            snapshot_config_hash=self._snapshot_config_hash,
+            snapshot_root_pid=os.getpid(),
         )
+
+    def snapshot_detach_io(
+        self,
+        nonce: str,
+        generation: int,
+        snapshot_id: str,
+        config_hash: str,
+        marker_path: str,
+        persistence: str,
+    ) -> None:
+        if not self._engine_snapshot_enabled:
+            raise RuntimeError("EngineCore snapshots are not enabled")
+        if persistence not in ("durable", "page_cache"):
+            raise ValueError(f"unknown snapshot persistence mode: {persistence}")
+        with self._snapshot_io_lock:
+            if not self._snapshot_io_active:
+                raise RuntimeError("EngineCore business I/O is already detached")
+            self._snapshot_nonce = nonce
+            self._snapshot_generation = generation
+            self._snapshot_id = snapshot_id
+            self._snapshot_config_hash = config_hash
+            self._snapshot_marker_path = marker_path
+            self._snapshot_persistence = persistence
+
+    def _begin_snapshot_io_detach(self) -> None:
+        self._snapshot_io_stop.set()
+        self.output_queue.put_nowait(self.ENGINE_CORE_IO_DETACH)
+        threading.Thread(
+            target=self._finish_snapshot_io_detach,
+            daemon=True,
+            name="engine-snapshot-io-detach",
+        ).start()
+
+    def _finish_snapshot_io_detach(self) -> None:
+        if not self._snapshot_input_stopped.wait(timeout=30):
+            logger.error("Timed out stopping EngineCore input socket thread")
+            return
+        if not self._snapshot_output_stopped.wait(timeout=30):
+            logger.error("Timed out stopping EngineCore output socket thread")
+            return
+        with self._snapshot_io_lock:
+            self._snapshot_io_active = False
+        marker_path = self._snapshot_marker_path
+        if marker_path is None:
+            logger.error("EngineCore snapshot marker path is missing")
+            return
+        marker = {
+            "pid": os.getpid(),
+            "nonce": self._snapshot_nonce,
+            "generation": self._snapshot_generation,
+            "snapshot_id": self._snapshot_id,
+            "config_hash": self._snapshot_config_hash,
+            "state": "detached",
+        }
+        temporary = f"{marker_path}.tmp-{os.getpid()}"
+        with open(temporary, "w") as marker_file:
+            json.dump(marker, marker_file)
+            marker_file.write("\n")
+            marker_file.flush()
+            if self._snapshot_persistence == "durable":
+                os.fsync(marker_file.fileno())
+        os.replace(temporary, marker_path)
+
+    def _snapshot_io_control_loop(self) -> None:
+        while self.is_running():
+            signal.sigwait({signal.SIGUSR2})
+            if not self.is_running():
+                return
+            try:
+                self._restore_snapshot_stdio()
+                logger.info("Reattaching EngineCore business I/O")
+                self._start_snapshot_io_threads()
+                logger.info("EngineCore business I/O reattached")
+            except Exception:
+                logger.exception("Failed to reattach EngineCore business I/O")
+
+    def _restore_snapshot_stdio(self) -> None:
+        rebind_stdio(
+            self._snapshot_parent_pid,
+            expected_starttime=self._snapshot_parent_starttime,
+        )
+
+    def _start_snapshot_io_threads(self) -> None:
+        with self._snapshot_io_lock:
+            if self._snapshot_io_active:
+                raise RuntimeError("EngineCore business I/O is already attached")
+            self._snapshot_io_stop.clear()
+            self._snapshot_input_stopped.clear()
+            self._snapshot_output_stopped.clear()
+            ready_event = threading.Event()
+            self.input_thread = threading.Thread(
+                target=self.process_input_sockets,
+                args=(
+                    self.addresses.inputs,
+                    self.addresses.coordinator_input,
+                    self._snapshot_identity,
+                    ready_event,
+                ),
+                daemon=True,
+                name="engine-input",
+            )
+            self.output_thread = threading.Thread(
+                target=self.process_output_sockets,
+                args=(
+                    self.addresses.outputs,
+                    self.addresses.coordinator_output,
+                    self.engine_index,
+                ),
+                daemon=True,
+                name="engine-output",
+            )
+            self.input_thread.start()
+            self.output_thread.start()
+            self._snapshot_io_active = True
+        while not ready_event.wait(timeout=10):
+            if not self.input_thread.is_alive():
+                raise RuntimeError("Input socket thread died during attach")
+            if self.addresses.coordinator_input is None:
+                raise RuntimeError("Input socket thread did not become ready")
+            logger.info("Waiting for READY message from DP Coordinator...")
 
     def process_input_sockets(
         self,
@@ -1686,93 +1815,107 @@ class EngineCoreProc(EngineCore):
         )
         generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
 
-        with ExitStack() as stack, zmq.Context() as ctx:
-            input_sockets = [
-                stack.enter_context(
-                    make_zmq_socket(
-                        ctx, input_address, zmq.DEALER, identity=identity, bind=False
+        try:
+            with ExitStack() as stack, zmq.Context() as ctx:
+                input_sockets = [
+                    stack.enter_context(
+                        make_zmq_socket(
+                            ctx,
+                            input_address,
+                            zmq.DEALER,
+                            identity=identity,
+                            bind=False,
+                        )
                     )
-                )
-                for input_address in input_addresses
-            ]
-            if coord_input_address is None:
-                coord_socket = None
-            else:
-                coord_socket = stack.enter_context(
-                    make_zmq_socket(
-                        ctx,
-                        coord_input_address,
-                        zmq.XSUB,
-                        identity=identity,
-                        bind=False,
+                    for input_address in input_addresses
+                ]
+                if coord_input_address is None:
+                    coord_socket = None
+                else:
+                    coord_socket = stack.enter_context(
+                        make_zmq_socket(
+                            ctx,
+                            coord_input_address,
+                            zmq.XSUB,
+                            identity=identity,
+                            bind=False,
+                        )
                     )
-                )
-                # Send subscription message to coordinator.
-                coord_socket.send(b"\x01")
+                    coord_socket.send(b"\x01")
 
-            # Register sockets with poller.
-            poller = zmq.Poller()
-            ready_response = self._make_ready_response()
-            ready_payload = msgspec.msgpack.encode(ready_response)
-            for input_socket in input_sockets:
-                # Send initial message to each input socket - this is required
-                # before the front-end ROUTER socket can send input messages
-                # back to us.
-                input_socket.send(ready_payload)
-                poller.register(input_socket, zmq.POLLIN)
+                poller = zmq.Poller()
+                ready_payload = msgspec.msgpack.encode(self._make_ready_response())
+                for input_socket in input_sockets:
+                    input_socket.send(ready_payload)
+                    poller.register(input_socket, zmq.POLLIN)
 
-            if coord_socket is not None:
-                # Wait for ready message from coordinator.
-                assert coord_socket.recv() == b"READY"
-                poller.register(coord_socket, zmq.POLLIN)
-
-            ready_event.set()
-            del ready_event
-            while True:
-                for input_socket, _ in poller.poll():
-                    # (RequestType, RequestData)
-                    type_frame, *data_frames = input_socket.recv_multipart(copy=False)
-                    # NOTE(yongji): ignore READY message sent by DP coordinator
-                    # that is used to notify newly started engines
-                    if type_frame.buffer == b"READY":
-                        assert input_socket == coord_socket
-                        continue
-                    request_type = EngineCoreRequestType(bytes(type_frame.buffer))
-
-                    # Deserialize the request data.
-                    request: Any
-                    if request_type == EngineCoreRequestType.ADD:
-                        req: EngineCoreRequest = add_request_decoder.decode(data_frames)
-                        try:
-                            request = self.preprocess_add_request(req)
-                        except MultiModalCacheMissError as e:
-                            # P0/P1 shadow drift -- return a retryable signal (P0
-                            # drops the stale entry, client resends with data).
-                            self._handle_mm_cache_miss(req, e)
-                            continue
-                        except Exception:
-                            self._handle_request_preproc_error(req)
-                            continue
-                    elif request_type == EngineCoreRequestType.UTILITY:
-                        request = generic_decoder.decode(data_frames)
-                        client_idx, call_id, method, args = request
-                        if method == FT_UTILITY_METHOD:
-                            self.ft_sentinel.handle_command(
-                                client_idx, call_id, args[0]
-                            )
-                            continue
+                if coord_socket is not None:
+                    if self._engine_snapshot_enabled:
+                        while not self._snapshot_io_stop.is_set():
+                            if (
+                                coord_socket.poll(timeout=100)
+                                and coord_socket.recv() == b"READY"
+                            ):
+                                break
+                        else:
+                            return
                     else:
-                        request = generic_decoder.decode(data_frames)
+                        assert coord_socket.recv() == b"READY"
+                    poller.register(coord_socket, zmq.POLLIN)
+
+                ready_event.set()
+                del ready_event
+                while not self._snapshot_io_stop.is_set():
+                    events = (
+                        poller.poll(timeout=100)
+                        if self._engine_snapshot_enabled
+                        else poller.poll()
+                    )
+                    for input_socket, _ in events:
+                        if self._snapshot_io_stop.is_set():
+                            break
+                        type_frame, *data_frames = input_socket.recv_multipart(
+                            copy=False
+                        )
+                        # NOTE(yongji): ignore READY message sent by DP coordinator
+                        # that is used to notify newly started engines
+                        if type_frame.buffer == b"READY":
+                            assert input_socket == coord_socket
+                            continue
+                        request_type = EngineCoreRequestType(bytes(type_frame.buffer))
+
+                        request: Any
+                        if request_type == EngineCoreRequestType.ADD:
+                            req: EngineCoreRequest = add_request_decoder.decode(
+                                data_frames
+                            )
+                            try:
+                                request = self.preprocess_add_request(req)
+                            except MultiModalCacheMissError as exc:
+                                self._handle_mm_cache_miss(req, exc)
+                                continue
+                            except Exception:
+                                self._handle_request_preproc_error(req)
+                                continue
+                        elif request_type == EngineCoreRequestType.UTILITY:
+                            request = generic_decoder.decode(data_frames)
+                            client_idx, call_id, method, args = request
+                            if method == FT_UTILITY_METHOD:
+                                self.ft_sentinel.handle_command(
+                                    client_idx, call_id, args[0]
+                                )
+                                continue
+                        else:
+                            request = generic_decoder.decode(data_frames)
 
                         if request_type == EngineCoreRequestType.ABORT:
-                            # Aborts are added to *both* queues, allows us to eagerly
-                            # process aborts while also ensuring ordering in the input
-                            # queue to avoid leaking requests. This is ok because
-                            # aborting in the scheduler is idempotent.
+                            # Aborts are added to both queues to process them eagerly
+                            # while preserving input queue ordering.
                             self.aborts_queue.put_nowait(request)
 
-                    # Push to input queue for core busy loop.
-                    self.input_queue.put_nowait((request_type, request))
+                        self.input_queue.put_nowait((request_type, request))
+        finally:
+            self._snapshot_input_stopped.set()
 
     def process_output_sockets(
         self, output_paths: list[str], coord_output_path: str | None, engine_index: int
@@ -1791,57 +1934,63 @@ class EngineCoreProc(EngineCore):
 
         # We must set linger to ensure the ENGINE_CORE_DEAD
         # message is sent prior to closing the socket.
-        with ExitStack() as stack, zmq.Context() as ctx:
-            sockets = [
-                stack.enter_context(
-                    make_zmq_socket(ctx, output_path, zmq.PUSH, linger=4000)
-                )
-                for output_path in output_paths
-            ]
-            coord_socket = (
-                stack.enter_context(
-                    make_zmq_socket(
-                        ctx, coord_output_path, zmq.PUSH, bind=False, linger=4000
+        try:
+            with ExitStack() as stack, zmq.Context() as ctx:
+                sockets = [
+                    stack.enter_context(
+                        make_zmq_socket(ctx, output_path, zmq.PUSH, linger=4000)
                     )
+                    for output_path in output_paths
+                ]
+                coord_socket = (
+                    stack.enter_context(
+                        make_zmq_socket(
+                            ctx,
+                            coord_output_path,
+                            zmq.PUSH,
+                            bind=False,
+                            linger=4000,
+                        )
+                    )
+                    if coord_output_path is not None
+                    else None
                 )
-                if coord_output_path is not None
-                else None
-            )
-            max_reuse_bufs = len(sockets) + 1
+                max_reuse_bufs = len(sockets) + 1
 
-            while True:
-                output = self.output_queue.get()
-                if output == EngineCoreProc.ENGINE_CORE_DEAD:
-                    for socket in sockets:
-                        socket.send(output)
-                    break
-                assert not isinstance(output, bytes)
-                client_index, outputs = output
-                outputs.engine_index = engine_index
+                while True:
+                    output = self.output_queue.get()
+                    if output == EngineCoreProc.ENGINE_CORE_DEAD:
+                        for socket in sockets:
+                            socket.send(output)
+                        break
+                    if output == EngineCoreProc.ENGINE_CORE_IO_DETACH:
+                        break
+                    assert not isinstance(output, bytes)
+                    client_index, outputs = output
+                    outputs.engine_index = engine_index
 
-                if client_index == -1:
-                    # Don't reuse buffer for coordinator message
-                    # which will be very small.
-                    assert coord_socket is not None
-                    coord_socket.send_multipart(encoder.encode(outputs))
-                    continue
+                    if client_index == -1:
+                        # Don't reuse buffers for small coordinator messages.
+                        assert coord_socket is not None
+                        coord_socket.send_multipart(encoder.encode(outputs))
+                        continue
 
-                # Reclaim buffers that zmq is finished with.
-                while pending and pending[-1][0].done:
-                    reclaimed = pending.pop()[1]
-                    if len(reuse_buffers) < max_reuse_bufs:
-                        reuse_buffers.append(reclaimed)
+                    while pending and pending[-1][0].done:
+                        reclaimed = pending.pop()[1]
+                        if len(reuse_buffers) < max_reuse_bufs:
+                            reuse_buffers.append(reclaimed)
 
-                buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
-                buffers = encoder.encode_into(outputs, buffer)
-                tracker = self._send_msg_tracking_payload(
-                    sockets[client_index], buffers
-                )
-                if not tracker.done:
-                    pending.appendleft((tracker, buffer))
-                elif len(reuse_buffers) < max_reuse_bufs:
-                    # Limit the number of buffers to reuse.
-                    reuse_buffers.append(buffer)
+                    buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
+                    buffers = encoder.encode_into(outputs, buffer)
+                    tracker = self._send_msg_tracking_payload(
+                        sockets[client_index], buffers
+                    )
+                    if not tracker.done:
+                        pending.appendleft((tracker, buffer))
+                    elif len(reuse_buffers) < max_reuse_bufs:
+                        reuse_buffers.append(buffer)
+        finally:
+            self._snapshot_output_stopped.set()
 
     def _handle_mm_cache_miss(
         self, request: EngineCoreRequest, err: MultiModalCacheMissError

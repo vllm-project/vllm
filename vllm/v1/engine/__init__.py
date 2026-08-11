@@ -98,6 +98,11 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    snapshot_generation: int = 0
+    snapshot_nonce: str | None = None
+    snapshot_id: str | None = None
+    snapshot_config_hash: str | None = None
+    snapshot_root_pid: int | None = None
 
 
 class EngineCoreRequest(

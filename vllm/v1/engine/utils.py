@@ -3,6 +3,8 @@
 
 import contextlib
 import os
+import select
+import signal
 import threading
 import weakref
 from collections.abc import Callable, Iterator, Sequence
@@ -28,7 +30,7 @@ from vllm.utils.network_utils import (
     get_tcp_uri,
     zmq_socket_ctx,
 )
-from vllm.utils.system_utils import get_mp_context
+from vllm.utils.system_utils import get_mp_context, kill_process_tree
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
 from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
@@ -159,6 +161,7 @@ class CoreEngineProcManager:
         log_stats: bool,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
+        enable_engine_snapshot: bool = False,
     ):
         self._request_shutdown_timeout = vllm_config.shutdown_timeout
         context = get_mp_context()
@@ -173,6 +176,8 @@ class CoreEngineProcManager:
 
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
+        if enable_engine_snapshot:
+            common_kwargs["enable_engine_snapshot"] = True
 
         is_dp = vllm_config.parallel_config.data_parallel_size > 1
 
@@ -198,6 +203,12 @@ class CoreEngineProcManager:
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
+        self._process_lock = threading.Lock()
+        self._replacement_event = threading.Event()
+        self._monitor_ready = threading.Event()
+        self._snapshot_exit_event = threading.Event()
+        self._expected_exit_pids: set[int] = set()
+        self._snapshot_pid: int | None = None
 
         # All ranks share this config object: capture the user-provided
         # --device-ids list before the per-rank shard overwrites it. Mutating
@@ -232,7 +243,16 @@ class CoreEngineProcManager:
                     dp_local_rank=local_dp_rank,
                     process_kind="EngineCore",
                 ):
-                    proc.start()
+                    if not enable_engine_snapshot:
+                        proc.start()
+                    else:
+                        previous_mask = signal.pthread_sigmask(
+                            signal.SIG_BLOCK, {signal.SIGUSR2}
+                        )
+                        try:
+                            proc.start()
+                        finally:
+                            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
@@ -241,6 +261,7 @@ class CoreEngineProcManager:
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine core processes with configurable timeout."""
         self.manager_stopped.set()
+        self._replacement_event.set()
         if self._finalizer.detach() is not None:
             process_timeout = get_engine_process_shutdown_timeout(
                 self._request_shutdown_timeout, timeout
@@ -255,33 +276,173 @@ class CoreEngineProcManager:
 
     def monitor_engine_liveness(self) -> None:
         """Monitor engine core process liveness."""
+        while not self.manager_stopped.is_set():
+            with self._process_lock:
+                sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
+                self._monitor_ready.set()
+            if not sentinel_to_proc:
+                break
+            died_sentinels = connection.wait(sentinel_to_proc, timeout=1)
+            if not died_sentinels:
+                continue
 
-        sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
-        sentinels = set(sentinel_to_proc.keys())
-
-        while sentinels and not self.manager_stopped.is_set():
-            died_sentinels = connection.wait(sentinels, timeout=1)
-
+            unexpected_exit = False
             for sentinel in died_sentinels:
-                proc = sentinel_to_proc.pop(cast(int, sentinel))
-                exitcode = proc.exitcode
-                if exitcode != 0 and not self.manager_stopped.is_set():
-                    self.failed_proc_name = proc.name
-            if died_sentinels:
+                proc = sentinel_to_proc[cast(int, sentinel)]
+                with self._process_lock:
+                    if proc.pid in self._expected_exit_pids:
+                        self._expected_exit_pids.remove(proc.pid)
+                        expected_exit = True
+                    elif proc not in self.processes:
+                        expected_exit = True
+                    else:
+                        expected_exit = False
+                        if proc.exitcode != 0 and not self.manager_stopped.is_set():
+                            self.failed_proc_name = proc.name
+                if expected_exit:
+                    proc.join(timeout=1)
+                    self._snapshot_exit_event.set()
+                else:
+                    unexpected_exit = True
+            if unexpected_exit:
                 break
 
-        self.shutdown()
+            while not self.manager_stopped.is_set():
+                with self._process_lock:
+                    replacement_ready = any(
+                        proc.sentinel not in sentinel_to_proc and proc.is_alive()
+                        for proc in self.processes
+                    )
+                    source_resumed = self._snapshot_pid is None and any(
+                        proc.is_alive() for proc in self.processes
+                    )
+                if replacement_ready or source_resumed:
+                    self._replacement_event.clear()
+                    break
+                self._replacement_event.wait(timeout=1)
+
+        if not self.manager_stopped.is_set():
+            self.shutdown()
+
+    def prepare_snapshot(self) -> int:
+        if not self._monitor_ready.wait(timeout=5):
+            raise TimeoutError("timed out waiting for EngineCore liveness monitor")
+        with self._process_lock:
+            if self._snapshot_pid is not None:
+                raise RuntimeError("an EngineCore snapshot is already active")
+            if len(self.processes) != 1:
+                raise RuntimeError("EngineCore snapshots require one root process")
+            proc = self.processes[0]
+            if not proc.is_alive() or proc.pid is None:
+                raise RuntimeError("EngineCore root is not alive")
+            self._snapshot_pid = proc.pid
+            self._expected_exit_pids.add(proc.pid)
+            self._replacement_event.clear()
+            self._snapshot_exit_event.clear()
+            return proc.pid
+
+    def cancel_snapshot(self) -> None:
+        with self._process_lock:
+            if self._snapshot_pid is not None:
+                self._expected_exit_pids.discard(self._snapshot_pid)
+            self._snapshot_pid = None
+            self._replacement_event.set()
+
+    def wait_for_snapshot_exit(self, timeout: float = 30) -> None:
+        if not self._snapshot_exit_event.wait(timeout):
+            raise TimeoutError("timed out waiting for EngineCore source exit")
+
+    def adopt_restored_process(self, pid: int) -> None:
+        with self._process_lock:
+            current = self.processes[0]
+            if self._snapshot_pid is None and current.is_alive():
+                raise RuntimeError("no EngineCore snapshot is active")
+            if current.pid == pid and current.is_alive():
+                self._expected_exit_pids.discard(pid)
+            else:
+                self._monitor_ready.clear()
+                if isinstance(current, _AdoptedProcess):
+                    current.close()
+                self.processes[:] = [
+                    cast(BaseProcess, _AdoptedProcess(pid, current.name))
+                ]
+            self._snapshot_pid = None
+            self._replacement_event.set()
+
+    def discard_restored_process(self) -> None:
+        with self._process_lock:
+            if self._snapshot_pid is not None:
+                raise RuntimeError("EngineCore source snapshot has not exited")
+            if len(self.processes) != 1:
+                raise RuntimeError("EngineCore snapshots require one root process")
+            proc = self.processes[0]
+            pid = proc.pid
+            if pid is not None and proc.is_alive():
+                self._expected_exit_pids.add(pid)
+                self._replacement_event.clear()
+                try:
+                    kill_process_tree(pid)
+                    proc.join(timeout=5)
+                    if proc.is_alive():
+                        raise RuntimeError(
+                            f"EngineCore process tree rooted at PID {pid} did not exit"
+                        )
+                except BaseException:
+                    self._expected_exit_pids.discard(pid)
+                    raise
 
     def sentinels(self) -> list:
-        return [proc.sentinel for proc in self.processes]
+        with self._process_lock:
+            return [proc.sentinel for proc in self.processes]
 
     def finished_procs(self) -> dict[str, int]:
         """Returns dict of proc name -> exit code for any finished procs."""
-        return {
-            proc.name: proc.exitcode
-            for proc in self.processes
-            if proc.exitcode is not None
-        }
+        with self._process_lock:
+            return {
+                proc.name: proc.exitcode
+                for proc in self.processes
+                if proc.exitcode is not None
+            }
+
+
+class _AdoptedProcess:
+    def __init__(self, pid: int, name: str):
+        self.pid = pid
+        self.name = name
+        self._pidfd: int | None = os.pidfd_open(pid)
+
+    @property
+    def sentinel(self) -> int:
+        if self._pidfd is None:
+            raise ValueError("process object is closed")
+        return self._pidfd
+
+    @property
+    def exitcode(self) -> int | None:
+        return None if self.is_alive() else -1
+
+    def is_alive(self) -> bool:
+        return (
+            self._pidfd is not None and not select.select([self._pidfd], [], [], 0)[0]
+        )
+
+    def terminate(self) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(self.pid, signal.SIGTERM)
+
+    def join(self, timeout: float | None = None) -> None:
+        if self._pidfd is not None:
+            select.select([self._pidfd], [], [], timeout)
+
+    def close(self) -> None:
+        pidfd = self._pidfd
+        self._pidfd = None
+        if pidfd is not None:
+            with contextlib.suppress(OSError):
+                os.close(pidfd)
+
+    def __del__(self):
+        self.close()
 
 
 class SignalCallback:
@@ -1106,6 +1267,7 @@ def launch_core_engines(
     executor_class: type[Executor],
     log_stats: bool,
     addresses: EngineZmqAddresses,
+    enable_engine_snapshot: bool = False,
 ) -> Iterator[CoreEngineLaunch]:
     """Launch engine and DP coordinator processes as needed."""
 
@@ -1229,6 +1391,7 @@ def launch_core_engines(
                 start_index=dp_rank,
                 local_start_index=local_start_index or 0,
                 tensor_queue=tensor_queue,
+                enable_engine_snapshot=enable_engine_snapshot,
             )
         else:
             local_engine_manager = None

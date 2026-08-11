@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.queues import Queue
 from threading import Thread
-from typing import Any, TypeAlias, TypeVar
+from typing import Any, TypeAlias, TypeVar, cast
 
 import msgspec
 import msgspec.msgpack
@@ -540,7 +540,11 @@ class MPClient(EngineCoreClient):
             # Elastic EP can remove a rank and later add it back with the same
             # identity. The client input ROUTER needs handover to allow the new
             # engine to replace the dead connection.
-            enable_input_socket_handover = parallel_config.enable_elastic_ep
+            enable_input_socket_handover = (
+                parallel_config.enable_elastic_ep
+                or client_addresses is not None
+                and "snapshot_control_path" in client_addresses
+            )
 
             self.stats_update_address: str | None = None
             tensor_queue: Queue | None = None
@@ -1192,6 +1196,63 @@ class AsyncMPClient(MPClient):
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")
+
+    async def snapshot_detach_io_async(
+        self,
+        nonce: str,
+        generation: int,
+        snapshot_id: str,
+        config_hash: str,
+        marker_path: str,
+        persistence: str,
+    ) -> None:
+        await self.call_utility_async(
+            "snapshot_detach_io",
+            nonce,
+            generation,
+            snapshot_id,
+            config_hash,
+            marker_path,
+            persistence,
+        )
+
+    async def snapshot_wait_for_attach_async(
+        self,
+        nonce: str,
+        generation: int,
+        snapshot_id: str,
+        config_hash: str,
+        root_pid: int,
+    ) -> None:
+        timeout = VLLM_ENGINE_READY_TIMEOUT_S
+        input_socket = cast(zmq.asyncio.Socket, self.input_socket)
+        try:
+            identity, payload = await asyncio.wait_for(
+                input_socket.recv_multipart(), timeout=timeout
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"Timed out after {timeout}s waiting for restored EngineCore attach"
+            ) from exc
+        if identity not in self.core_engines:
+            raise RuntimeError("Restored EngineCore used an unknown identity")
+        response = msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
+        if response.snapshot_nonce != nonce:
+            raise RuntimeError("Restored EngineCore snapshot nonce mismatch")
+        if response.snapshot_generation != generation:
+            raise RuntimeError(
+                "Restored EngineCore generation mismatch: "
+                f"{response.snapshot_generation} != {generation}"
+            )
+        if response.snapshot_id != snapshot_id:
+            raise RuntimeError("Restored EngineCore snapshot id mismatch")
+        if response.snapshot_config_hash != config_hash:
+            raise RuntimeError("Restored EngineCore config hash mismatch")
+        if response.snapshot_root_pid != root_pid:
+            raise RuntimeError(
+                "Restored EngineCore root PID mismatch: "
+                f"{response.snapshot_root_pid} != {root_pid}"
+            )
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")

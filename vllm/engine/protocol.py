@@ -177,6 +177,49 @@ class EngineClient(ABC):
         """Check whether the engine is sleeping"""
         ...
 
+    async def is_idle(self) -> bool:
+        """Return whether frontend and EngineCore have no active requests."""
+        raise NotImplementedError
+
+    async def checkpoint_prepare(
+        self, resource_policy: dict[str, str]
+    ) -> list[dict[str, float]]:
+        """Prepare workers for a process checkpoint."""
+        raise NotImplementedError
+
+    async def checkpoint_restore(
+        self, resource_policy: dict[str, str]
+    ) -> list[dict[str, float]]:
+        """Restore workers after a process checkpoint."""
+        raise NotImplementedError
+
+    async def checkpoint_abort(self) -> list[dict[str, float]]:
+        """Undo worker checkpoint preparation."""
+        raise NotImplementedError
+
+    async def snapshot_detach_io(
+        self,
+        nonce: str,
+        generation: int,
+        snapshot_id: str,
+        config_hash: str,
+        marker_path: str,
+        persistence: str,
+    ) -> None:
+        """Detach EngineCore business sockets before checkpoint."""
+        raise NotImplementedError
+
+    async def snapshot_wait_for_attach(
+        self,
+        nonce: str,
+        generation: int,
+        snapshot_id: str,
+        config_hash: str,
+        root_pid: int,
+    ) -> None:
+        """Wait for and verify restored EngineCore socket attachment."""
+        raise NotImplementedError
+
     @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
