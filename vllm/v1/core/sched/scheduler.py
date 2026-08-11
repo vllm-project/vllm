@@ -2667,6 +2667,17 @@ class Scheduler(SchedulerInterface):
             # This will cache the blocks iff caching is enabled.
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
+            # When prefix caching is off, cache_blocks is a no-op and does not
+            # emit BlockStored. Decode (kv_consumer) still occupies HBM after
+            # remote recv; emit events so external consumers (e.g. Conductor)
+            # can update active_blocks. Skip when caching is on to avoid
+            # double-emitting with cache_full_blocks.
+            ktc = self.vllm_config.kv_transfer_config
+            if ktc is not None and ktc.is_kv_consumer:
+                self.kv_cache_manager.emit_remote_recv_block_stored(
+                    request, request.num_computed_tokens
+                )
+
             # on a full prompt hit, we need to re-compute the last token
             # in order to be able to sample the next token
             if request.num_computed_tokens == request.num_tokens:

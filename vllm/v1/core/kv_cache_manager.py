@@ -770,6 +770,39 @@ class KVCacheManager:
         if self.enable_caching:
             self.coordinator.cache_blocks(request, num_computed_tokens)
 
+    def emit_remote_recv_block_stored(
+        self, request: Request, num_tokens: int
+    ) -> None:
+        """Emit BlockStored for blocks filled by a finished remote KV recv.
+
+        When prefix caching is disabled, ``cache_blocks`` is a no-op and does
+        not emit events, so Decode ``active_blocks`` on external consumers
+        (e.g. KV-Conductor) stays at 0 after PD transfer. This helper emits
+        GPU ``BlockStored`` events without mutating block state.
+
+        Skips when events are disabled, prefix caching is enabled (events
+        already come from ``cache_full_blocks``), or ``num_tokens`` covers no
+        full blocks.
+        """
+        if (
+            not self.enable_kv_cache_events
+            or self.enable_caching
+            or num_tokens <= 0
+        ):
+            return
+
+        for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            block_size = group.kv_cache_spec.block_size
+            num_blocks = num_tokens // block_size
+            if num_blocks <= 0:
+                continue
+            self.block_pool.emit_cached_block_events(
+                request,
+                num_blocks,
+                block_size,
+                group_idx,
+            )
+
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]
     ) -> KVCacheBlocks:
