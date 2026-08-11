@@ -47,6 +47,9 @@ def _make_vllm_config(
     config.cache_config.cache_dtype = torch.float16
     config.model_config.model = "test-model"
     config.model_config.use_mla = False
+    # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
+    # requires the head shard to cover the model's KV heads exactly
+    config.model_config.get_total_num_kv_heads.return_value = 4
     world_size = (
         tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size
     )
@@ -601,6 +604,89 @@ def test_parallelism_agnostic_for_single_full_attention_group():
 )
 def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
     assert not _parallelism_agnostic(kv_cache_groups)
+
+
+def test_canonical_layout_widens_parallelism_agnostic_to_mla():
+    """The canonical layout dedups the TP-replicated MLA latent into one
+    portable copy, so the gate admits MLA — but only when canonical_layout
+    is requested."""
+    mla_groups = [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))]
+    assert not _parallelism_agnostic(mla_groups)
+
+    config = _make_vllm_config(extra_config={"canonical_layout": True})
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=mla_groups,
+    )
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    assert offloading_config.parallel.is_parallelism_agnostic
+    assert offloading_config.canonical_layout
+
+    # hybrid groupings stay out: their non-full-attention layers can only
+    # derive opaque (exact-topology) mappings
+    hybrid_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["l0"], _full_attention_spec()),
+            KVCacheGroupSpec(["l1"], _full_attention_spec()),
+        ],
+    )
+    assert not build_offloading_config(
+        config, hybrid_config
+    ).parallel.is_parallelism_agnostic
+
+
+def test_canonical_layout_certifies_v2_model_runner():
+    """Canonical bytes are certified per layer against live tensor strides at
+    registration, so the static gate must not depend on the model-runner
+    version — the v2 runner is the case the canonical layout exists for."""
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["l0"], _full_attention_spec())],
+    )
+
+    config = _make_vllm_config()
+    config.use_v2_model_runner = True
+    assert not build_offloading_config(
+        config, kv_cache_config
+    ).parallel.is_parallelism_agnostic
+
+    config = _make_vllm_config(extra_config={"canonical_layout": True})
+    config.use_v2_model_runner = True
+    assert build_offloading_config(
+        config, kv_cache_config
+    ).parallel.is_parallelism_agnostic
+
+
+def test_prefer_cross_layer_blocks_yields_to_canonical_layout():
+    """The connector must not request cross-layer blocks under
+    canonical_layout: cross-layer slabs have no per-layer refs to certify."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+        OffloadingConnector,
+    )
+
+    kv_cache_config = _make_kv_cache_config()
+    connector_module = "vllm.distributed.kv_transfer.kv_connector.v1"
+
+    def make_connector(extra_config: dict[str, Any] | None) -> OffloadingConnector:
+        with (
+            patch(f"{connector_module}.offloading_connector.OffloadingSpecFactory"),
+            patch(
+                f"{connector_module}.offloading_connector.OffloadingConnectorScheduler"
+            ),
+        ):
+            return OffloadingConnector(
+                _make_vllm_config(extra_config=extra_config),
+                KVConnectorRole.SCHEDULER,
+                kv_cache_config,
+            )
+
+    assert make_connector(None).prefer_cross_layer_blocks
+    assert not make_connector({"canonical_layout": True}).prefer_cross_layer_blocks
 
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():
