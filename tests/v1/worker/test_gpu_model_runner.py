@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -124,6 +125,34 @@ def get_vllm_config():
         parallel_config=parallel_config,
     )
     return vllm_config
+
+
+@pytest.mark.parametrize("gc_initially_enabled", [True, False])
+def test_freeze_gc_disables_and_restores_automatic_gc(
+    monkeypatch: pytest.MonkeyPatch,
+    gc_initially_enabled: bool,
+):
+    monkeypatch.setenv("VLLM_ENABLE_CUDAGRAPH_GC", "0")
+    original_gc_state = gc.isenabled()
+    try:
+        if gc_initially_enabled:
+            gc.enable()
+        else:
+            gc.disable()
+
+        with (
+            pytest.raises(RuntimeError, match="capture failed"),
+            GPUModelRunner._freeze_gc(),
+        ):
+            assert not gc.isenabled()
+            raise RuntimeError("capture failed")
+
+        assert gc.isenabled() is gc_initially_enabled
+    finally:
+        if original_gc_state:
+            gc.enable()
+        else:
+            gc.disable()
 
 
 @pytest.fixture
@@ -894,6 +923,37 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
         dim=0,
     )
     assert torch.equal(passed_draft_probs, expected_draft_probs)
+
+
+def test_dummy_sampler_run_warms_all_greedy_rejection_sampler(monkeypatch):
+    runner = object.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None)
+    )
+    runner.model = SimpleNamespace(compute_logits=Mock(return_value=torch.randn(3, 8)))
+    runner.sampler = Mock(return_value="sampler_output")
+    runner.sampler.logprobs_mode = "processed_logprobs"
+    runner.speculative_config = SimpleNamespace(
+        rejection_sample_method="standard",
+        draft_sample_method="greedy",
+    )
+    runner.rejection_sampler = Mock()
+    synchronize = Mock()
+    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+
+    output = GPUModelRunner._dummy_sampler_run(runner, torch.randn(3, 4))
+
+    assert output == "sampler_output"
+    assert runner.rejection_sampler.call_count == 2
+    mixed_metadata = runner.rejection_sampler.call_args_list[0].args[3]
+    all_greedy_metadata = runner.rejection_sampler.call_args_list[1].args[3]
+    assert not mixed_metadata.all_greedy
+    assert mixed_metadata.temperature is not None
+    assert all_greedy_metadata.all_greedy
+    assert not all_greedy_metadata.all_random
+    assert all_greedy_metadata.temperature is None
+    synchronize.assert_called_once_with()
 
 
 def test_invalid_draft_suffixes_remain_rejected_in_metadata():
