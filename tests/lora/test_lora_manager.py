@@ -74,6 +74,52 @@ def test_from_lora_tensors(qwen3_lora_files, device):
         assert lora.lora_a.shape[0] == 8
 
 
+def test_from_lora_tensors_propagates_target_parameters(qwen3_lora_files):
+    """A PEFT 0.18+ ``target_parameters`` list flows from PEFTHelper onto the
+    built LoRAModel, so 3D MoE LoRA loading can read it. Older adapters (no
+    target_parameters) yield None.
+    """
+    tensors = load_file(os.path.join(qwen3_lora_files, "adapter_model.safetensors"))
+    peft_helper = PEFTHelper.from_local_dir(
+        qwen3_lora_files, max_position_embeddings=4096
+    )
+
+    peft_helper.target_parameters = ["mlp.experts.gate_up_proj"]
+    lora_model = LoRAModel.from_lora_tensors(1, tensors, peft_helper=peft_helper)
+    assert lora_model.target_parameters == ["mlp.experts.gate_up_proj"]
+    # clone() must preserve it (fresh list, not a shared reference).
+    cloned = lora_model.clone(2)
+    assert cloned.target_parameters == ["mlp.experts.gate_up_proj"]
+    assert cloned.target_parameters is not lora_model.target_parameters
+
+    peft_helper.target_parameters = None
+    legacy = LoRAModel.from_lora_tensors(3, tensors, peft_helper=peft_helper)
+    assert legacy.target_parameters is None
+
+
+@pytest.mark.parametrize(
+    "target_parameters,expected",
+    [
+        (None, False),
+        ([], False),
+        (["q_proj", "v_proj"], False),
+        (["mlp.experts.gate_up_proj"], True),
+        (["model.layers.0.mlp.experts.down_proj"], True),
+        (["mlp.experts.w13_weight", "mlp.experts.w2_weight"], True),
+    ],
+)
+def test_target_parameters_indicates_3d_lora(target_parameters, expected):
+    """The 3D-layout discriminator fires only when target_parameters names a
+    fused MoE expert weight -- matched by suffix so both a bare name and a
+    fully-qualified path resolve. A plain LoRA (or none) must not trip it,
+    otherwise native/dummy MoE adapters would be wrongly transposed.
+    """
+    lora_model = LoRAModel(1, 8, {}, target_parameters=target_parameters)
+    assert (
+        LoRAModelManager._target_parameters_indicates_3d_lora(lora_model) is expected
+    )
+
+
 def create_lora(
     lora_id: int, model: nn.Module, sub_modules: list[str], device: torch.device
 ) -> LoRAModel:
