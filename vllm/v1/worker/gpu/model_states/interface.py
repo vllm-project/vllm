@@ -9,6 +9,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.tasks import GenerationTask
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -37,7 +38,6 @@ class ModelSpecificAttnMetadata:
 
 
 class ModelState(ABC):
-    @abstractmethod
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -45,11 +45,34 @@ class ModelState(ABC):
         encoder_cache: EncoderCache | None,
         device: torch.device,
     ) -> None:
-        raise NotImplementedError
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.model = model
+        self.device = device
 
-    model: nn.Module
-    # Set by mm-capable states; used by the default gather_mm_embeddings().
-    encoder_runner: EncoderRunner
+        self.max_model_len = self.model_config.max_model_len
+        self.max_num_reqs = self.scheduler_config.max_num_seqs
+        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
+        self.dtype = self.model_config.dtype
+
+        self.supports_mm_inputs = encoder_cache is not None
+        if encoder_cache is not None:
+            self.encoder_cache = encoder_cache
+            observability_config = vllm_config.observability_config
+            self.encoder_runner = EncoderRunner(
+                model=self.model,
+                max_num_tokens=self.max_num_tokens,
+                hidden_size=self.inputs_embeds_size,
+                encoder_cache=encoder_cache,
+                dtype=self.dtype,
+                device=self.device,
+                enable_timing=bool(
+                    observability_config
+                    and observability_config.enable_mm_processor_stats
+                ),
+            )
 
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
         from vllm.model_executor.models.interfaces import (
@@ -78,8 +101,32 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
+        """Cudagraph support of attention groups this ModelState builds outside
+        ``init_attn_backend`` (e.g. encoder-only layers).
+
+        Returns the minimum support level and its backend name. The default of
+        ``ALWAYS`` imposes no extra constraint on the runner's cudagraph mode.
+        """
+        return AttentionCGSupport.ALWAYS, None
+
+    def preprocess_state(
+        self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        """Hook run on real batches before the forward pass (after block tables
+        are gathered). Used by mamba "align" prefix caching to pre-copy state
+        across block boundaries. No-op by default."""
+        return None
+
     def postprocess_state(
-        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
         return None
 
@@ -92,17 +139,39 @@ class ModelState(ABC):
     ) -> torch.Tensor | None:
         raise NotImplementedError
 
+    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
+        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+        return None
+
+    def execute_mm_encoder(
+        self, scheduled_encoder_inputs: dict[str, list[int]]
+    ) -> None:
+        """Run the multi-modal encoder and cache its outputs by `mm_hash`.
+
+        The encode half of `get_mm_embeddings`, without the gather, for callers
+        that run no language model.
+        """
+        mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
+            scheduled_encoder_inputs
+        )
+        if mm_kwargs:
+            with self.encoder_runner.timed_encoder_operation(
+                scheduled_encoder_inputs.keys()
+            ):
+                encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
+
     def gather_mm_embeddings(
         self, input_batch: InputBatch, draft_lookahead: int = 0
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        """Gather cached multimodal embeddings for a speculator's draft forward."""
+        """Gather cached multimodal embeddings."""
         return self.encoder_runner.gather_mm_embeddings(
             input_batch.req_ids,
             input_batch.num_tokens,
             input_batch.num_scheduled_tokens,
             input_batch.query_start_loc_np,
             input_batch.prefill_len_np,
-            input_batch.num_computed_prefill_tokens_np,
+            input_batch.num_computed_tokens_np,
             draft_lookahead=draft_lookahead,
         )
 

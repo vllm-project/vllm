@@ -1,15 +1,93 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
 use tonic::Status;
+use url::Url;
 use uuid::Uuid;
-use vllm_engine_core_client::protocol::{StopReason, StructuredOutputsParams};
+use vllm_chat::MediaContentPart;
+use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, SamplingParams,
     TextDecodeOptions, TextRequest,
 };
 
 use super::pb;
+
+pub fn media_parts_from_request(
+    media: Vec<pb::MediaItem>,
+) -> Result<Vec<MediaContentPart>, Status> {
+    let mut parts = Vec::with_capacity(media.len());
+    for (index, item) in media.into_iter().enumerate() {
+        match item.modality() {
+            pb::Modality::Image => {}
+            pb::Modality::Unspecified => {
+                return Err(Status::invalid_argument(format!(
+                    "media[{index}].modality is required"
+                )));
+            }
+            other => {
+                return Err(Status::unimplemented(format!(
+                    "media[{index}].modality {other:?} is not supported by the gRPC service"
+                )));
+            }
+        }
+        let uuid = (!item.uuid.is_empty()).then_some(item.uuid);
+        let mime_type = (!item.mime_type.is_empty()).then_some(item.mime_type);
+        let part = match item.source {
+            Some(pb::media_item::Source::Url(url)) => {
+                validate_media_uri(index, "url", &url, &["http", "https"])?;
+                MediaContentPart::ImageUrl {
+                    url,
+                    detail: None,
+                    uuid,
+                }
+            }
+            Some(pb::media_item::Source::DataUri(uri)) => {
+                validate_media_uri(index, "data_uri", &uri, &["data"])?;
+                MediaContentPart::ImageUrl {
+                    url: uri,
+                    detail: None,
+                    uuid,
+                }
+            }
+            Some(pb::media_item::Source::RawBytes(bytes)) => MediaContentPart::ImageData {
+                data: bytes,
+                mime_type,
+                uuid,
+                detail: None,
+            },
+            None => {
+                return Err(Status::invalid_argument(format!(
+                    "media[{index}].source is required"
+                )));
+            }
+        };
+        parts.push(part);
+    }
+    Ok(parts)
+}
+
+fn validate_media_uri(
+    index: usize,
+    field: &str,
+    value: &str,
+    allowed_schemes: &[&str],
+) -> Result<(), Status> {
+    let uri = Url::parse(value).map_err(|_| {
+        Status::invalid_argument(format!("media[{index}].{field} is not a valid URI"))
+    })?;
+    if !allowed_schemes.contains(&uri.scheme()) {
+        return Err(Status::invalid_argument(format!(
+            "media[{index}].{field} must use the {} scheme",
+            allowed_schemes.join(" or ")
+        )));
+    }
+    Ok(())
+}
 
 // ========================================================================================
 // Request conversion
@@ -49,6 +127,7 @@ pub fn to_text_request(
     } else {
         req.request_id
     };
+    let session_id = req.session_id.filter(|s| !s.is_empty());
 
     let sampling = req.sampling.as_ref();
     let decoding = req.decoding.as_ref();
@@ -67,6 +146,11 @@ pub fn to_text_request(
             let kv_json = proto_struct_to_json(kv_struct);
             let map = sampling_params.vllm_xargs.get_or_insert_with(Default::default);
             map.insert("kv_transfer_params".to_string(), kv_json);
+        }
+        if let Some(ec_struct) = kv.ec_transfer_params.as_ref() {
+            let ec_json = proto_struct_to_json(ec_struct);
+            let map = sampling_params.vllm_xargs.get_or_insert_with(Default::default);
+            map.insert("ec_transfer_params".to_string(), ec_json);
         }
         if kv.bypass_prefix_cache {
             sampling_params.skip_reading_prefix_cache = Some(true);
@@ -91,8 +175,10 @@ pub fn to_text_request(
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
         data_parallel_rank: None,
+        session_id,
         reasoning_parser_kwargs: None,
         lora_request: None,
+        arrival_time: None,
     })
 }
 
@@ -230,32 +316,18 @@ fn convert_structured_output(
         StructuredOutput::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
-            StructuredOutputsParams {
-                json: Some(json),
-                ..Default::default()
-            }
+            StructuredOutputsParams::json(json)
         }
-        StructuredOutput::Regex(regex) => StructuredOutputsParams {
-            regex: Some(regex.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::Choice(choices) => StructuredOutputsParams {
-            choice: Some(choices.choices.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::Grammar(grammar) => StructuredOutputsParams {
-            grammar: Some(grammar.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::JsonObject(true) => StructuredOutputsParams {
-            json_object: Some(true),
-            ..Default::default()
-        },
+        StructuredOutput::Regex(regex) => StructuredOutputsParams::regex(regex.clone()),
+        StructuredOutput::Choice(choices) => {
+            StructuredOutputsParams::choice(choices.choices.clone())
+        }
+        StructuredOutput::Grammar(grammar) => StructuredOutputsParams::grammar(grammar.clone()),
+        StructuredOutput::JsonObject(true) => StructuredOutputsParams::json_object(),
         StructuredOutput::JsonObject(false) => return Ok(None),
-        StructuredOutput::StructuralTag(tag) => StructuredOutputsParams {
-            structural_tag: Some(tag.clone()),
-            ..Default::default()
-        },
+        StructuredOutput::StructuralTag(tag) => {
+            StructuredOutputsParams::structural_tag(tag.clone())
+        }
     };
     Ok(Some(params))
 }
@@ -345,7 +417,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Abort | FinishReason::Error | FinishReason::Repetition => {
+        FinishReason::Abort | FinishReason::Error | FinishReason::Repetition(_) => {
             (PbFinishReason::Aborted as i32, None)
         }
     };
@@ -355,6 +427,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
         finish_reason,
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
+        ec_transfer_params: finished.ec_transfer_params.as_ref().and_then(json_to_proto_struct),
     }
 }
 
@@ -502,7 +575,7 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
-    use vllm_engine_core_client::protocol::StopReason;
+    use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{FinishReason, Finished, Prompt};
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
@@ -598,6 +671,7 @@ mod tests {
             },
             finish_reason: reason,
             kv_transfer_params: None,
+            ec_transfer_params: None,
         }
     }
 

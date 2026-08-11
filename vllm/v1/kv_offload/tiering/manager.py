@@ -20,8 +20,10 @@ Key Design Principles:
    protecting blocks from eviction until complete_read() is called
 """
 
+import time
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 from typing_extensions import override
@@ -40,15 +42,19 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    ScheduleEndContext,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
-    JobMetadata,
+    JobResult,
+    ParentManager,
     SecondaryTierManager,
+    TransferJob,
 )
+from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 
 logger = init_logger(__name__)
 
@@ -67,7 +73,12 @@ class RequestState:
     req_context: ReqContext
     pending_primary_stores: int = 0
     is_finished: bool = False
-    request_level_tiers: set[SecondaryTierManager] | None = None
+    request_level_tiers: set[int] | None = None
+
+
+class JobMetadata(NamedTuple):
+    transfer_job: TransferJob
+    tier_idx: int
 
 
 class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
@@ -85,11 +96,13 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         num_blocks: int,
         mmap_region: SharedOffloadRegion,
         cache_policy: str = "lru",
+        cache_policy_module_path: str | None = None,
         enable_events: bool = False,
     ):
         super().__init__(
             num_blocks=num_blocks,
-            cache_policy=cache_policy,  # type: ignore[arg-type]
+            cache_policy=cache_policy,
+            cache_policy_module_path=cache_policy_module_path,
             enable_events=enable_events,
         )
         self._mmap_region = mmap_region
@@ -119,6 +132,37 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self._mmap_region.cleanup()
 
 
+class _SecondaryTierFacingParent(ParentManager):
+    """Wrapper that implements ParentManager by delegating to the
+    TieringOffloadingManager with exclude_tier_idx set to the origin tier."""
+
+    __slots__ = ("_m", "_origin_idx")
+
+    def __init__(
+        self,
+        manager: "TieringOffloadingManager",
+        tier_idx: int,
+    ):
+        self._m = manager
+        self._origin_idx = tier_idx
+
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return self._m.on_new_request(req_context, exclude_tier_idx=self._origin_idx)
+
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        return self._m.lookup(key, req_context, exclude_tier_idx=self._origin_idx)
+
+    def create_store_job(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> TransferJob:
+        return self._m.create_store_job(keys, req_context, self._origin_idx)
+
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        return self._m.on_request_finished(
+            req_context, exclude_tier_idx=self._origin_idx
+        )
+
+
 class TieringOffloadingManager(OffloadingManager):
     """
     Orchestrates multi-tier KV cache offloading.
@@ -139,7 +183,6 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
-        enable_events: bool = False,
     ):
         """
         Initialize the TieringOffloadingManager.
@@ -148,27 +191,29 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
-            enable_events: Whether to track offloading events
         """
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
 
         self._job_id_counter: int = 0
-        self.events: list[OffloadingEvent] | None = [] if enable_events else None
-
         # Job tracking: maps job_id to metadata for all in-flight transfers.
-        # JobMetadata.is_promotion distinguishes direction:
+        # TransferJob.is_promotion distinguishes direction:
         #   True:  secondary → primary (promotion)
         #   False: primary → secondary (cascade)
-        self._transfer_jobs: dict[JobId, JobMetadata] = {}
+        self._jobs: dict[JobId, JobMetadata] = {}
+        primary_view = self.primary_tier.get_kv_memoryview()
+        assert primary_view.strides is not None
+        self._metrics = TieringMetricsTracker(
+            tier_types=[tier.tier_type for tier in self.secondary_tiers],
+            num_primary_blocks=self.primary_tier._num_blocks,
+            primary_block_size=primary_view.strides[0],
+        )
 
         # Pending promotion requests accumulated during lookup() calls; flushed
         # as one batched submit_load() per (tier, request) in on_schedule_end().
-        # Outer key: tier. Inner key: req_context.req_id — the same ReqContext
+        # Outer key: tier index. Inner key: req_context.req_id — the same ReqContext
         # object is reused for all block lookups of a given request per engine step.
-        self._pending_load_submissions: dict[
-            SecondaryTierManager, dict[str, PendingPromotion]
-        ] = {}
+        self._pending_load_submissions: dict[int, dict[str, PendingPromotion]] = {}
 
         # Gate for once-per-step execution of _maybe_process_finished_jobs().
         # Reset at the end of each step in on_schedule_end().
@@ -179,11 +224,29 @@ class TieringOffloadingManager(OffloadingManager):
         # complete_store(), since complete_store() can still submit cascades.
         self._req_state: dict[str, RequestState] = {}
 
+        # Cached ParentManager wrappers for each secondary tier.
+        self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
+            tier: _SecondaryTierFacingParent(self, tier_idx)
+            for tier_idx, tier in enumerate(self.secondary_tiers)
+        }
+
+    @property
+    def _transfer_jobs(self) -> dict[JobId, JobMetadata]:
+        return self._jobs
+
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
         job_id = self._job_id_counter
         self._job_id_counter += 1
         return job_id
+
+    def _register_job(self, transfer_job: TransferJob, tier_idx: int) -> None:
+        job_metadata = JobMetadata(transfer_job, tier_idx)
+        self._jobs[transfer_job.job_id] = job_metadata
+        self._metrics.on_job_registered(job_metadata)
+
+    def _pop_job(self, job_id: JobId) -> JobMetadata | None:
+        return self._jobs.pop(job_id, None)
 
     def _maybe_process_finished_jobs(self):
         """
@@ -197,6 +260,40 @@ class TieringOffloadingManager(OffloadingManager):
             return
         self._processed_jobs_this_step = True
         self._process_finished_jobs()
+
+    def _complete_promotion(
+        self, job_metadata: JobMetadata, completed_job: JobResult
+    ) -> None:
+        transfer_job = job_metadata.transfer_job
+        successful_keys = completed_job.successful_keys
+        failed_keys: Collection[OffloadKey]
+        if completed_job.success:
+            successful_keys = transfer_job.keys
+            failed_keys = ()
+        elif successful_keys:
+            failed_keys_set = set(transfer_job.keys)
+            assert failed_keys_set.issuperset(successful_keys), (
+                f"Finished promotion job_id {completed_job.job_id} "
+                "reported unknown successful keys"
+            )
+            failed_keys_set.difference_update(successful_keys)
+            failed_keys = failed_keys_set
+        else:
+            successful_keys = ()
+            failed_keys = transfer_job.keys
+
+        if successful_keys:
+            self.primary_tier.complete_write(
+                successful_keys,
+                transfer_job.req_context,
+                True,
+            )
+        if failed_keys:
+            self.primary_tier.complete_write(
+                failed_keys,
+                transfer_job.req_context,
+                False,
+            )
 
     def _process_finished_jobs(self):
         """
@@ -212,29 +309,37 @@ class TieringOffloadingManager(OffloadingManager):
         for i, tier in enumerate(self.secondary_tiers):
             for completed_job in tier.get_finished_jobs():
                 job_id = completed_job.job_id
-                job_metadata = self._transfer_jobs.pop(job_id, None)
+                job_metadata = self._pop_job(job_id)
                 assert job_metadata is not None, (
                     f"Finished job_id {job_id} from tier #{i}"
-                    f" ({tier.tier_type}) not in _transfer_jobs"
+                    f" ({tier.tier_type}) not in _jobs"
                 )
+                assert job_metadata.tier_idx == i, (
+                    f"Finished job_id {job_id} reported by tier #{i}"
+                    f" but belongs to tier #{job_metadata.tier_idx}"
+                )
+                transfer_job = job_metadata.transfer_job
+                self._metrics.on_job_finished(job_metadata, completed_job)
 
-                if job_metadata.is_promotion:
+                if transfer_job.is_promotion:
                     # secondary→primary transfer (promotion) completed.
                     # Make blocks available in primary tier.
-                    self.primary_tier.complete_write(
-                        job_metadata.keys,
-                        job_metadata.req_context,
-                        completed_job.success,
-                    )
+                    self._complete_promotion(job_metadata, completed_job)
                 else:
                     # primary→secondary transfer completed.
                     # Decrement ref_cnt on primary blocks.
                     self.primary_tier.complete_read(
-                        job_metadata.keys, job_metadata.req_context
+                        transfer_job.keys, transfer_job.req_context
                     )
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+    def lookup(
+        self,
+        key: OffloadKey,
+        req_context: ReqContext,
+        *,
+        exclude_tier_idx: int | None = None,
+    ) -> LookupResult:
         """
         Check whether a single block is offloaded and ready.
 
@@ -256,23 +361,56 @@ class TieringOffloadingManager(OffloadingManager):
             MISS      — block not found in any tier, or primary is full
                         and cannot accept a promotion.
         """
+        # Poll first so a promotion that finished since the last call is
+        # already reflected as HIT (not stale HIT_PENDING/MISS) below, and
+        # so blocks freed by cascade or promotion completions are evictable
+        # in time for a promotion this lookup may initiate.
         self._maybe_process_finished_jobs()
 
+        start_time = time.monotonic()
         primary_hit = self.primary_tier.lookup(key, req_context)
+        lookup_duration = time.monotonic() - start_time
+        self._metrics.on_lookup(
+            req_context,
+            key,
+            self._metrics.primary_tier_label,
+            primary_hit,
+            lookup_duration,
+        )
         if primary_hit is LookupResult.HIT:
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
 
         any_retry = False
-        for tier in self.secondary_tiers:
+        for i, tier in enumerate(self.secondary_tiers):
+            if i == exclude_tier_idx:
+                continue
+            if not req_context.load_tier_filter.allows(tier.medium, tier.locality):
+                continue
+            labelvalues = self._metrics.tier_label(i)
+            start_time = time.monotonic()
             result = tier.lookup(key, req_context)
+            lookup_duration = time.monotonic() - start_time
             if result is LookupResult.HIT:
-                if not self._initiate_promotion(tier, key, req_context):
-                    return LookupResult.MISS
-                return LookupResult.RETRY
+                self._metrics.on_lookup(
+                    req_context,
+                    key,
+                    labelvalues,
+                    result,
+                    lookup_duration,
+                )
+                promoted = self._initiate_promotion(i, key, req_context)
+                return LookupResult.MISS if not promoted else LookupResult.RETRY
             if result is LookupResult.RETRY:
                 any_retry = True
+            self._metrics.on_lookup(
+                req_context,
+                key,
+                labelvalues,
+                result,
+                lookup_duration,
+            )
 
         if any_retry:
             return LookupResult.RETRY
@@ -280,7 +418,7 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _initiate_promotion(
         self,
-        tier: SecondaryTierManager,
+        tier_idx: int,
         key: OffloadKey,
         req_context: ReqContext,
     ) -> bool:
@@ -294,7 +432,7 @@ class TieringOffloadingManager(OffloadingManager):
         batched job.
 
         Args:
-            tier: The secondary tier to promote from
+            tier_idx: The secondary tier index to promote from
             key: Block to promote
             req_context: Per-request context forwarded to primary.prepare_write().
 
@@ -310,13 +448,14 @@ class TieringOffloadingManager(OffloadingManager):
         if primary_write_result is None:
             # Primary tier is full; caller should treat the block as unavailable
             # rather than retrying indefinitely.
+            self._metrics.on_promotion_allocation_failure()
             return False
 
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
         # Defer submit_load to on_schedule_end(). Group by (tier, request) so
         # each request's blocks are submitted as one batched job per tier.
-        tier_pending = self._pending_load_submissions.setdefault(tier, {})
+        tier_pending = self._pending_load_submissions.setdefault(tier_idx, {})
         ctx_id = req_context.req_id
         if ctx_id not in tier_pending:
             tier_pending[ctx_id] = PendingPromotion(
@@ -336,17 +475,18 @@ class TieringOffloadingManager(OffloadingManager):
         if not self._pending_load_submissions:
             return
 
-        for tier, pending_by_ctx in self._pending_load_submissions.items():
+        for tier_idx, pending_by_ctx in self._pending_load_submissions.items():
+            tier = self.secondary_tiers[tier_idx]
             for entry in pending_by_ctx.values():
                 job_id = self._next_job_id()
-                job_metadata = JobMetadata(
+                job_metadata = TransferJob(
                     job_id=job_id,
                     keys=entry.keys,
                     block_ids=np.array(entry.block_ids, dtype=np.int64),
                     is_promotion=True,
                     req_context=entry.req_context,
                 )
-                self._transfer_jobs[job_id] = job_metadata
+                self._register_job(job_metadata, tier_idx)
                 tier.submit_load(job_metadata)
 
         self._pending_load_submissions.clear()
@@ -358,8 +498,8 @@ class TieringOffloadingManager(OffloadingManager):
         """
         Prepare blocks to be loaded from primary tier to GPU.
 
-        CRITICAL: This method calls _maybe_process_finished_jobs() FIRST to ensure
-        that any completed promotions have been finalized and blocks are ready.
+        Callers only pass keys already confirmed HIT by lookup() earlier this
+        step.
 
         This increments ref_cnt on the blocks in the primary tier, protecting
         them from eviction during the transfer.
@@ -371,9 +511,6 @@ class TieringOffloadingManager(OffloadingManager):
         Returns:
             LoadStoreSpec for reading from primary tier.
         """
-        # Process completed promotions to ensure blocks are ready
-        self._maybe_process_finished_jobs()
-
         return self.primary_tier.prepare_load(keys, req_context)
 
     @override
@@ -426,8 +563,15 @@ class TieringOffloadingManager(OffloadingManager):
             evicted, or None if store cannot proceed.
         """
         # Step 1: Poll for completed async jobs FIRST
-        # This decrements ref_cnt on primary blocks that have been
-        # successfully transferred to secondary tiers.
+        # _process_finished_jobs() handles two kinds of completions here:
+        #  - Cascade completions (store to a secondary tier, either a local
+        #    cascade or a store job created for a remote requester via
+        #    create_store_job()): decrements ref_cnt on the primary blocks
+        #    that were read, making them evictable again once ref_cnt hits 0.
+        #  - Promotion completions (secondary->primary loads): sets a
+        #    not-yet-ready block's ref_cnt from -1 to 0 via complete_write(),
+        #    making it evictable for the first time.
+        # Both must be accounted for before the eviction decision below.
         self._maybe_process_finished_jobs()
 
         # Step 2: Store to primary tier (new blocks only).
@@ -461,7 +605,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         keys: Sequence[OffloadKey],
         req_context: ReqContext,
-        request_level_tiers: set[SecondaryTierManager],
+        request_level_tiers: set[int],
     ) -> None:
         """
         For tiers that requested request-level policy, submit_store() for
@@ -476,21 +620,9 @@ class TieringOffloadingManager(OffloadingManager):
         if not ready_keys:
             return
 
-        for tier in request_level_tiers:
-            primary_blocks_spec = self.primary_tier.prepare_read(
-                ready_keys, req_context
-            )
-
-            job_id = self._next_job_id()
-            assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
-            job_metadata = JobMetadata(
-                job_id=job_id,
-                keys=ready_keys,
-                block_ids=primary_blocks_spec.block_ids,
-                is_promotion=False,
-                req_context=req_context,
-            )
-            self._transfer_jobs[job_id] = job_metadata
+        for tier_idx in request_level_tiers:
+            job_metadata = self.create_store_job(ready_keys, req_context, tier_idx)
+            tier = self.secondary_tiers[tier_idx]
             tier.submit_store(job_metadata)
 
     @override
@@ -499,7 +631,7 @@ class TieringOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         success: bool = True,
-    ):
+    ) -> None:
         """
         Mark blocks as done storing from GPU to primary tier.
 
@@ -527,23 +659,8 @@ class TieringOffloadingManager(OffloadingManager):
             # LoadStoreSpec AND to increment ref_cnt (protecting blocks from
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
-            for tier in self.secondary_tiers:
-                primary_blocks_spec = self.primary_tier.prepare_read(keys, req_context)
-
-                # Submit async store job: primary→secondary
-                job_id = self._next_job_id()
-
-                # Track this store job
-                assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
-                job_metadata = JobMetadata(
-                    job_id=job_id,
-                    keys=keys,
-                    block_ids=primary_blocks_spec.block_ids,
-                    is_promotion=False,
-                    req_context=req_context,
-                )
-                self._transfer_jobs[job_id] = job_metadata
-
+            for tier_idx, tier in enumerate(self.secondary_tiers):
+                job_metadata = self.create_store_job(keys, req_context, tier_idx)
                 tier.submit_store(job_metadata)
 
         # Note: The async transfers are now in flight. Their completion is
@@ -554,8 +671,41 @@ class TieringOffloadingManager(OffloadingManager):
         state.pending_primary_stores -= 1
         self._maybe_finalize_request(req_id)
 
+    def create_store_job(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        tier_idx: int = 0,
+    ) -> TransferJob:
+        """Pin blocks in the primary tier and create a tracked store job.
+
+        Calls prepare_read() to increment ref_cnt (protecting blocks
+        from eviction during the async transfer), allocates a job ID,
+        and registers the job in _jobs.
+
+        The caller is responsible for the actual data transfer and
+        reporting completion via get_finished_jobs().
+        """
+        primary_blocks_spec = self.primary_tier.prepare_read(keys, req_context)
+        assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
+        job_id = self._next_job_id()
+        job_metadata = TransferJob(
+            job_id=job_id,
+            keys=keys,
+            block_ids=primary_blocks_spec.block_ids,
+            is_promotion=False,
+            req_context=req_context,
+        )
+        self._register_job(job_metadata, tier_idx)
+        return job_metadata
+
     @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+    def on_new_request(
+        self,
+        req_context: ReqContext,
+        *,
+        exclude_tier_idx: int | None = None,
+    ) -> RequestOffloadingContext:
         """
         Query each secondary tier for its offload policy preference.
 
@@ -563,12 +713,15 @@ class TieringOffloadingManager(OffloadingManager):
         Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
         """
         state = RequestState(req_context=req_context)
-        for tier in self.secondary_tiers:
+        self._metrics.on_new_request(req_context)
+        for tier_idx, tier in enumerate(self.secondary_tiers):
+            if tier_idx == exclude_tier_idx:
+                continue
             tier_ctx = tier.on_new_request(req_context)
             if tier_ctx.policy == OffloadPolicy.REQUEST_LEVEL:
                 if state.request_level_tiers is None:
                     state.request_level_tiers = set()
-                state.request_level_tiers.add(tier)
+                state.request_level_tiers.add(tier_idx)
         self._req_state[req_context.req_id] = state
 
         policy = (
@@ -579,13 +732,22 @@ class TieringOffloadingManager(OffloadingManager):
         return RequestOffloadingContext(policy=policy)
 
     @override
-    def on_request_finished(self, req_context: ReqContext) -> None:
+    def on_request_finished(
+        self,
+        req_context: ReqContext,
+        *,
+        exclude_tier_idx: int | None = None,
+    ) -> None:
         self.primary_tier.on_request_finished(req_context)
         state = self._req_state[req_context.req_id]
         state.is_finished = True
-        self._maybe_finalize_request(req_context.req_id)
+        self._maybe_finalize_request(req_context.req_id, exclude_tier_idx)
 
-    def _maybe_finalize_request(self, req_id: str) -> None:
+    def _maybe_finalize_request(
+        self,
+        req_id: str,
+        exclude_tier_idx: int | None = None,
+    ) -> None:
         """Finalize secondary tiers once no more store cascades can be submitted.
 
         Finalization means forwarding on_request_finished() to secondary tiers.
@@ -598,45 +760,62 @@ class TieringOffloadingManager(OffloadingManager):
         if state.pending_primary_stores != 0:
             return
 
-        for tier in self.secondary_tiers:
+        for tier_idx, tier in enumerate(self.secondary_tiers):
+            if tier_idx == exclude_tier_idx:
+                continue
             tier.on_request_finished(state.req_context)
+        self._metrics.on_request_finished(state.req_context)
         del self._req_state[req_id]
 
     @override
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """End-of-schedule hook: process finished jobs, flush deferred
         promotions, and reset the per-step gate.
 
         Called once per scheduler step from
         OffloadingConnectorScheduler.build_connector_meta().
         """
+        # Catch-all poll: guarantees jobs are processed even on steps where
+        # lookup()/prepare_store() were never called (e.g. no requests
+        # scheduled but a tier still has_pending_work()).
         self._maybe_process_finished_jobs()
+
+        for tier in self.secondary_tiers:
+            tier.serve_external_requests(self._tier_parents[tier])
+
+        # Reset the per-step gate AFTER serve_external_requests so that
+        # lookup() calls within it skip redundant _process_finished_jobs().
         self._processed_jobs_this_step = False
+
         self._flush_pending_promotions()
         for tier in self.secondary_tiers:
-            tier.on_schedule_end()
+            tier.on_schedule_end(context)
+
+        for req_id in context.new_req_ids:
+            state = self._req_state.get(req_id)
+            if state is None:
+                continue
+            self._metrics.on_request_allocated(state.req_context)
 
     @override
     def has_pending_work(self) -> bool:
         # In-flight primary<->secondary transfers (pending promotions are
         # translated to transfer jobs in on_schedule_end), plus any work the
         # secondary tiers themselves still have outstanding.
-        return bool(self._transfer_jobs) or any(
+        return bool(self._jobs) or any(
             tier.has_pending_work() for tier in self.secondary_tiers
         )
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
-        """Yield offloading events collected since the last call.
+        """Yield events owned by the primary and secondary tiers.
 
         Yields:
-            New OffloadingEvents collected since the last call.
+            New OffloadingEvents collected by each tier since the last call.
         """
-        if self.events is not None:
-            yield from self.events
-            self.events.clear()
-
         yield from self.primary_tier.take_events()
+        for tier in self.secondary_tiers:
+            yield from tier.take_events()
 
     @override
     def reset_cache(self) -> None:
@@ -658,11 +837,13 @@ class TieringOffloadingManager(OffloadingManager):
         # All tier I/O has stopped; consume their completion notifications
         # so manager bookkeeping is consistent before the primary reset.
         self._process_finished_jobs()
+        assert not self._jobs
 
         # Deferred promotion submissions reserve primary slots that the
         # reset below invalidates; their submit_load() has not yet been
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
+        self._metrics.assert_idle()
 
         finished_req_ids = []
         for req_id, state in self._req_state.items():
@@ -671,6 +852,7 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             for tier in self.secondary_tiers:
                 tier.on_request_finished(state.req_context)
+            self._metrics.on_request_finished(state.req_context)
             finished_req_ids.append(req_id)
 
         self.primary_tier.reset_cache()
@@ -685,6 +867,13 @@ class TieringOffloadingManager(OffloadingManager):
 
         if stats is not None and stats.is_empty():
             stats = None
+
+        metrics_stats = self._metrics.take_stats()
+        if metrics_stats is not None:
+            if stats is None:
+                stats = metrics_stats
+            else:
+                stats.aggregate(metrics_stats)
 
         for tier in self.secondary_tiers:
             tier_stats = tier.get_stats()

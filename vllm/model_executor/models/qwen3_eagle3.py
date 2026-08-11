@@ -17,15 +17,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.qwen3 import Qwen3DecoderLayer, Qwen3ForCausalLM
 from vllm.multimodal.inputs import NestedTensors
 
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     get_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
@@ -46,11 +43,22 @@ class Qwen3Eagle3DecoderLayer(Qwen3DecoderLayer):
         cache_config = vllm_config.cache_config
         quant_config = get_draft_quant_config(vllm_config)
 
+        # Resolve per-layer sliding window from draft config
+        sliding_window = None
+        layer_types = getattr(config, "layer_types", None)
+        if (
+            layer_types
+            and layer_idx < len(layer_types)
+            and layer_types[layer_idx] == "sliding_attention"
+        ):
+            sliding_window = getattr(config, "sliding_window", None)
+
         super().__init__(
             config=config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,
+            per_layer_sliding_window=sliding_window,
         )
 
         # First layer uses 2*hidden_size (embeds + hidden_states concatenated)
@@ -132,6 +140,17 @@ class Qwen3Eagle3DecoderLayer(Qwen3DecoderLayer):
     }
 )
 class Qwen3Eagle3Model(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={"midlayer.": "layers.0."},
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
+    )
+
     def __init__(
         self,
         *,
@@ -256,38 +275,8 @@ class Qwen3Eagle3Model(nn.Module):
         return hidden_states, aux_output
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "midlayer." in name:
-                name = name.replace("midlayer.", "layers.0.")
-            # Remapping the name FP8 kv-scale or zero point.
-            if "scale" in name or "zero_point" in name:
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):

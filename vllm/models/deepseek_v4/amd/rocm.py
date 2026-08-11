@@ -6,6 +6,10 @@ from typing import cast
 
 import torch
 
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
@@ -272,153 +276,6 @@ def compute_global_topk_ragged_indices_and_indptr(
     return global_topk_ragged, topk_indptr, topk_lens
 
 
-@triton.jit
-def _compute_combined_lens_kernel(
-    combined_lens_ptr,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    TOP_K: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    WINDOW_SIZE: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-    worker_id = tl.program_id(1)
-    num_workers = tl.num_programs(1)
-
-    base = tl.load(query_start_loc_ptr)
-    query_start = tl.load(query_start_loc_ptr + batch_idx) - base
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
-    query_len = query_end - query_start
-    seq_len = tl.load(seq_lens_ptr + batch_idx)
-    start_pos = seq_len - query_len
-
-    for token_idx in range(query_start + worker_id, query_end, num_workers):
-        token_idx_in_query = token_idx - query_start
-        pos = start_pos + token_idx_in_query
-        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
-        tl.store(combined_lens_ptr + token_idx, topk_len + swa_len)
-
-
-@triton.jit
-def _combine_topk_swa_indices_ragged_kernel(
-    combined_ragged_ptr,
-    combined_indptr_ptr,
-    topk_indices_ptr,
-    topk_indices_stride,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    gather_lens_ptr,
-    M,
-    N,
-    topk_width,
-    TOP_K: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    WINDOW_SIZE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-    worker_id = tl.program_id(1)
-    block_idx = tl.program_id(2)
-    num_workers = tl.num_programs(1)
-
-    base = tl.load(query_start_loc_ptr)
-    query_start = tl.load(query_start_loc_ptr + batch_idx) - base
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
-    query_len = query_end - query_start
-    seq_len = tl.load(seq_lens_ptr + batch_idx)
-    gather_len = tl.load(gather_lens_ptr + batch_idx)
-    start_pos = seq_len - query_len
-    gather_start = seq_len - gather_len
-
-    for token_idx in range(query_start + worker_id, query_end, num_workers):
-        token_idx_in_query = token_idx - query_start
-        pos = start_pos + token_idx_in_query
-        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
-        combined_len = topk_len + swa_len
-
-        offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        if block_idx * BLOCK_SIZE < combined_len:
-            out_start = tl.load(combined_indptr_ptr + token_idx)
-            topk_mask = (offset < topk_len) & (offset < topk_width)
-            topk_vals = tl.load(
-                topk_indices_ptr + token_idx * topk_indices_stride + offset,
-                mask=topk_mask,
-                other=-1,
-            )
-            tl.store(
-                combined_ragged_ptr + out_start + offset,
-                topk_vals + M * batch_idx,
-                mask=topk_mask,
-            )
-
-            swa_offset = offset - topk_len
-            swa_mask = (offset >= topk_len) & (swa_offset < swa_len)
-            tl.store(
-                combined_ragged_ptr + out_start + offset,
-                M * batch_idx + N + swa_offset + pos - swa_len + 1 - gather_start,
-                mask=swa_mask,
-            )
-
-
-def combine_topk_swa_indices_ragged(
-    topk_indices: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    seq_lens: torch.Tensor,
-    gather_lens: torch.Tensor,
-    window_size: int,
-    compress_ratio: int,
-    topk: int,
-    M: int,
-    N: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
-    num_tokens = topk_indices.shape[0]
-    num_reqs = seq_lens.shape[0]
-    combined_lens = torch.empty(
-        num_tokens, dtype=torch.int32, device=topk_indices.device
-    )
-
-    num_workers = 128
-    _compute_combined_lens_kernel[(num_reqs, num_workers)](
-        combined_lens,
-        query_start_loc,
-        seq_lens,
-        TOP_K=topk,
-        COMPRESS_RATIO=compress_ratio,
-        WINDOW_SIZE=window_size,
-    )
-
-    combined_indptr = _build_indptr_from_lengths(combined_lens)
-    combined_ragged = torch.empty(
-        num_tokens * (topk + window_size),
-        dtype=torch.int32,
-        device=topk_indices.device,
-    )
-    if combined_ragged.numel() > 0:
-        block = 128
-        _combine_topk_swa_indices_ragged_kernel[
-            (num_reqs, num_workers, triton.cdiv(topk + window_size, block))
-        ](
-            combined_ragged,
-            combined_indptr,
-            topk_indices,
-            topk_indices.stride(0),
-            query_start_loc,
-            seq_lens,
-            gather_lens,
-            M,
-            N,
-            topk_indices.shape[-1],
-            TOP_K=topk,
-            COMPRESS_RATIO=compress_ratio,
-            WINDOW_SIZE=window_size,
-            BLOCK_SIZE=block,
-        )
-    return combined_ragged, combined_indptr, combined_lens
-
-
 def _copy_ragged_to_graph_buffers(
     ragged_indices: torch.Tensor,
     ragged_indptr: torch.Tensor,
@@ -515,11 +372,19 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4FlashMLAMetadataBuil
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    # Keep fused multi-step decode disabled until update_draft_decode_metadata()
+    # also refreshes the ROCm-specific ragged SWA indices and indptrs.
+    supports_draft_decode_metadata_update = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        # The non-causal (DSpark draft) path widens each token's SWA index list
+        # to ``noncausal_index_width`` (>= window_size), so size the persistent
+        # ragged buffer to the wider bound to cover both causal and non-causal.
+        swa_index_width = max(self.window_size, self.noncausal_index_width)
         self.decode_swa_ragged_indices_buffer = torch.empty(
-            max_tokens * self.window_size,
+            max_tokens * swa_index_width,
             dtype=torch.int32,
             device=self.device,
         )
@@ -558,7 +423,9 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
                 self.decode_swa_ragged_indices_buffer,
                 self.decode_swa_ragged_indptr_buffer,
                 base.num_decode_tokens,
-                self.window_size,
+                # Actual dense width for this build: window_size (causal) or
+                # noncausal_index_width (DSpark non-causal draft).
+                base.decode_swa_indices.shape[-1],
             )
 
         return DeepseekV4ROCMAiterSparseSWAMetadata(
@@ -583,9 +450,72 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Block scale for the preshuffled weight; None = not preshuffled.
+        self._wqa_wkv_scale: torch.Tensor | None = None
+        self._wo_b_scale: torch.Tensor | None = None
+
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
+
+    def prepare_attn_preshuffle(self) -> None:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if not rocm_aiter_ops.is_enabled():
+            return
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            _upcast_e8m0_to_fp32,
+        )
+        from vllm.model_executor.utils import replace_parameter
+
+        def _prep(linear) -> torch.Tensor | None:
+            w = getattr(linear, "weight", None)
+            if w is None or w.dim() != 2:
+                return None
+            # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
+            if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
+                return None
+            ws = getattr(linear, "weight_scale_inv", None)  # per-block scale
+            if ws is None:
+                return None
+            if ws.dtype == torch.float8_e8m0fnu:
+                ws = _upcast_e8m0_to_fp32(ws).contiguous()
+            # Shuffle the weight in place (single weight, no unshuffled copy).
+            replace_parameter(
+                linear,
+                "weight",
+                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            )
+            return ws
+
+        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
+        self._wo_b_scale = _prep(self.wo_b)
+
+    def _bpre_attn_gemm(
+        self,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        x: torch.Tensor,
+        reduce_tp: bool,
+    ) -> torch.Tensor:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
+        out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            x_fp8, weight, x_scale, scale, output_dtype=x.dtype
+        )
+        if reduce_tp and get_tensor_model_parallel_world_size() > 1:
+            out = tensor_model_parallel_all_reduce(out)
+        return out
+
+    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self._wqa_wkv_scale is not None and hidden_states.dim() == 2:
+            return self._bpre_attn_gemm(
+                self.fused_wqa_wkv.weight, self._wqa_wkv_scale, hidden_states, False
+            )
+        return super()._fused_wqa_wkv_gemm(hidden_states)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
@@ -598,7 +528,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.o_lora_rank,
             self.wo_a,
         )
-        return self.wo_b(z.flatten(1))
+        zf = z.flatten(1)
+        if self._wo_b_scale is not None and zf.dim() == 2:
+            return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
+        return self.wo_b(zf)
 
     def forward_mqa(
         self,

@@ -1,13 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+import time
+from collections.abc import Collection
+from contextlib import contextmanager
+
 import numpy as np
 import torch
 
-from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.logger import init_logger
+from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
-from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
+from vllm.multimodal.utils import (
+    get_mm_features_in_window,
+    group_and_batch_mm_kwargs,
+    set_mm_embedding_modality,
+)
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
+from vllm.v1.worker.utils import (
+    EncoderTimingStats,
+    sanity_check_mm_encoder_outputs,
+)
+
+logger = init_logger(__name__)
 
 
 class EncoderRunner:
@@ -19,6 +35,7 @@ class EncoderRunner:
         encoder_cache: EncoderCache,
         dtype: torch.dtype,
         device: torch.device,
+        enable_timing: bool = False,
     ):
         self.model = model
         self.max_num_tokens = max_num_tokens
@@ -26,6 +43,10 @@ class EncoderRunner:
         self.encoder_cache = encoder_cache
         self.dtype = dtype
         self.device = device
+        self.is_realtime = supports_realtime(model)
+        self.enable_timing = enable_timing
+        self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
+        self._timing_lock = threading.Lock()
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
@@ -42,10 +63,51 @@ class EncoderRunner:
                 mm_feature = mm_features[mm_input_id]
                 if mm_feature.data is None:
                     continue
+                if mm_feature.identifier in self.encoder_cache.encoder_outputs:
+                    continue
                 mm_hashes.append(mm_feature.identifier)
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
 
         return mm_hashes, mm_kwargs
+
+    @torch.inference_mode()
+    def profile_encoder_cache(
+        self,
+        dummy_mm_inputs: list[tuple[str, MultiModalKwargsItem]],
+        budget: MultiModalBudget,
+    ) -> None:
+        """Profile multimodal encoder and temporary encoder cache memory."""
+        if (encoder_budget := budget.get_encoder_budget()) <= 0:
+            return
+
+        if not budget.mm_max_toks_per_item:
+            logger.info(
+                "Skipping encoder profiling for embedding-only mode "
+                "(all modality limits=0 with enable_mm_embeds=True).",
+            )
+            return
+
+        assert dummy_mm_inputs, "Dummy inputs should be generated for encoder profiling"
+        dummy_modality = dummy_mm_inputs[0][0]
+        max_mm_items_per_batch = len(dummy_mm_inputs)
+
+        logger.info_once(
+            "Encoder cache will be initialized with a budget of %s tokens, "
+            "and profiled with %s %s items of the maximum feature size.",
+            encoder_budget,
+            max_mm_items_per_batch,
+            dummy_modality,
+        )
+
+        dummy_encoder_outputs = self.execute_mm_encoder(dummy_mm_inputs)
+
+        sanity_check_mm_encoder_outputs(
+            dummy_encoder_outputs,
+            expected_num_items=max_mm_items_per_batch,
+        )
+        self.encoder_cache.encoder_outputs.update(
+            (f"tmp_{i}", output) for i, output in enumerate(dummy_encoder_outputs)
+        )
 
     @torch.inference_mode()
     def execute_mm_encoder(
@@ -60,6 +122,36 @@ class EncoderRunner:
             encoder_outputs.extend(batch_outputs)
         return encoder_outputs
 
+    @contextmanager
+    def timed_encoder_operation(self, request_ids: Collection[str]):
+        if not (self.enable_timing and request_ids):
+            yield
+            return
+
+        torch.accelerator.synchronize()
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            torch.accelerator.synchronize()
+            per_request_time = (time.perf_counter() - start_time) / len(request_ids)
+            with self._timing_lock:
+                for req_id in request_ids:
+                    stats = self.encoder_timing_registry.setdefault(
+                        req_id, EncoderTimingStats()
+                    )
+                    stats.encoder_forward_secs += per_request_time
+                    stats.num_encoder_calls += 1
+
+    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
+        with self._timing_lock:
+            stats = {
+                req_id: stats_obj.to_dict()
+                for req_id, stats_obj in self.encoder_timing_registry.items()
+            }
+            self.encoder_timing_registry.clear()
+            return stats
+
     def gather_mm_embeddings(
         self,
         req_ids: list[str],
@@ -67,30 +159,32 @@ class EncoderRunner:
         num_scheduled_tokens: np.ndarray,
         query_start_loc: np.ndarray,
         prefill_lens: np.ndarray,
-        computed_prefill_lens: np.ndarray,
+        num_computed_tokens: np.ndarray,
         draft_lookahead: int = 0,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         if draft_lookahead:
-            computed_prefill_lens = computed_prefill_lens + draft_lookahead
+            num_computed_tokens = num_computed_tokens + draft_lookahead
 
-        is_prefilling_np = computed_prefill_lens < prefill_lens
-        if not is_prefilling_np.any():
-            # All decode requests, so no need to gather any embeddings.
-            return [], torch.zeros(
-                total_num_scheduled_tokens, dtype=torch.bool, device=self.device
-            )
-
-        is_prefilling = is_prefilling_np.tolist()
-        query_start = computed_prefill_lens.tolist()
-        query_end = (computed_prefill_lens + num_scheduled_tokens).tolist()
-
-        mm_embeds: list[torch.Tensor] = []
         is_mm_embed = torch.zeros(
             total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
         )
+
+        # Whether to gather media embeddings this step.
+        exclude_embeddings: list[bool] | None = None
+        if not self.is_realtime:
+            # Non-realtime models only have media embeddings within the prompt.
+            is_decode = num_computed_tokens >= prefill_lens
+            if is_decode.all():
+                # All decode requests, so no need to gather any embeddings.
+                return [], is_mm_embed
+            exclude_embeddings = is_decode.tolist()
+
+        query_start = num_computed_tokens.tolist()
+        query_end = (num_computed_tokens + num_scheduled_tokens).tolist()
+
+        mm_embeds: list[torch.Tensor] = []
         for i, req_id in enumerate(req_ids):
-            if not is_prefilling[i]:
-                # OPTIMIZATION: Skip decode requests.
+            if exclude_embeddings is not None and exclude_embeddings[i]:
                 continue
 
             cur_query_start = query_start[i]
@@ -132,6 +226,9 @@ class EncoderRunner:
                     mm_embeds_item = encoder_output[curr_embeds_start:curr_embeds_end]
                 else:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
+
+                # Attach modality for Omni interleaved merge (collected on demand).
+                set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)
 
                 req_start_pos = query_start_loc[i] + start_pos - cur_query_start
                 is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] |= (

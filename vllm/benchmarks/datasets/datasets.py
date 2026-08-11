@@ -164,8 +164,8 @@ class BenchmarkDataset(ABC):
         # TODO (jenniferzhao): add support for downloading data
         raise NotImplementedError("load_data must be implemented in subclasses.")
 
+    @staticmethod
     def get_random_lora_request(
-        self,
         max_loras: int | None = None,
         lora_path: str | None = None,
     ) -> LoRARequest | None:
@@ -197,8 +197,8 @@ class BenchmarkDataset(ABC):
         )
         return lora_request
 
+    @staticmethod
     def get_round_robin_lora_request(
-        self,
         index: int,
         max_loras: int | None = None,
         lora_path: str | None = None,
@@ -232,8 +232,8 @@ class BenchmarkDataset(ABC):
         )
         return lora_request
 
+    @staticmethod
     def get_lora_request(
-        self,
         index: int,
         max_loras: int | None = None,
         lora_path: str | None = None,
@@ -254,10 +254,12 @@ class BenchmarkDataset(ABC):
             (or `None` if not applicable).
         """
         if lora_assignment == "round-robin":
-            return self.get_round_robin_lora_request(
+            return BenchmarkDataset.get_round_robin_lora_request(
                 index=index, max_loras=max_loras, lora_path=lora_path
             )
-        return self.get_random_lora_request(max_loras=max_loras, lora_path=lora_path)
+        return BenchmarkDataset.get_random_lora_request(
+            max_loras=max_loras, lora_path=lora_path
+        )
 
     @abstractmethod
     def sample(
@@ -2091,7 +2093,12 @@ def _parse_range_ratio(value: str) -> RangeRatio:
         return json.loads(value)
 
 
-def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
+def get_samples(
+    args,
+    tokenizer: TokenizerLike | None,
+    *,
+    multimodal_backends: tuple[str, ...] = ("openai-chat", "openai-audio"),
+) -> list[SampleRequest]:
     if not hasattr(args, "request_id_prefix"):
         args.request_id_prefix = ""
 
@@ -2148,6 +2155,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
         )
 
     elif args.dataset_name == "sonnet":
+        assert tokenizer is not None, (
+            "Tokenizer must be initialized for the 'sonnet' dataset."
+        )
         sonnet_dataset = SonnetDataset(
             dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
         )
@@ -2307,16 +2317,21 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 "like to add support for additional dataset formats."
             )
 
-        if dataset_class.IS_MULTIMODAL and not (
-            args.backend in ("openai-chat", "openai-audio")
-            or "embeddings-" in args.backend
+        if (
+            dataset_class.IS_MULTIMODAL
+            and args.backend not in multimodal_backends
+            and "embeddings-" not in args.backend
         ):
-            # multi-modal benchmark is only available on OpenAI Chat
-            # endpoint-type.
+            # multi-modal benchmark is only available on chat-style backends;
+            # which ones are allowed is caller-controlled (serve uses the
+            # OpenAI endpoints, throughput uses vllm-chat).
             raise ValueError(
-                "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' backends."
+                f"Multi-modal content is not supported on backend "
+                f"{args.backend!r}; use one of {sorted(multimodal_backends)}."
             )
+        assert tokenizer is not None, (
+            "Tokenizer must be initialized for the 'hf' dataset."
+        )
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -2338,6 +2353,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
         )
 
     elif args.dataset_name == "timed_trace":
+        assert tokenizer is not None, (
+            "Tokenizer must be initialized for the 'timed_trace' dataset."
+        )
         dataloader = TimedTrace(**vars(args))
         input_requests = dataloader.sample(
             num_requests=args.num_prompts,
@@ -2347,6 +2365,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
     else:
         # For datasets that follow a similar structure, use a mapping.
+        assert tokenizer is not None, (
+            f"Tokenizer must be initialized for the '{args.dataset_name}' dataset."
+        )
         dataset_mapping = {
             "spec_bench": lambda: SpecBench(
                 dataset_path=args.dataset_path,
@@ -2452,6 +2473,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 num_requests=args.num_prompts,
                 tokenizer=tokenizer,
                 output_len=args.speed_bench_output_len,
+                skip_chat_template=args.skip_chat_template,
                 chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
@@ -2461,10 +2483,13 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
         try:
             # Enforce endpoint compatibility for multimodal datasets.
-            if args.dataset_name == "random-mm" and args.backend not in ["openai-chat"]:
+            if (
+                args.dataset_name == "random-mm"
+                and args.backend not in multimodal_backends
+            ):
                 raise ValueError(
-                    "Multi-modal content (images) is only supported on "
-                    "'openai-chat' backend."
+                    f"Multi-modal content (images) is not supported on backend "
+                    f"{args.backend!r}; use one of {sorted(multimodal_backends)}."
                 )
             input_requests = dataset_mapping[args.dataset_name]()
         except KeyError as err:
@@ -2531,7 +2556,7 @@ class CustomDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2808,7 +2833,7 @@ class CustomImageDataset(CustomDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2906,7 +2931,7 @@ class CustomAudioDataset(CustomDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2928,7 +2953,9 @@ class CustomAudioDataset(CustomDataset):
             prompt = item.get("prompt", "")
             if tokenizer is None:
                 prompt_len = 1
-                new_output_len = output_len if output_len not in (None, -1) else 256
+                new_output_len = (
+                    output_len if (output_len is not None and output_len != -1) else 256
+                )
                 mm_content = None
             else:
                 use_chat_template = (
@@ -2978,6 +3005,7 @@ class CustomAudioDataset(CustomDataset):
                         )
                     new_output_len = int(item["output_tokens"])
                 else:
+                    assert output_len is not None
                     new_output_len = output_len
             sampled_requests.append(
                 SampleRequest(
@@ -3036,7 +3064,7 @@ class SpecBench(CustomDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -4089,9 +4117,10 @@ class ASRDataset(HuggingFaceDataset):
     EARNINGS22_TINY_FILTERED_DATASET = (
         "D4nt3/esb-datasets-earnings22-validation-tiny-filtered"
     )
+    LIBRISPEECH_DATASET = "openslr/librispeech_asr"
 
     SUPPORTED_DATASET_PATHS = {
-        "openslr/librispeech_asr",
+        LIBRISPEECH_DATASET,
         "facebook/voxpopuli",
         "LIUM/tedlium",
         "edinburghcstr/ami",
@@ -4119,7 +4148,10 @@ class ASRDataset(HuggingFaceDataset):
                 self.data = self.data.shuffle(seed=self.random_seed)
             self._materialize_local_audio_column()
             return
-        if self.hf_name == self.EARNINGS22_TINY_FILTERED_DATASET:
+        if self.hf_name in (
+            self.EARNINGS22_TINY_FILTERED_DATASET,
+            self.LIBRISPEECH_DATASET,
+        ):
             super().load_data()
             self._disable_audio_decode()
             return
@@ -4155,8 +4187,21 @@ class ASRDataset(HuggingFaceDataset):
         **kwargs,
     ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
-        if "openai" in getattr(tokenizer, "name_or_path", ""):
+        name_or_path = getattr(tokenizer, "name_or_path", "")
+        tok_class = type(tokenizer).__name__
+        if "openai" in name_or_path:
             prompt = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
+        elif tok_class == "CohereAsrTokenizer" or "cohere" in name_or_path.lower():
+            # CohereAsrTokenizer does not inject a decoder start token, so the
+            # decoder prompt must supply the full control-token sequence.
+            # Token order: context boundary, transcript start, emotion (default
+            # undefined), language (en), transcription directive (en), punctuation
+            # enabled, no ITN, no timestamp, no diarization.
+            prompt = (
+                "<|startofcontext|><|startoftranscript|>"
+                "<|emo:undefined|><|en|><|en|><|pnc|><|noitn|>"
+                "<|notimestamp|><|nodiarize|>"
+            )
         else:
             prompt = ""
         prompt_len = len(tokenizer(prompt).input_ids)
@@ -4185,14 +4230,14 @@ class ASRDataset(HuggingFaceDataset):
             elif isinstance(audio, str):
                 duration_s = sf.info(audio).duration
                 mm_content = {"audio_path": audio}
-            elif isinstance(audio, dict) and audio.get("path"):
-                duration_s = sf.info(audio["path"]).duration
-                mm_content = {"audio_path": audio["path"]}
             elif isinstance(audio, dict) and audio.get("bytes") is not None:
                 with BytesIO(audio["bytes"]) as audio_buffer:
                     y, sr = sf.read(audio_buffer, dtype="float32")
                 duration_s = get_audio_duration(y=y, sr=sr)
                 mm_content = {"audio": (y, sr)}
+            elif isinstance(audio, dict) and audio.get("path"):
+                duration_s = sf.info(audio["path"]).duration
+                mm_content = {"audio_path": audio["path"]}
             else:
                 raise ValueError(
                     "ASR samples must provide decoded audio arrays, "
