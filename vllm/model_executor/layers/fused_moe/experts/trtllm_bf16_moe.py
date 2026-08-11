@@ -11,6 +11,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -266,7 +269,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor | mk.DeferredMoEOutput:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
@@ -304,7 +307,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         if defer:
             # flashinfer returns a flat permute map; the protocol wants
             # [num_tokens, top_k] so consumers can read top_k from its shape.
-            return mk.DeferredMoEOutput(
+            return UnfinalizedMoEOutput(
                 gemm2_permuted=out[0],
                 expert_weights=out[1],
                 expanded_idx_to_permuted_idx=out[2]
