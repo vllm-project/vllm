@@ -14,6 +14,13 @@ def test_kimi_k3_fp8_scale_paths_are_mutually_exclusive() -> None:
         )
 
 
+def test_kimi_k3_fp8_calibration_requires_run_identity() -> None:
+    with pytest.raises(ValueError, match="calibration_id is required"):
+        AttentionConfig(
+            rocm_kimi_k3_fp8_prefill_scale_save_path="calibration",
+        )
+
+
 @pytest.mark.parametrize("margin", [float("nan"), float("inf"), 0.99])
 def test_kimi_k3_fp8_scale_margin_is_validated(margin: float) -> None:
     with pytest.raises(ValueError, match="must be finite and >= 1"):

@@ -18,6 +18,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 logger = init_logger(__name__)
 
 _QKV_NAMES = ("q", "k", "v")
+_CACHE_MODE = "bf16_latent_cache"
 
 
 def _kimi_layers(vllm_config: VllmConfig) -> list[tuple[int, str, Any]]:
@@ -53,6 +54,53 @@ def _validate_calibration_mode(vllm_config: VllmConfig) -> None:
         raise ValueError("Kimi-K3 FP8 calibration does not support DCP")
 
 
+def _checkpoint_identity(vllm_config: VllmConfig) -> str:
+    model_config = vllm_config.model_config
+    if model_config.revision:
+        revision = model_config.revision.lower()
+        if len(revision) >= 7 and all(char in "0123456789abcdef" for char in revision):
+            return revision
+        raise ValueError("Kimi-K3 FP8 scale revision must be an immutable commit hash")
+    model_path = Path(model_config.model)
+    snapshot = model_path.name.lower()
+    if (
+        model_path.parent.name == "snapshots"
+        and len(snapshot) >= 7
+        and all(char in "0123456789abcdef" for char in snapshot)
+    ):
+        return snapshot
+    raise ValueError(
+        "Kimi-K3 FP8 scales require an immutable model revision or snapshot path"
+    )
+
+
+def _validate_cache_mode(layers: list[tuple[int, str, Any]]) -> None:
+    supported = {"auto", "bf16", "bfloat16"}
+    incompatible = {
+        runtime_name: layer.kv_cache_dtype
+        for _, runtime_name, layer in layers
+        if getattr(layer, "kv_cache_dtype", "auto") not in supported
+    }
+    if incompatible:
+        raise ValueError(
+            f"Kimi-K3 FP8 scales require a BF16 latent cache, got {incompatible}"
+        )
+
+
+def _validate_static_backends(layers: list[tuple[int, str, Any]]) -> None:
+    for _, runtime_name, layer in layers:
+        backend = getattr(layer, "prefill_backend", None)
+        if (
+            backend is None
+            or backend.get_name() != "ROCM_AITER_FA"
+            or not getattr(backend, "_fp8_prefill_enabled", False)
+            or getattr(backend, "_fp8_static_quant_func", None) is None
+        ):
+            raise ValueError(
+                f"Kimi-K3 static FP8 is unavailable for expected layer {runtime_name}"
+            )
+
+
 def prepare_kimi_k3_fp8_scales(
     vllm_config: VllmConfig,
     *,
@@ -63,13 +111,15 @@ def prepare_kimi_k3_fp8_scales(
     save_path = attention_config.rocm_kimi_k3_fp8_prefill_scale_save_path
     load_path = attention_config.rocm_kimi_k3_fp8_prefill_scale_path
     layers = _kimi_layers(vllm_config)
-    if not layers or (save_path is None and load_path is None):
+    if save_path is None and load_path is None:
         return
 
     if save_path is not None:
+        _validate_calibration_mode(vllm_config)
+        _checkpoint_identity(vllm_config)
+        _validate_cache_mode(layers)
         if not arm_calibration:
             return
-        _validate_calibration_mode(vllm_config)
         for _, _, layer in layers:
             layer._kimi_k3_fp8_calibration_amax.zero_()
             layer._kimi_k3_fp8_calibration_state["armed"] = True
@@ -85,6 +135,9 @@ def prepare_kimi_k3_fp8_scales(
         return
 
     assert load_path is not None
+    checkpoint_id = _checkpoint_identity(vllm_config)
+    _validate_cache_mode(layers)
+    _validate_static_backends(layers)
     from safetensors import safe_open
 
     tp_rank = get_tp_group().rank_in_group
@@ -96,17 +149,15 @@ def prepare_kimi_k3_fp8_scales(
             raise ValueError("Unsupported Kimi-K3 FP8 scale artifact schema")
         if metadata.get("model") != model_config.model:
             raise ValueError("Kimi-K3 FP8 scale artifact model mismatch")
-        artifact_revision = metadata.get("revision", "")
-        runtime_revision = model_config.revision or ""
-        if artifact_revision != runtime_revision:
-            raise ValueError("Kimi-K3 FP8 scale artifact revision mismatch")
+        if metadata.get("checkpoint_id") != checkpoint_id:
+            raise ValueError("Kimi-K3 FP8 scale artifact checkpoint mismatch")
         if int(metadata.get("tp_size", "0")) != tp_size:
             raise ValueError("Kimi-K3 FP8 scale artifact TP size mismatch")
         if int(metadata.get("pp_size", "0")) != len(get_pp_group().ranks):
             raise ValueError("Kimi-K3 FP8 scale artifact PP size mismatch")
         if metadata.get("fp8_dtype") != "float8_e4m3fnuz":
             raise ValueError("Kimi-K3 FP8 scale artifact dtype mismatch")
-        if metadata.get("cache_mode") != "bf16_latent_cache":
+        if metadata.get("cache_mode") != _CACHE_MODE:
             raise ValueError("Kimi-K3 FP8 scale artifact cache mode mismatch")
         if int(metadata.get("qk_head_dim", "0")) != 192:
             raise ValueError("Kimi-K3 FP8 scale artifact QK dimension mismatch")
@@ -153,22 +204,26 @@ def save_kimi_k3_fp8_calibration(vllm_config: VllmConfig) -> None:
     if save_path is None:
         return
     layers = _kimi_layers(vllm_config)
-    if not layers:
-        return
 
-    torch.cuda.synchronize()
+    if layers:
+        torch.cuda.synchronize()
     tp_rank = get_tp_group().rank_in_group
     pp_rank = get_pp_group().rank_in_group
     payload: dict[str, Any] = {
         "schema": 1,
         "model": vllm_config.model_config.model,
         "revision": vllm_config.model_config.revision or "",
+        "checkpoint_id": _checkpoint_identity(vllm_config),
+        "calibration_id": attention_config.rocm_kimi_k3_fp8_prefill_calibration_id,
         "tp_size": len(get_tp_group().ranks),
         "tp_rank": tp_rank,
         "pp_size": len(get_pp_group().ranks),
         "pp_rank": pp_rank,
         "fp8_dtype": "float8_e4m3fnuz",
-        "cache_mode": "bf16_latent_cache",
+        "cache_mode": _CACHE_MODE,
+        "local_heads": layers[0][2]._kimi_k3_fp8_calibration_amax.shape[1]
+        if layers
+        else 12,
         "qk_head_dim": 192,
         "v_head_dim": 128,
         "margin": attention_config.rocm_kimi_k3_fp8_prefill_scale_margin,

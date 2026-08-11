@@ -26,6 +26,12 @@ class _FakeLayer:
         ).view(3, 12)
         self._kimi_k3_fp8_static_descale = torch.empty((0, 12))
         self._kimi_k3_fp8_calibration_state = {"armed": True}
+        self.kv_cache_dtype = "auto"
+        self.prefill_backend = SimpleNamespace(
+            get_name=lambda: "ROCM_AITER_FA",
+            _fp8_prefill_enabled=True,
+            _fp8_static_quant_func=object(),
+        )
 
 
 def _config(
@@ -38,6 +44,7 @@ def _config(
         rocm_kimi_k3_fp8_prefill_scale_save_path=save_path,
         rocm_kimi_k3_fp8_prefill_scale_path=load_path,
         rocm_kimi_k3_fp8_prefill_scale_margin=1.1,
+        rocm_kimi_k3_fp8_prefill_calibration_id="calibration-test",
     )
     return SimpleNamespace(
         attention_config=attention_config,
@@ -46,7 +53,7 @@ def _config(
         ),
         model_config=SimpleNamespace(
             model="moonshotai/Kimi-K3",
-            revision=None,
+            revision="abcdef123456",
         ),
     )
 
@@ -93,11 +100,14 @@ def test_load_kimi_k3_fp8_static_scales(tmp_path: Path, monkeypatch) -> None:
             "schema": "1",
             "model": "moonshotai/Kimi-K3",
             "revision": "",
+            "checkpoint_id": "abcdef123456",
+            "calibration_id": "calibration-test",
             "tp_size": "2",
             "pp_size": "1",
             "num_layers": "1",
             "fp8_dtype": "float8_e4m3fnuz",
             "cache_mode": "bf16_latent_cache",
+            "local_heads": "12",
             "qk_head_dim": "192",
             "v_head_dim": "128",
         },
