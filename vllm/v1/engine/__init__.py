@@ -132,6 +132,11 @@ class EngineCoreReadyResponse:
     # `/server_info` without holding the config themselves (the Rust frontend).
     # Sent only with VLLM_SERVER_DEV_MODE, the same gate as `/server_info`.
     vllm_config: dict[str, Any] | None = None
+    snapshot_generation: int = 0
+    snapshot_nonce: str | None = None
+    snapshot_id: str | None = None
+    snapshot_config_hash: str | None = None
+    snapshot_root_pid: int | None = None
 
 
 class EngineCoreRequest(

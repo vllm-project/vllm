@@ -1231,11 +1231,56 @@ class AsyncLLM(EngineClient):
     async def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
         return await self.engine_core.checkpoint_state_async()
 
+    async def snapshot_prepare(self) -> list[dict[str, float]]:
+        return await self.collective_rpc("snapshot_prepare")
+
+    async def snapshot_restore(self) -> list[dict[str, float]]:
+        return await self.collective_rpc("snapshot_restore")
+
+    async def snapshot_abort(self) -> list[dict[str, float]]:
+        return await self.collective_rpc("snapshot_abort")
+
+    async def snapshot_detach_io(
+        self,
+        nonce: str,
+        generation: int,
+        snapshot_id: str,
+        config_hash: str,
+        marker_path: str,
+        persistence: str,
+    ) -> None:
+        await self.engine_core.snapshot_detach_io_async(
+            nonce,
+            generation,
+            snapshot_id,
+            config_hash,
+            marker_path,
+            persistence,
+        )
+
+    async def snapshot_wait_for_attach(
+        self,
+        nonce: str,
+        generation: int,
+        snapshot_id: str,
+        config_hash: str,
+        root_pid: int,
+    ) -> None:
+        await self.engine_core.snapshot_wait_for_attach_async(
+            nonce, generation, snapshot_id, config_hash, root_pid
+        )
+
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 
     async def compute_weight_checksums(self) -> list[dict[str, str]]:
         return await self.engine_core.compute_weight_checksums_async()
+
+    async def is_idle(self) -> bool:
+        return (
+            not self.output_processor.has_unfinished_requests()
+            and not self.engine_core.dp_engines_running()
+        )
 
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
