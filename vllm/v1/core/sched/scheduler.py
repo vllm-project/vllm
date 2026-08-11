@@ -2764,8 +2764,10 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            req = self.requests[req_id]
+            req = self.requests.get(req_id)
+            if req is None:
+                # Late report (fast-notify already resumed and freed it).
+                continue
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 already_reported = req_id in self.finished_recving_kv_req_ids
                 self.finished_recving_kv_req_ids.add(req_id)
@@ -2773,9 +2775,11 @@ class Scheduler(SchedulerInterface):
                     seeded_output = self._try_seed_first_token(req_id)
                     if seeded_output is not None:
                         outputs[req.client_index].append(seeded_output)
+            elif RequestStatus.is_finished(req.status):
+                self._free_blocks(req)
             else:
-                assert RequestStatus.is_finished(req.status)
-                self._free_blocks(self.requests[req_id])
+                # Duplicate of a fast-notify completion; already promoted.
+                continue
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
@@ -2826,6 +2830,26 @@ class Scheduler(SchedulerInterface):
             events=request.take_events(),
             trace_headers=request.trace_headers,
         )
+
+    def on_fast_kv_recv_finished(
+        self, req_id: str
+    ) -> tuple[int, EngineCoreOutput] | None:
+        """P/D fast KV notify (see nixl/fast_kv.py). Called from the
+        fast-notify bridge thread, so only GIL-atomic mutations are allowed;
+        the set add happens AFTER seeding so schedule() only consumes a
+        fully seeded request. Returns (client_index, EngineCoreOutput) when
+        token #1 was seeded and must be emitted by the caller, else None.
+        """
+        request = self.requests.get(req_id)
+        if request is None or request.status != RequestStatus.WAITING_FOR_REMOTE_KVS:
+            return None
+        if req_id in self.finished_recving_kv_req_ids:
+            return None
+        seeded_output = self._try_seed_first_token(req_id)
+        self.finished_recving_kv_req_ids.add(req_id)
+        if seeded_output is None:
+            return None
+        return request.client_index, seeded_output
 
     def _update_requests_with_invalid_blocks(
         self,

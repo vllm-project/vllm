@@ -233,6 +233,9 @@ class EngineCore:
         )
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
+        # Fast KV side channels (see nixl/fast_kv.py); set by EngineCoreProc.
+        self.fast_kv_bridge = None
+
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
@@ -589,6 +592,8 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        if self.fast_kv_bridge is not None:
+            self.fast_kv_bridge.dispatch(scheduler_output)
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -647,6 +652,8 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            if self.fast_kv_bridge is not None:
+                self.fast_kv_bridge.dispatch(scheduler_output)
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -746,6 +753,9 @@ class EngineCore:
 
     def shutdown(self):
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
+        if self.fast_kv_bridge is not None:
+            self.fast_kv_bridge.shutdown()
+            self.fast_kv_bridge = None
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
@@ -1084,6 +1094,21 @@ class EngineCoreProc(EngineCore):
                     engine=self,
                     parallel_config=vllm_config.parallel_config,
                 )
+
+            try:
+                from vllm.distributed.kv_transfer.kv_connector.v1.nixl.fast_kv import (  # noqa: E501
+                    maybe_create_fast_kv_bridge,
+                )
+
+                self.fast_kv_bridge = maybe_create_fast_kv_bridge(
+                    vllm_config, self.scheduler, self.output_queue
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to initialize the fast KV bridge; falling back "
+                    "to per-step KV transfer dispatch/notification."
+                )
+                self.fast_kv_bridge = None
 
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,

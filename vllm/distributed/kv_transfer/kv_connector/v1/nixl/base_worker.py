@@ -482,6 +482,27 @@ class NixlBaseConnectorWorker:
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
 
+        # Fast KV side channels (pull mode only, opt-in; see nixl/fast_kv.py).
+        self.fast_dispatch_enabled = False
+        self.fast_notify_enabled = False
+        # Guards recv bookkeeping across the main thread and the
+        # fast-dispatch/fast-notify threads.
+        self._fast_lock = threading.RLock()
+        # Reqs whose pulls the fast-notify poller polls/reports.
+        self._fast_eligible: set[ReqId] = set()
+        # Fast-eligible reqs that saw a transfer failure (slow path reports).
+        self._fast_failed: set[ReqId] = set()
+        # Fast-notified reqs pending their idempotent slow-path re-report.
+        self._fast_done_recving: set[ReqId] = set()
+        # Reqs initiated by the fast-dispatch listener.
+        self._fast_dispatched: dict[ReqId, float] = {}
+        # All initiated recv reqs (either path); dedups double-initiation.
+        self._recv_initiated: dict[ReqId, float] = {}
+        self._fast_stop_event = threading.Event()
+        self._fast_zmq_ctx: zmq.Context | None = None
+        self._fast_poller_t: threading.Thread | None = None
+        self._fast_dispatch_t: threading.Thread | None = None
+
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
         # Background thread for initializing new NIXL handshakes.
@@ -2048,20 +2069,30 @@ class NixlBaseConnectorWorker:
         to track which workers are done.
         """
         assert self.transfer_topo is not None
-        done_sending = self._get_new_notifs()
-        done_recving = self._pop_done_transfers(self._recving_transfers)
+        with self._fast_lock:
+            done_sending = self._get_new_notifs()
+            # Reqs owned by the fast-notify poller are reported below.
+            done_recving = self._pop_done_transfers(
+                self._recving_transfers, skip=self._fast_eligible
+            )
 
-        # Drain queue of requests where handshake or transfer setup failed.
-        failed_recv_reqs = set[ReqId]()
-        while not self._failed_recv_reqs.empty():
-            try:
-                failed_recv_reqs.add(self._failed_recv_reqs.get_nowait())
-            except queue.Empty:
-                break
+            # Drain queue of requests where handshake or transfer setup failed.
+            failed_recv_reqs = set[ReqId]()
+            while not self._failed_recv_reqs.empty():
+                try:
+                    failed_recv_reqs.add(self._failed_recv_reqs.get_nowait())
+                except queue.Empty:
+                    break
 
-        # Add failed requests to done_recving for scheduler tracking
-        # (blocks are already marked invalid, scheduler will handle recompute)
-        done_recving.update(failed_recv_reqs)
+            # Add failed requests to done_recving for scheduler tracking
+            # (blocks are already marked invalid, scheduler will handle recompute)
+            done_recving.update(failed_recv_reqs)
+
+            # Re-report fast-notified reqs through the regular path so
+            # KVOutputAggregator bookkeeping is unchanged; scheduler dedups.
+            fast_done_recving = self._fast_done_recving
+            self._fast_done_recving = set()
+            done_recving |= fast_done_recving
 
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
@@ -2076,6 +2107,10 @@ class NixlBaseConnectorWorker:
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
         for req_id in done_recving:
+            if req_id in fast_done_recving:
+                # Fast-notify eligibility guarantees no post-processing.
+                self._recving_metadata.pop(req_id, None)
+                continue
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
@@ -2207,16 +2242,23 @@ class NixlBaseConnectorWorker:
                     new_expiry,
                 )
 
-    def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
+    def _pop_done_transfers(
+        self,
+        transfers: dict[str, list[int]],
+        skip: set[str] | None = None,
+    ) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
         Args:
             transfers: dict of req_id -> list[running_xfer]
+            skip: req_ids polled elsewhere (fast-notify poller); untouched.
         Returns:
             set of req_ids that have all done xfers
         """
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
+            if skip and req_id in skip:
+                continue
             in_progress = []
             for handle in handles:
                 try:
@@ -2586,6 +2628,14 @@ class NixlBaseConnectorWorker:
         if not hasattr(self, "_handshake_initiation_executor"):
             # error happens during init, no need to shutdown
             return
+        self._fast_stop_event.set()
+        for t in (self._fast_poller_t, self._fast_dispatch_t):
+            if t is not None and t.is_alive():
+                t.join(timeout=1.0)
+        self._fast_poller_t = None
+        self._fast_dispatch_t = None
+        # The fast zmq context is deliberately not term()'d: term would
+        # block on sockets owned by already-killed daemon threads.
         self._handshake_initiation_executor.shutdown(wait=False)
         for handles in self._recving_transfers.values():
             for handle in handles:
