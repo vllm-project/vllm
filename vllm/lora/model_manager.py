@@ -842,6 +842,25 @@ class LoRAModelManager:
                     lora.lora_a = lora.lora_a.pin_memory()
                     lora.lora_b = lora.lora_b.pin_memory()
 
+    @staticmethod
+    def _target_parameters_indicates_3d_lora(lora_model: LoRAModel) -> bool:
+        """Whether the adapter's PEFT 0.18+ ``target_parameters`` names a fused
+        MoE expert weight.
+
+        A match signals the on-disk tensors follow the PEFT 3D layout (lora_A
+        applied to PEFT's "in" = the layer's output axis) rather than
+        vLLM-native. Match by suffix so both ``mlp.experts.gate_up_proj`` and a
+        fully-qualified prefix resolve.
+        """
+        target_parameters = lora_model.target_parameters or []
+        keywords = (
+            "experts.gate_up_proj",
+            "experts.down_proj",
+            "experts.w13_weight",
+            "experts.w2_weight",
+        )
+        return any(any(kw in tp for kw in keywords) for tp in target_parameters)
+
     def _stack_moe_lora_weights(
         self, lora_model: LoRAModel, module: FusedMoE3DWithLoRA, module_name: str
     ):
@@ -872,30 +891,68 @@ class LoRAModelManager:
                 ep_rank = module.ep_rank
                 expert_start = ep_rank * local_num_experts
                 expert_end = expert_start + local_num_experts
+                hidden_size = module.hidden_size
 
-                # (num_experts,rank,input_size)
+                # PEFT 0.18+ target_parameters against a fused 3D expert tensor
+                # [E, dim1, dim2] saves lora_a[E*r, in=dim1] / lora_b[out=dim2,
+                # E*r], reading the parameter positionally as [E, in, out]. For
+                # Qwen3-MoE that flips the forward semantics: PEFT's "in" is the
+                # layer's output side and PEFT's "out" is the input side.
+                # vLLM's create_dummy_lora_weights uses the opposite (native)
+                # layout; the two share a flat shape but have opposite dim
+                # semantics, so we disambiguate. Primary signal: target_parameters
+                # names a fused expert weight. Fallback: native lora_a trailing
+                # dim == hidden_size.
+                if lora_model.target_parameters:
+                    is_peft_layout = self._target_parameters_indicates_3d_lora(
+                        lora_model
+                    )
+                else:
+                    is_peft_layout = gate_up_proj_lora.lora_a.shape[-1] != hidden_size
+
+                # Reshape + EP-slice to this rank's owned expert range (same for
+                # both layouts). For non-EP (local == global) the slice is a
+                # no-op. Result: lora_a [E_local, r, in], lora_b [E_local, out, r].
                 gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
                     global_num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
                 )[expert_start:expert_end].contiguous()
                 down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
                     global_num_experts, -1, down_proj_lora.lora_a.shape[-1]
                 )[expert_start:expert_end].contiguous()
+                gate_up_proj_lora.lora_b = (
+                    gate_up_proj_lora.lora_b.reshape(
+                        gate_up_proj_lora.lora_b.shape[0], -1, global_num_experts
+                    )[..., expert_start:expert_end]
+                    .permute(2, 0, 1)
+                    .contiguous()
+                )
+                down_proj_lora.lora_b = (
+                    down_proj_lora.lora_b.reshape(
+                        down_proj_lora.lora_b.shape[0], -1, global_num_experts
+                    )[..., expert_start:expert_end]
+                    .permute(2, 0, 1)
+                    .contiguous()
+                )
 
-                # (output_size,rank,num_experts)
-                gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
-                    gate_up_proj_lora.lora_b.shape[0], -1, global_num_experts
-                )[..., expert_start:expert_end]
-                down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
-                    down_proj_lora.lora_b.shape[0], -1, global_num_experts
-                )[..., expert_start:expert_end]
-
-                # (num_experts,output_size,rank)
-                gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.permute(
-                    2, 0, 1
-                ).contiguous()
-                down_proj_lora.lora_b = down_proj_lora.lora_b.permute(
-                    2, 0, 1
-                ).contiguous()
+                if is_peft_layout:
+                    # PEFT A/B trade roles vs vLLM's add_lora_w13/w2 kernels, and
+                    # each expert's delta is transposed. Swap A<->B and transpose
+                    # the trailing two dims so the buffers match [E, r, in] and
+                    # [E, out, r]. Per expert: delta_vllm = delta_peft^T.
+                    peft_gu_a, peft_gu_b = (
+                        gate_up_proj_lora.lora_a,
+                        gate_up_proj_lora.lora_b,
+                    )
+                    peft_dn_a, peft_dn_b = (
+                        down_proj_lora.lora_a,
+                        down_proj_lora.lora_b,
+                    )
+                    # vLLM A = PEFT B^T (applied to the layer input)
+                    gate_up_proj_lora.lora_a = peft_gu_b.transpose(-2, -1).contiguous()
+                    down_proj_lora.lora_a = peft_dn_b.transpose(-2, -1).contiguous()
+                    # vLLM B = PEFT A^T (produces the layer output)
+                    gate_up_proj_lora.lora_b = peft_gu_a.transpose(-2, -1).contiguous()
+                    down_proj_lora.lora_b = peft_dn_a.transpose(-2, -1).contiguous()
 
                 module_lora.lora_a = [
                     gate_up_proj_lora.lora_a,
