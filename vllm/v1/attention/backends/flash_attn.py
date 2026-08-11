@@ -803,7 +803,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         return new_metadata
 
     def update_draft_decode_metadata(self, metadata: FlashAttentionMetadata) -> None:
-        if not self.aot_schedule:
+        if metadata.scheduler_metadata is None:
             return
 
         num_reqs = metadata.num_decode_reqs or metadata.seq_lens.shape[0]

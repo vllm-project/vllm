@@ -383,7 +383,7 @@ def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
         max_num_splits=4,
         causal=True,
         sliding_window=None,
-        mm_prefix_range_tensor=None,
+        mm_prefix_query_range_tensor=None,
         rswa_prefix_lens=None,
         rswa_window=None,
         rswa_window_tensor=None,
@@ -395,9 +395,9 @@ def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
     assert torch.equal(builder.scheduler_metadata[:3], expected)
 
 
-def test_update_draft_decode_metadata_skips_non_fa3_builders(monkeypatch):
+def test_update_draft_decode_metadata_skips_without_scheduler_metadata(monkeypatch):
     builder = object.__new__(flash_attn_module.FlashAttentionMetadataBuilder)
-    builder.aot_schedule = False
+    builder.aot_schedule = True
     builder.use_full_cuda_graph = True
     builder.scheduler_metadata = torch.zeros(4, dtype=torch.int32)
 
@@ -429,12 +429,12 @@ def test_update_draft_decode_metadata_skips_non_fa3_builders(monkeypatch):
         num_prefill_reqs=0,
         num_decode_tokens=1,
         num_prefill_tokens=0,
-        scheduler_metadata=torch.tensor([5], dtype=torch.int32),
+        scheduler_metadata=None,
         prefix_scheduler_metadata=None,
         max_num_splits=1,
         causal=True,
         sliding_window=None,
-        mm_prefix_range_tensor=None,
+        mm_prefix_query_range_tensor=None,
         rswa_prefix_lens=None,
         rswa_window=None,
         rswa_window_tensor=None,
@@ -443,7 +443,4 @@ def test_update_draft_decode_metadata_skips_non_fa3_builders(monkeypatch):
     builder.update_draft_decode_metadata(metadata)
 
     assert not called
-    assert torch.equal(
-        metadata.scheduler_metadata,
-        torch.tensor([5], dtype=torch.int32),
-    )
+    assert metadata.scheduler_metadata is None
