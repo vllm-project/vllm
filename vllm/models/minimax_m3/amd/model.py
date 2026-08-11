@@ -25,6 +25,7 @@ from transformers import PretrainedConfig
 
 from vllm import _custom_ops as ops
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
@@ -104,7 +105,6 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.platforms.rocm import on_gfx950
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
@@ -291,6 +291,28 @@ class MiniMaxM3MLP(nn.Module):
         return x
 
 
+def _aiter_moe_fused_shared_experts_enabled(
+    is_fused_shared_expert_enabled: bool,
+) -> bool:
+    """Whether the fused shared expert routes through aiter's grouped top-k MoE.
+
+    A strict sub-case of `is_fused_shared_expert_enabled`: shared-expert
+    fusion must already be opted in (``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS``)
+    and allowed (not under expert parallelism). When additionally on gfx950 with
+    an active aiter MoE backend, the shared expert is appended inside aiter's
+    biased grouped top-k kernel (``num_fused_shared_experts``) instead of the
+    vLLM router's torch concat. Otherwise FSE still runs via the vLLM top-k bias
+    router.
+    """
+    from vllm.platforms.rocm import on_gfx950
+
+    return (
+        on_gfx950()
+        and is_fused_shared_expert_enabled
+        and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+    )
+
+
 class MiniMaxM3MoE(nn.Module):
     """Sigmoid-routed MoE block with a routing-bias correction and a shared
     expert."""
@@ -346,12 +368,14 @@ class MiniMaxM3MoE(nn.Module):
         # TODO: Historically, only `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`
         # is checked to enable FSE for MiniMax-M3, despite AITER not being used.
         # This should be cleaned up and use `resolve_fused_shared_expert_fusion`.
-        fse_requested = (
-            bool(getattr(config, "n_shared_experts", None))
+        fse_requested = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+
+        self.is_fused_shared_expert_enabled = False
+        if (
+            fse_requested
+            and bool(getattr(config, "n_shared_experts", None))
             and not get_current_vllm_config().parallel_config.enable_expert_parallel
-            and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-        )
-        if fse_requested:
+        ):
             fse_compatible, fse_reason = is_shared_expert_quant_fse_compatible(
                 quant_config,
                 f"{prefix}.experts",
@@ -362,7 +386,7 @@ class MiniMaxM3MoE(nn.Module):
                     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
                     f"cannot be enabled: {fse_reason}."
                 )
-        self.is_fused_shared_expert_enabled = fse_requested
+            self.is_fused_shared_expert_enabled = True
 
         # When additionally on gfx950 with an active aiter MoE backend, the shared
         # expert is appended inside aiter's an active aiter MoE backend, the shared
@@ -371,7 +395,9 @@ class MiniMaxM3MoE(nn.Module):
         # Otherwise FSE still runs via the vLLM top-k bias router.
         # TODO: `on_gfx950()` check here should not be MiniMax-M3 specific, and
         # the check should be done on resolved MOE backend directly.
-        self.use_aiter_moe_fse = on_gfx950() and self.is_fused_shared_expert_enabled
+        self.use_aiter_moe_fse = _aiter_moe_fused_shared_experts_enabled(
+            self.is_fused_shared_expert_enabled
+        )
 
         self.shared_experts: MiniMaxM3MLP | None = None
         if self.n_shared_experts and not self.is_fused_shared_expert_enabled:
