@@ -174,17 +174,6 @@ class Gemma4MTPAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         self.num_heads = self.total_num_heads // tp_size
-
-        layer_idx = extract_layer_index(prefix)
-        # Check per_layer_config to support heterogeneous configs
-        plc = getattr(config, "per_layer_config", None)
-        if plc is not None:
-            try:
-                layer_cfg = plc[layer_idx]
-                head_dim = getattr(layer_cfg, "head_dim", head_dim)
-                num_kv_heads = getattr(layer_cfg, "num_key_value_heads", num_kv_heads)
-            except Exception:
-                pass
         self.total_num_kv_heads = num_kv_heads
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = head_dim
