@@ -261,7 +261,9 @@ class FileSystemTierManager(SecondaryTierManager):
                 # Keys the pool reported as failed are marked as a MISS in
                 # the lookup cache.
                 self._lookup_manager.mark_miss(finished.failed_keys)
-                successful = set(load_keys) - set(finished.failed_keys)
+                successful = tuple(
+                    k for k in load_keys if k not in finished.failed_keys
+                )
                 results.append(
                     JobResult(
                         job_id=job_id,

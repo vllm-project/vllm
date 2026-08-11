@@ -447,7 +447,9 @@ def test_wait_idle_blocks_until_tasks_complete():
     """wait_idle must not return while a task is still in flight."""
     pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
     gate = threading.Event()
-    pool.enqueue_store(job_id=1, n_tasks=1, tasks=[lambda: gate.wait(timeout=5.0)])
+    pool.enqueue_store(
+        job_id=1, n_tasks=1, tasks=[(lambda: gate.wait(timeout=5.0), [None])]
+    )
 
     waiter = threading.Thread(target=pool.wait_idle)
     waiter.start()
