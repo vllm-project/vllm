@@ -537,6 +537,24 @@ class VllmConfig:
         return hash_str
 
     @property
+    def is_ec_producer_only(self) -> bool:
+        ec_config = self.ec_transfer_config
+        return (
+            ec_config is not None
+            and ec_config.is_ec_producer
+            and not ec_config.is_ec_consumer
+        )
+
+    @property
+    def is_encoder_only(self) -> bool:
+        mm_config = (
+            self.model_config.multimodal_config
+            if self.model_config is not None
+            else None
+        )
+        return self.is_ec_producer_only or bool(mm_config and mm_config.mm_encoder_only)
+
+    @property
     def max_concurrent_batches(self) -> int:
         # PP requires PP-size concurrent batches to fill the pipeline.
         # Async scheduling requires 2 concurrent batches to overlap.
@@ -572,6 +590,33 @@ class VllmConfig:
             and self.diffusion_config.canvas_length is not None
         ):
             return self.diffusion_config.canvas_length
+        return 0
+
+    @property
+    def num_lookahead_tokens(self) -> int:
+        """KV slots to reserve past the tokens the target model is scheduled for.
+
+        The drafter writes KV for positions beyond the target model's query
+        range, so every component that reserves blocks must add this margin:
+        the scheduler through `allocate_slots`, and the worker warmup, which
+        builds its own `SchedulerOutput`s. Consumers must read this property
+        rather than re-deriving their own per-method lookahead, so the
+        scheduler and warmup cannot drift apart.
+        """
+        speculative_config = self.speculative_config
+        if speculative_config is None:
+            return 0
+        if speculative_config.use_dflash():
+            # DFlash requires an extra lookahead slot since it uses in-fill-style
+            # decoding instead of standard next-token sampling, so it has a query
+            # for the last sampled token plus queries for each draft token.
+            return self.num_speculative_tokens + 1
+        if speculative_config.use_eagle() or speculative_config.uses_draft_model():
+            # DSpark (covered by use_eagle) drafts a block of num_speculative_tokens
+            # query tokens in which the anchor itself is the first prediction
+            # position (no separate bonus query), so it needs exactly
+            # num_speculative_tokens lookahead slots.
+            return self.num_speculative_tokens
         return 0
 
     @property
@@ -734,6 +779,7 @@ class VllmConfig:
             quant_config.maybe_update_config(
                 model_config.model,
                 hf_config=model_config.hf_config,
+                revision=model_config.revision,
             )
             return quant_config
         return None
@@ -1108,6 +1154,7 @@ class VllmConfig:
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
+                and self.speculative_config.method != "draft_model"
                 and self.speculative_config.method != "dspark"
             ):
                 logger.warning_once(
@@ -1233,16 +1280,20 @@ class VllmConfig:
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
 
-        if envs.VLLM_USE_BREAKABLE_CUDAGRAPH:
-            logger.warning_once(
-                "VLLM_USE_BREAKABLE_CUDAGRAPH is set, disabling vLLM's "
-                "torch.compile pipeline. Equivalent to -cc.mode=none."
-            )
+        from vllm.compilation.breakable_cudagraph import (
+            is_breakable_cudagraph_enabled,
+        )
+
+        breakable_cudagraph_enabled = is_breakable_cudagraph_enabled()
+        if breakable_cudagraph_enabled:
             self.compilation_config.mode = CompilationMode.NONE
 
-        if self.compilation_config.backend == "eager" or (
-            self.compilation_config.mode is not None
-            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+        if not breakable_cudagraph_enabled and (
+            self.compilation_config.backend == "eager"
+            or (
+                self.compilation_config.mode is not None
+                and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+            )
         ):
             logger.warning_once(
                 "Inductor compilation was disabled by user settings, "
@@ -1487,6 +1538,10 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        self._resolve_mm_embeds_from_ec_connector()
+        self._resolve_mm_processor_device()
+        self._validate_mm_processor_device()
+
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
         elif self.parallel_config.prefill_context_parallel_size > 1:
@@ -1728,21 +1783,15 @@ class VllmConfig:
     def _set_max_num_scheduled_tokens(self):
         """
         In most cases, the scheduler may schedule a batch with as many tokens as the
-        worker is configured to handle. However for some speculative decoding methods,
-        the drafter model may insert additional slots into the batch when drafting.
-        To account for this, we need to decrease the max_num_scheduled_tokens by an
-        upper bound on the number of slots that can be added.
+        worker is configured to handle.
         """
         if self.speculative_config is not None:
             scheduled_token_delta = (
                 self.speculative_config.max_num_new_slots_for_drafting
-                * self.scheduler_config.max_num_seqs
             )
             max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
             if self.scheduler_config.max_num_scheduled_tokens is None:
-                self.scheduler_config.max_num_scheduled_tokens = (
-                    max_num_batched_tokens - scheduled_token_delta
-                )
+                self.scheduler_config.max_num_scheduled_tokens = max_num_batched_tokens
 
             if self.scheduler_config.max_num_scheduled_tokens <= 0:
                 raise ValueError(
@@ -1751,7 +1800,7 @@ class VllmConfig:
                     " the speculative decoding settings, which does not allow"
                     " any tokens to be scheduled. Increase max_num_batched_tokens"
                     " to accommodate the additional draft token slots, or decrease"
-                    " num_speculative_tokens or max_num_seqs."
+                    " num_speculative_tokens."
                 )
             if self.scheduler_config.max_num_scheduled_tokens < 8192:
                 logger.warning_once(
@@ -1760,19 +1809,14 @@ class VllmConfig:
                     " the speculative decoding settings. This may lead to suboptimal"
                     " performance. Consider increasing max_num_batched_tokens to"
                     " accommodate the additional draft token slots, or decrease"
-                    " num_speculative_tokens or max_num_seqs.",
+                    " num_speculative_tokens.",
                 )
 
-            max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens
-            if max_num_batched_tokens < max_num_scheduled_tokens + (
-                self.speculative_config.max_num_new_slots_for_drafting
-                * self.scheduler_config.max_num_seqs
-            ):
+            if max_num_batched_tokens <= scheduled_token_delta:
                 raise ValueError(
-                    f"VllmConfig received max_num_scheduled_tokens but it does not have"
-                    " enough slots to support the speculative decoding settings."
-                    f" It should be greater by at least {scheduled_token_delta}, but"
-                    f" got {max_num_batched_tokens=} and {max_num_scheduled_tokens=}."
+                    "VllmConfig does not have enough slots to schedule a token and"
+                    " support the speculative decoding settings."
+                    f" Got {max_num_batched_tokens=} and {scheduled_token_delta=}."
                 )
 
     def _set_cudagraph_sizes(self):
@@ -1781,7 +1825,9 @@ class VllmConfig:
         capture as:
 
         ```python
-        max_graph_size = min(max_num_seqs * 2, 512)
+        default_max_graph_size = 1024 if is_data_center_blackwell else 512
+        max_graph_size = min(max_num_seqs * decode_query_len * 2,
+                             default_max_graph_size)
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
         cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
@@ -1805,8 +1851,8 @@ class VllmConfig:
         Example:
             With `max_num_batched_tokens = 8192`, and typical sequences
             averaging ~32 tokens, most practical batch sizes fall below 256.
-            However, the system will still allow capture sizes up to 512 if
-            shape and memory permit.
+            However, the system will still allow capture sizes up to the
+            platform default if shape and memory permit.
 
         Note:
             If users explicitly specify cudagraph capture sizes in the
@@ -1829,9 +1875,15 @@ class VllmConfig:
                 self.compilation_config.max_cudagraph_capture_size
             )
             if max_cudagraph_capture_size is None:
+                from vllm.platforms import current_platform
+
                 decode_query_len = 1 + self.num_speculative_tokens
+                default_max_graph_size = (
+                    1024 if current_platform.is_device_capability_family(100) else 512
+                )
                 max_cudagraph_capture_size = min(
-                    self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
+                    self.scheduler_config.max_num_seqs * decode_query_len * 2,
+                    default_max_graph_size,
                 )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
@@ -2163,6 +2215,101 @@ class VllmConfig:
             f"kernel_config={self.kernel_config!r}"
         )
 
+    def _resolve_mm_embeds_from_ec_connector(self) -> None:
+        """Allow `*_embeds` to be omitted only where the connector supplies them.
+
+        That is exactly an EC consumer: the encoder instance publishes the
+        embeddings through the EC connector, so the request only has to carry
+        the grid metadata that sizes the placeholder range. On every other
+        deployment a missing `*_embeds` is a client error and must keep failing
+        fast in the frontend.
+        """
+        model_config = self.model_config
+        if model_config is None:
+            return
+        mm_config = model_config.multimodal_config
+        if mm_config is None:
+            return
+
+        ec_config = self.ec_transfer_config
+        # Derived, so overwrite unconditionally rather than honouring a value
+        # that was set by hand.
+        mm_config.mm_embeds_from_ec_connector = (
+            ec_config is not None and ec_config.is_ec_consumer
+        )
+        if mm_config.mm_embeds_from_ec_connector:
+            logger.info_once(
+                "EC consumer: pre-computed-embedding inputs may omit the "
+                "embedding tensor; embeddings are loaded from the EC connector."
+            )
+
+    def _resolve_mm_processor_device(self) -> None:
+        """Settle `--mm-processor-device=auto` now that the EC role is known.
+
+        "auto" means "the accelerator, but only where the processor has it to
+        itself and its output can be handed over without a copy back to host":
+        an encode-only instance whose tensor transport carries device tensors.
+        Every other deployment keeps the processor on CPU.
+
+        An explicit device -- from `--mm-processor-device` or straight from
+        `mm_processor_kwargs` -- is already folded in by `MultiModalConfig`, so
+        it is left alone here and validated by `_validate_mm_processor_device`.
+        """
+        model_config = self.model_config
+        if model_config is None:
+            return
+        mm_config = model_config.multimodal_config
+        if mm_config is None:
+            return
+        if mm_config.get_mm_processor_device_type() is not None:
+            return
+
+        from vllm.platforms import current_platform
+
+        device_type = current_platform.device_type
+        if device_type in ("", "cpu"):
+            return
+
+        ec_config = self.ec_transfer_config
+        # An EC producer that is not also a consumer runs no forward pass and
+        # allocates no KV cache, so frontend accelerator work has the device to
+        # itself.
+        if ec_config is None or not ec_config.is_encode_only:
+            return
+
+        if mm_config.mm_tensor_ipc != "torch_shm":
+            # Any other transport serializes host bytes, so the output would be
+            # copied back, and that copy costs more than running the transform
+            # on device saves.
+            logger.info_once(
+                "EPD encoder instance: keeping the multi-modal processor on CPU "
+                "because mm_tensor_ipc=%s cannot carry device tensors. Add "
+                "--mm-tensor-ipc=torch_shm to run it on the accelerator.",
+                mm_config.mm_tensor_ipc,
+            )
+            return
+
+        mm_config.mm_processor_kwargs = {
+            **(mm_config.mm_processor_kwargs or {}),
+            "device": device_type,
+        }
+        logger.info_once(
+            "EPD encoder instance: running the multi-modal processor on %s. "
+            "Override with --mm-processor-device=cpu.",
+            device_type,
+        )
+
+    def _validate_mm_processor_device(self) -> None:
+        """Hand the EC config to `MultiModalConfig`, which owns the rule."""
+        model_config = self.model_config
+        if model_config is None:
+            return
+        mm_config = model_config.multimodal_config
+        if mm_config is None:
+            return
+
+        mm_config.validate_mm_processor_device(self.ec_transfer_config)
+
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""
         unsupported: list[str] = []
@@ -2224,10 +2371,6 @@ class VllmConfig:
         if self.parallel_config.enable_elastic_ep:
             unsupported.append("elastic expert parallelism")
 
-        if model_config is not None and model_config.enable_return_routed_experts:
-            # Will be added by https://github.com/vllm-project/vllm/pull/38163
-            unsupported.append("routed experts capture")
-
         has_logitsproc_plugins = False
         if model_config is not None:
             from importlib.metadata import entry_points
@@ -2246,10 +2389,6 @@ class VllmConfig:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
             unsupported.append("KV sharing fast prefill")
 
-        if self.ec_transfer_config is not None:
-            # Will be added by https://github.com/vllm-project/vllm/pull/38390
-            unsupported.append("EC transfer")
-
         return unsupported
 
     def _validate_v2_model_runner(self) -> None:
@@ -2261,12 +2400,6 @@ class VllmConfig:
         if unsupported:
             raise ValueError(
                 f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
-            )
-
-        if self.reasoning_config is not None:
-            logger.warning_once(
-                "Model Runner V2 does not yet support the thinking_token_budget "
-                "request parameter. Set VLLM_USE_V2_MODEL_RUNNER=0 if this is required."
             )
 
     def validate_block_size(self) -> None:
@@ -2312,7 +2445,10 @@ class VllmConfig:
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
         if self.model_config is None:
             return self
-        if self.cache_config.cache_dtype == "nvfp4" and self.model_config.use_mla:
+        if (
+            self.cache_config.cache_dtype.startswith("nvfp4")
+            and self.model_config.use_mla
+        ):
             raise ValueError(
                 "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
                 "Attention) backends. Please use a different --kv-cache-dtype "
