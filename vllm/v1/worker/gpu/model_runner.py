@@ -456,6 +456,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Cache the default CUDA stream to avoid lookup overhead.
         return torch.cuda.current_stream(self.device)
 
+    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
+        encoder_runner = getattr(self.model_state, "encoder_runner", None)
+        if encoder_runner is None:
+            return {}
+        return encoder_runner.get_encoder_timing_stats()
+
     def get_kv_cache_spec(self):
         if self.is_encoder_only:
             return {}
