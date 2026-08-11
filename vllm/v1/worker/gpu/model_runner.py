@@ -1106,9 +1106,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # num_scheduled_tokens represents the draft budget evenly distributed across
             # all verification requests, `reallocate_drafts` will unevenly assign the
             # draft budget to requests on the GPU side only.
-            num_scheduled_tokens = adaptive_verification.compact_batch(
-                num_draft_tokens_per_req,
-                num_scheduled_tokens,
+            num_scheduled_tokens, cu_num_logits_np = (
+                adaptive_verification.compact_batch(
+                    num_draft_tokens_per_req,
+                    num_scheduled_tokens,
+                    cu_num_logits_np,
+                )
             )
 
         # Get query_start_loc.

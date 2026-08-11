@@ -103,7 +103,8 @@ def test_compact_batch_preserves_totals_and_bounds():
     )
     scheduled = np.array([3, 3, 40], dtype=np.int32)
     drafts = np.array([2, 2, 0], dtype=np.int32)
-    compacted = manager.compact_batch(drafts, scheduled)
+    cu_num_logits_np = np.array([0, 3, 6, 7], dtype=np.int32)
+    compacted, _ = manager.compact_batch(drafts, scheduled, cu_num_logits_np)
 
     assert int(compacted.sum()) == num_tokens
     num_steps = manager.num_speculative_steps
@@ -125,3 +126,45 @@ def test_budget_caps_at_one_rejection_sampler_chunk():
     )
     _, _, draft_budget = manager._batch_budget
     assert draft_budget <= 1
+
+
+def test_zero_budget_rebuilds_cpu_cu_num_logits():
+    # When one bonus row per request already overflows a verification chunk, the
+    # budget clamps to zero but the batch still needs chunking. Every capacity is
+    # zeroed on device, so the CPU can name that layout exactly -- and must, since
+    # _iter_request_chunks slices the compacted logits with these offsets.
+    #
+    # The third request is a chunked prefill (no drafts, still mid-prompt). The
+    # runner gives *every* request num_bonus_tokens logits rows regardless
+    # (num_logits = num_draft_tokens_per_req + num_bonus_tokens), so the rebuilt
+    # offsets stay uniform rather than skipping non-verification rows.
+    manager = make_manager(
+        np.array([[0.9, 0.9], [0.9, 0.9], [1.0, 1.0]], dtype=np.float32),
+        np.ones(64),
+    )
+    manager.req_states.req_id_to_index["prefill"] = 2
+    manager.req_states.num_computed_tokens_np = np.zeros(3, dtype=np.int32)
+    manager.req_states.prefill_len.np = np.array([0, 0, 60], dtype=np.int32)
+    manager._max_total_logits = 2  # < 3 requests * 1 bonus token
+
+    manager.get_num_tokens(
+        {"low": 3, "high": 3, "prefill": 40},
+        {"low": [1, 2], "high": [3, 4]},
+    )
+    _, _, draft_budget = manager._batch_budget
+    assert draft_budget == 0
+
+    scheduled = np.array([3, 3, 40], dtype=np.int32)
+    drafts = np.array([2, 2, 0], dtype=np.int32)
+    scheduled_cu_num_logits = np.array([0, 3, 6, 7], dtype=np.int32)
+    compacted, cu_num_logits_np = manager.compact_batch(
+        drafts, scheduled, scheduled_cu_num_logits
+    )
+
+    # One bonus row per request, matching cumsum(capacities + num_bonus_tokens)
+    # with every capacity zeroed -- the prefill row included.
+    expected = np.arange(4, dtype=np.int32) * manager.num_bonus_tokens
+    assert np.array_equal(cu_num_logits_np, expected)
+    assert cu_num_logits_np.dtype == scheduled_cu_num_logits.dtype
+    # The prefill keeps its scheduled tokens; only drafts are dropped.
+    assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))

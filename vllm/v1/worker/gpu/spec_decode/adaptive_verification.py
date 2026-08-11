@@ -332,15 +332,32 @@ class AdaptiveVerificationManager:
         self,
         num_draft_tokens_per_req: np.ndarray,
         num_scheduled_tokens: np.ndarray,
-    ) -> np.ndarray:
+        cu_num_logits_np: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Compact the CPU batch to the chosen draft budget.
+
+        Returns the compacted per-request token counts and the CPU cu_num_logits_np.
+        If the draft budget is 0, we can know cu_num_logits_np exactly, otherwise
+        its unchanged/an-upper-bound.
+        """
         batch_budget = self._batch_budget
         assert batch_budget is not None
         _, _, draft_budget = batch_budget
         num_drafts = int(num_draft_tokens_per_req.sum())
         if draft_budget == num_drafts:
-            return num_scheduled_tokens
+            return num_scheduled_tokens, cu_num_logits_np
 
         num_non_draft_tokens = num_scheduled_tokens - num_draft_tokens_per_req
+        if draft_budget == 0:
+            # The draft budget is 0, so we can know cu_num_logits_np exactly. This helps
+            # when we would exceed the sampler logit chunk size.
+            num_reqs = num_scheduled_tokens.shape[0]
+            cu_num_logits_np = (
+                np.arange(num_reqs + 1, dtype=cu_num_logits_np.dtype)
+                * self.num_bonus_tokens
+            )
+            return num_non_draft_tokens, cu_num_logits_np
+
         is_verification_request = num_draft_tokens_per_req > 0
         num_verification_reqs = int(is_verification_request.sum())
         # sort_batch_req_ids keeps verification requests at the front.
@@ -349,7 +366,7 @@ class AdaptiveVerificationManager:
         draft_lens_cpu = np.zeros_like(num_non_draft_tokens)
         draft_lens_cpu[:num_verification_reqs] = draft_budget // num_verification_reqs
         draft_lens_cpu[: draft_budget % num_verification_reqs] += 1
-        return num_non_draft_tokens + draft_lens_cpu
+        return num_non_draft_tokens + draft_lens_cpu, cu_num_logits_np
 
     def reallocate_drafts(
         self, req_ids: list[str], idx_mapping: torch.Tensor
