@@ -82,6 +82,7 @@ def _make_offloading_spec(
             dcp_size=1,
             data_parallel_index=0,
             data_parallel_size=1,
+            data_parallel_rank_local=None,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
