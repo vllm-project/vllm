@@ -116,6 +116,8 @@ def _build_minimal_metrics_serving_completion(
 
 def _make_metrics_request_output(
     metrics: RequestStateStats | None = _PER_REQUEST_STATS,
+    accepted_prediction_tokens: int = 0,
+    rejected_prediction_tokens: int = 0,
 ) -> RequestOutput:
     return RequestOutput(
         request_id="test-id",
@@ -130,6 +132,8 @@ def _make_metrics_request_output(
                 cumulative_logprob=None,
                 logprobs=None,
                 finish_reason="stop",
+                num_accepted_spec_tokens=accepted_prediction_tokens,
+                num_rejected_spec_tokens=rejected_prediction_tokens,
             )
         ],
         finished=True,
@@ -176,6 +180,30 @@ def test_completion_per_request_metrics_follow_server_flag():
     )
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+def test_completion_prediction_token_details():
+    serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=False
+    )
+    response = serving.request_output_to_completion_response(
+        [
+            _make_metrics_request_output(
+                accepted_prediction_tokens=3,
+                rejected_prediction_tokens=2,
+            )
+        ],
+        CompletionRequest(model=MODEL_NAME, prompt="Test prompt", max_tokens=10),
+        "cmpl-test-id",
+        0,
+        MODEL_NAME,
+        None,
+        RequestResponseMetadata(request_id="cmpl-test-id"),
+    )
+
+    assert response.usage.completion_tokens_details is not None
+    assert response.usage.completion_tokens_details.accepted_prediction_tokens == 3
+    assert response.usage.completion_tokens_details.rejected_prediction_tokens == 2
 
 
 def test_completion_per_request_metrics_suppressed_for_multiple_prompts():

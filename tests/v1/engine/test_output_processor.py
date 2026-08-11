@@ -22,6 +22,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -215,6 +216,56 @@ def test_request_stream_interval_raises_but_not_below_engine_default(
         assert gen_tokens[request_id] == dummy_test_vectors.generation_tokens[idx]
 
     assert not output_processor.has_unfinished_requests()
+
+
+def test_speculative_token_counts_accumulate_per_request(dummy_test_vectors):
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer, log_stats=False, stream_interval=1
+    )
+    request = EngineCoreRequest(
+        request_id="request-int",
+        external_req_id="request",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            output_kind=RequestOutputKind.DELTA,
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+        ),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, dummy_test_vectors.prompt_strings[0])
+
+    first = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-int",
+                new_token_ids=[dummy_test_vectors.generation_tokens[0][0]],
+                num_accepted_spec_tokens=2,
+                num_rejected_spec_tokens=1,
+            )
+        ]
+    ).request_outputs[0]
+    second = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-int",
+                new_token_ids=[dummy_test_vectors.generation_tokens[0][1]],
+                finish_reason=FinishReason.LENGTH,
+                num_accepted_spec_tokens=1,
+                num_rejected_spec_tokens=2,
+            )
+        ]
+    ).request_outputs[0]
+
+    assert first.outputs[0].num_accepted_spec_tokens == 2
+    assert first.outputs[0].num_rejected_spec_tokens == 1
+    assert second.outputs[0].num_accepted_spec_tokens == 3
+    assert second.outputs[0].num_rejected_spec_tokens == 3
 
 
 def _validate_logprobs(

@@ -749,7 +749,7 @@ def test_stop_via_update_from_output():
         pooler_output=[],
     )
 
-    scheduler.update_from_output(scheduler_output, model_output)
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
 
     # Verify first request stopped on custom token
     assert len(scheduler.running) == 1
@@ -759,6 +759,13 @@ def test_stop_via_update_from_output():
     assert requests[0].request_id in scheduler.finished_req_ids
     assert list(requests[0].output_token_ids) == [10, 42]
     assert list(requests[1].output_token_ids) == [13, 14]
+    outputs_by_id = {
+        output.request_id: output for output in engine_core_outputs.outputs
+    }
+    assert outputs_by_id[requests[0].request_id].num_accepted_spec_tokens == 2
+    assert outputs_by_id[requests[0].request_id].num_rejected_spec_tokens == 0
+    assert outputs_by_id[requests[1].request_id].num_accepted_spec_tokens == 1
+    assert outputs_by_id[requests[1].request_id].num_rejected_spec_tokens == 0
 
     # Test case 3: Stop on max tokens
     scheduler = create_scheduler(num_speculative_tokens=2)

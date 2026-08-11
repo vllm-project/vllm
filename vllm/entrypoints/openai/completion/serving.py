@@ -16,6 +16,7 @@ from vllm.entrypoints.generate.base.serving import (
     build_per_request_timing_metrics,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
+    make_completion_tokens_details,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
@@ -26,6 +27,7 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionStreamResponse,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
     ErrorResponse,
     PerRequestTimingMetrics,
     PromptTokenUsageInfo,
@@ -295,6 +297,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
+        accepted_prediction_tokens = [0] * num_choices * num_prompts
+        rejected_prediction_tokens = [0] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
         num_cached_tokens = None
@@ -396,6 +400,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
                     previous_text_lens[i] += len(output.text)
                     previous_num_tokens[i] += len(output.token_ids)
+                    accepted_prediction_tokens[i] = output.num_accepted_spec_tokens
+                    rejected_prediction_tokens[i] = output.num_rejected_spec_tokens
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
@@ -438,6 +444,20 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             completion_tokens=completion_tokens,
                             total_tokens=prompt_tokens + completion_tokens,
                         )
+                        if (
+                            accepted_prediction_tokens[i]
+                            or rejected_prediction_tokens[i]
+                        ):
+                            chunk.usage.completion_tokens_details = (
+                                CompletionTokenUsageInfo(
+                                    accepted_prediction_tokens=(
+                                        accepted_prediction_tokens[i]
+                                    ),
+                                    rejected_prediction_tokens=(
+                                        rejected_prediction_tokens[i]
+                                    ),
+                                )
+                            )
 
                     response_json = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {response_json}\n\n"
@@ -449,6 +469,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             )
+            if any(accepted_prediction_tokens) or any(rejected_prediction_tokens):
+                final_usage_info.completion_tokens_details = CompletionTokenUsageInfo(
+                    accepted_prediction_tokens=sum(accepted_prediction_tokens),
+                    rejected_prediction_tokens=sum(rejected_prediction_tokens),
+                )
 
             if self.enable_prompt_tokens_details and num_cached_tokens is not None:
                 final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
@@ -599,6 +624,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+        )
+        usage.completion_tokens_details = make_completion_tokens_details(
+            [output for res in final_res_batch for output in res.outputs]
         )
 
         if (

@@ -107,9 +107,27 @@ def _make_prompt_tokens_details(
 
 
 def _make_completion_tokens_details(
-    reasoning_tokens: int,
-) -> CompletionTokenUsageInfo:
-    return CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+    reasoning_tokens: int | None = None,
+    accepted_prediction_tokens: int = 0,
+    rejected_prediction_tokens: int = 0,
+) -> CompletionTokenUsageInfo | None:
+    has_prediction_tokens = (
+        accepted_prediction_tokens or rejected_prediction_tokens
+    )
+    if reasoning_tokens is None and not has_prediction_tokens:
+        return None
+    if reasoning_tokens is None:
+        return CompletionTokenUsageInfo(
+            accepted_prediction_tokens=accepted_prediction_tokens,
+            rejected_prediction_tokens=rejected_prediction_tokens,
+        )
+    if not has_prediction_tokens:
+        return CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+    return CompletionTokenUsageInfo(
+        reasoning_tokens=reasoning_tokens,
+        accepted_prediction_tokens=accepted_prediction_tokens,
+        rejected_prediction_tokens=rejected_prediction_tokens,
+    )
 
 
 class OpenAIServingChat(GenerateBaseServing):
@@ -450,6 +468,8 @@ class OpenAIServingChat(GenerateBaseServing):
         # TODO: Remove once all reasoning parsers use the Parser Engine.
         generated_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
         previous_reasoning_tokens = [0] * num_choices
+        accepted_prediction_tokens = [0] * num_choices
+        rejected_prediction_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
@@ -657,6 +677,8 @@ class OpenAIServingChat(GenerateBaseServing):
                         previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
                             tuple(generated_token_ids[i])
                         )
+                    accepted_prediction_tokens[i] = output.num_accepted_spec_tokens
+                    rejected_prediction_tokens[i] = output.num_rejected_spec_tokens
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
@@ -782,12 +804,12 @@ class OpenAIServingChat(GenerateBaseServing):
                             prompt_tokens=num_prompt_tokens,
                             completion_tokens=completion_tokens,
                             total_tokens=num_prompt_tokens + completion_tokens,
-                            completion_tokens_details=(
-                                _make_completion_tokens_details(
-                                    previous_reasoning_tokens[i]
-                                )
+                            completion_tokens_details=_make_completion_tokens_details(
+                                previous_reasoning_tokens[i]
                                 if self._include_reasoning_tokens_details
-                                else None
+                                else None,
+                                accepted_prediction_tokens[i],
+                                rejected_prediction_tokens[i],
                             ),
                         )
 
@@ -804,9 +826,11 @@ class OpenAIServingChat(GenerateBaseServing):
                     total_tokens=num_prompt_tokens + completion_tokens,
                     completion_tokens_details=_make_completion_tokens_details(
                         sum(previous_reasoning_tokens)
-                    )
-                    if self._include_reasoning_tokens_details
-                    else None,
+                        if self._include_reasoning_tokens_details
+                        else None,
+                        sum(accepted_prediction_tokens),
+                        sum(rejected_prediction_tokens),
+                    ),
                 )
                 final_usage.prompt_tokens_details = _make_prompt_tokens_details(
                     self.enable_prompt_tokens_details,
@@ -814,7 +838,6 @@ class OpenAIServingChat(GenerateBaseServing):
                     num_cache_creation_tokens,
                     mm_token_counts,
                 )
-
                 # In streaming, metrics ride on this final usage chunk, which is
                 # only emitted when usage reporting is enabled (i.e.
                 # ``stream_options.include_usage=true`` or
@@ -853,9 +876,11 @@ class OpenAIServingChat(GenerateBaseServing):
                 total_tokens=num_prompt_tokens + num_completion_tokens,
                 completion_tokens_details=_make_completion_tokens_details(
                     sum(previous_reasoning_tokens)
-                )
-                if self._include_reasoning_tokens_details
-                else None,
+                    if self._include_reasoning_tokens_details
+                    else None,
+                    sum(accepted_prediction_tokens),
+                    sum(rejected_prediction_tokens),
+                ),
             )
 
             # Log complete streaming response if output logging is enabled
@@ -1099,15 +1124,23 @@ class OpenAIServingChat(GenerateBaseServing):
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs
         )
+        accepted_prediction_tokens = sum(
+            output.num_accepted_spec_tokens for output in final_res.outputs
+        )
+        rejected_prediction_tokens = sum(
+            output.num_rejected_spec_tokens for output in final_res.outputs
+        )
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
             completion_tokens_details=_make_completion_tokens_details(
                 total_reasoning_tokens
-            )
-            if self._include_reasoning_tokens_details
-            else None,
+                if self._include_reasoning_tokens_details
+                else None,
+                accepted_prediction_tokens,
+                rejected_prediction_tokens,
+            ),
         )
         usage.prompt_tokens_details = _make_prompt_tokens_details(
             self.enable_prompt_tokens_details,
@@ -1115,7 +1148,6 @@ class OpenAIServingChat(GenerateBaseServing):
             final_res.num_cache_creation_tokens,
             mm_token_counts,
         )
-
         request_metadata.final_usage_info = usage
 
         per_request_metrics: PerRequestTimingMetrics | None = None
