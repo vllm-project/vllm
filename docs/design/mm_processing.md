@@ -72,10 +72,14 @@ To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation
 
 Traditionally, the CPU would divide pixel values by 255, then subtract the mean and divide by the standard deviation. We fuse these steps into one operation and run it entirely on the GPU.
 
-- **How it works**: We use a dedicated `FusedInputNorm` module — essentially a frozen `BatchNorm1d` with the rescale factor baked into its statistics — and bake the rescale factor (typically 1/255) directly into the effective mean and standard deviation:
-    - Effective mean = `image_mean * (1/rescale_factor)`
-    - Effective std  = `image_std  * (1/rescale_factor)`
-- **At runtime**: The `FusedInputNorm` layer takes raw `uint8` pixel values (0–255) and performs the full normalised mapping in a single GPU kernel—no CPU involvement.
+**How it works**: We use a dedicated `FusedInputNorm` module that bakes the rescale factor (1/255) directly into the layer's `weight` and `bias` parameters. Instead of performing three separate steps (scale, subtract, divide), the module does everything in a single affine transformation: `y = x * weight + bias`.
+
+The parameters are set as follows:
+
+- `weight` controls both the standard deviation and the rescale factor
+- `bias` centers the data using the mean and the same rescale factor
+
+This means the module takes raw pixel values (0–255) and outputs properly normalised values without ever explicitly dividing by 255 as a separate step.
 
 #### Optimized Data Path for Fused Normalisation
 
