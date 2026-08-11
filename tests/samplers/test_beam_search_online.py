@@ -72,3 +72,34 @@ async def test_beam_search_handles_extra_logprob_candidates() -> None:
     assert outputs[0].outputs[0].finish_reason == "stop"
     assert outputs[0].outputs[0].token_ids == []
     assert outputs[0].outputs[0].cumulative_logprob == pytest.approx(-0.1)
+
+
+@pytest.mark.asyncio
+async def test_beam_search_respects_min_tokens_before_eos() -> None:
+    prompt = {
+        "type": "token",
+        "prompt": "prompt",
+        "prompt_token_ids": [1],
+    }
+    params = BeamSearchParams(beam_width=1, max_tokens=2, min_tokens=1)
+
+    outputs = [
+        output async for output in _Serving().beam_search(prompt, "request", params)
+    ]
+
+    assert len(outputs) == 1
+    assert outputs[0].outputs[0].finish_reason == "stop"
+    assert outputs[0].outputs[0].token_ids == [11]
+    assert outputs[0].outputs[0].cumulative_logprob == pytest.approx(-1.1)
+
+
+def test_beam_search_params_validate_min_tokens() -> None:
+    BeamSearchParams(beam_width=1, max_tokens=2, min_tokens=2)
+
+    with pytest.raises(
+        ValueError, match="min_tokens must be greater than or equal to 0"
+    ):
+        BeamSearchParams(beam_width=1, max_tokens=2, min_tokens=-1)
+
+    with pytest.raises(ValueError, match="min_tokens must be less than or equal to"):
+        BeamSearchParams(beam_width=1, max_tokens=2, min_tokens=3)
