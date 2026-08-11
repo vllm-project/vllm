@@ -28,6 +28,9 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     _is_tp_sharded,
 )
 from vllm.model_executor.layers.quantization.online.int8 import Int8OnlineMoEMethod
+from vllm.model_executor.layers.quantization.online.lut_b import (
+    LutBOnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
     Mxfp4OnlineMoEMethod,
@@ -37,6 +40,11 @@ from vllm.model_executor.layers.quantization.online.nvfp4 import (
     _quantize_moe_weight_to_nvfp4,
 )
 from vllm.model_executor.layers.quantization.utils import quant_utils
+from vllm.model_executor.layers.quantization.utils.lut_b_utils import (
+    LUT_B_PACKED_TILE_BYTES,
+    dequantize_lut_b,
+    quantize_lut_b,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
@@ -57,6 +65,28 @@ else:
 
 
 DEVICE = current_platform.device_type
+
+
+def test_lut_b_stacked_moe_weight_format_and_fit() -> None:
+    """LUT-B stores 3-bit indices plus one eight-byte codebook per tile."""
+    torch.manual_seed(0)
+    weight = torch.randn(2, 16, 128, dtype=torch.float32)
+
+    packed, codebooks = quantize_lut_b(weight)
+    packed_again, codebooks_again = quantize_lut_b(weight)
+    reconstructed = dequantize_lut_b(
+        packed,
+        codebooks,
+        out_dtype=torch.float32,
+    )
+
+    assert packed.shape == (2, 2, 2, LUT_B_PACKED_TILE_BYTES)
+    assert codebooks.shape == (2, 2, 2, 8)
+    assert codebooks.dtype == torch.float8_e4m3fn
+    assert (packed.numel() + codebooks.numel()) * 8 / weight.numel() == 3.125
+    assert torch.equal(packed, packed_again)
+    assert torch.equal(codebooks, codebooks_again)
+    assert (weight - reconstructed).square().mean() < weight.square().mean()
 
 
 @pytest.mark.skipif(
@@ -105,6 +135,12 @@ DEVICE = current_platform.device_type
             None,
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
+        ),
+        (
+            "lut_b_moe",
+            None,
+            UnquantizedLinearMethod,
+            LutBOnlineMoEMethod,
         ),
     ],
 )
@@ -172,7 +208,15 @@ def test_online_quantization(
             if moe is not None:
                 assert isinstance(moe._quant_method, expected_moe_cls)
 
-            if quant_scheme == "mxfp4":
+            if quant_scheme == "lut_b_moe":
+                assert o_proj.weight.dtype in (torch.bfloat16, torch.float16)
+                if moe is not None:
+                    assert moe._quant_method.moe_quant_config.w1_scale is not None
+                    assert (
+                        moe._quant_method.moe_quant_config.w1_scale.dtype
+                        == torch.float8_e4m3fn
+                    )
+            elif quant_scheme == "mxfp4":
                 # Packed e2m1 values, two per byte.
                 assert o_proj.weight.dtype == torch.uint8
             elif current_platform.is_cuda() or current_platform.is_xpu():
