@@ -52,7 +52,10 @@ def _stub_model(*, enabled: bool, use_attn_res: bool = True) -> SimpleNamespace:
         layers=consumers,
         output_attn_res_norm=_weights(99.0),
         output_attn_res_proj=SimpleNamespace(weight=torch.full((1, 2), 99.0)),
+        boundary_attn_res_norm=_weights(77.0),
+        boundary_attn_res_proj=SimpleNamespace(weight=torch.full((1, 2), 77.0)),
         num_attn_res_blocks=99,
+        _aux_hidden_state_layers=(),
     )
 
 
@@ -157,25 +160,17 @@ def test_last_layer_on_the_final_rank_uses_the_output_aggregation(
     assert recorder[0].kwargs["num_blocks"] == 99
 
 
-def test_last_layer_of_a_non_final_stage_falls_back(recorder, monkeypatch):
-    """The consumer lives on the next rank and the output aggregation only
-    exists on the last one, so there is nothing here to mix against.
-
-    This is the case that would otherwise reach for weights this rank never
-    constructs. The forward guard is `layer_idx + 1 < end_layer`, where
-    `end_layer` is the rank's own exclusive bound from `get_pp_indices`, so a
-    `PPMissingLayer` is unreachable by construction -- the fallback below is
-    what makes that true rather than merely likely.
-    """
+def test_last_layer_of_a_non_final_stage_uses_boundary_weights(recorder, monkeypatch):
+    """The tap must use the next rank's boundary weights and block count."""
     _set_last_rank(monkeypatch, False)
-    prefix_sum = torch.tensor([3.0, 4.0])
 
-    got = _call(
-        _stub_model(enabled=True), END_LAYER - 1, prefix_sum, None, torch.zeros(2)
+    _call(
+        _stub_model(enabled=True), END_LAYER - 1, torch.zeros(2), None, torch.zeros(2)
     )
 
-    torch.testing.assert_close(got, prefix_sum)
-    assert not recorder, "no weights exist on this rank to mix against"
+    assert len(recorder) == 1
+    torch.testing.assert_close(recorder[0].norm_weight, torch.full((2,), 77.0))
+    assert recorder[0].kwargs["num_blocks"] == 99
 
 
 def test_pending_mlp_output_is_folded_in_rather_than_passed_as_delta(
@@ -195,3 +190,73 @@ def test_pending_mlp_output_is_folded_in_rather_than_passed_as_delta(
     torch.testing.assert_close(recorder[0].prefix, prefix_sum + pending)
     # And the caller's tensor is not mutated on the way.
     torch.testing.assert_close(prefix_sum, torch.tensor([1.0, 2.0]))
+
+
+def test_boundary_checkpoint_weights_are_redirected(monkeypatch):
+    """Boundary checkpoint names must load into the local boundary params."""
+    loaded = []
+
+    class _Parameter:
+        def weight_loader(self, param, weight, **kwargs):
+            loaded.append((param, weight, kwargs))
+
+    param_norm = _Parameter()
+    param_proj = _Parameter()
+    stub = SimpleNamespace(
+        _aux_attn_res_stream=True,
+        boundary_attn_res_norm=SimpleNamespace(),
+        end_layer=END_LAYER,
+        config=SimpleNamespace(
+            linear_attn_config=None,
+            is_moe=False,
+            is_linear_attn=True,
+        ),
+        modules=lambda: [],
+        named_parameters=lambda: [
+            ("boundary_attn_res_norm.weight", param_norm),
+            ("boundary_attn_res_proj.weight", param_proj),
+        ],
+    )
+    monkeypatch.setattr(k3_model, "is_pp_missing_parameter", lambda *_: False)
+    monkeypatch.setattr(k3_model, "maybe_remap_kv_scale_name", lambda name, _: name)
+
+    got = k3_model.KimiLinearModel.load_weights(
+        stub,
+        [
+            (
+                f"model.layers.{END_LAYER}.self_attention_res_norm.weight",
+                torch.ones(2),
+            ),
+            (
+                f"layers.{END_LAYER}.self_attention_res_proj.weight",
+                torch.ones(1, 2),
+            ),
+        ],
+    )
+
+    assert got == {
+        "boundary_attn_res_norm.weight",
+        "boundary_attn_res_proj.weight",
+    }
+    assert [entry[0] for entry in loaded] == [param_norm, param_proj]
+
+
+def test_missing_boundary_weights_fail_when_boundary_layer_is_tapped(
+    monkeypatch,
+):
+    """A tapped boundary with unsupplied weights must fail during setup."""
+    model = k3_model.KimiLinearModel.__new__(k3_model.KimiLinearModel)
+    torch.nn.Module.__init__(model)
+    model.use_attn_res = True
+    model.end_layer = END_LAYER
+    model.boundary_attn_res_norm = _weights(float("nan"))
+    model.boundary_attn_res_proj = SimpleNamespace(
+        weight=torch.full((1, 2), float("nan"))
+    )
+    monkeypatch.setattr(
+        k3_model, "get_pp_group", lambda: SimpleNamespace(is_last_rank=False)
+    )
+    monkeypatch.setattr(k3_model.envs, "VLLM_KIMI_K3_AUX_ATTN_RES_STREAM", True)
+
+    with pytest.raises(RuntimeError, match="boundary weights.*not loaded"):
+        model._set_aux_hidden_state_layers((END_LAYER,))
