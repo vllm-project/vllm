@@ -88,6 +88,7 @@ class SingleTypeKVCacheManager(ABC):
             TQFullAttentionSpec,
             MLAAttentionSpec,
             HiddenStateCacheSpec,
+            SlidingWindowSpec,
         )
         self.new_block_ids: list[int] = []
 
