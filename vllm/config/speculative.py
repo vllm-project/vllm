@@ -999,6 +999,8 @@ class SpeculativeConfig:
                         "DSparkDraftModel"
                     ]
                     self.update_arch_()
+                    if self.draft_model_config.quantization == "fp8":
+                        self.draft_model_config.quantization = "deepseek_v4_fp8"
                 elif (
                     self.method == "dspark"
                     and "Gemma4DSparkModel" in self.draft_model_config.architectures
