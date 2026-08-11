@@ -61,12 +61,12 @@ AUDIO_MODEL_SETTINGS = {
         pytest.param(
             "mistralai/Voxtral-Mini-3B-2507",
             marks=pytest.mark.xfail(
-                reason="MistralCommonBackend.encode does not produce the audio "
-                "placeholder token (ID 24) from raw text. apply_chat_template "
-                "yields token IDs with placeholders, but MultiModalProcessor."
-                "apply() decodes the prompt back to text and re-tokenizes, at "
-                "which point the placeholders are lost. Fix belongs in "
-                "mistral_common or in the Voxtral-specific path.",
+                reason="Voxtral's mistral_common processor does not compose with "
+                "the Transformers modelling backend. Loading it currently fails "
+                "outright, because MistralCommonBackend.from_pretrained rejects "
+                "the kwargs vLLM passes, and it implements no "
+                "`replace_audio_token`, so it would report no replacement "
+                "offsets. Both fixes belong in mistral_common or transformers.",
                 strict=False,
             ),
         ),

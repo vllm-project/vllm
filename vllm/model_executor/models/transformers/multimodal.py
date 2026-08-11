@@ -386,7 +386,9 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         """
         pixel_values = hf_inputs.get("pixel_values")
         image_sizes = hf_inputs.get("image_sizes")
-        if not isinstance(pixel_values, torch.Tensor) or image_sizes is None:
+        if not isinstance(pixel_values, torch.Tensor):
+            return
+        if not isinstance(image_sizes, torch.Tensor):
             return
         if pixel_values.ndim != 4 or len(pixel_values) != len(image_sizes):
             return
@@ -1079,42 +1081,40 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             context = torch.nn.attention.sdpa_kernel(
                 backends=[torch.nn.attention.SDPBackend.MATH]
             )
+        split_sizes = num_image_patches.flatten().tolist()
         with context:
             if isinstance(pixel_values, torch.Tensor):
                 vision_embeddings = self._get_image_features(pixel_values, **kwargs)
-            else:
-                # Images the processor left un-padded arrive as a list once their
-                # shapes differ. Encode them one at a time so that none of them is
-                # padded to match another.
-                per_image = [
-                    self._get_image_features(
-                        image.unsqueeze(0),
-                        **self._select_item_kwargs(kwargs, index, len(pixel_values)),
-                    )
-                    for index, image in enumerate(pixel_values)
-                ]
-                vision_embeddings = [
-                    embedding
-                    for features in per_image
-                    for embedding in (
-                        [features] if isinstance(features, torch.Tensor) else features
-                    )
-                ]
+                if isinstance(vision_embeddings, torch.Tensor):
+                    return self._split_embeddings(vision_embeddings, split_sizes)
+                return list(vision_embeddings)
 
-        if isinstance(vision_embeddings, torch.Tensor):
-            split_sizes = num_image_patches.flatten().tolist()
-            return self._split_embeddings(vision_embeddings, split_sizes)
-
-        return list(vision_embeddings)
+            # Images the processor left un-padded arrive as a list once their
+            # shapes differ. Encode them one at a time so that none of them is
+            # padded to match another.
+            embeddings: list[torch.Tensor] = []
+            for index, image in enumerate(pixel_values):
+                features = self._get_image_features(
+                    image.unsqueeze(0),
+                    **self._select_item_kwargs(kwargs, index, len(pixel_values)),
+                )
+                # Encoders which return one entry per image return a single entry
+                if not isinstance(features, torch.Tensor):
+                    features = torch.cat(list(features))
+                embeddings.extend(
+                    self._split_embeddings(features, [split_sizes[index]])
+                )
+        return embeddings
 
     def _select_item_kwargs(
-        self, kwargs: dict[str, Any], index: int, num_images: int
+        self, kwargs: dict[str, Any], index: int, num_items: int
     ) -> dict[str, Any]:
-        """Narrow the entries of `kwargs` that hold one row per image down to the
-        image at `index`."""
+        """Narrow the entries of `kwargs` that hold one row per item down to the item
+        at `index`. Length is all there is to match on, so an unrelated entry of the
+        same length is narrowed too."""
         return {
             key: value[index : index + 1]
-            if isinstance(value, (torch.Tensor, list)) and len(value) == num_images
+            if isinstance(value, (torch.Tensor, list)) and len(value) == num_items
             else value
             for key, value in kwargs.items()
         }
