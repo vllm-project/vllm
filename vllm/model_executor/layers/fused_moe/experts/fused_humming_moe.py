@@ -44,6 +44,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static,
+    kInt4Static32,
+    kInt4Static32Bfloat16,
+    kInt4Static32Fp32,
     kInt8DynamicTokenSym,
     kInt8Static,
     kInt8StaticChannelSym,
@@ -189,6 +192,13 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             (kFp8Static128BlockSym, kFp8DynamicTokenSym),
             (kInt4Static, None),
             (kInt4Static, kFp8DynamicTokenSym),
+            # W4A16 group-32 without zero point. The fp16-scale key is what
+            # moe_wna16/auto_gptq-style callers construct; the bf16-scale key
+            # is what a converted humming weight schema maps to, and the fp32
+            # key is what a compressed-tensors checkpoint schema maps to.
+            (kInt4Static32, None),
+            (kInt4Static32Bfloat16, None),
+            (kInt4Static32Fp32, None),
             (kInt8Static, None),
             (kInt8Static, kFp8DynamicTokenSym),
             # Checkpoint-driven (weight, activation) pairs the dense/MoE oracles

@@ -211,6 +211,16 @@ kInt8Static = QuantKey(INT8_DTYPE, scale=kInt8StaticGroupScale, symmetric=True)
 kInt4Static32GroupScale = ScaleDesc(torch.float16, True, GroupShape(1, 32))
 kInt4Static32 = QuantKey(INT4_DTYPE, scale=kInt4Static32GroupScale, symmetric=True)
 
+kInt4Static32Bfloat16GroupScale = ScaleDesc(torch.bfloat16, True, GroupShape(1, 32))
+kInt4Static32Bfloat16 = QuantKey(
+    INT4_DTYPE, scale=kInt4Static32Bfloat16GroupScale, symmetric=True
+)
+
+kInt4Static32Fp32GroupScale = ScaleDesc(torch.float32, True, GroupShape(1, 32))
+kInt4Static32Fp32 = QuantKey(
+    INT4_DTYPE, scale=kInt4Static32Fp32GroupScale, symmetric=True
+)
+
 kInt4StaticAsym = QuantKey(
     scalar_types.uint4, scale=kInt4StaticGroupScale, symmetric=False
 )

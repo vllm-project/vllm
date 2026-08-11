@@ -1171,6 +1171,53 @@ class _MoeWNA16HummingWeightSchema:
         return schema, output
 
 
+class _CompressedTensorsHummingWeightSchema:
+    """Adapter from the compressed-tensors WNA16 packed layout to Humming's.
+
+    compressed-tensors MoE keeps int32 words K-major as ``[E, K/8, N]`` while
+    humming's checkpoint layout is N-major ``[E, N, K/8]``; the nibble order
+    inside each word is already the same little-endian-along-K convention on
+    both sides, so the conversion is a transpose.  Asymmetric checkpoints are
+    out of scope: their zero-point tensors have no humming-standard layout
+    here, so they are rejected instead of being dequantized wrong.
+    """
+
+    def __init__(self, num_bits: int, group_size: int, symmetric: bool) -> None:
+        self.num_bits = num_bits
+        self.group_size = group_size
+        self.symmetric = symmetric
+
+    def convert_humming(
+        self,
+        tensors: dict[str, torch.Tensor],
+        shape_n_stacks: list[int],
+        shape_k_stacks: list[int],
+        param_dtype: torch.dtype,
+        num_experts: int | None = None,
+    ) -> tuple[Any, dict[str, torch.Tensor]]:
+        del shape_n_stacks, shape_k_stacks, num_experts
+        from vllm.utils.humming import HummingWeightSchema, dtypes
+
+        if not self.symmetric or "weight_zero_point" in tensors:
+            raise ValueError(
+                "humming's WNA16 MoE schema requires a symmetric checkpoint "
+                f"(no zero point); got symmetric={self.symmetric} and "
+                f"weight_zero_point {'present' if 'weight_zero_point' in tensors else 'absent'}"
+            )
+        weight = tensors["weight_packed"]
+        scale = tensors["weight_scale"]
+        output = {
+            "weight": weight.transpose(1, 2).contiguous(),
+            "weight_scale": scale.transpose(1, 2).contiguous().to(param_dtype),
+        }
+        schema = HummingWeightSchema(
+            b_dtype=dtypes.DataType.from_str(f"uint{self.num_bits}"),
+            weight_scale_group_size=self.group_size,
+            has_zero_point=False,
+        )
+        return schema, output
+
+
 def _unpack_and_dequant_int4_gptq(
     w_int32: torch.Tensor,
     scale: torch.Tensor,
@@ -1469,6 +1516,18 @@ def convert_to_wna16_moe_kernel_format(
                     bits=quant_config.weight_bits,
                     group_size=layer.group_size,
                     has_zero_point=quant_config.has_zp,
+                ),
+                input_schema=HummingInputSchema(),
+            )
+        elif isinstance(quant_config, QuantizationArgs):
+            from vllm.utils.humming import HummingInputSchema
+
+            convert_to_humming_moe_kernel_format(
+                layer,
+                weight_schema=_CompressedTensorsHummingWeightSchema(
+                    num_bits=quant_config.num_bits,
+                    group_size=quant_config.group_size,
+                    symmetric=quant_config.symmetric,
                 ),
                 input_schema=HummingInputSchema(),
             )

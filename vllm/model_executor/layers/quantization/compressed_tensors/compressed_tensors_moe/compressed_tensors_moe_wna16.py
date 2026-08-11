@@ -450,23 +450,25 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
 
-        # Add Marlin-specific arguments
-        marlin_args: dict[str, Any] = {}
+        # Add backend-specific arguments
+        backend_args: dict[str, Any] = {}
         if self.is_marlin:
-            marlin_args = {
+            backend_args = {
                 "w13_g_idx": layer.w13_weight_g_idx,
                 "w2_g_idx": layer.w2_weight_g_idx,
                 "w13_g_idx_sort_indices": layer.w13_g_idx_sort_indices,
                 "w2_g_idx_sort_indices": layer.w2_g_idx_sort_indices,
                 "is_k_full": self.is_k_full,
             }
+        elif self.wna16_backend == WNA16MoEBackend.HUMMING:
+            backend_args = {"backend": self.wna16_backend, "layer": layer}
 
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
-            **marlin_args,
+            **backend_args,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
