@@ -256,6 +256,10 @@ void mamba_chunk_scan_fwd_cpu_impl(at::Tensor& out, at::Tensor& final_states,
 
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
+void set_cpu_moe_numa_shards(int64_t shards);
+int64_t cpu_moe_numa_shards();
+void place_moe_expert_weight(at::Tensor& weight, int64_t block_size);
+
 namespace cpu_utils {
 void eagle_prepare_inputs_padded_kernel_impl(
     const torch::Tensor& cu_num_draft_tokens,
@@ -675,6 +679,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &mamba_chunk_scan_fwd_cpu_impl);
 
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
+
+  // NUMA sharding for the CPU MoE experts. The shard count is set once from
+  // the policy in Python; place_moe_expert_weight moves each shard's rows onto
+  // the node that will compute them, using the same split the kernel makes.
+  ops.def("set_cpu_moe_numa_shards(int shards) -> ()",
+          &set_cpu_moe_numa_shards);
+  ops.def("cpu_moe_numa_shards() -> int", &cpu_moe_numa_shards);
+  ops.def("place_moe_expert_weight(Tensor! weight, int block_size) -> ()",
+          &place_moe_expert_weight);
 
   // Speculative decoding kernels
   ops.def(
