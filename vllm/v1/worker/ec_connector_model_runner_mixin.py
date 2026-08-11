@@ -13,7 +13,7 @@ import torch
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
 from vllm.logger import init_logger
-from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import ECConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -35,19 +35,6 @@ class ECConnectorModelRunnerMixin:
         connector.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
 
     @staticmethod
-    def ec_connector_no_forward(
-        scheduler_output: "SchedulerOutput",
-        encoder_cache: dict[str, torch.Tensor],
-    ) -> ModelRunnerOutput:
-        # EC send/recv even if no work to do.
-        with ECConnectorModelRunnerMixin.maybe_get_ec_connector_output(
-            scheduler_output, encoder_cache
-        ) as ec_connector_output:
-            pass
-
-        return ModelRunnerOutput.with_ec_conn_output_only(ec_connector_output)
-
-    @staticmethod
     def maybe_get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
         encoder_cache: dict[str, torch.Tensor],
@@ -57,7 +44,7 @@ class ECConnectorModelRunnerMixin:
             ECConnectorModelRunnerMixin._get_ec_connector_output(
                 scheduler_output, encoder_cache, **kwargs
             )
-            if has_ec_transfer() and scheduler_output.ec_connector_metadata is not None
+            if has_ec_transfer()
             else nullcontext()
         )
 
@@ -87,6 +74,5 @@ class ECConnectorModelRunnerMixin:
             output.finished_sending, output.finished_recving = (
                 ec_connector.get_finished(scheduler_output.finished_req_ids)
             )
-            output.ec_connector_worker_meta = ec_connector.build_connector_worker_meta()
 
             ec_connector.clear_connector_metadata()
