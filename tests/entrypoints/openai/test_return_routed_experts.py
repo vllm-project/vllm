@@ -20,6 +20,18 @@ NUM_EXPERTS_PER_TOK = 2
 NUM_HIDDEN_LAYERS = 2
 
 
+def assert_valid_routed_experts(encoded: str | None) -> None:
+    assert encoded is not None
+    routed_experts = np.load(io.BytesIO(base64.b64decode(encoded)))
+    assert routed_experts.ndim == 3
+    num_tokens, num_layers, topk = routed_experts.shape
+    assert num_tokens > 0
+    assert num_layers == NUM_HIDDEN_LAYERS
+    assert topk == NUM_EXPERTS_PER_TOK
+    assert (routed_experts >= 0).all()
+    assert (routed_experts < NUM_LOCAL_EXPERTS).all()
+
+
 @pytest.fixture(scope="module")
 def server():
     args = [
@@ -50,15 +62,41 @@ async def test_routed_experts(server):
 
         choice = result.model_dump()["choices"][0]
 
-        assert choice["routed_experts"] is not None
         assert choice["token_ids"] is not None
+        assert_valid_routed_experts(choice["routed_experts"])
 
-        # routed_experts is base64-encoded .npy bytes; decode to ndarray.
-        routed_experts = np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
-        assert routed_experts.ndim == 3
-        num_tokens, num_layers, topk = routed_experts.shape
-        assert num_tokens > 0
-        assert num_layers == NUM_HIDDEN_LAYERS
-        assert topk == NUM_EXPERTS_PER_TOK
-        assert (routed_experts >= 0).all()
-        assert (routed_experts < NUM_LOCAL_EXPERTS).all()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["completions", "chat.completions"])
+async def test_streaming_routed_experts(server, endpoint):
+    """Streaming endpoints return R3 exactly once on the terminal choice."""
+    async with server.get_async_client() as client:
+        if endpoint == "completions":
+            stream = await client.completions.create(
+                model=MODEL_NAME,
+                prompt="Hello, world",
+                max_tokens=10,
+                temperature=0,
+                stream=True,
+            )
+        else:
+            stream = await client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[{"role": "user", "content": "Hello, world"}],
+                max_tokens=10,
+                temperature=0,
+                stream=True,
+            )
+
+        terminal_choices = []
+        routed_experts = []
+        async for chunk in stream:
+            for choice in chunk.model_dump()["choices"]:
+                if choice.get("finish_reason") is not None:
+                    terminal_choices.append(choice)
+                if choice.get("routed_experts") is not None:
+                    routed_experts.append(choice["routed_experts"])
+
+        assert len(terminal_choices) == 1
+        assert len(routed_experts) == 1
+        assert_valid_routed_experts(routed_experts[0])
