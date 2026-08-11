@@ -46,6 +46,11 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.offloader import (
+    create_offloader,
+    get_offloader,
+    set_offloader,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
@@ -292,6 +297,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.eplb = EPLBController(self.parallel_config, self.device)
         self.routed_experts_capturer: RoutedExpertsCapturer | None = None
 
+        set_offloader(create_offloader(self.vllm_config.offload_config))
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
@@ -413,6 +420,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
 
+        get_offloader().post_init()
+
     def get_model(self) -> nn.Module:
         return self.model
 
@@ -443,6 +452,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def main_stream(self) -> torch.cuda.Stream:
         # Cache the default CUDA stream to avoid lookup overhead.
         return torch.cuda.current_stream(self.device)
+
+    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
+        encoder_runner = getattr(self.model_state, "encoder_runner", None)
+        if encoder_runner is None:
+            return {}
+        return encoder_runner.get_encoder_timing_stats()
 
     def get_kv_cache_spec(self):
         if self.is_encoder_only:
