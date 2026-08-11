@@ -105,6 +105,39 @@ def test_trace_dispatch_expands_ranges_dedupes_and_ignores_unused_inputs() -> No
     ]
 
 
+def test_warmup_range_uses_custom_advancement() -> None:
+    keys = ToyKernel()._trace_dispatch(ToyKernel().dispatch)(
+        tokens=WarmupIntRange(
+            1,
+            10,
+            advance=lambda value: _next_power_of_2(value) + 1,
+        ),
+        cfg=_config(),
+    )
+
+    assert [key.block_size for key in keys] == [1, 2, 4, 8, 16]
+
+
+def test_warmup_range_validates_custom_advancement() -> None:
+    trace_dispatch = ToyKernel()._trace_dispatch(ToyKernel().dispatch)
+
+    with pytest.raises(ValueError, match="both step and advance"):
+        trace_dispatch(
+            tokens=WarmupIntRange(
+                1,
+                10,
+                step=2,
+                advance=lambda value: value + 1,
+            ),
+            cfg=_config(),
+        )
+    with pytest.raises(ValueError, match="must return a greater value"):
+        trace_dispatch(
+            tokens=WarmupIntRange(1, 10, advance=lambda value: value),
+            cfg=_config(),
+        )
+
+
 def test_compile_key_uses_defaults_locals_attributes_and_expressions() -> None:
     cfg = _config(bias=3, disabled=True, name="cfg", vectorized=True)
 
@@ -140,6 +173,38 @@ def test_trace_dispatch_combines_zipped_rows_with_independent_values() -> None:
         ToyKernel.CompileKey(1, 2, 1, ("base", "small", -1, 1, 1), True),
         ToyKernel.CompileKey(4, 4, 4, ("base", "wide", -4, 1, 16), True),
         ToyKernel.CompileKey(4, 8, 4, ("base", "wide", -4, 1, 16), True),
+    ]
+
+
+def test_trace_dispatch_filters_with_traced_predicate() -> None:
+    class PredicateKernel(ToyKernel):
+        def _is_valid_warmup_dispatch(
+            self,
+            *,
+            tokens: int,
+            lanes: int,
+            max_work: int,
+        ) -> bool:
+            block_size = _next_power_of_2(tokens)
+            return block_size * lanes <= max_work
+
+        def get_warmup_keys(
+            self, max_tokens: int, cfg: Any
+        ) -> list[ToyKernel.CompileKey]:
+            return self._trace_dispatch(self.dispatch)(
+                tokens=WarmupIntRange(1, max_tokens + 1),
+                lanes=(1, 2),
+                cfg=cfg,
+                max_work=4,
+                _when=self._is_valid_warmup_dispatch,
+            )
+
+    assert PredicateKernel().get_warmup_keys(5, _config()) == [
+        ToyKernel.CompileKey(1, 1, 1, ("base", "default", -1, 1, 1), True),
+        ToyKernel.CompileKey(1, 2, 1, ("base", "default", -1, 1, 1), True),
+        ToyKernel.CompileKey(2, 2, 1, ("base", "default", -2, 2, 4), True),
+        ToyKernel.CompileKey(2, 4, 1, ("base", "default", -2, 2, 4), True),
+        ToyKernel.CompileKey(4, 4, 1, ("base", "default", -4, 1, 16), True),
     ]
 
 
