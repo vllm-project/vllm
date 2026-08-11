@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    PackedBufferImporter,
     packed_ipc_consumer,
     packed_ipc_producer,
 )
@@ -143,6 +144,9 @@ class IPCWeightTransferEngine(
         # Set from the trainer-supplied init info at the handshake; defaults are
         # only for the (unreachable) receive-before-init case.
         self.packed = False
+        # Shared across all chunks of every packed transfer this engine
+        # receives; see PackedBufferImporter for the refcount contract.
+        self._packed_importer = PackedBufferImporter()
 
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """
@@ -170,6 +174,12 @@ class IPCWeightTransferEngine(
         )
 
         finalize_layerwise_reload(self.model, self.model_config)
+        # Every reduce_tensor call is a fresh export with its own refcount
+        # slot, so releasing once per update always balances this update's
+        # export and lets the trainer reclaim its staging buffer. Callers
+        # that skip finish are still covered by the replace-on-next-export
+        # path inside the importer.
+        self._packed_importer.close()
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """
@@ -202,6 +212,7 @@ class IPCWeightTransferEngine(
                 dtype_names=update_info.dtype_names,
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
+                importer=self._packed_importer,
             )
         else:
             assert isinstance(update_info.ipc_handles, list)
@@ -236,7 +247,7 @@ class IPCWeightTransferEngine(
             self.model.load_weights(weights)
 
     def shutdown(self) -> None:
-        pass
+        self._packed_importer.close()
 
     @staticmethod
     def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
@@ -291,8 +302,10 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         init_info: IPCTrainerInitInfo,
         *,
         client: VLLMWeightSyncClient,
-        source: WeightSource,
+        source: WeightSource | None = None,
     ) -> Self:
+        if source is None:
+            raise ValueError("IPC trainer weight transfer requires a WeightSource.")
         engine = cls(
             client=client,
             source=source,
@@ -307,6 +320,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         return engine
 
     def send_weights(self) -> None:
+        assert self.source is not None
         source = self.source
         if self.is_sender:
             self.client.start_weight_update()

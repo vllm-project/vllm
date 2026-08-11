@@ -29,7 +29,6 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -56,6 +55,7 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
 @triton.jit(do_not_specialize=["n_blocks"])
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
+    seg_block_strides_ptr,
     seg_page_sizes_ptr,
     block_ids_ptr,
     n_blocks,
@@ -70,10 +70,10 @@ def _zero_kv_blocks_kernel(
     buffer.  For backends where K/V is outermost (block_dim=1) there are
     two segments per buffer (one for K, one for V).
 
-    Segments may have different page sizes (e.g. models with multiple KV
-    cache groups like MLA + DSA indexer).  Each segment's page size is
-    read from seg_page_sizes_ptr; programs whose chunk_index falls beyond
-    their segment's page size early-exit.
+    Segments may have different block strides and page sizes (e.g. packed
+    KV views or models with multiple KV cache groups like MLA + DSA
+    indexer). Each segment's block stride determines where a logical block
+    begins, while its page size determines how many elements are cleared.
 
     seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
     allowing segments to live in different CUDA allocations.
@@ -88,6 +88,7 @@ def _zero_kv_blocks_kernel(
     remainder = pid % work_per_block
     seg_index = remainder // MAX_CHUNKS
     chunk_index = remainder % MAX_CHUNKS
+    block_stride_el = tl.load(seg_block_strides_ptr + seg_index)
     page_size_el = tl.load(seg_page_sizes_ptr + seg_index)
     if chunk_index >= page_size_el // BLOCK_SIZE:
         return
@@ -95,7 +96,7 @@ def _zero_kv_blocks_kernel(
     seg_addr = tl.load(seg_addrs_ptr + seg_index)
     ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
     offset = (
-        block_id.to(tl.int64) * page_size_el.to(tl.int64)
+        block_id.to(tl.int64) * block_stride_el.to(tl.int64)
         + chunk_index.to(tl.int64) * BLOCK_SIZE
     )
     cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
@@ -126,27 +127,31 @@ class KVBlockZeroer:
 
         Block IDs from the scheduler reference logical blocks whose size
         may differ from the kernel block size (virtual block splitting).
-        Each segment's page_size_el accounts for this ratio so that
-        ``block_id * page_size_el`` lands at the correct offset.
+        Each virtual block is represented as an independent segment so its
+        physical block stride and zeroed page span remain independent.
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
         self.device = device
-        self._meta: tuple[torch.Tensor, torch.Tensor, int, int, int] | None = None
+        self._meta: (
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int] | None
+        ) = None
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
+        seg_block_strides: list[int] = []
         seg_page_sizes: list[int] = []
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
-            if not isinstance(spec, FullAttentionSpec):
+            if not isinstance(spec, AttentionSpec):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+            assert spec.block_size % kernel_bs == 0
             ratio = spec.block_size // kernel_bs
             block_dim = group.backend.get_kv_cache_block_dim(
                 kernel_bs,
@@ -167,22 +172,32 @@ class KVBlockZeroer:
                 seen_ptrs.add(dp)
 
                 el = kv.element_size()
-                cur_bytes = kv.stride(block_dim) * el
-                assert cur_bytes % 4 == 0
-                kernel_block_el = cur_bytes // 4
-                cur_page_el = kernel_block_el * ratio
-
-                block_stride_bytes = cur_bytes
+                block_stride_bytes = kv.stride(block_dim) * el
+                assert block_stride_bytes % 4 == 0
+                assert kv.shape[block_dim] % ratio == 0
                 outer_dims = [
                     d
                     for d in range(block_dim)
                     if kv.stride(d) * el > block_stride_bytes
                 ]
                 outer_strides = [kv.stride(d) * el for d in outer_dims]
+                inner_dims = [
+                    d for d in range(kv.ndim) if d != block_dim and d not in outer_dims
+                ]
+                kernel_page_bytes = el + sum(
+                    (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
+                )
+                assert kernel_page_bytes % 4 == 0
+                logical_block_stride_bytes = block_stride_bytes * ratio
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
                     off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
-                    seg_addrs.append(dp + off_bytes)
-                    seg_page_sizes.append(cur_page_el)
+                    assert (dp + off_bytes) % 4 == 0
+                    for virtual_index in range(ratio):
+                        seg_addrs.append(
+                            dp + off_bytes + virtual_index * block_stride_bytes
+                        )
+                        seg_block_strides.append(logical_block_stride_bytes // 4)
+                        seg_page_sizes.append(kernel_page_bytes // 4)
 
         if not seg_addrs:
             self._meta = None
@@ -195,6 +210,7 @@ class KVBlockZeroer:
         )
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
+            torch.tensor(seg_block_strides, dtype=torch.int64, device=self.device),
             torch.tensor(seg_page_sizes, dtype=torch.int64, device=self.device),
             max_page_size_el // blk_size,
             blk_size,
@@ -205,12 +221,20 @@ class KVBlockZeroer:
         """Zero the KV cache memory for the given block IDs."""
         if not block_ids or self._meta is None:
             return
-        seg_addrs, seg_page_sizes, max_chunks, blk_size, n_segs = self._meta
+        (
+            seg_addrs,
+            seg_block_strides,
+            seg_page_sizes,
+            max_chunks,
+            blk_size,
+            n_segs,
+        ) = self._meta
         n_blocks = len(block_ids)
         idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
         grid = (n_blocks * n_segs * max_chunks,)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
+            seg_block_strides,
             seg_page_sizes,
             idx,
             n_blocks,
@@ -273,6 +297,17 @@ class AttentionGroup:
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
+
+    @property
+    def supports_draft_decode_metadata_update(self) -> bool:
+        return self.get_metadata_builder().supports_draft_decode_metadata_update
+
+    def update_draft_decode_metadata(
+        self,
+        attn_metadata: Mapping[str, Any],
+    ) -> None:
+        metadata = attn_metadata[self.layer_names[0]]
+        self.get_metadata_builder().update_draft_decode_metadata(metadata)
 
 
 def select_common_block_size(
@@ -603,3 +638,20 @@ def is_residual_scattered_for_sp(
     assert num_input_tokens % tp == 0
 
     return True
+
+
+@dataclass
+class EncoderTimingStats:
+    """Per-request timing statistics for encoder forward pass."""
+
+    encoder_forward_secs: float = 0.0
+    """Time spent in vision encoder forward pass (seconds)."""
+
+    num_encoder_calls: int = 0
+    """Number of times encoder was called for this request."""
+
+    def to_dict(self) -> dict[str, float | int]:
+        return {
+            "encoder_forward_secs": self.encoder_forward_secs,
+            "num_encoder_calls": self.num_encoder_calls,
+        }
