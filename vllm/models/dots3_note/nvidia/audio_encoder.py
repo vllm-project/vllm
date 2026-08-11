@@ -7,7 +7,6 @@ Ported from cybertron_alm ``dots_audio_encoder/modeling_whisper.py``.
 Upstream ``WhisperEncoder`` is exposed as :class:`DotsSpeechEncoder`.
 """
 
-import math
 from typing import Any, ClassVar
 
 import torch
@@ -456,8 +455,6 @@ class DotsSpeechEncoder(DotsSpeechPreTrainedModel):
         )
         self.padding_idx = config.pad_token_id
         self.max_source_positions = config.max_source_positions
-        self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
-
         if self.use_conv2d_stem:
             # Conv2D stem: 3 layers of stride-2 for 8x downsampling
             dhs = getattr(config, "downsample_hidden_size", 480)

@@ -238,11 +238,10 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         kv_cache = kv_c_and_k_pe_cache.view(
             -1, attn_metadata.block_size, self.head_size
         )
-        # Flatten complete MLA entries before slicing K/V. Slicing first keeps
-        # the combined head size as the row stride and cannot be viewed flat.
-        kv_cache = kv_cache.flatten(0, 1)
-        k_cache = kv_cache[:, self.kv_lora_rank :].unsqueeze(1).unsqueeze(1)
-        v_cache = kv_cache[:, : self.kv_lora_rank].unsqueeze(1).unsqueeze(1)
+        k_cache = kv_cache[:, :, self.kv_lora_rank :].view(
+            -1, 1, 1, self.qk_rope_head_dim
+        )
+        v_cache = kv_cache[:, :, : self.kv_lora_rank].view(-1, 1, 1, self.kv_lora_rank)
 
         out = flash_attn_varlen_func(
             q=q_rope,

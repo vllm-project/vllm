@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
-import math
 from functools import lru_cache
 
 import torch
@@ -16,11 +14,8 @@ SAMPLE_RATE = 16000
 N_FFT = 400
 HOP_LENGTH = 160
 DEFAULT_CHUNK_LENGTH_S = 60
-DEFAULT_CONV_TEMPORAL_STRIDE = 8
 DEFAULT_MERGE_FACTOR = 1
 N_SAMPLES = DEFAULT_CHUNK_LENGTH_S * SAMPLE_RATE
-STRIDE = HOP_LENGTH * DEFAULT_CONV_TEMPORAL_STRIDE * DEFAULT_MERGE_FACTOR
-ENCODER_SEQ_LEN = N_SAMPLES // HOP_LENGTH // 2
 
 
 class Dots3NoteAudioConfig:
@@ -33,10 +28,6 @@ class Dots3NoteAudioConfig:
         self.whisper_adapter_out_dim = kwargs.get(
             "whisper_adapter_out_dim", kwargs.get("adapter_out_dim", 2048)
         )
-        self.sampling_rate = kwargs.get("sampling_rate", SAMPLE_RATE)
-        self.audio_comp_start = kwargs.get("audio_comp_start", "<|audio_comp_start|>")
-        self.audio_comp_span = kwargs.get("audio_comp_span", "<|audio_comp_pad|>")
-        self.audio_comp_end = kwargs.get("audio_comp_end", "<|audio_comp_end|>")
         self.merge_factor = kwargs.get("merge_factor", DEFAULT_MERGE_FACTOR)
         self.chunk_seconds = kwargs.get("chunk_seconds", DEFAULT_CHUNK_LENGTH_S)
         self.use_conv2d_stem = kwargs.get("use_conv2d_stem", True)
@@ -59,18 +50,9 @@ class Dots3NoteAudioConfig:
             },
         )
 
-    @classmethod
-    def from_json(cls, path):
-        with open(path) as f:
-            return cls(**json.load(f))
-
     @property
     def conv_temporal_stride(self) -> int:
         return 8 if self.use_conv2d_stem else 2
-
-    @property
-    def token_stride(self) -> int:
-        return HOP_LENGTH * self.conv_temporal_stride * self.merge_factor
 
     @property
     def chunk_samples(self) -> int:
@@ -124,27 +106,6 @@ def log_mel_spectrogram(audio, n_mels=128):
     log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
     log_spec = (log_spec + 4.0) / 4.0
     return log_spec
-
-
-def compute_audio_token_length(
-    num_samples,
-    *,
-    sample_rate: int = SAMPLE_RATE,
-    chunk_seconds: int = DEFAULT_CHUNK_LENGTH_S,
-    hop_length: int = HOP_LENGTH,
-    conv_temporal_stride: int = DEFAULT_CONV_TEMPORAL_STRIDE,
-    merge_factor: int = DEFAULT_MERGE_FACTOR,
-):
-    stride = hop_length * conv_temporal_stride * merge_factor
-    total = 0
-    time_step = 0
-    while time_step * sample_rate < num_samples:
-        chunk_len = min(
-            num_samples - time_step * sample_rate, chunk_seconds * sample_rate
-        )
-        total += math.ceil(chunk_len / stride)
-        time_step += chunk_seconds
-    return total
 
 
 class DotsEncoderWithMask(nn.Module):
@@ -251,7 +212,6 @@ class AudioAdapter(nn.Module):
 class Dots3NoteAudioModel(nn.Module):
     def __init__(self, config: Dots3NoteAudioConfig):
         super().__init__()
-        self.config = config
         if config.encoder_type != "dots":
             raise ValueError("Dots3Note only supports encoder_type='dots'")
         self.merge_factor = config.merge_factor
