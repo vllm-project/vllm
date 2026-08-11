@@ -7,6 +7,11 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_utils import (
+    pack_mxfp8_scale,
+    quantize_before_dispatch,
+    unpack_mxfp8_scale,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
@@ -237,11 +242,19 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_num_tokens_per_expert_list, device=expert_x.device
         )
 
-        # * For non-block quant, dispatch in b16 and quantize now as
-        #   DeepEP kernels only support dispatching block scales.
+        # * For blockfp8 and mxfp8, the tokens were dispatched quantized;
+        #   restore the scale layout the expert kernel expects.
+        # * For all other quant, dispatch is in b16 so quantize now.
         # * For expert kernels that require unquantized inputs,
         #   defer quantization to FusedMoEExpertsPermuteUnpermute.
-        if not quant_config.is_block_quantized and not defer_input_quant:
+        if quantize_before_dispatch(quant_config, defer_input_quant):
+            if quant_config.quant_dtype == "mxfp8" and expert_x_scale is not None:
+                expert_x_scale = unpack_mxfp8_scale(
+                    expert_x_scale,
+                    hidden_size=expert_x.size(-1),
+                    is_scale_swizzled=quant_config.is_scale_swizzled,
+                )
+        elif not defer_input_quant:
             # Quantize after dispatch.
             expert_x_scale = None
             if expert_x.numel() != 0:
@@ -285,21 +298,28 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        # * DeepEP only supports fp8 block scales so quantize
-        #   before the dispatch for these models.
+        # * DeepEP dispatch moves per-token scale factors, so blockfp8 and
+        #   mxfp8 are quantized before the dispatch.
         # * For all other quantization, dispatch after.
         # * For expert kernels that require unquantized inputs,
         #   defer quantization to FusedMoEExpertsPermuteUnpermute.
-        if quant_config.is_block_quantized and not defer_input_quant:
+        if quantize_before_dispatch(quant_config, defer_input_quant):
+            # Scales must be row-major [num_tokens, ...] here so each token's
+            # scales can be shuffled with it; any swizzling the expert kernel
+            # wants is applied post-dispatch in `_receiver`.
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 quant_config.a1_scale,
                 quant_dtype=quant_config.quant_dtype,
                 per_act_token_quant=quant_config.per_act_token_quant,
                 block_shape=quant_config.block_shape,
+                is_scale_swizzled=False,
+                mx_alignment=quant_config.mx_alignment,
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
+            if quant_config.quant_dtype == "mxfp8":
+                a1q_scale = pack_mxfp8_scale(a1q_scale)
             a1_post_scale = None
         else:
             a1q = a1
