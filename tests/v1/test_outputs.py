@@ -34,8 +34,12 @@ def test_logprobs_tensors_cat():
 
 def test_sampling_mask_tensors_tolist():
     tensors = SamplingMaskTensors(
-        token_ids=torch.tensor([3, 5, 7]),
-        counts=torch.tensor([2, 1]),
+        packed_mask=torch.tensor(
+            [[0b00101000], [0b00000000], [0b10000000]],
+            dtype=torch.uint8,
+        ),
+        counts=torch.tensor([2, 0, 1], dtype=torch.int32),
+        vocab_size=8,
     )
 
     result = tensors.tolists(np.array([1, 0, 1]))
@@ -70,8 +74,11 @@ def test_sampling_mask_tensors_from_logits():
         num_sampled_tokens=torch.tensor([1, 0, 1]),
     )
 
-    assert tensors.token_ids.tolist() == [0, 2, 1, 2]
-    assert tensors.counts.tolist() == [2, 2]
+    result = tensors.tolists(np.array([1, 0, 1]))
+
+    assert result.token_ids.tolist() == [0, 2, 1, 2]
+    assert result.offsets.tolist() == [0, 2, 4]
+    assert result.cu_num_generated_tokens == [0, 1, 1, 2]
 
 
 class TestLogprobsLists(TestCase):
