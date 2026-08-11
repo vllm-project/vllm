@@ -5,7 +5,6 @@ import fnmatch
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
-from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -50,10 +49,6 @@ __all__ = ["QuarkLinearMethod"]
 
 logger = init_logger(__name__)
 
-# model_type values that use dynamic MXFP4 re-quantization for
-# OCP MX fp4 Quark checkpoints
-_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "deepseek_v32"})
-
 
 class QuarkConfig(QuantizationConfig):
     def __init__(
@@ -78,38 +73,6 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
-        # Note : this flag is kept disabled because the overhead of
-        # dynamic mxfp4 quantization negates the performance gains
-        # that come from shifting to mxfp4. It is left here in case
-        # we want to re-enable it in the future.
-        self.dynamic_mxfp4_quant = False
-
-    def maybe_update_config(
-        self,
-        model_name: str,
-        hf_config: PretrainedConfig | None = None,
-        revision: str | None = None,
-    ):
-        """Enable dynamic MXFP4 only for DeepSeek-V3-family fp4 checkpoints."""
-
-        if hf_config is None:
-            return
-
-        if (
-            getattr(hf_config, "model_type", None)
-            not in _DEEPSEEK_V3_FAMILY_MODEL_TYPES
-        ):
-            return
-
-        quant_config = getattr(hf_config, "quantization_config", None)
-        if isinstance(quant_config, dict):
-            quant_dtype = (
-                quant_config.get("global_quant_config", {})
-                .get("weight", {})
-                .get("dtype")
-            )
-            if quant_dtype == "fp4":
-                self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -165,20 +128,7 @@ class QuarkConfig(QuantizationConfig):
         ):
             if isinstance(layer, RoutedExperts):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
-            if (
-                "self_attn" not in prefix  # only quantize attention projections
-                or not getattr(self, "dynamic_mxfp4_quant", False)
-                or not isinstance(layer, LinearBase)  # Ignore other methods
-            ):
-                return UnquantizedLinearMethod()
-
-            scheme = self.get_scheme(
-                layer=layer,
-                layer_name=prefix,
-                dynamic_mxfp4_quant=True,
-            )
-            layer.scheme = scheme
-            return QuarkLinearMethod(self)
+            return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
             layer.scheme = scheme
@@ -650,9 +600,7 @@ class QuarkConfig(QuantizationConfig):
             )
             return global_quant_config
 
-    def _get_scheme_from_config(
-        self, config: dict[str, Any], dynamic_mxfp4_quant: bool = False
-    ) -> "QuarkScheme":
+    def _get_scheme_from_config(self, config: dict[str, Any]) -> "QuarkScheme":
         if config.get("output_tensors") or config.get("bias"):
             raise NotImplementedError(
                 "Currently, Quark models with output_tensors "
@@ -692,9 +640,7 @@ class QuarkConfig(QuantizationConfig):
                 input_symmetric=input_config.get("symmetric"),
             )
         elif self._is_w_ocp_mx_a_x(weight_config, input_config):
-            return QuarkOCP_MX(
-                weight_config, input_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant
-            )
+            return QuarkOCP_MX(weight_config, input_config)
 
         raise NotImplementedError(
             "No quark compatible scheme was found. "
@@ -702,15 +648,11 @@ class QuarkConfig(QuantizationConfig):
             f"Input config: {input_config}"
         )
 
-    def get_scheme(
-        self, layer: torch.nn.Module, layer_name: str, dynamic_mxfp4_quant: bool = False
-    ) -> "QuarkScheme":
+    def get_scheme(self, layer: torch.nn.Module, layer_name: str) -> "QuarkScheme":
         layer_quant_config = self._find_matched_config(layer_name, layer)
 
         # Find the quant_scheme
-        scheme = self._get_scheme_from_config(
-            layer_quant_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant
-        )
+        scheme = self._get_scheme_from_config(layer_quant_config)
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
         self._check_scheme_supported(scheme.get_min_capability())
