@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from vllm import LLM
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
@@ -252,7 +253,7 @@ def test_kv_sharing_fast_prefill_rejects_prompt_logprobs_zero():
         max_model_len=128,
         gpu_memory_utilization=0.5,
     )
-    with pytest.raises(ValueError, match="kv-sharing-fast-prefill"):
+    with pytest.raises(VLLMValidationError, match="kv-sharing-fast-prefill"):
         llm.generate(
             "Hello, my name is",
             SamplingParams(prompt_logprobs=0, max_tokens=5),
