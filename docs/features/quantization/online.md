@@ -56,13 +56,6 @@ vllm serve Qwen/Qwen3.6-35B-A3B --quantization lut_b_moe
 | `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
 | `lut_b_moe` | 3-bit indices and one eight-entry E4M3 codebook per 8x64 expert-weight tile | BF16/FP16 | Routed MoE experts only; dense linear layers remain unquantized. |
 
-### LUT-B MoE
-
-`lut_b_moe` fits each codebook deterministically from the loaded BF16/FP16
-expert weights and decodes the indices in the expert GEMM. Each 8x64 tile
-occupies 200 bytes, or 3.125 bits per weight. For larger routed batches, an
-unfused dequant-to-BF16 path may be preferable before the grouped GEMM.
-
 ## Advanced Configuration
 
 For fine-grained control, use a `quantization_config` dictionary.
