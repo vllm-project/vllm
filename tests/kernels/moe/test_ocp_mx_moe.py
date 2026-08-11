@@ -1610,15 +1610,8 @@ def test_rocm_mxfp4_moe_oracle(
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(), reason="AITER is not installed or supported"
 )
-@pytest.mark.parametrize(
-    ("num_fused_shared_experts", "expected_intermediate_size"),
-    [(0, 384), (1, 512)],
-)
-def test_aiter_mxfp4_bf16_only_pads_dsv4_for_active_shared_expert_fusion(
-    num_fused_shared_experts: int,
-    expected_intermediate_size: int,
-):
-    """Keep DSV4's TP8 shard native unless shared-expert fusion is active."""
+def test_aiter_mxfp4_bf16_preserves_dsv4_native_tp_shard():
+    """Keep DSV4's TP8 intermediate shard at its native I384 width."""
     from vllm.model_executor.layers.fused_moe import FusedMoEConfig
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.config import (
@@ -1646,7 +1639,6 @@ def test_aiter_mxfp4_bf16_only_pads_dsv4_for_active_shared_expert_fusion(
         routing_method=RoutingMethodType.DeepseekV4,
         moe_parallel_config=moe_parallel_config,
         in_dtype=torch.bfloat16,
-        num_fused_shared_experts=num_fused_shared_experts,
     )
     method = object.__new__(Mxfp4MoEMethod)
     method.moe = moe_config
@@ -1659,7 +1651,7 @@ def test_aiter_mxfp4_bf16_only_pads_dsv4_for_active_shared_expert_fusion(
         moe_parallel_config=moe_config.moe_parallel_config,
     )
 
-    assert rounded_shape == (7168, expected_intermediate_size)
+    assert rounded_shape == (7168, 384)
 
 
 # Emulation needs each per-partition dim rounded up to OCP_MX_BLOCK_SIZE (32);

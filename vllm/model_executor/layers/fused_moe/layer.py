@@ -342,7 +342,6 @@ def FusedMoEFactory(
         intermediate_pad=intermediate_pad,
         num_local_experts=expert_map_manager.local_num_experts,
         num_logical_experts=logical_num_experts,
-        num_fused_shared_experts=num_fused_shared_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=moe_in_dtype,
         moe_backend=vllm_config.kernel_config.moe_backend,
