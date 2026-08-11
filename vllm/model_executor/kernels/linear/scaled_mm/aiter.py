@@ -400,7 +400,6 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if ws is not None and ws.dtype == torch.float8_e8m0fnu:
             replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
 
-        layer.aiter_bpreshuffled = False
         if not self._is_bpreshuffled:
             return
 
@@ -422,7 +421,6 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             params.WEIGHT,
             torch.nn.Parameter(shuffled_weight.data, requires_grad=False),
         )
-        layer.aiter_bpreshuffled = True
 
     @classmethod
     def is_supported(cls, compute_capability=None):
