@@ -323,12 +323,16 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[set[str] | None, set[str] | None]:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
-        for c in self._connectors:
+        for i, c in enumerate(self._connectors):
             sending, recving = c.get_finished(finished_req_ids)
             if not recving and not sending:
                 continue
             # Aggregate finished recving request ids.
-            finished_recving.update(recving or ())
+            # Only trust the finished_recving signal from the connector
+            # that was actually assigned to load this request's KV.
+            for req_id in recving or ():
+                if self._requests_to_connector.get(req_id, -1) == i:
+                    finished_recving.add(req_id)
             # Aggregate finished sending request ids - only include
             # once we've drained the "extra" count (for cases where
             # more than one connector is async-saving the same request).
