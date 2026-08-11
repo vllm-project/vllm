@@ -107,10 +107,39 @@ curl -X POST 'http://localhost:8000/collective_rpc' -H 'Content-Type: applicatio
 curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 ```
 
+#### Engine snapshots (level 3)
+
+Level 3 uses a launcher-managed EngineCore checkpoint so the server process can
+hibernate and wake without a cold engine restart. It is an experimental,
+development-only path and requires the Python frontend, one API server, a
+single-node `UniProcExecutor`, and all parallel sizes set to 1. Enabling the
+flag without `VLLM_SERVER_DEV_MODE=1` fails before engine startup. The
+`criu` and `cuda-checkpoint` executables must be available on `PATH` or in the
+SCR bundle paths used by the vLLM development image. CRIU also needs the host
+permissions required to checkpoint the EngineCore process.
+
+```bash
+VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
+  --enable-engine-snapshot \
+  --enable-sleep-mode \
+  --engine-snapshot-provider=criu_cuda \
+  --engine-snapshot-resource-policy=l2_prepared \
+  --engine-snapshot-dir=/snapshots \
+  --port 8000
+```
+
+Use `POST /sleep?level=3&mode=wait` to capture the EngineCore and
+`POST /wake_up` to restore it. `GET /snapshot/status` reports the checkpoint
+state. The snapshot directory contains process-image and model/runtime state;
+keep it on a local, access-controlled filesystem and do not expose these
+development endpoints on a production network.
+
 #### HTTP endpoints
 
 - `POST /sleep?level=1` — Put the model to sleep (`level=1`).
+- `POST /sleep?level=3&mode=wait` — Capture an EngineCore snapshot (experimental).
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
+- `GET /snapshot/status` — Report the EngineCore snapshot state.
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.
 

@@ -186,6 +186,22 @@ class BaseFrontendArgs:
     """
     fingerprint_value: str | None = None
     """Literal fingerprint string used when ``--fingerprint-mode=custom``."""
+    enable_engine_snapshot: bool = False
+    """Enable launcher-managed EngineCore snapshots for Sleep Mode level 3."""
+    engine_snapshot_provider: Literal["fake", "criu_cuda"] = "criu_cuda"
+    """Engine snapshot provider. The fake provider is for lifecycle testing."""
+    engine_snapshot_resource_policy: Literal[
+        "full", "discard_kv", "l1_prepared", "l2_prepared"
+    ] = "full"
+    """Internal Engine snapshot resource policy."""
+    engine_snapshot_persistence: Literal["durable", "page_cache"] = "durable"
+    """Durability mode for Engine snapshot artifacts."""
+    engine_snapshot_integrity: Literal["optimistic", "strict"] = "optimistic"
+    """Integrity mode for Engine snapshot artifacts."""
+    engine_snapshot_dir: str = "/snapshots"
+    """Directory used for committed EngineCore snapshots."""
+    engine_snapshot_control_socket: str = "/snapshots/control.sock"
+    """Unix socket used by API processes to control the snapshot manager."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -416,6 +432,9 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     # LaunchSubcommandBase.add_cli_args), so its args are serve args as well.
     if hasattr(args, "subparser") and args.subparser not in ("serve", "launch"):
         return
+
+    if getattr(args, "enable_engine_snapshot", False) and not envs.VLLM_SERVER_DEV_MODE:
+        raise ValueError("--enable-engine-snapshot requires VLLM_SERVER_DEV_MODE=1")
 
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
