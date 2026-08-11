@@ -1089,19 +1089,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             if self.use_attn_res:
                 self.output_attn_res_norm = PPMissingLayer()
                 self.output_attn_res_proj = PPMissingLayer()
-                if self._aux_attn_res_stream:
-                    self.boundary_attn_res_norm = RMSNorm(
-                        config.hidden_size, eps=config.rms_norm_eps
-                    )
-                    self.boundary_attn_res_proj = ReplicatedLinear(
-                        config.hidden_size,
-                        1,
-                        bias=False,
-                        quant_config=None,
-                        prefix=f"{prefix}.boundary_attn_res_proj",
-                    )
-                    self.boundary_attn_res_norm.weight.data.fill_(float("nan"))
-                    self.boundary_attn_res_proj.weight.data.fill_(float("nan"))
 
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, (
@@ -1133,20 +1120,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         super()._set_aux_hidden_state_layers(layers)
-        if (
-            self._aux_attn_res_stream
-            and self.use_attn_res
-            and not get_pp_group().is_last_rank
-            and self.end_layer in layers
-            and not (
-                torch.isfinite(self.boundary_attn_res_norm.weight).all()
-                and torch.isfinite(self.boundary_attn_res_proj.weight).all()
-            )
-        ):
-            raise RuntimeError(
-                "Kimi K3 auxiliary AttnRes boundary weights for "
-                f"layer {self.end_layer} were not loaded"
-            )
         if self.use_attn_res:
             # Emitted once, at configuration time. Which layers are tapped and
             # which convention is in force are the two things you need to
@@ -1204,11 +1177,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             score_proj = self.output_attn_res_proj
             num_blocks = self.num_attn_res_blocks
         else:
-            # The next rank's score vectors are local boundary copies; its
-            # prefix and bank are already local here.
-            score_norm = self.boundary_attn_res_norm
-            score_proj = self.boundary_attn_res_proj
-            num_blocks = self.num_attn_res_blocks
+            # Last layer of a non-final pipeline stage: the consumer lives on
+            # the next rank and the output-side aggregation only exists on the
+            # last one, so there is nothing here to mix against. Falling back
+            # to the running prefix keeps the tap defined rather than reaching
+            # for weights this rank does not construct.
+            return prefix
 
         return attn_res(
             prefix,
@@ -1411,15 +1385,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         experts_unpacked = not use_mega_moe and not any(
             n.endswith("w13_weight_packed") for n in params_dict
         )
-        boundary_names = {}
-        if self._aux_attn_res_stream and hasattr(self, "boundary_attn_res_norm"):
-            boundary_layer_prefix = f"layers.{self.end_layer}."
-            boundary_names = {
-                boundary_layer_prefix
-                + "self_attention_res_norm.weight": "boundary_attn_res_norm.weight",
-                boundary_layer_prefix
-                + "self_attention_res_proj.weight": "boundary_attn_res_proj.weight",
-            }
         loaded_params: set[str] = set()
         for args in weights:
             name, loaded_weight = args[0], args[1]
@@ -1428,11 +1393,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 continue
             if experts_unpacked and name.endswith(".weight_packed"):
                 name = name.replace(".weight_packed", ".weight")
-
-            for incoming_suffix, boundary_name in boundary_names.items():
-                if name.endswith(incoming_suffix):
-                    name = boundary_name
-                    break
 
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
