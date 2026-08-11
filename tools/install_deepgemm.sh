@@ -8,7 +8,7 @@ set -e
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
 DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
 # Keep SM120 support from nv_dev while adding SITU activation support.
-DEEPGEMM_GIT_REF="586032eba787dd99e3d1c069f8514ab01ca64906"
+DEEPGEMM_GIT_REF="9e8903799beb0b65d88e5ca08940dd5cd712c7d2"
 WHEEL_DIR=""
 
 # Parse command line arguments
