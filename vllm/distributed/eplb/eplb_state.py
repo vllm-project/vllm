@@ -53,7 +53,9 @@ from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
+    AsyncEplbCycleComplete,
     AsyncEplbLayerResult,
+    AsyncEplbResult,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -199,11 +201,11 @@ class EplbModelState:
     """
     The communicator for expert weight transfers.
     """
-    pending_result: AsyncEplbLayerResult | None = None
+    pending_result: AsyncEplbResult | None = None
     """
-    Set by the async worker after all writes to expert_buffer are done. Consumed
-    and reset to None by the main thread in move_to_workspace() after the contents of
-    expert_buffer have been transferred out. At most one result is pending at a time.
+    Set by the async worker after a layer transfer or an empty cycle completes.
+    Consumed and reset to None by the main thread in move_to_workspace(). At most
+    one result is pending at a time.
 
     pending_result relies on the GIL to synchronize access between the main thread and
     the async worker.
@@ -969,7 +971,7 @@ class EplbState:
                 if self._all_ranks_result_ready(ms):
                     result = ms.pending_result
                     assert result is not None
-                    if result.layer_idx == ms.model.num_moe_layers - 1:
+                    if result.completes_cycle:
                         ms.rebalanced = False
                     ms.pending_result = None
                     result.consumed_event.record()
@@ -1322,21 +1324,24 @@ def _move_to_workspace(
 ) -> None:
     result = model_state.pending_result
     assert result is not None
-    move_from_buffer(
-        expert_weights=model_state.model.expert_weights[result.layer_idx],
-        expert_weights_buffers=model_state.expert_buffer,
-        transfer_metadata=result.transfer_metadata,
-        new_indices=result.new_physical_to_logical_map.numpy(),
-        ep_rank=ep_rank,
-    )
+    if isinstance(result, AsyncEplbLayerResult):
+        move_from_buffer(
+            expert_weights=model_state.model.expert_weights[result.layer_idx],
+            expert_weights_buffers=model_state.expert_buffer,
+            transfer_metadata=result.transfer_metadata,
+            new_indices=result.new_physical_to_logical_map.numpy(),
+            ep_rank=ep_rank,
+        )
 
-    _commit_eplb_maps_for_layer(
-        model_state,
-        new_physical_to_logical_map=result.new_physical_to_logical_map,
-        layer=result.layer_idx,
-    )
+        _commit_eplb_maps_for_layer(
+            model_state,
+            new_physical_to_logical_map=result.new_physical_to_logical_map,
+            layer=result.layer_idx,
+        )
+    else:
+        assert isinstance(result, AsyncEplbCycleComplete)
 
-    if result.layer_idx == model_state.model.num_moe_layers - 1:
+    if result.completes_cycle:
         model_state.rebalanced = False
 
     # Reset pending_result before unblocking the async worker

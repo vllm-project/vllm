@@ -53,6 +53,8 @@ class AsyncEplbLayerResult:
     """
     transfer_metadata: TransferMetadata
     """Metadata describing what was received during transfer_layer."""
+    completes_cycle: bool
+    """Whether acknowledging this transfer completes the async EPLB cycle."""
     consumed_event: CpuGpuEvent
     """
     Event used to synchronize access to the intermediate buffer. The async worker calls
@@ -60,6 +62,21 @@ class AsyncEplbLayerResult:
     thread calls record() after it finishes transferring weights out of the intermediate
     buffer in _move_to_workspace()
     """
+
+
+@dataclass
+class AsyncEplbCycleComplete:
+    """A completed async EPLB cycle that transferred no layers."""
+
+    consumed_event: CpuGpuEvent
+    """Event used to acknowledge completion on the main thread."""
+
+    @property
+    def completes_cycle(self) -> bool:
+        return True
+
+
+AsyncEplbResult = AsyncEplbLayerResult | AsyncEplbCycleComplete
 
 
 def get_ep_ranks_with_experts_batch(
