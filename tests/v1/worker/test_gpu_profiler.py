@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
 
 import pytest
-import torch
 from pydantic import ValidationError
 
 from vllm.config import (
@@ -17,6 +16,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.profiler import _is_uri_path
+from vllm.platforms import current_platform
 from vllm.profiler.wrapper import ProtonProfilerWrapper, WorkerProfiler
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -354,6 +354,13 @@ def make_proton_wrapper(
     return wrapper, proton
 
 
+_requires_cuda_for_proton = pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Proton profiling tests require an NVIDIA CUDA platform.",
+)
+
+
+@_requires_cuda_for_proton
 class TestProtonConfig:
     def test_normalizes_local_output_directory(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -455,10 +462,7 @@ class TestProtonConfig:
             )
 
 
-@pytest.mark.skipif(
-    torch.version.hip is not None,
-    reason="Proton profiling tests require an NVIDIA Triton runtime.",
-)
+@_requires_cuda_for_proton
 class TestProtonProfilerWrapper:
     def test_passes_config_and_global_rank_name_to_proton(self, tmp_path):
         wrapper, proton = make_proton_wrapper(
@@ -572,6 +576,7 @@ class TestProtonProfilerWrapper:
         assert context is not None
 
 
+@_requires_cuda_for_proton
 def test_gpu_worker_creates_proton_profiler():
     worker = MagicMock()
     worker.rank = 1
@@ -591,6 +596,7 @@ def test_gpu_worker_creates_proton_profiler():
     worker.profiler.start.assert_called_once_with()
 
 
+@_requires_cuda_for_proton
 def test_gpu_worker_recreates_proton_profiler_for_each_run():
     worker = MagicMock()
     worker.rank = 1
