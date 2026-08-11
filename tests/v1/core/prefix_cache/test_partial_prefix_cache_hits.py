@@ -364,6 +364,78 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     assert moved[0].block_hash_num_tokens == 6
 
 
+def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
+    """An external mid-block hit must become a running request even when its
+    first continuation does not need another Mamba block."""
+    hash_block_size = 2
+    mamba_block_size = 4 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    request = make_request("0", [0] * 15, hash_block_size, sha256)
+    loaded_blocks = manager.allocate_slots(
+        request,
+        num_new_tokens=0,
+        num_external_computed_tokens=10,
+        delay_cache_blocks=True,
+    )
+    assert loaded_blocks is not None
+
+    request.num_computed_tokens = 10
+    first_step_blocks = manager.allocate_slots(request, num_new_tokens=4)
+    assert first_step_blocks is not None
+
+    source_block_id = manager.get_blocks("0").get_block_ids()[1][1]
+    partial_hash = request.block_hashes[14 // hash_block_size - 1]
+    partial_block = manager.block_pool.get_cached_block(
+        partial_hash, kv_cache_group_ids=[1]
+    )
+    assert partial_block is not None
+    assert partial_block[0].block_id == source_block_id
+
+    request.num_computed_tokens = 14
+    continuation_blocks = manager.allocate_slots(request, num_new_tokens=1)
+    assert continuation_blocks is not None
+
+    assert continuation_blocks.get_block_ids()[1] == []
+    assert manager.get_blocks("0").get_block_ids()[1][1] == source_block_id
+    copies, _ = manager.take_kv_cache_block_copies()
+    cow_copy = next(c for c in copies if c.src_block_id == source_block_id)
+    assert cow_copy.dst_block_id != source_block_id
+
+    moved = manager.block_pool.get_cached_block(partial_hash, kv_cache_group_ids=[1])
+    assert moved is not None
+    assert moved[0].block_id == cow_copy.dst_block_id
+
+
 def test_take_partial_tail_offloads_returns_cow_target():
     """The connector offload hand-off exposes the mamba CoW *target* block Y
     (the durable boundary state), not the overwritten source X, and only at

@@ -62,6 +62,7 @@ def create_scheduler(
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
     speculative_method: str | None = None,
+    parallel_drafting: bool = False,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
     pipeline_parallel_size: int = 1,
@@ -153,6 +154,7 @@ def create_scheduler(
             spec_kwargs["prompt_lookup_max"] = num_speculative_tokens
             spec_kwargs["prompt_lookup_min"] = 1
         speculative_config = SpeculativeConfig(**spec_kwargs)
+        speculative_config.parallel_drafting = parallel_drafting
 
     ec_transfer_config = (
         ECTransferConfig(
