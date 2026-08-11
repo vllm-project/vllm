@@ -32,6 +32,22 @@ MAX_LOGPROB_TOKEN_IDS = 128
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
 
+def _verify_num_sequences(value: int, parameter_name: str) -> None:
+    if not isinstance(value, int):
+        raise VLLMValidationError(
+            f"{parameter_name} must be an int, but is of type {type(value)}"
+        )
+    if value < 1:
+        raise VLLMValidationError(f"{parameter_name} must be at least 1, got {value}.")
+    max_n = envs.VLLM_MAX_N_SEQUENCES
+    if value > max_n:
+        raise VLLMValidationError(
+            f"{parameter_name} must be at most {max_n}, got {value}. "
+            "To increase this limit, set the VLLM_MAX_N_SEQUENCES "
+            "environment variable."
+        )
+
+
 def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
     """Validate ``thinking_token_budget``; return ``None`` if unset."""
     if value is None:
@@ -479,9 +495,13 @@ class SamplingParams(
 
         if self.stop_token_ids is None:
             self.stop_token_ids = []
+        else:
+            self.stop_token_ids = list(dict.fromkeys(self.stop_token_ids))
 
         if self.bad_words is None:
             self.bad_words = []
+        else:
+            self.bad_words = list(dict.fromkeys(self.bad_words))
 
         if self.logprobs is True:
             self.logprobs = 1
@@ -513,19 +533,7 @@ class SamplingParams(
             self.skip_reading_prefix_cache = self.prompt_logprobs is not None
 
     def _verify_args(self) -> None:
-        if not isinstance(self.n, int):
-            raise VLLMValidationError(
-                f"n must be an int, but is of type {type(self.n)}"
-            )
-        if self.n < 1:
-            raise VLLMValidationError(f"n must be at least 1, got {self.n}.")
-        max_n = envs.VLLM_MAX_N_SEQUENCES
-        if self.n > max_n:
-            raise VLLMValidationError(
-                f"n must be at most {max_n}, got {self.n}. "
-                "To increase this limit, set the VLLM_MAX_N_SEQUENCES "
-                "environment variable."
-            )
+        _verify_num_sequences(self.n, "n")
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -677,6 +685,7 @@ class SamplingParams(
         if not self.bad_words:
             return
         self._bad_words_token_ids = []
+        max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
         for bad_word in self.bad_words:
             # To prohibit words both at the beginning
             # and in the middle of text
@@ -696,6 +705,14 @@ class SamplingParams(
                     and len(prompt_token_ids) == len(self._bad_words_token_ids[-1])
                 ):
                     self._bad_words_token_ids.append(prompt_token_ids)
+                    if len(self._bad_words_token_ids) > max_num_bad_words:
+                        raise VLLMValidationError(
+                            f"Too many bad words after tokenization: "
+                            f"{len(self._bad_words_token_ids)}. "
+                            f"The max number is {max_num_bad_words}.",
+                            parameter="bad_words",
+                            value=self.bad_words,
+                        )
 
         invalid_token_ids = [
             token_id
@@ -1147,3 +1164,6 @@ class BeamSearchParams(
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
+
+    def __post_init__(self) -> None:
+        _verify_num_sequences(self.beam_width, "beam_width")
