@@ -344,19 +344,17 @@ def test_gemma4_uniform_head_dims_are_homogeneous():
 
 
 class _HeterogeneousConfig(PretrainedConfig):
-    """A stand-in for the Transformers >= 5.15.0 heterogeneous config API.
+    """A heterogeneous config with no convertor of its own.
 
-    No released Transformers has it, so the default per-layer seam has no other
-    way to be exercised. Mirrors the parts vLLM uses: per-layer configs are
-    shallow copies with the varying attributes applied and heterogeneity
-    stripped, so they do not recurse.
-    """
+    Mirrors the parts vLLM uses: per-layer configs are shallow copies with the
+    varying attributes applied and heterogeneity stripped, so they do not recurse."""
 
     is_heterogeneous = True
 
     def __init__(self, per_layer: dict[str, list], **kwargs):
-        super().__init__(**kwargs)
+        # Set before `super().__init__` because it validates `per_layer_config`
         self._per_layer = per_layer
+        super().__init__(**kwargs)
 
     @property
     def per_layer_config(self) -> list[PretrainedConfig]:
