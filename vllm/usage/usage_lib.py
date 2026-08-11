@@ -213,7 +213,15 @@ class UsageMessage:
         self.platform = platform.platform()
         self.total_memory = psutil.virtual_memory().total
 
-        info = cpuinfo.get_cpu_info()
+        try:
+            info = cpuinfo.get_cpu_info()
+        except Exception:
+            # CPU info collection is best-effort and can fail inside
+            # forked workers (py-cpuinfo re-executes itself); do not
+            # take the whole engine down over optional telemetry.
+            logger.debug("Could not collect CPU info for usage stats",
+                         exc_info=True)
+            info = {}
         self.num_cpu = info.get("count", None)
         self.cpu_type = info.get("brand_raw", "")
         self.cpu_family_model_stepping = ",".join(
