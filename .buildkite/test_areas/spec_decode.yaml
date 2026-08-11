@@ -29,8 +29,8 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: Spec Decode Eagle
-  key: spec-decode-eagle
+- label: "Spec Decode Eagle 1: DeepSeek + Qwen"
+  key: spec-decode-eagle-1-deepseek-qwen
   timeout_in_minutes: 25
   device: h200_35gb
   source_file_dependencies:
@@ -38,12 +38,38 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/eagle/
+    - pytest -v -s v1/e2e/spec_decode/eagle/ -k "deepseek_eagle or qwen3_eagle3"
   mirror:
     amd:
       dind: false
       device: mi300_1
-      timeout_in_minutes: 55
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/sample/
+      - vllm/model_executor/layers/
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
+- label: "Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
+  key: spec-decode-eagle-2-llama3-qwen-vl-other
+  timeout_in_minutes: 25
+  device: h200_35gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/eagle/ -k "not deepseek_eagle and not qwen3_eagle3"
+  mirror:
+    amd:
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 25
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -192,8 +218,8 @@ steps:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
 
-- label: Spec Decode DeepSeek MTP Parallel Load (B200)
-  key: spec-decode-deepseek-mtp-parallel-load-b200
+- label: Spec Decode DeepSeek MTP Parallel Load (2xB200-2xMI300)
+  key: spec-decode-deepseek-mtp-parallel-load-2xb200-2xmi300
   timeout_in_minutes: 30
   device: b200-k8s
   optional: true
@@ -207,6 +233,26 @@ steps:
     - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
+  mirror:
+    amd:
+      dind: false
+      device: mi300_2
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/
+      - vllm/model_executor/models/deepseek_mtp.py
+      - vllm/model_executor/models/deepseek_v2.py
+      - vllm/v1/attention/
+      - vllm/v1/engine/
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/worker/gpu_model_runner.py
+      - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
+      - vllm/platforms/rocm.py
 
 - label: Spec Decode AL DFlash Nightly
   key: spec-decode-dflash-nightly
@@ -221,6 +267,27 @@ steps:
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/
+  mirror:
+    amd:
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 120
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/attention/
+      - vllm/v1/sample/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/
+      - vllm/model_executor/models/qwen2.py
+      - vllm/model_executor/models/qwen3.py
+      - vllm/model_executor/models/qwen3_dflash.py
+      - vllm/model_executor/models/laguna.py
+      - vllm/model_executor/models/laguna_dflash.py
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
 
 - label: Spec Decode AL DSpark Nightly
   key: spec-decode-dspark-nightly
@@ -235,6 +302,31 @@ steps:
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/
+  mirror:
+    amd:
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/attention/
+      - vllm/v1/sample/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/
+      - vllm/model_executor/models/qwen2.py
+      - vllm/model_executor/models/qwen3.py
+      - vllm/model_executor/models/qwen3_dflash.py
+      - vllm/model_executor/models/qwen3_dspark.py
+      - vllm/model_executor/models/gemma4.py
+      - vllm/model_executor/models/gemma4_mm.py
+      - vllm/model_executor/models/gemma4_unified.py
+      - vllm/model_executor/models/gemma4_mtp.py
+      - vllm/model_executor/models/gemma4_dspark.py
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
 
 - label: Spec Decode AL MTP + Other Acceptance Nightly
   key: spec-decode-mtp-other-acceptance-nightly
