@@ -2566,8 +2566,18 @@ class EngineArgs:
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
         # So here we do an extra device name check to prevent such regression.
-        if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
-            # For GPUs like H100 and MI300x, use larger default values.
+        if device_memory >= 160 * GiB_bytes:
+            # for GPUs like B200/B300 with >= 160GB memory, use the largest defaults
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 16384,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 1024,
+                UsageContext.OPENAI_API_SERVER: 1024,
+            }
+        elif device_memory >= 70 * GiB_bytes and "a100" not in device_name:
+            # For GPUs like H100 and H200, use larger offline defaults.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 8192,
