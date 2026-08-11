@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
+    SlidingWindowSpec,
 )
 
 
@@ -1281,3 +1282,74 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
         len(group) * block_size >= num_computed for group in computed_blocks.blocks
     )
     assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
+
+
+def test_hybrid_sliding_window_group_disables_partial_hash_hits():
+    hash_block_size = 2
+    sliding_window_block_size = 2 * hash_block_size
+    mamba_block_size = 2 * sliding_window_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["swa_draft"],
+                SlidingWindowSpec(
+                    block_size=sliding_window_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window_block_size,
+                ),
+                is_eagle_group=True,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        use_eagle=True,
+    )
+
+    tokens = list(range(3 * sliding_window_block_size))
+    request = make_request("0", tokens, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    assert not manager.coordinator.enable_partial_hash_hits
+    assert (
+        manager.allocate_slots(request, mamba_block_size, num_computed, computed_blocks)
+        is not None
+    )
+    request.num_computed_tokens = mamba_block_size
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, len(tokens) - mamba_block_size) is not None
+    request.num_computed_tokens = len(tokens)
+    manager.free(request)
+    manager.new_step_starts()
+
+    cached_request = make_request(
+        "1", tokens + [len(tokens), len(tokens) + 1], hash_block_size, sha256
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(cached_request)
+
+    assert num_computed == mamba_block_size
+    assert len(computed_blocks.blocks[0]) * hash_block_size == num_computed
