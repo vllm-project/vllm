@@ -87,16 +87,46 @@ def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
 
 @pytest.mark.parametrize("failing_handler", ["store", "load"])
 def test_worker_logs_handler_error_and_cleans_region(
-    caplog_vllm, failing_handler
+    caplog_vllm, monkeypatch: pytest.MonkeyPatch, failing_handler
 ) -> None:
     worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)
+    calls: list[str] = []
     store_handler = MagicMock()
     load_handler = MagicMock()
     if failing_handler == "store":
-        store_handler.shutdown.side_effect = RuntimeError("transfer did not drain")
+
+        def fail_store_shutdown() -> bool:
+            calls.append("store")
+            raise RuntimeError("transfer did not drain")
+
+        store_handler.shutdown.side_effect = fail_store_shutdown
     else:
-        load_handler.shutdown.side_effect = RuntimeError("transfer did not drain")
+
+        def fail_load_shutdown() -> bool:
+            calls.append("load")
+            raise RuntimeError("transfer did not drain")
+
+        load_handler.shutdown.side_effect = fail_load_shutdown
+
+    def record_other_shutdown() -> bool:
+        calls.append("load" if failing_handler == "store" else "store")
+        return True
+
+    if failing_handler == "store":
+        load_handler.shutdown.side_effect = record_other_shutdown
+    else:
+        store_handler.shutdown.side_effect = record_other_shutdown
+
+    def record_device_sync() -> None:
+        calls.append("sync")
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", record_device_sync)
+
+    def record_region_cleanup() -> None:
+        calls.append("region")
+
     mmap_region = MagicMock()
+    mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
     worker._mmap_region = mmap_region
@@ -113,6 +143,80 @@ def test_worker_logs_handler_error_and_cleans_region(
     assert (
         f"Failed to shut down {failing_handler} offloading handler" in caplog_vllm.text
     )
+    assert calls[-2:] == ["sync", "region"]
+
+
+def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
+    handler = gpu_worker.SingleDirectionOffloadingHandler.__new__(
+        gpu_worker.SingleDirectionOffloadingHandler
+    )
+    failed_event = MagicMock()
+    failed_event.synchronize.side_effect = RuntimeError("device lost")
+    skipped_event = MagicMock()
+    handler._transfers = gpu_worker.deque(
+        [
+            MagicMock(end_event=failed_event),
+            MagicMock(end_event=skipped_event),
+        ]
+    )
+    handler._transfer_events = {1: failed_event, 2: skipped_event}
+    handler._stream_pool = [MagicMock()]
+    handler._event_pool = [MagicMock()]
+    handler._buffer_pool = [(MagicMock(), MagicMock(), MagicMock())]
+    handler.src_tensors = [MagicMock()]
+    handler.dst_tensors = [MagicMock()]
+
+    with pytest.raises(RuntimeError, match="device lost"):
+        handler.shutdown()
+    failed_event.synchronize.assert_called_once_with()
+    skipped_event.synchronize.assert_not_called()
+    assert not handler._transfers
+    assert not handler._transfer_events
+    assert not handler._stream_pool
+    assert not handler._event_pool
+    assert not handler._buffer_pool
+    assert not handler.src_tensors
+    assert not handler.dst_tensors
+
+
+@pytest.mark.parametrize("device_sync_fails", [False, True])
+def test_worker_syncs_before_cleanup_after_handler_failure(
+    caplog_vllm, monkeypatch: pytest.MonkeyPatch, device_sync_fails: bool
+) -> None:
+    worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)
+    calls: list[str] = []
+    store_handler = MagicMock()
+
+    def fail_store_shutdown() -> None:
+        raise RuntimeError("device lost")
+
+    store_handler.shutdown.side_effect = fail_store_shutdown
+    load_handler = MagicMock()
+
+    def record_device_sync() -> None:
+        calls.append("sync")
+        if device_sync_fails:
+            raise RuntimeError("device lost")
+
+    def record_region_cleanup() -> None:
+        calls.append("region")
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", record_device_sync)
+    mmap_region = MagicMock()
+    mmap_region.cleanup.side_effect = record_region_cleanup
+    worker._store_handler = store_handler
+    worker._load_handler = load_handler
+    worker._mmap_region = mmap_region
+
+    with caplog_vllm.at_level(
+        logging.WARNING, logger="vllm.v1.kv_offload.cpu.gpu_worker"
+    ):
+        worker.shutdown()
+
+    assert calls == ["sync", "region"]
+    mmap_region.cleanup.assert_called_once_with()
+    if device_sync_fails:
+        assert "Device sync before mmap cleanup failed" in caplog_vllm.text
 
 
 @pytest.mark.parametrize("gpu_to_cpu", [True, False])
@@ -292,6 +396,10 @@ def test_transfer(
             else:
                 expected = orig_dst_view[dst_sub_block]
             torch.testing.assert_close(dst_view[dst_sub_block].cpu(), expected.cpu())
+
+    # Drop loop-variable refs so mmap_obj has no exported buffers at cleanup.
+    del orig_tensor, tensor, src_tensor, dst_tensor, orig_dst_tensor
+    del src_view, dst_view, orig_dst_view, expected
 
     worker.shutdown()
 
