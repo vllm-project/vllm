@@ -108,11 +108,13 @@ class WorkerProfiler(ABC):
             and self._running
             and self._profiling_for_iters > self._max_iters
         ):
-            # Automatically stop the profiler after max iters
-            # will be marked as not running, but leave as active so that stop
-            # can clean up properly
+            # Automatically stop the profiler after max iters. Go through the
+            # public stop() (not _call_stop() directly) so _active and the
+            # iteration counters reset too -- otherwise a later start_profile
+            # is silently ignored forever, since start() bails out early
+            # whenever _active is still True.
             logger.info_once("Max profiling iterations reached. Stopping profiler...")
-            self._call_stop()
+            self.stop()
             return
 
     def _profiler_step(self) -> bool:
