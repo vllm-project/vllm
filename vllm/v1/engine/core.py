@@ -489,6 +489,15 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
+    def update_pd_kv_ready(
+        self, raw_request_id: str, kv_transfer_params: dict[str, Any]
+    ) -> bool:
+        """P/D concurrent dispatch: utility RPC behind /v1/pd_kv_ready."""
+        update = getattr(self.scheduler, "update_pd_kv_ready", None)
+        if update is None:
+            return False
+        return update(raw_request_id, kv_transfer_params)
+
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""

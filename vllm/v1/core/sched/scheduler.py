@@ -213,6 +213,17 @@ class Scheduler(SchedulerInterface):
             and kv_transfer_config.get_from_extra_config("seed_first_token", False)
         )
 
+        # P/D concurrent dispatch: KV-ready notifications that arrived
+        # before their prepare request reached the scheduler.
+        self._pd_pending_ready: dict[str, tuple[dict[str, Any], float]] = {}
+        # Max time an armed prepare request may wait for the KV-ready
+        # notification before falling back to a local prefill.
+        self._pd_prepare_ready_timeout_s = float(
+            kv_transfer_config.get_from_extra_config("prepare_ready_timeout_s", 10.0)
+            if kv_transfer_config is not None
+            else 10.0
+        )
+
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
         self.grammar_compile_error_reqs: set[str] = set()
@@ -2259,12 +2270,113 @@ class Scheduler(SchedulerInterface):
         else:
             if request.resumable:
                 request.streaming_queue = deque()
+            # P/D: merge a KV-ready notification that raced ahead of this
+            # prepare request.
+            if self._pd_pending_ready and self._pd_request_awaiting_ready(request):
+                for raw_id in list(self._pd_pending_ready):
+                    if raw_id in request.request_id:
+                        params, _ = self._pd_pending_ready.pop(raw_id)
+                        self._pd_merge_kv_ready(request, params)
+                        break
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.connector is not None:
                 self.connector.on_new_request(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+
+    @staticmethod
+    def _pd_request_awaiting_ready(request: Request) -> bool:
+        """True for a decode prepare request whose remote-KV metadata has
+        not been merged yet."""
+        params = request.kv_transfer_params
+        return bool(
+            params is not None
+            and params.get("do_remote_prefill")
+            and not params.get("remote_block_ids")
+            and params.get("remote_ready") is False
+        )
+
+    @staticmethod
+    def _pd_merge_kv_ready(
+        request: Request, kv_transfer_params: dict[str, Any]
+    ) -> None:
+        assert request.kv_transfer_params is not None
+        request.kv_transfer_params.update(kv_transfer_params)
+        request.kv_transfer_params["remote_ready"] = True
+        request.kv_transfer_params["do_remote_prefill"] = True
+
+    def update_pd_kv_ready(
+        self, raw_request_id: str, kv_transfer_params: dict[str, Any]
+    ) -> bool:
+        """P/D concurrent dispatch: deliver the prefill-side
+        kv_transfer_params to the parked decode prepare request.
+
+        Runs in the engine busy loop between steps (utility RPC), so no
+        locking against schedule() is needed. Internal request ids embed the
+        router-side raw id, hence the substring match. With early-arm the
+        connector owns the armed state, so delegate to it.
+        """
+        connector_scheduler = getattr(self.connector, "connector_scheduler", None)
+        if connector_scheduler is not None and getattr(
+            connector_scheduler, "pd_early_arm_enabled", False
+        ):
+            result = connector_scheduler.on_pd_kv_ready(
+                raw_request_id, kv_transfer_params
+            )
+            return result is not None
+        matched = False
+        for req_id, request in self.requests.items():
+            if raw_request_id not in req_id:
+                continue
+            if not self._pd_request_awaiting_ready(request):
+                logger.warning(
+                    "PD KV-ready notification for %s ignored: request is not "
+                    "awaiting remote KV metadata (params=%s).",
+                    req_id,
+                    request.kv_transfer_params,
+                )
+                continue
+            self._pd_merge_kv_ready(request, kv_transfer_params)
+            matched = True
+        if not matched:
+            # Prepare request not in the scheduler yet: stash and prune.
+            now = time.monotonic()
+            self._pd_pending_ready[raw_request_id] = (kv_transfer_params, now)
+            for raw_id, (_, ts) in list(self._pd_pending_ready.items()):
+                if now - ts > 60.0:
+                    del self._pd_pending_ready[raw_id]
+        return matched
+
+    def _pd_check_armed_timeout(self, request: Request) -> bool:
+        """P/D early-arm: on KV-ready timeout, inject a synthetic failed
+        recv so the standard failure path frees the blocks and recomputes
+        locally. Returns True when the timeout was injected."""
+        params = request.kv_transfer_params
+        armed_ts = params.get("_pd_armed_ts") if params else None
+        if armed_ts is None:
+            return False
+        elapsed = time.monotonic() - armed_ts
+        if elapsed <= self._pd_prepare_ready_timeout_s:
+            return False
+        connector_scheduler = getattr(self.connector, "connector_scheduler", None)
+        cancel = getattr(connector_scheduler, "pd_cancel_armed", None)
+        if cancel is None or not cancel(request.request_id):
+            # on_pd_kv_ready claimed the entry; the pull is going ahead.
+            return False
+        logger.warning(
+            "PD armed request %s waited %.1fs for the KV-ready notification; "
+            "falling back to local prefill.",
+            request.request_id,
+            elapsed,
+        )
+        assert params is not None
+        params.pop("_pd_armed_ts", None)
+        # No KV was received: nothing valid to cache, free and recompute.
+        request.num_computed_tokens = 0
+        self.failed_recving_kv_req_ids.add(request.request_id)
+        self.finished_recving_kv_req_ids.add(request.request_id)
+        return True
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
@@ -2716,7 +2828,10 @@ class Scheduler(SchedulerInterface):
             # update_from_output(), based on worker-side connector signals
             # in KVConnectorOutput.finished_recving
             if request.request_id not in self.finished_recving_kv_req_ids:
-                return False
+                if not self._pd_check_armed_timeout(request):
+                    return False
+                # Armed timeout injected: fall through to free the blocks
+                # and recompute locally.
             self._update_waiting_for_remote_kv(request)
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
