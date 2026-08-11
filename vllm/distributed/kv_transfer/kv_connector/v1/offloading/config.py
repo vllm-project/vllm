@@ -20,12 +20,7 @@ from vllm.v1.kv_offload.config import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
-
-
-def is_kv_cache_tensor_packed(kv_cache_tensor: "KVCacheTensor") -> bool:
-    """Return whether a KV cache tensor uses a packed block stride."""
-    return bool(kv_cache_tensor.block_stride)
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
 def build_offloading_config(
@@ -96,18 +91,10 @@ def build_offloading_config(
         blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
 
     worker_kv_bytes_per_block = 0
-    if kv_cache_config.num_blocks > 0:
-        packed_tensors = tuple(
-            is_kv_cache_tensor_packed(tensor)
-            for tensor in kv_cache_config.kv_cache_tensors
-        )
-        is_packed = any(packed_tensors)
-        assert not is_packed or all(packed_tensors)
-        total_gpu_kv_bytes = (
-            kv_cache_config.kv_cache_tensors[0].size
-            if is_packed
-            else sum(tensor.size for tensor in kv_cache_config.kv_cache_tensors)
-        )
+    if kv_cache_config.num_blocks > 0 and kv_cache_config.kv_cache_tensors:
+        # Every KVCacheTensor describes placement within the same backing
+        # allocation, so its size is the total, not a per-tensor share.
+        total_gpu_kv_bytes = kv_cache_config.kv_cache_tensors[0].size
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
 
     single_group_spec = (
@@ -164,7 +151,7 @@ def build_offloading_config(
         if isinstance(single_group_spec, FullAttentionSpec):
             if type(single_group_spec) is MLAAttentionSpec:
                 spec_certifiable = (
-                    single_group_spec.compress_ratio == 1
+                    single_group_spec.tokens_per_state == 1
                     and single_group_spec.real_page_size_bytes
                     % single_group_spec.block_size
                     == 0

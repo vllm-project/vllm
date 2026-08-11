@@ -72,59 +72,67 @@ def _make_vllm_config(
 
 def _make_kv_cache_config() -> KVCacheConfig:
     num_blocks = 16
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
     kv_tensor = KVCacheTensor(
-        size=num_blocks * 8,
-        shared_by=["layer"],
-        block_stride=0,
+        size=spec.page_size_bytes * num_blocks,
+        layers=["layer"],
+        layer_stride=spec.page_size_bytes * num_blocks,
+        block_stride=spec.page_size_bytes,
     )
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[kv_tensor],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=16,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            )
-        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
     )
 
 
 def _make_sizing_kv_cache_config(packed: bool) -> KVCacheConfig:
+    """One 16 byte-per-block allocation, described two ways.
+
+    Packed: both layers are one dense run. Unpacked: the same bytes as two
+    runs, the second starting after the first layer's region. Either way the
+    connector accounts for 16 KV bytes per block.
+    """
     num_blocks = 4
+    page = 8
+    size = 2 * page * num_blocks
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    kv_cache_groups = [KVCacheGroupSpec(["layer0", "layer1"], spec)]
     if packed:
         kv_cache_tensors = [
             KVCacheTensor(
-                size=64,
-                shared_by=[layer_name],
-                block_stride=16,
+                size=size,
+                layers=["layer0", "layer1"],
+                layer_stride=page * num_blocks,
+                block_stride=page,
             )
-            for layer_name in ("layer0", "layer1")
         ]
     else:
         kv_cache_tensors = [
-            KVCacheTensor(size=40, shared_by=["layer0"]),
-            KVCacheTensor(size=24, shared_by=["layer1"]),
+            KVCacheTensor(
+                size=size,
+                layers=[layer],
+                layer_stride=page * num_blocks,
+                block_stride=page,
+                offset=i * page * num_blocks,
+            )
+            for i, layer in enumerate(("layer0", "layer1"))
         ]
 
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer0", "layer1"],
-                FullAttentionSpec(
-                    block_size=16,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            )
-        ],
+        kv_cache_groups=kv_cache_groups,
     )
 
 
@@ -150,6 +158,18 @@ def _mla_spec(
     )
 
 
+_MAMBA_SPEC = MambaSpec(
+    block_size=16,
+    shapes=((16, 1),),
+    dtypes=(torch.float32,),
+)
+# Page sizes of the specs the replicated-layout cases below are built from.
+_MLA_PAGE = _mla_spec().page_size_bytes
+_HALF_MLA_PAGE = _mla_spec(head_size=256).page_size_bytes
+_FULL_PAGE = _full_attention_spec().page_size_bytes
+_MAMBA_PAGE = _MAMBA_SPEC.page_size_bytes
+
+
 def _make_mla_kv_cache_config(
     layer_names: list[str] | None = None,
     head_size: int = 512,
@@ -159,12 +179,14 @@ def _make_mla_kv_cache_config(
     if layer_names is None:
         layer_names = ["layer0", "layer1"]
     spec = _mla_spec(head_size=head_size, dtype=dtype)
+    layer_stride = spec.page_size_bytes * num_blocks
     kv_cache_tensors = [
         KVCacheTensor(
-            size=spec.page_size_bytes * num_blocks,
-            shared_by=[layer_name],
+            size=layer_stride * len(layer_names),
+            layers=layer_names,
+            layer_stride=layer_stride,
+            block_stride=spec.page_size_bytes,
         )
-        for layer_name in layer_names
     ]
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -174,15 +196,31 @@ def _make_mla_kv_cache_config(
 
 
 def _make_hybrid_kv_cache_config() -> KVCacheConfig:
+    num_blocks = 4
+    full_spec = _full_attention_spec(block_size=12)
+    mla_spec = _mla_spec()
+    # Mixed page sizes across overlaying groups: a block is a window of the
+    # largest group's packing, so the layer dim sits inside the block dim.
+    window = max(full_spec.page_size_bytes, mla_spec.page_size_bytes)
     return KVCacheConfig(
-        num_blocks=4,
+        num_blocks=num_blocks,
         kv_cache_tensors=[
-            KVCacheTensor(size=40, shared_by=["full_layer"]),
-            KVCacheTensor(size=24, shared_by=["mla_layer"]),
+            KVCacheTensor(
+                size=window * num_blocks,
+                layers=["full_layer"],
+                layer_stride=full_spec.page_size_bytes,
+                block_stride=window,
+            ),
+            KVCacheTensor(
+                size=window * num_blocks,
+                layers=["mla_layer"],
+                layer_stride=mla_spec.page_size_bytes,
+                block_stride=window,
+            ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["full_layer"], _full_attention_spec(block_size=12)),
-            KVCacheGroupSpec(["mla_layer"], _mla_spec()),
+            KVCacheGroupSpec(["full_layer"], full_spec),
+            KVCacheGroupSpec(["mla_layer"], mla_spec),
         ],
     )
 
@@ -263,18 +301,12 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     assert offloading_config.cache.blocks_per_chunk == 2
 
 
-def test_rejects_partially_packed_tensor_layout():
-    kv_cache_config = _make_sizing_kv_cache_config(packed=False)
-    kv_cache_config.kv_cache_tensors[0].block_stride = 16
-
-    with pytest.raises(AssertionError):
-        build_offloading_config(_make_vllm_config(), kv_cache_config)
-
-
 def test_zero_blocks_skips_tensor_layout_validation():
+    # Partially-packed layouts are no longer expressible: packing is
+    # structural (the runs of one allocation) rather than a per-tensor
+    # block_stride flag, so the old rejects-partially-packed test is gone.
     kv_cache_config = _make_sizing_kv_cache_config(packed=False)
     kv_cache_config.num_blocks = 0
-    kv_cache_config.kv_cache_tensors[0].block_stride = 16
 
     offloading_config = build_offloading_config(_make_vllm_config(), kv_cache_config)
 
@@ -374,8 +406,10 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
                 num_blocks=4,
                 kv_cache_tensors=[
                     KVCacheTensor(
-                        size=_mla_spec().page_size_bytes * 4,
-                        shared_by=["layer"],
+                        size=_MLA_PAGE * 4,
+                        layers=["layer"],
+                        layer_stride=_MLA_PAGE * 4,
+                        block_stride=_MLA_PAGE,
                     )
                 ],
                 kv_cache_groups=[
@@ -398,8 +432,10 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
                 num_blocks=4,
                 kv_cache_tensors=[
                     KVCacheTensor(
-                        size=_mla_spec().page_size_bytes * 4,
-                        shared_by=["layer"],
+                        size=_MLA_PAGE * 4,
+                        layers=["layer"],
+                        layer_stride=_MLA_PAGE * 4,
+                        block_stride=_MLA_PAGE,
                     )
                 ],
                 kv_cache_groups=[
@@ -417,16 +453,23 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
             "hidden-state",
         ),
         (
+            # One group packing two page sizes: layer1's run starts past
+            # layer0's whole region.
             KVCacheConfig(
                 num_blocks=4,
                 kv_cache_tensors=[
                     KVCacheTensor(
-                        size=_mla_spec().page_size_bytes * 4,
-                        shared_by=["layer0"],
+                        size=(_MLA_PAGE + _HALF_MLA_PAGE) * 4,
+                        layers=["layer0"],
+                        layer_stride=_MLA_PAGE * 4,
+                        block_stride=_MLA_PAGE,
                     ),
                     KVCacheTensor(
-                        size=_mla_spec(head_size=256).page_size_bytes * 4,
-                        shared_by=["layer1"],
+                        size=(_MLA_PAGE + _HALF_MLA_PAGE) * 4,
+                        layers=["layer1"],
+                        layer_stride=_HALF_MLA_PAGE * 4,
+                        block_stride=_HALF_MLA_PAGE,
+                        offset=_MLA_PAGE * 4,
                     ),
                 ],
                 kv_cache_groups=[
@@ -445,16 +488,22 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
             "uniform-wrapper",
         ),
         (
+            # Overlaid groups with different page sizes: a block is a window
+            # of the largest group's packing.
             KVCacheConfig(
                 num_blocks=4,
                 kv_cache_tensors=[
                     KVCacheTensor(
-                        size=_mla_spec().page_size_bytes * 4,
-                        shared_by=["mla"],
+                        size=_FULL_PAGE * 4,
+                        layers=["mla"],
+                        layer_stride=_MLA_PAGE,
+                        block_stride=_FULL_PAGE,
                     ),
                     KVCacheTensor(
-                        size=_full_attention_spec().page_size_bytes * 4,
-                        shared_by=["full"],
+                        size=_FULL_PAGE * 4,
+                        layers=["full"],
+                        layer_stride=_FULL_PAGE,
+                        block_stride=_FULL_PAGE,
                     ),
                 ],
                 kv_cache_groups=[
@@ -469,21 +518,21 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
                 num_blocks=4,
                 kv_cache_tensors=[
                     KVCacheTensor(
-                        size=_mla_spec().page_size_bytes * 4,
-                        shared_by=["mla"],
+                        size=_MLA_PAGE * 4,
+                        layers=["mla"],
+                        layer_stride=_MLA_PAGE,
+                        block_stride=_MLA_PAGE,
                     ),
-                    KVCacheTensor(size=64 * 4, shared_by=["mamba"]),
+                    KVCacheTensor(
+                        size=_MLA_PAGE * 4,
+                        layers=["mamba"],
+                        layer_stride=_MAMBA_PAGE,
+                        block_stride=_MLA_PAGE,
+                    ),
                 ],
                 kv_cache_groups=[
                     KVCacheGroupSpec(["mla"], _mla_spec()),
-                    KVCacheGroupSpec(
-                        ["mamba"],
-                        MambaSpec(
-                            block_size=16,
-                            shapes=((16, 1),),
-                            dtypes=(torch.float32,),
-                        ),
-                    ),
+                    KVCacheGroupSpec(["mamba"], _MAMBA_SPEC),
                 ],
             ),
             "mla-mamba-hybrid",
@@ -493,13 +542,12 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
                 num_blocks=4,
                 kv_cache_tensors=[
                     KVCacheTensor(
-                        size=_mla_spec().page_size_bytes * 4,
-                        shared_by=["layer0"],
-                    ),
-                    KVCacheTensor(
-                        size=_mla_spec().page_size_bytes * 4,
-                        shared_by=["layer1"],
-                    ),
+                        size=_MLA_PAGE * 4,
+                        layers=[layer],
+                        layer_stride=_MLA_PAGE * 4,
+                        block_stride=_MLA_PAGE,
+                    )
+                    for layer in ("layer0", "layer1")
                 ],
                 kv_cache_groups=[
                     KVCacheGroupSpec(["layer0"], _mla_spec()),
@@ -531,16 +579,26 @@ def test_replicated_layout_rejects_bare_mla_with_mixed_page_accounting():
     indexer_spec = _mla_spec(head_size=128, dtype=torch.uint8)
     main_layers = [f"main_{i}" for i in range(61)]
     indexer_layers = [f"indexer_{i}" for i in range(61)]
+    # A DSA-style group: the main pages and the smaller indexer pages are
+    # packed one after the other, so a block holds more than 61 MLA pages.
+    main_bytes = main_spec.page_size_bytes * len(main_layers)
+    indexer_bytes = indexer_spec.page_size_bytes * len(indexer_layers)
+    size = (main_bytes + indexer_bytes) * num_blocks
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=main_spec.page_size_bytes * len(main_layers) * num_blocks,
-                shared_by=main_layers,
+                size=size,
+                layers=main_layers,
+                layer_stride=main_spec.page_size_bytes * num_blocks,
+                block_stride=main_spec.page_size_bytes,
             ),
             KVCacheTensor(
-                size=indexer_spec.page_size_bytes * len(indexer_layers) * num_blocks,
-                shared_by=indexer_layers,
+                size=size,
+                layers=indexer_layers,
+                layer_stride=indexer_spec.page_size_bytes * num_blocks,
+                block_stride=indexer_spec.page_size_bytes,
+                offset=main_bytes * num_blocks,
             ),
         ],
         kv_cache_groups=[KVCacheGroupSpec(main_layers + indexer_layers, main_spec)],
@@ -663,34 +721,6 @@ def test_canonical_layout_certifies_v2_model_runner():
     assert build_offloading_config(
         config, kv_cache_config
     ).parallel.is_parallelism_agnostic
-
-
-def test_prefer_cross_layer_blocks_yields_to_canonical_layout():
-    """The connector must not request cross-layer blocks under
-    canonical_layout: cross-layer slabs have no per-layer refs to certify."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
-        OffloadingConnector,
-    )
-
-    kv_cache_config = _make_kv_cache_config()
-    connector_module = "vllm.distributed.kv_transfer.kv_connector.v1"
-
-    def make_connector(extra_config: dict[str, Any] | None) -> OffloadingConnector:
-        with (
-            patch(f"{connector_module}.offloading_connector.OffloadingSpecFactory"),
-            patch(
-                f"{connector_module}.offloading_connector.OffloadingConnectorScheduler"
-            ),
-        ):
-            return OffloadingConnector(
-                _make_vllm_config(extra_config=extra_config),
-                KVConnectorRole.SCHEDULER,
-                kv_cache_config,
-            )
-
-    assert make_connector(None).prefer_cross_layer_blocks
-    assert not make_connector({"canonical_layout": True}).prefer_cross_layer_blocks
 
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():

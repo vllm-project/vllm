@@ -10,6 +10,7 @@ read partially written / stale blocks and silently corrupt the CPU cache.
 from __future__ import annotations
 
 import time
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -19,6 +20,12 @@ from vllm.platforms import current_platform
 if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
+from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.v1.attention.backends.utils import set_kv_cache_layout
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+)
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
@@ -188,3 +195,98 @@ def test_build_params_src_access_order():
         gpu, cpu, stream, src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_STREAM
     )
     assert ordered.attrs.srcAccessOrder == CU_MEMCPY_SRC_ACCESS_ORDER_STREAM
+
+
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
+def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
+    num_blocks = 4
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float16,
+    )
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
+        device="cuda",
+    )
+    caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
+    cache_config = MagicMock(num_blocks=num_blocks)
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None,
+        kv_cache_config=cache_config,
+        cpu_capacity_bytes=raw.nbytes,
+    )
+    worker._backend = MagicMock()
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+
+    set_kv_cache_layout(layout.name)
+    try:
+        worker.register_kv_caches(
+            {f"layer.{layer_idx}": cache for layer_idx, cache in enumerate(caches)}
+        )
+    finally:
+        set_kv_cache_layout(None)
+
+    assert worker.gpu_kv_caches is not None
+    if layout.heads_outside_blocks:
+        expected_regions = num_layers * spec.num_heads
+        expected_block_bytes = spec.page_size_bytes // spec.num_heads
+    elif layout.is_layer_compact:
+        expected_regions = num_layers
+        expected_block_bytes = spec.page_size_bytes
+    else:
+        expected_regions = 1
+        expected_block_bytes = spec.page_size_bytes * num_layers
+    assert len(worker.gpu_kv_caches) == expected_regions
+    assert {cache.shape for cache in worker.gpu_kv_caches.values()} == {
+        (num_blocks, expected_block_bytes)
+    }
+
+
+def test_register_separate_kv_head_groups(monkeypatch):
+    # LHBNC hoists the K/V head groups outside the block dim, so each layer's
+    # blocks are registered as one region per group (K, V).
+    layout = KVCacheLayout.LHBNC
+    num_blocks = 4
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float16,
+        num_head_slots=2,
+        state_content_bytes=2 * 2 * 2,
+    )
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
+        device="cuda",
+    )
+    caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None,
+        kv_cache_config=MagicMock(num_blocks=num_blocks),
+        cpu_capacity_bytes=raw.nbytes,
+    )
+    worker._backend = MagicMock()
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+
+    set_kv_cache_layout(layout.name)
+    try:
+        worker.register_kv_caches(
+            {f"layer.{layer_idx}": cache for layer_idx, cache in enumerate(caches)}
+        )
+    finally:
+        set_kv_cache_layout(None)
+
+    assert worker.gpu_kv_caches is not None
+    assert len(worker.gpu_kv_caches) == num_layers * spec.num_heads
+    per_group_block_bytes = (
+        spec.num_kv_heads * spec.block_size * spec.head_size * spec.dtype.itemsize
+    )
+    assert {cache.shape for cache in worker.gpu_kv_caches.values()} == {
+        (num_blocks, per_group_block_bytes)
+    }

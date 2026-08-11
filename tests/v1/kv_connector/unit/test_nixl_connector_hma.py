@@ -1505,14 +1505,19 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
     )
     assert kda_spec.page_size_bytes == unified_page
+    # The three groups overlay each other, so layer i of every group aliases
+    # the same region: mla.i, kda_a.i and kda_b.i all live at i * layer_stride.
+    layer_stride = num_blocks * unified_page
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=num_blocks * unified_page,
-                shared_by=[f"mla.{i}", f"kda_a.{i}", f"kda_b.{i}"],
+                size=2 * layer_stride,
+                layers=[f"{prefix}.0", f"{prefix}.1"],
+                layer_stride=layer_stride,
+                block_stride=unified_page,
             )
-            for i in range(2)
+            for prefix in ("mla", "kda_a", "kda_b")
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(["mla.0", "mla.1"], mla_spec),

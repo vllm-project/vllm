@@ -241,13 +241,19 @@ class RequestRunner:
                 )
             ]
 
+        # Groups overlay one allocation, sized by the largest group.
+        block_stride = max(
+            group.kv_cache_spec.page_size_bytes * len(group.layer_names)
+            for group in kv_cache_groups
+        )
         kv_cache_tensors = [
             KVCacheTensor(
-                size=group.kv_cache_spec.page_size_bytes * num_gpu_blocks,
-                shared_by=[layer_name],
+                size=block_stride * num_gpu_blocks,
+                layers=list(group.layer_names),
+                layer_stride=group.kv_cache_spec.page_size_bytes * num_gpu_blocks,
+                block_stride=group.kv_cache_spec.page_size_bytes,
             )
             for group in kv_cache_groups
-            for layer_name in group.layer_names
         ]
 
         kv_cache_config = KVCacheConfig(

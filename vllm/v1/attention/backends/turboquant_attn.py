@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
+from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
 from vllm.triton_utils import triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
@@ -142,9 +143,6 @@ class TurboQuantAttentionBackend(AttentionBackend):
         """TurboQuant packs K+V into one slot per head."""
         if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_turboquant:
             return spec
-        from vllm.model_executor.layers.quantization.turboquant.config import (
-            TurboQuantConfig,
-        )
 
         # KVQuantMode member names mirror the preset strings.
         tq = TurboQuantConfig.from_cache_dtype(
@@ -155,6 +153,10 @@ class TurboQuantAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "TURBOQUANT"
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> str | None:
+        return "LBNHC"
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -175,39 +177,6 @@ class TurboQuantAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["TurboQuantMetadataBuilder"]:
         return TurboQuantMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "turboquant_4bit_nc",
-    ) -> tuple[int, ...]:
-        """Combined K+V cache shape — no leading 2 dimension.
-
-        Standard attention backends use (2, num_blocks, block_size, num_kv_heads,
-        head_dim) with a leading 2 to separate K and V. TurboQuant packs K+V
-        into a single interleaved slot per head per position. The logical
-        (blocks-first, head-major) shape is:
-
-            (num_blocks, num_kv_heads, block_size, slot_size_aligned)
-
-        Each slot = [key_packed | value_packed | padding].
-        This is safe because TQ has its own get_kv_cache_shape override and
-        never shares cache tensors with other backends. Layers that fall back
-        to native dtype via kv_cache_dtype_skip_layers get their own
-        standard-shaped cache allocation.
-
-        head_size is the model's real head_dim. slot_size_aligned is computed
-        from the TQ config to ensure correct cache allocation for all head dims.
-        """
-        from vllm.model_executor.layers.quantization.turboquant.config import (
-            TurboQuantConfig,
-        )
-
-        tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype_str, head_size)
-        return (num_blocks, num_kv_heads, block_size, tq_config.slot_size_aligned)
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
@@ -585,7 +554,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             return output.fill_(0)
 
         q = query[:N].view(N, self.num_heads, self.head_size)
-
         # Get TQ buffers, ensure on device (one-time migration).
         # Use Any-typed alias for dynamic _tq_* attrs set by _ensure_on_device.
         tq_layer: Any = layer

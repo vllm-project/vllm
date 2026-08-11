@@ -30,7 +30,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -184,14 +183,6 @@ class FlashInferMLABackend(MLACommonBackend):
         return [32, 64]
 
     @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (1, 0, 2, 3)
-        return (0, 1, 2)
-
-    @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA"
 
@@ -237,10 +228,6 @@ class FlashInferMLABackend(MLACommonBackend):
                     f"in [64, 128, 192], but got {qk_nope_head_dim}"
                 )
         return None
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
 
 
 class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):

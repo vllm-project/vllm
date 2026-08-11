@@ -11,8 +11,13 @@ from typing import Any
 import pytest
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    MLAAttentionSpec,
+)
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
@@ -241,7 +246,7 @@ def _write_task(layer_name: str, transfer_id: str = "xfer") -> Any:
             id="interleaved-kernel-axis-from-spec",
         ),
         pytest.param(
-            (8, 4, 3),
+            (8, 1, 4, 3),
             _mla_spec(),
             16,
             {
@@ -297,7 +302,7 @@ def test_mixed_layers_compute_distinct_offsets_per_layer():
     kv_caches = {
         "separated": torch.empty((2, 8, 4, 2, 3), dtype=torch.bfloat16),
         "interleaved": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
-        "indexer": torch.empty((8, 4, 3), dtype=torch.bfloat16),
+        "indexer": torch.empty((8, 1, 4, 3), dtype=torch.bfloat16),
     }
     worker = _worker(
         kv_caches,
@@ -342,7 +347,7 @@ def test_write_transfer_plan_caches_offsets_per_geometry():
     kv_caches = {
         "dense0": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
         "dense1": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
-        "indexer": torch.empty((8, 4, 3), dtype=torch.bfloat16),
+        "indexer": torch.empty((8, 1, 4, 3), dtype=torch.bfloat16),
     }
     calls: list[str] = []
 
@@ -692,7 +697,7 @@ def test_empty_local_block_ids_is_free_only_noop():
 def test_registration_regions_do_not_split_interleaved_or_mla_cache():
     separated = torch.empty((2, 8, 4, 2, 3), dtype=torch.bfloat16)
     interleaved = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
-    indexer = torch.empty((8, 4, 3), dtype=torch.bfloat16)
+    indexer = torch.empty((8, 1, 4, 3), dtype=torch.bfloat16)
     worker = _worker(
         {
             "separated": separated,
@@ -745,8 +750,55 @@ def test_registration_regions_use_layer_num_blocks():
 
 
 def test_unsupported_shape_raises_value_error():
-    cache = torch.empty((8, 4, 2, 3), dtype=torch.bfloat16)
+    # A 4-D view whose head/state/content dims all disagree with the spec
+    # (a standardized [B, H, N, C] view for _full_spec would be (8, 2, 4, 6)).
+    cache = torch.empty((8, 3, 5, 7), dtype=torch.bfloat16)
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
     with pytest.raises(ValueError, match="Unsupported MoRIIO K/V cache shape"):
         moriio_layout.get_layer_transfer_geometry("layer", cache, worker.layer_to_spec)
+
+
+def test_standardized_view_geometry_and_padded_registration():
+    """Production per-layer views come from ``reshape_kv_cache``: geometry
+    must track the [B, H, N, C] shape, and padded pages must register the
+    full strided span (not just the meaningful block_len)."""
+    num_blocks = 8
+    spec = _full_spec()
+    raw = torch.zeros(num_blocks * spec.page_size_bytes, dtype=torch.int8)
+    (view,) = dense_kv_cache_views(raw, spec, num_blocks, 1, KVCacheLayout.LBNHC)
+    worker = _worker({"layer": view}, {"layer": spec})
+
+    geometry = moriio_layout.get_layer_transfer_geometry(
+        "layer", view, worker.layer_to_spec
+    )
+    assert geometry.num_blocks == num_blocks
+    assert geometry.block_len == spec.page_size_bytes
+    assert geometry.block_stride * view.element_size() == spec.page_size_bytes
+
+    # MLA is just H == 1.
+    mla = _mla_spec()
+    mla_raw = torch.zeros(num_blocks * mla.page_size_bytes, dtype=torch.int8)
+    (mla_view,) = dense_kv_cache_views(mla_raw, mla, num_blocks, 1, KVCacheLayout.LBNHC)
+    mla_geometry = moriio_layout.get_layer_transfer_geometry(
+        "mla", mla_view, {"mla": mla}
+    )
+    assert mla_geometry.block_len == mla.page_size_bytes
+
+    # Alignment-padded page: registration must cover the padded stride.
+    padded = MLAAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=3,
+        dtype=torch.bfloat16,
+        page_size_padded=64,
+    )
+    padded_raw = torch.zeros(num_blocks * padded.page_size_bytes, dtype=torch.int8)
+    (padded_view,) = dense_kv_cache_views(
+        padded_raw, padded, num_blocks, 1, KVCacheLayout.LBNHC
+    )
+    regions = moriio_layout.iter_layer_registration_regions(
+        "padded", padded_view, {"padded": padded}
+    )
+    assert len(regions) == 1
+    assert regions[0][1] == num_blocks * padded.page_size_bytes

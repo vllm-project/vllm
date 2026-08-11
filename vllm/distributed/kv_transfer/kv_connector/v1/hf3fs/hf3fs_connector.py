@@ -541,35 +541,24 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         self._dtype = first_cache.dtype
         element_size = first_cache.element_size()
 
-        if self._use_mla:
-            assert len(first_cache.shape) == 3, "MLA format should have 3 dimensions"
-            # MLA format: [num_blocks, block_size, head_size]
-            num_blocks, block_size, head_size = first_cache.shape
-            num_heads = 1
-        else:
-            # MHA format: [2, num_blocks, block_size, num_heads, head_size]
-            _, num_blocks, block_size, num_heads, head_size = first_cache.shape
+        # Standardized per-layer [B, H, N, C] view; MLA is just H == 1 with
+        # the latent vector as the content dim.
+        assert len(first_cache.shape) == 4, (
+            f"expected a [B, H, N, C] KV cache view, got {tuple(first_cache.shape)}"
+        )
+        num_blocks, num_heads, block_size, content_dim = first_cache.shape
 
         self._local_total_tokens = num_blocks * block_size
         self._local_block_size = block_size
 
-        if self._use_mla:
-            layer_block_size = block_size * head_size * element_size
-            self._bytes_per_page = layer_block_size * len(self._kv_caches)
-            self._shape_per_page = [
-                len(self._kv_caches),
-                block_size,
-                head_size,
-            ]
-        else:
-            layer_block_size = 2 * block_size * num_heads * head_size * element_size
-            self._bytes_per_page = layer_block_size * len(self._kv_caches)
-            self._shape_per_page = [
-                len(self._kv_caches),
-                2,
-                block_size,
-                num_heads * head_size,
-            ]
+        layer_block_size = num_heads * block_size * content_dim * element_size
+        self._bytes_per_page = layer_block_size * len(self._kv_caches)
+        self._shape_per_page = [
+            len(self._kv_caches),
+            num_heads,
+            block_size,
+            content_dim,
+        ]
 
         self._kvcache_ptrs = torch.tensor(
             [cache.data_ptr() for cache in self._kv_caches.values()],

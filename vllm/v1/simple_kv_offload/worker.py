@@ -86,66 +86,39 @@ class SimpleCPUOffloadWorker:
         The worker will infer the underlying raw storage from the kv_caches.
 
         Args:
-            kv_caches: Per-layer GPU KV caches. Values are either a single
-                tensor (attention layers) or a list of tensors (Mamba layers
-                in hybrid models). All values are included for offloading
-                by resolving to their underlying raw storage.
+            kv_caches: Per-layer GPU KV caches.
         """
         if not kv_caches:
             logger.warning("No KV caches to offload.")
             return
 
-        # Resolve each entry to a representative tensor for storage
-        # deduplication. For attention layers the value is already a tensor;
-        # for Mamba layers it is a list of tensors that all share the same
-        # underlying raw storage, so we take the first one.
-        def _repr_tensor(v: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
-            assert isinstance(v, torch.Tensor | list)
-            return v if isinstance(v, torch.Tensor) else v[0]
-
-        any_tensor = _repr_tensor(next(iter(kv_caches.values())))
-        self.device = any_tensor.device
+        self.device = next(iter(kv_caches.values())).device
 
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
 
-        # Deduplicate: multiple layers may share the same backing storage.
-        seen_ptrs: dict[int, tuple[str, torch.Tensor]] = {}
-        for name, value in kv_caches.items():
-            tensor = _repr_tensor(value)
-            ptr = tensor.untyped_storage().data_ptr()
-            if ptr not in seen_ptrs:
-                seen_ptrs[ptr] = (name, tensor)
-
-        # Build [num_blocks, block_bytes] int8 views from each unique
-        # storage so that stride(0) gives block_bytes for the copy op.
-        #
-        # The physical layout varies across attention backends:
-        #   FlashAttn/ROCm:  (2, num_blocks, ...) -> K/V outermost, 2 segments
-        #   FlashInfer/MLA:  (num_blocks, ...)    -> blocks outermost, 1 segment
-        # We derive page_size_bytes = storage.nbytes() // num_blocks, then
-        # classify dims: any dim whose byte-stride exceeds page_size_bytes
-        # must be an outer segment dim (e.g. the K/V dim of size 2). A less
-        # hacky way is to update the interface with the layout.
+        # The DMA backend copies whole blocks as base + block_id * stride(0),
+        # so view each unique allocation as [num_blocks, block_bytes].
         unique_gpu_caches: dict[str, torch.Tensor] = {}
-        for name, tensor in seen_ptrs.values():
+        seen: set[tuple[torch.device, int]] = set()
+        for name, tensor in kv_caches.items():
             storage = tensor.untyped_storage()
-            raw = torch.empty(0, dtype=torch.int8, device=self.device).set_(
-                storage, 0, (storage.nbytes(),)
+            key = (tensor.device, storage.data_ptr())
+            if key in seen:
+                continue
+            seen.add(key)
+
+            physical_per_block, remainder = divmod(tensor.shape[0], num_blocks)
+            assert remainder == 0, (
+                f"KV cache {name!r} has {tensor.shape[0]} physical blocks, which "
+                f"is not divisible by {num_blocks} scheduler blocks"
             )
-            el = tensor.element_size()
-            page_size_bytes = storage.nbytes() // num_blocks
-            outer_dims = [
-                d for d in range(tensor.ndim) if tensor.stride(d) * el > page_size_bytes
-            ]
-            if not outer_dims:
-                unique_gpu_caches[name] = raw.view(num_blocks, -1)
-            else:
-                seg_stride = tensor.stride(outer_dims[0]) * el
-                for idx in range(tensor.shape[outer_dims[0]]):
-                    offset = idx * seg_stride
-                    chunk = raw[offset : offset + seg_stride]
-                    unique_gpu_caches[f"{name}.{idx}"] = chunk.view(num_blocks, -1)
+            block_bytes = tensor.stride(0) * tensor.element_size() * physical_per_block
+            raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(storage)
+            regions = raw.view(-1, num_blocks, block_bytes)
+            for idx, region in enumerate(regions):
+                key_name = name if len(regions) == 1 else f"{name}.{idx}"
+                unique_gpu_caches[key_name] = region
 
         # Compute per-tensor bytes_per_block. Tensors may have different
         # page_size_bytes (e.g., UniformTypeKVCacheSpecs with varying head_size).

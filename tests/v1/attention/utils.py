@@ -32,8 +32,12 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     FullAttentionSpec,
+    KVCacheLayout,
+    KVCacheSpec,
     MambaSpec,
     get_kv_quant_mode,
+    layer_kv_cache_strides,
+    reshape_kv_cache,
 )
 
 
@@ -417,3 +421,28 @@ class MockMambaBuilder(BaseMambaAttentionMetadataBuilder[BaseMambaAttentionMetad
             is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool)
         )
         return builder.build(0, common_metadata)
+
+
+def dense_kv_cache_views(
+    raw: torch.Tensor,
+    spec: KVCacheSpec,
+    num_blocks: int,
+    num_layers: int,
+    layout: KVCacheLayout,
+    block_size: int | None = None,
+) -> list[torch.Tensor]:
+    """``reshape_kv_cache`` for a dense allocation of ``num_layers`` layers."""
+    layer_stride, block_stride = layer_kv_cache_strides(
+        spec, num_blocks, num_layers, layout, block_size
+    )
+    return reshape_kv_cache(
+        raw,
+        spec,
+        num_blocks,
+        num_layers,
+        layout,
+        offset=0,
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+        block_size=block_size,
+    )

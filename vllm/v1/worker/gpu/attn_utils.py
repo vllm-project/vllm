@@ -1,43 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
-from math import prod
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
 
-from vllm.config import (
-    VllmConfig,
-    get_layers_from_vllm_config,
-    set_current_vllm_config,
-)
-from vllm.logger import init_logger
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    KVQuantMode,
-    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
+    allocate_and_reshape_kv_cache,
     bind_kv_cache,
     prepare_kernel_block_sizes,
 )
-
-logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -69,13 +60,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             if isinstance(spec, AttentionSpec):
-                backend = attn_module.get_attn_backend()
-                # indexes_kv_by_block_stride() -> get_kv_cache_stride_order() ->
-                # get_kv_cache_layout() needs the current vLLM config.
-                with set_current_vllm_config(vllm_config):
-                    indexes = backend.indexes_kv_by_block_stride()
-                spec = replace(spec, indexes_kv_by_block_stride=indexes)
-                spec = backend.customize_spec(spec)
+                spec = attn_module.get_attn_backend().customize_spec(spec)
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
 
@@ -197,374 +182,19 @@ def get_query_lens_mismatch_unsupported_backend(
     return None
 
 
-def _allocate_kv_cache(
-    kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
-):
-    kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
-    packed_backing: torch.Tensor | None = None
-    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        if kv_cache_tensor.block_stride > 0:
-            # Allocate once; all packed tensors alias the same backing.
-            if packed_backing is None:
-                packed_backing = torch.zeros(
-                    kv_cache_tensor.size, dtype=torch.int8, device=device
-                )
-            tensor = packed_backing
-        else:
-            tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
-        for layer_name in kv_cache_tensor.shared_by:
-            kv_cache_raw_tensors[layer_name] = tensor
-
-    layer_names = set()
-    for group in kv_cache_config.kv_cache_groups:
-        for layer_name in group.layer_names:
-            layer_names.add(layer_name)
-    assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
-        "Some layers are not correctly initialized"
-    )
-    return kv_cache_raw_tensors
-
-
-def _kv_first_layers_sharing_pool_with_mamba(
-    attn_groups: Sequence[AttentionGroup],
-    kernel_block_sizes: list[int],
-    cache_dtype: str,
-    kv_cache_config: "KVCacheConfig | None",
-) -> set[str]:
-    """KV-first attention layers that share an allocation with Mamba state.
-
-    Mamba addresses its state by page, so these layers have to lay their blocks
-    out page by page as well; otherwise block ids from the two groups resolve
-    to overlapping bytes.
-    """
-    if kv_cache_config is None:
-        return set()
-
-    kv_first_layers: set[str] = set()
-    mamba_layers: set[str] = set()
-    for group in attn_groups:
-        kv_cache_spec = group.kv_cache_spec
-        if isinstance(kv_cache_spec, MambaSpec):
-            mamba_layers.update(group.layer_names)
-            continue
-        if not isinstance(kv_cache_spec, AttentionSpec):
-            continue
-        if group.kv_cache_group_id >= len(kernel_block_sizes):
-            continue
-        block_dim = group.backend.get_kv_cache_block_dim(
-            kernel_block_sizes[group.kv_cache_group_id],
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
-        )
-        if block_dim != 0:
-            kv_first_layers.update(group.layer_names)
-
-    page_aligned: set[str] = set()
-    for kv_tensor in kv_cache_config.kv_cache_tensors:
-        if mamba_layers.isdisjoint(kv_tensor.shared_by):
-            continue
-        page_aligned.update(kv_first_layers.intersection(kv_tensor.shared_by))
-    return page_aligned
-
-
-def _reshape_attention_kv_cache(
-    kv_raw_tensor: torch.Tensor,
-    kv_cache_spec: AttentionSpec,
-    kv_cache_shape: tuple[int, ...],
-    kv_cache_stride_order: tuple[int, ...],
-    num_blocks: int,
-    packing: tuple[int, int] | None,
-    page_aligned_blocks: bool = False,
-) -> torch.Tensor:
-    permuted_kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-    inv_order = [
-        kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
-    ]
-    dtype = kv_cache_spec.dtype
-
-    if packing is not None:
-        offset, block_stride = packing
-        assert inv_order[0] == 0
-        page_bytes = prod(kv_cache_shape[1:]) * get_dtype_size(dtype)
-        kv_cache = (
-            kv_raw_tensor.view(-1, block_stride)[:, offset : offset + page_bytes]
-            .view(dtype)
-            .view(permuted_kv_cache_shape)
-        )
-    elif kv_cache_spec.page_size_padded is not None:
-        # Use a strided view to skip the padding between physical pages.
-        #
-        # Only num-blocks-first layouts are supported (the block dimension is
-        # dim 0 of the unpermuted shape). kv-first layouts such as ROCm's
-        # ``(2, num_blocks, ...)`` are intentionally not supported here. For a
-        # num-blocks-first layout the only stride that must change is the block
-        # stride: every other (contiguous) stride already steps within the
-        # unpadded region of a page, so no further adjustment is needed.
-        assert kv_cache_shape[0] == num_blocks, (
-            "Padded KV pages require a num-blocks-first KV cache layout (got "
-            f"shape {kv_cache_shape} with num_blocks={num_blocks}); "
-            "kv-first layouts are not supported."
-        )
-        dtype_size = get_dtype_size(kv_cache_spec.dtype)
-        page_stride = kv_cache_spec.page_size_bytes // dtype_size
-
-        num_blocks_dim = inv_order[0]
-        strides = list(torch.empty(permuted_kv_cache_shape, device="meta").stride())
-        strides[num_blocks_dim] = page_stride
-
-        kv_cache = torch.as_strided(
-            kv_raw_tensor.view(dtype),
-            size=permuted_kv_cache_shape,
-            stride=tuple(strides),
-        )
-    elif page_aligned_blocks:
-        # A KV-first layout such as ROCm's ``(2, num_blocks, ...)`` puts block
-        # ``b``'s K and V in two far-apart halves of the allocation, so block
-        # ``b`` does not cover page ``b``. Mamba layers sharing the allocation
-        # do address their state by page, so the two would resolve the same
-        # bytes. Build the view page-first instead, then swap the dims back.
-        assert kv_cache_shape[1] == num_blocks and kv_cache_stride_order == tuple(
-            range(len(kv_cache_shape))
-        ), (
-            "Page-aligned KV blocks expect a default-strided (kv, num_blocks, "
-            f"...) layout, got shape {kv_cache_shape} with stride order "
-            f"{kv_cache_stride_order} and num_blocks={num_blocks}."
-        )
-        kv_cache = (
-            kv_raw_tensor.view(dtype)
-            .view(num_blocks, kv_cache_shape[0], *kv_cache_shape[2:])
-            .transpose(0, 1)
-        )
-    else:
-        # No padding — safe to use a contiguous view.
-        kv_cache = kv_raw_tensor.view(dtype).view(permuted_kv_cache_shape)
-
-    return kv_cache.permute(*inv_order)
-
-
-def _reshape_kv_cache(
-    attn_groups: Sequence[AttentionGroup],
-    kv_cache_raw_tensors: dict[str, torch.Tensor],
-    cache_dtype: str,
-    kernel_block_sizes: list[int],
-    shared_kv_cache_layers: dict[str, str],
-    kv_cache_config: "KVCacheConfig | None" = None,
-) -> dict[str, Any]:
-    kv_caches: dict[str, Any] = {}
-    has_attn = False
-
-    layer_packing: dict[str, tuple[int, int]] = {}
-    if kv_cache_config is not None:
-        for kv_tensor in kv_cache_config.kv_cache_tensors:
-            if kv_tensor.block_stride > 0:
-                for ln in kv_tensor.shared_by:
-                    layer_packing[ln] = (kv_tensor.offset, kv_tensor.block_stride)
-
-    page_aligned_layers = _kv_first_layers_sharing_pool_with_mamba(
-        attn_groups, kernel_block_sizes, cache_dtype, kv_cache_config
-    )
-
-    for group in attn_groups:
-        if group.kv_cache_group_id >= len(kernel_block_sizes):
-            continue
-
-        kv_cache_spec = group.kv_cache_spec
-        if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
-            # use storage_block_size as the kernel block size for groups
-            # that apply a compression on block size (eg. DeepSeek V4).
-            kernel_block_size = kv_cache_spec.storage_block_size
-        else:
-            kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
-
-        for layer_name in group.layer_names:
-            if layer_name in shared_kv_cache_layers:
-                # Shared layer — tensor will be aliased to its target later.
-                continue
-
-            kv_raw_tensor = kv_cache_raw_tensors[layer_name]
-            packing = layer_packing.get(layer_name)
-            if packing is not None:
-                _, blk_stride = packing
-                num_blocks = kv_raw_tensor.numel() // blk_stride
-            else:
-                assert kv_raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = kv_raw_tensor.numel() // kv_cache_spec.page_size_bytes
-
-            if isinstance(kv_cache_spec, AttentionSpec):
-                has_attn = True
-                # Use storage_block_size: it equals block_size for uncompressed
-                # specs but is smaller for compressed ones (DeepSeek V4), which
-                # store block_size tokens in block_size // compress_ratio slots.
-                num_blocks_per_kv_block = (
-                    kv_cache_spec.storage_block_size // kernel_block_size
-                )
-                kernel_num_blocks = num_blocks * num_blocks_per_kv_block
-                # Skipped layers (--kv-cache-dtype-skip-layers) keep the
-                # unquantized shape; only the quantized primary uses the
-                # quantized cache dtype's (possibly packed) layout.
-                layer_cache_dtype = (
-                    "auto"
-                    if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
-                    else cache_dtype
-                )
-                kv_cache_shape = group.backend.get_kv_cache_shape(
-                    kernel_num_blocks,
-                    kernel_block_size,
-                    kv_cache_spec.num_kv_heads,
-                    kv_cache_spec.head_size,
-                    cache_dtype_str=layer_cache_dtype,
-                )
-
-                # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
-                try:
-                    kv_cache_stride_order = group.backend.get_kv_cache_stride_order()
-                    assert len(kv_cache_stride_order) == len(kv_cache_shape)
-                except (AttributeError, NotImplementedError):
-                    kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-
-                kv_caches[layer_name] = _reshape_attention_kv_cache(
-                    kv_raw_tensor,
-                    kv_cache_spec,
-                    kv_cache_shape,
-                    kv_cache_stride_order,
-                    kernel_num_blocks,
-                    packing,
-                    page_aligned_blocks=layer_name in page_aligned_layers,
-                )
-
-            elif isinstance(kv_cache_spec, MambaSpec):
-                page_size_bytes = kv_cache_spec.page_size_bytes
-                # Hold a single contiguous [num_blocks, 1, 1, page_size_bytes]
-                # int8 page view per layer; the layer's bind_kv_cache unpacks
-                # each block's bytes into its conv/ssm state views. Keeping
-                # one tensor per layer lets the KV connector register it
-                # without special-casing Mamba.
-                kv_caches[layer_name] = kv_raw_tensor[
-                    : num_blocks * page_size_bytes
-                ].view(num_blocks, 1, 1, page_size_bytes)
-            else:
-                raise NotImplementedError(
-                    f"Unsupported KV cache spec type: {type(kv_cache_spec)}"
-                )
-
-    if has_attn and kv_cache_config is not None:
-        _align_mixed_attention_kv_cache_views(
-            attn_groups=attn_groups,
-            kv_caches=kv_caches,
-            kernel_block_sizes=kernel_block_sizes,
-            cache_dtype=cache_dtype,
-            kv_cache_config=kv_cache_config,
-            page_aligned_layers=page_aligned_layers,
-        )
-
-    # Map any sharing layers to their target layer's KV cache.
-    for layer_name, target_layer_name in shared_kv_cache_layers.items():
-        kv_caches[layer_name] = kv_caches[target_layer_name]
-
-    return kv_caches
-
-
-def _align_mixed_attention_kv_cache_views(
-    attn_groups: Iterable[AttentionGroup],
-    kv_caches: dict[str, Any],
-    kernel_block_sizes: list[int],
-    cache_dtype: str,
-    kv_cache_config: KVCacheConfig,
-    page_aligned_layers: set[str],
-) -> None:
-    """Align shared attention KV views when backends disagree on layout.
-
-    Encoder-decoder models can share one raw allocation between decoder
-    self-attention (K/V-first ROCM_ATTN, block dim 1) and cross-attention
-    (blocks-first backends, block dim 0). Keep the physical storage in the
-    K/V-first layout expected by ROCM_ATTN, and restride the blocks-first
-    logical views so block IDs address the same bytes.
-    """
-    block_dims_by_layer: dict[str, int] = {}
-    for group in attn_groups:
-        kv_cache_spec = group.kv_cache_spec
-        if not isinstance(kv_cache_spec, AttentionSpec):
-            continue
-        if group.kv_cache_group_id >= len(kernel_block_sizes):
-            continue
-        block_dim = group.backend.get_kv_cache_block_dim(
-            kernel_block_sizes[group.kv_cache_group_id],
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
-        )
-        for layer_name in group.layer_names:
-            if layer_name in kv_caches:
-                block_dims_by_layer[layer_name] = block_dim
-
-    for kv_tensor in kv_cache_config.kv_cache_tensors:
-        if kv_tensor.block_stride > 0:
-            continue
-        if not page_aligned_layers.isdisjoint(kv_tensor.shared_by):
-            # These KV-first views already address blocks by page, just like
-            # blocks-first views, so they must not be restrided onto the
-            # unaligned KV-first storage layout.
-            continue
-        shared_block_dims = {
-            block_dims_by_layer[layer_name]
-            for layer_name in kv_tensor.shared_by
-            if layer_name in block_dims_by_layer
-        }
-        if 0 not in shared_block_dims or 1 not in shared_block_dims:
-            continue
-
-        for layer_name in kv_tensor.shared_by:
-            if block_dims_by_layer.get(layer_name) == 0:
-                _restride_blocks_first_kv_cache_to_kv_first_storage(
-                    kv_caches[layer_name]
-                )
-
-
-def _restride_blocks_first_kv_cache_to_kv_first_storage(
-    kv_cache: torch.Tensor,
-) -> None:
-    assert kv_cache.ndim >= 3
-    assert kv_cache.shape[1] == 2
-    page_size = kv_cache.shape[2:].numel()
-    num_blocks = kv_cache.shape[0]
-    expected_tail_stride = torch.empty(kv_cache.shape[2:]).stride()
-    if kv_cache.stride()[2:] != expected_tail_stride:
-        logger.warning_once(
-            "Skipping mixed KV-cache layout alignment for a non-NHD "
-            "blocks-first attention view with stride %s.",
-            kv_cache.stride(),
-        )
-        return
-    kv_cache.as_strided_(
-        size=kv_cache.shape,
-        stride=(page_size, num_blocks * page_size, *expected_tail_stride),
-    )
-
-
 def init_kv_cache(
     runner_kv_caches: list[torch.Tensor | list[torch.Tensor]],
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
-    attn_groups: list[list[AttentionGroup]],
     device: torch.device,
-    cache_dtype: str,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
 ) -> dict[str, Any]:
-    shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
-    kv_cache_raw_tensors = _allocate_kv_cache(
-        kv_cache_config, shared_kv_cache_layers, device
+    kv_caches = allocate_and_reshape_kv_cache(
+        kv_cache_config, device, get_kv_cache_layout(), kernel_block_sizes
     )
-    flattened_attn_groups = list(group for groups in attn_groups for group in groups)
-    kv_caches = _reshape_kv_cache(
-        attn_groups=flattened_attn_groups,
-        kv_cache_raw_tensors=kv_cache_raw_tensors,
-        kernel_block_sizes=kernel_block_sizes,
-        cache_dtype=cache_dtype,
-        shared_kv_cache_layers=shared_kv_cache_layers,
-        kv_cache_config=kv_cache_config,
-    )
+    for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
+        kv_caches[layer_name] = kv_caches[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
     # decoder layer, so a layer name carries two integers (layer + module index).
     num_attn_module = (

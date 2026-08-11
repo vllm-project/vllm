@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
@@ -16,7 +16,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -28,10 +28,25 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
+    KVCacheLayoutType,
     split_decodes_prefills_and_extends,
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
+
+
+def _use_separate_kv_head_groups() -> bool:
+    """Whether to allocate K and V as two separate token-major head groups.
+
+    The AITER fused QK-norm+RoPE+cache kernel addresses each side as
+    ``block_id * stride(0) + token * (H*hs) + head * hs``, i.e. token-major and
+    contiguous within a block. The shuffle-layout variant uses its own x-packed
+    interior instead, so it keeps the default packed content dim.
+    """
+    return (
+        rocm_aiter_ops.is_enabled() and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+    )
+
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
@@ -711,6 +726,30 @@ class AiterFlashAttentionMetadataBuilder(
 
 
 class AiterFlashAttentionBackend(AttentionBackend):
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """K and V as two head groups ``[B, 2, N, H*hs]`` so each side is one
+        contiguous token-major region per block, as the AITER fused
+        QK-norm+RoPE+cache kernel addresses them."""
+        if spec.state_content_bytes is not None or not _use_separate_kv_head_groups():
+            return spec
+        assert spec.head_size == spec.head_size_v, (
+            "Separate K/V head groups require symmetric K/V head sizes."
+        )
+        return replace(
+            spec,
+            num_head_slots=2,
+            state_content_bytes=spec.num_kv_heads
+            * spec.head_size
+            * get_dtype_size(spec.dtype),
+        )
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
+        # Separate K/V head groups need H inside the block and L outermost so
+        # each side is a token-major, block-contiguous [B, N, H*hs] region.
+        return "LBHNC" if _use_separate_kv_head_groups() else None
+
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
 
     @classmethod
@@ -761,19 +800,6 @@ class AiterFlashAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["AiterFlashAttentionMetadataBuilder"]:
         return AiterFlashAttentionMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         from vllm.platforms.rocm import get_cdna_version
@@ -807,6 +833,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
+        self.separate_kv_head_groups = _use_separate_kv_head_groups()
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
@@ -1387,7 +1414,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        """Split the per-layer cache into K/V views shaped [B, N, H, hs].
+
+        With separate planes the cache is [B, 2, N, H*hs] and each side is a
+        contiguous, token-major block region. Otherwise K/V are packed in the
+        content dim of [B, H, N, 2*hs] and the split is a strided view.
+        """
+        if self.separate_kv_head_groups:
+            key_cache, value_cache = kv_cache.unbind(1)
+            shape = (*key_cache.shape[:-1], self.num_kv_heads, self.head_size)
+            return key_cache.view(shape), value_cache.view(shape)
         return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
     def do_kv_cache_update(
@@ -1453,12 +1489,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        # Only fuse when shuffle layout is off; the shuffle write path uses a
-        # dedicated cache update, mirroring fused_rope_kvcache_supported.
-        return (
-            rocm_aiter_ops.is_enabled()
-            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-        )
+        # The fused kernel needs K and V as separate block-contiguous caches,
+        # which only the separate-planes allocation provides.
+        return self.separate_kv_head_groups
 
     def do_qk_norm_rope_kvcache_update(
         self,
@@ -1495,7 +1528,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
             k_scale=layer._k_scale_cpu,
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
-            use_shuffle_layout=rocm_aiter_ops.is_shuffle_kv_cache_enabled(),
+            # Separate planes and the shuffle layout are mutually exclusive
+            # (see _use_separate_kv_head_groups), so this path is never shuffled.
+            use_shuffle_layout=False,
         )
 
     def do_rope_and_kv_cache_update(

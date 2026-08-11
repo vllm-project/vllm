@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import defaultdict
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,7 +12,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -70,35 +68,14 @@ def _allocate_and_reshape_kv_caches(
     attn_groups: list[list],
     device: torch.device,
 ):
-    """
-    Use the real GPUModelRunner allocation and reshape methods to produce
-    kv_caches, just like the model runner does during initialization.
-    """
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    """Allocate kv_caches exactly as the model runner does at startup."""
+    from vllm.v1.kv_cache_interface import KVCacheLayout
+    from vllm.v1.worker.utils import allocate_and_reshape_kv_cache
 
-    # Some backends (e.g. FlashAttention) query the KV cache layout during
-    # reshape, which ultimately calls get_current_vllm_config(). Setting
-    # the layout override avoids needing a full VllmConfig context.
-    set_kv_cache_layout("NHD")
-    try:
-        runner = object.__new__(GPUModelRunner)
-        runner.device = device
-        runner.runner_only_attn_layers = set()
-        runner.attn_groups = attn_groups
-        runner.kv_cache_config = kv_cache_config
-        runner.cache_config = MagicMock(cache_dtype="auto")
-        runner.shared_kv_cache_layers = {}
-        runner.model_config = MagicMock()
-        runner.model_config.hf_config.model_type = ""
-        runner.compilation_config = MagicMock(
-            static_forward_context=defaultdict(MagicMock)
-        )
-        runner.kv_caches = []
-
-        kernel_block_sizes = [BLOCK_SIZE] * len(kv_cache_config.kv_cache_groups)
-        return runner.initialize_kv_cache_tensors(kv_cache_config, kernel_block_sizes)
-    finally:
-        set_kv_cache_layout(None)
+    kernel_block_sizes = [BLOCK_SIZE] * len(kv_cache_config.kv_cache_groups)
+    return allocate_and_reshape_kv_cache(
+        kv_cache_config, device, KVCacheLayout.LBNHC, kernel_block_sizes
+    )
 
 
 def _single_rank_vllm_config(total_kv_heads: int):
@@ -321,10 +298,9 @@ def test_register_kv_caches(backend):
     Creates one FullAttention group, one MLA group, one Mamba group, and
     one Mamba-padded group. Each group has GROUP_SIZE layers.
 
-    KVCacheTensors are shared across all groups mirroring the real allocation
-    in kv_cache_utils.py: tensor i is shared by layer i from every group.
-    The padded-mamba group has a different page size so its layers get their
-    own dedicated tensors.
+    KVCacheTensors mirror the real allocation in kv_cache_utils.py: each
+    group is one run of the shared allocation starting at offset 0, so layer
+    i of every group aliases the same bytes.
 
     Uses the real GPUModelRunner.initialize_kv_cache_tensors to produce
     the raw per-layer kv_caches registered by the connector.
@@ -413,18 +389,17 @@ def test_register_kv_caches(backend):
         aligned_mamba_layer_names,
     ]
 
-    kv_cache_tensors: list[KVCacheTensor] = []
-    for i in range(GROUP_SIZE):
-        shared_by: list[str] = []
-        for group_layer_names in layer_groups:
-            if len(group_layer_names) > i:
-                shared_by.append(group_layer_names[i])
-        kv_cache_tensors.append(
-            KVCacheTensor(
-                size=PAGE_SIZE_BYTES * NUM_BLOCKS,
-                shared_by=shared_by,
-            )
+    # Every group packs its layers densely into the same allocation and all
+    # start at offset 0, so layer i of every group aliases the same bytes.
+    kv_cache_tensors: list[KVCacheTensor] = [
+        KVCacheTensor(
+            size=PAGE_SIZE_BYTES * NUM_BLOCKS * GROUP_SIZE,
+            layers=group_layer_names,
+            layer_stride=PAGE_SIZE_BYTES * NUM_BLOCKS,
+            block_stride=PAGE_SIZE_BYTES,
         )
+        for group_layer_names in layer_groups
+    ]
 
     kv_cache_groups = [
         KVCacheGroupSpec(layer_names=attn_layer_names, kv_cache_spec=attn_spec),
@@ -580,16 +555,24 @@ def test_register_kv_caches_uniform_type(backend):
         kv_cache_specs={layer_a: spec_a, layer_b: spec_b},
     )
 
+    # The group packs its two layers densely, one run each as their pages
+    # differ: layer_a occupies the first page of every block, layer_b the rest.
+    window = spec_a.page_size_bytes + spec_b.page_size_bytes
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=spec_a.page_size_bytes * NUM_BLOCKS,
-                shared_by=[layer_a],
+                size=window * NUM_BLOCKS,
+                layers=[layer_a],
+                layer_stride=spec_a.page_size_bytes * NUM_BLOCKS,
+                block_stride=spec_a.page_size_bytes,
             ),
             KVCacheTensor(
-                size=spec_b.page_size_bytes * NUM_BLOCKS,
-                shared_by=[layer_b],
+                size=window * NUM_BLOCKS,
+                layers=[layer_b],
+                layer_stride=spec_b.page_size_bytes * NUM_BLOCKS,
+                block_stride=spec_b.page_size_bytes,
+                offset=spec_a.page_size_bytes * NUM_BLOCKS,
             ),
         ],
         kv_cache_groups=[

@@ -129,14 +129,19 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
         page_size_padded=unified_page,
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
     )
+    # The three groups overlay each other, so layer i of every group aliases
+    # the same region: mla.i, kda_a.i and kda_b.i all live at i * layer_stride.
+    layer_stride = num_logical_blocks * unified_page
     kv_cache_config = KVCacheConfig(
         num_blocks=num_logical_blocks,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=num_logical_blocks * unified_page,
-                shared_by=[f"mla.{i}", f"kda_a.{i}", f"kda_b.{i}"],
+                size=2 * layer_stride,
+                layers=[f"{prefix}.0", f"{prefix}.1"],
+                layer_stride=layer_stride,
+                block_stride=unified_page,
             )
-            for i in range(2)
+            for prefix in ("mla", "kda_a", "kda_b")
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(["mla.0", "mla.1"], mla_spec),
@@ -230,6 +235,9 @@ def _make_remote_meta(
         kv_caches_base_addr=[0x10_000_000, 0x20_000_000],
         num_blocks=remote_num_logical * remote_ppl,
         block_lens=[kernel_page, kernel_page],
+        # Non-interleaved remote: consecutive blocks abut, so the stride
+        # between them equals the page length.
+        block_strides=[kernel_page, kernel_page],
         kv_cache_layout=worker.kv_cache_layout,
         block_size=remote_kernel_block_size,
         ssm_sizes=remote_ssm_sizes,

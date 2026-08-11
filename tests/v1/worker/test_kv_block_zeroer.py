@@ -7,22 +7,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    KVCacheLayout,
     SlidingWindowSpec,
 )
 from vllm.v1.worker import utils as worker_utils
-from vllm.v1.worker.utils import (
-    AttentionGroup,
-    KVBlockZeroer,
-    _zero_kv_blocks_kernel,
-)
-
-
-class _BlockFirstBackend:
-    @staticmethod
-    def get_kv_cache_block_dim(*args, **kwargs):
-        return 0
+from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer, _zero_kv_blocks_kernel
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -52,11 +45,8 @@ def test_attention_blocks_are_zeroed(spec):
     layer_name = "draft.self_attn"
     zeroer = KVBlockZeroer(
         device,
-        attn_groups_iter=[
-            AttentionGroup(_BlockFirstBackend, [layer_name], spec, 0)  # type: ignore[arg-type]
-        ],
+        attn_groups_iter=[AttentionGroup(None, [layer_name], spec, 0)],
         kernel_block_sizes=[2],
-        cache_dtype="fp8",
         static_forward_context={
             layer_name: SimpleNamespace(kv_cache=storage),
         },
@@ -205,16 +195,10 @@ def test_large_dsv4_launch_geometry(monkeypatch):
     zeroer = KVBlockZeroer(
         device,
         attn_groups_iter=[
-            AttentionGroup(
-                _BlockFirstBackend,  # type: ignore[arg-type]
-                [name],
-                spec,
-                group_id,
-            )
+            AttentionGroup(None, [name], spec, group_id)
             for group_id, name in enumerate(layer_names)
         ],
         kernel_block_sizes=[1] * n_segs,
-        cache_dtype="auto",
         static_forward_context={
             name: SimpleNamespace(kv_cache=storage)
             for name, storage in storages.items()
@@ -311,3 +295,47 @@ def test_warmup_respects_available_block_count():
     torch.accelerator.synchronize()
 
     assert torch.all(storage == 1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
+def test_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
+    """The zeroer must zero every byte of the target block in every layer and
+    nothing outside it — per head-group plane under LHBNC, and never past the
+    target block's tile under block-major layouts (no out-of-bounds writes,
+    no clobbering other blocks' data)."""
+    device = torch.device("cuda")
+    num_blocks, num_layers = 4, 2
+    spec = FullAttentionSpec(
+        block_size=4, num_kv_heads=2, head_size=8, dtype=torch.float32
+    )
+    raw = torch.empty(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
+        device=device,
+    ).fill_(1)
+    views = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
+    groups = [
+        AttentionGroup(
+            backend=None,
+            layer_names=[f"layer.{i}" for i in range(num_layers)],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
+        )
+    ]
+    ctx = {f"layer.{i}": SimpleNamespace(kv_cache=views[i]) for i in range(num_layers)}
+    zeroer = KVBlockZeroer(
+        device,
+        attn_groups_iter=iter(groups),
+        kernel_block_sizes=[spec.block_size],
+        static_forward_context=ctx,
+    )
+    zeroer.zero_block_ids([2])
+    torch.accelerator.synchronize()
+
+    for view in views:
+        assert (view[2] == 0).all(), layout
+        for b in (0, 1, 3):
+            assert (view[b].view(torch.int8) == 1).all(), layout
+    zero_bytes = int((raw == 0).sum().item())
+    assert zero_bytes == num_layers * spec.page_size_bytes, layout

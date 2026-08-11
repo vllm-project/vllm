@@ -1,35 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU regression for the packed-DSV4 KV zeroer geometry.
+"""CPU regression for the packed-DSV4 KV zeroer geometry (upstream #50276).
 
-Constructor-crossing regression for the packed-KV zeroing stride fix (upstream
-PR #50276): every number below comes from instantiating the REAL production
-code (no arithmetic is reimplemented here):
+Four DSV4 fp8_ds_mla layers share one cross-layer allocation: each block row
+packs the four alignment-padded pages side by side (layout BLHNC). The zeroer
+must step by the full packed row per block while zeroing only each layer's
+meaningful page — never the alignment padding, never an adjacent layer's page.
 
-  - ``vllm.v1.core.kv_cache_utils._get_packed_kv_cache_layout``  (packed
-    offsets / block stride)
-  - ``vllm.v1.worker.gpu.attn_utils._reshape_attention_kv_cache``
-    (per-layer column views)
-  - ``vllm.models.deepseek_v4.sparse_mla.DeepseekV4FlashMLABackend``
-    (``get_kv_cache_shape`` / ``get_kv_cache_block_dim``)
-  - ``vllm.v1.worker.utils.AttentionGroup`` / ``KVBlockZeroer``
-    (``KVBlockZeroer.__init__`` precomputes the segment tables)
-
-CPU only: no Triton launch, no CUDA tensor, no CUDA call is made. The test
-asserts the packed-DSV4 constructor metadata:
-
-  * block stride   = the full packed row (4 aligned pages)
-  * per-layer zero = the meaningful page (the spec's unpadded
-                     ``real_page_size_bytes``), so adjacent packed layers are
-                     never wiped
-  * 4 packed layer views; block 99 of the highest-offset layer is the last
-    written region and stays within the packed backing.
-
-The pre-fix constructor exposed a five-field ``_meta`` with no block stride, so
-its zero width equals the FULL packed row; the extraction below records that
-legacy defect and then asserts the fixed semantics, so failure on the old code
-is a semantic one (wrong zero width / out-of-bounds block 99), not a
-schema-shape accident.
+CPU only: the zeroer's ``__init__`` precomputes the segment tables; no kernel
+is launched.
 """
 
 from types import SimpleNamespace
@@ -37,160 +16,156 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.deepseek_v4.sparse_mla import DeepseekV4FlashMLABackend
-from vllm.v1.core.kv_cache_utils import _get_packed_kv_cache_layout
-from vllm.v1.kv_cache_interface import MLAAttentionSpec, UniformTypeKVCacheSpecs
-from vllm.v1.worker.gpu.attn_utils import _reshape_attention_kv_cache
-from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
+from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.v1.kv_cache_interface import (
+    KVCacheLayout,
+    MLAAttentionSpec,
+)
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    KVBlockZeroer,
+    allocate_and_reshape_kv_cache,
+)
 
 pytestmark = pytest.mark.cpu_test
 
 NUM_BLOCKS = 100
-BLOCK_SIZE_CFG = 256  # vllm_config.cache_config.block_size for DSV4 (group 0)
-COMPRESS = 4  # main-MLA compress_ratio
-STORAGE_BS = BLOCK_SIZE_CFG // COMPRESS  # 64
-KERNEL_BS = 256  # DeepseekV4FlashMLABackend supports [256]
-LAST_BLOCK = NUM_BLOCKS - 1  # block 99
+NUM_LAYERS = 4
+ALIGNMENT = 576
 
 
-def _extract_segments(meta, base):
-    """Read (offset_bytes, block_stride_bytes, zero_span_bytes) per segment.
-
-    Accepts both the pre-fix five-field ``_meta`` (no block stride; the zero
-    width is the FULL packed row -- the defect) and the fixed six-field ``_meta``.
-    All values come from the real constructor output; nothing is recomputed. Returns
-    ``(segs, legacy_why)`` where ``legacy_why`` describes the pre-fix defect
-    when detected.
-    """
-    legacy_why = None
-    if len(meta) == 6:
-        seg_addrs, seg_block_strides, seg_page_sizes, _max_chunks, _blk, n_segs = meta
-    else:
-        seg_addrs, seg_page_sizes, _max_chunks, _blk, n_segs = meta
-        seg_block_strides = seg_page_sizes
-        legacy_why = (
-            f"legacy {len(meta)}-field _meta (no block stride): zero width is "
-            f"the FULL packed row ({int(seg_page_sizes[0]) * 4} B) -- the defect"
-        )
-    segs = [
-        (int(a) - base, int(bs) * 4, int(ps) * 4)
-        for a, bs, ps in zip(seg_addrs, seg_block_strides, seg_page_sizes)
-    ]
-    return segs, legacy_why, n_segs
-
-
-def test_dsv4_packed_zeroer_geometry():
-    """Real DSV4 constructor metadata separates block stride from zero span."""
-    layer_names = [f"model.layers.{i}.self_attn" for i in range(4)]
-
-    specs = [
-        MLAAttentionSpec(
-            block_size=BLOCK_SIZE_CFG,
-            num_kv_heads=1,
-            head_size=512,
-            dtype=torch.uint8,
-            compress_ratio=COMPRESS,
-            cache_dtype_str="fp8_ds_mla",
-            alignment=576,
-            model_version="deepseek_v4",
-            state_content_bytes=584,  # >576 to allocate room for scales at back of page
-        )
-        for _ in layer_names
-    ]
-    uniform = UniformTypeKVCacheSpecs.from_specs(
-        {ln: sp for ln, sp in zip(layer_names, specs)}
+def test_packed_dsv4_zeroer_zeroes_only_each_layers_page():
+    spec = MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+        tokens_per_state=4,
+        alignment=ALIGNMENT,
+        # DeepseekV4 fp8_ds_mla: 584B per token, published by the layer.
+        state_content_bytes=584,
     )
-    assert uniform is not None
+    # DSV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per stored state.
+    assert spec.state_content_size_bytes == 584
+    assert spec.storage_block_size == 64
+    unpadded_page = spec.unpadded_page_size_bytes
+    padded_page = spec.page_size_bytes
+    assert unpadded_page == 64 * 584
+    assert padded_page > unpadded_page, "alignment must pad the page"
 
-    # --- Real packed layout planner -------------------------------------------
-    block_stride, layers_by_offset = _get_packed_kv_cache_layout(
-        [
-            AttentionGroup(
-                backend=DeepseekV4FlashMLABackend,
-                layer_names=layer_names,
-                kv_cache_spec=uniform,
-                kv_cache_group_id=0,
-            )
-        ]
-    )
-    page_bytes = specs[0].page_size_bytes  # DSV4 fp8_ds_mla page after 576B alignment
-    real_page_bytes = specs[0].real_page_size_bytes  # unpadded meaningful page
-    alignment_gap = page_bytes - real_page_bytes  # trailing planner padding
-    total_size = block_stride * NUM_BLOCKS
-    offsets = sorted(layers_by_offset)
-    assert block_stride == 4 * page_bytes, (block_stride, 4 * page_bytes)
-    assert offsets == [i * page_bytes for i in range(4)]
+    raw = torch.zeros(NUM_BLOCKS * NUM_LAYERS * padded_page, dtype=torch.int8)
+    views = dense_kv_cache_views(raw, spec, NUM_BLOCKS, NUM_LAYERS, KVCacheLayout.BLHNC)
+    base = raw.data_ptr()
+    block_row = NUM_LAYERS * padded_page
+    for i, view in enumerate(views):
+        assert view.data_ptr() - base == i * padded_page
+        assert view.stride(0) * view.element_size() == block_row
 
-    # --- Real per-layer views (packed branch) --------------------------------
-    backing = torch.zeros(total_size, dtype=torch.uint8)
-    base = backing.data_ptr()
-    views = {}
-    for ln, off in zip(layer_names, offsets):
-        packing = (off, block_stride)
-        kv_shape = DeepseekV4FlashMLABackend.get_kv_cache_shape(
-            NUM_BLOCKS, STORAGE_BS, 1, 512, cache_dtype_str="fp8_ds_mla"
-        )
-        stride_order = tuple(range(len(kv_shape)))
-        view = _reshape_attention_kv_cache(
-            backing, specs[0], kv_shape, stride_order, NUM_BLOCKS, packing
-        )
-        views[ln] = view
-        assert view.data_ptr() - base == off, "data_ptr must be base+offset"
-        assert view.stride(0) * view.element_size() == block_stride, (
-            "row stride == block_stride (logical block stride)"
-        )
-
-    # --- Real KVBlockZeroer.__init__ (production arithmetic, CPU) ----------
-    sctx = {ln: SimpleNamespace(kv_cache=v) for ln, v in views.items()}
     zeroer = KVBlockZeroer(
         torch.device("cpu"),
-        attn_groups_iter=[
-            AttentionGroup(
-                backend=DeepseekV4FlashMLABackend,
-                layer_names=layer_names,
-                kv_cache_spec=specs[0],
-                kv_cache_group_id=0,
-            )
-        ],
-        kernel_block_sizes=[KERNEL_BS],
-        cache_dtype="fp8_ds_mla",
-        static_forward_context=sctx,
+        attn_groups_iter=iter(
+            [
+                AttentionGroup(
+                    backend=None,
+                    layer_names=[f"layer.{i}" for i in range(NUM_LAYERS)],
+                    kv_cache_spec=spec,
+                    kv_cache_group_id=0,
+                )
+            ]
+        ),
+        kernel_block_sizes=[spec.block_size],
+        static_forward_context={
+            f"layer.{i}": SimpleNamespace(kv_cache=views[i]) for i in range(NUM_LAYERS)
+        },
     )
-    segs, legacy_why, n_segs = _extract_segments(zeroer._meta, base)
+    seg_addrs, seg_block_strides, seg_page_sizes, _, _, n_segs = zeroer._meta
 
-    # --- Fixed semantics (proven by metadata values, not by schema shape) ----
-    assert n_segs == 4, "all 4 packed layers must register as segments"
-    assert [off for off, _, _ in segs] == offsets, "one segment per layer offset"
-    assert all(bs == block_stride for _, bs, _ in segs), (
-        "block stride must be the full packed row (4 aligned pages)"
+    assert n_segs == NUM_LAYERS
+    # Segments step by the full packed row per block...
+    assert (seg_block_strides * 4 == block_row).all()
+    # ...but zero only the layer's meaningful page: no alignment padding, no
+    # adjacent layer's page.
+    assert (seg_page_sizes * 4 == unpadded_page).all()
+    assert sorted(a - base for a in seg_addrs.tolist()) == [
+        i * padded_page for i in range(NUM_LAYERS)
+    ]
+    # Block 99 of the highest-offset layer stays within the packed backing.
+    last_end = (
+        max(seg_addrs.tolist())
+        + (NUM_BLOCKS - 1) * int(seg_block_strides[0]) * 4
+        + int(seg_page_sizes[0]) * 4
     )
-    assert all(zs == real_page_bytes for _, _, zs in segs), (
-        f"zero span must be the meaningful page ({real_page_bytes} B), got "
-        f"{[zs for _, _, zs in segs]} B" + (f"; {legacy_why}" if legacy_why else "")
+    assert last_end <= base + raw.numel()
+
+
+def test_overlaid_zeroer_dedups_segments_with_max_span():
+    """Two groups overlay one allocation; the zeroer must emit one segment
+    per distinct byte offset, spanning the widest overlaid page, so a newly
+    allocated block is fully zeroed no matter which group owns it."""
+    from unittest.mock import MagicMock
+
+    from vllm.v1.attention.backends.utils import get_kv_cache_layout
+    from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        UniformTypeKVCacheSpecs,
     )
 
-    # --- Block 99 (the real final block) bounds, via constructor metadata ---
-    # Production write for block b of a segment is
-    #   [off + b*block_stride_bytes, off + b*block_stride_bytes + zero_span_bytes).
-    worst = 0
-    for off, bs, zs in segs:
-        start = off + LAST_BLOCK * bs
-        end = start + zs
-        oob = end - total_size
-        worst = max(worst, oob)
-        assert end <= total_size, (
-            f"segment@off={off} block {LAST_BLOCK} writes [{start}, {end}) "
-            f"-> {oob} bytes past backing ({total_size})"
+    def make_spec(head_size):
+        return MLAAttentionSpec(
+            block_size=64, num_kv_heads=1, head_size=head_size, dtype=torch.uint8
         )
-    assert worst == 0, f"highest-offset final block goes {worst} bytes OOB"
 
-    # Highest-offset segment's block 99 is the last written region and ends exactly at
-    # total_size - alignment_gap: the trailing planner padding stays untouched.
-    off_last, bs_last, zs_last = segs[-1]
-    assert off_last + LAST_BLOCK * bs_last + zs_last == total_size - alignment_gap, (
-        "highest-offset final block must end at total_size - alignment_gap "
-        f"({alignment_gap}-byte gap intact)"
+    g1_specs = {"g1.big": make_spec(512), "g1.small": make_spec(128)}
+    g2_specs = {"g2.huge": make_spec(1024)}
+    groups = [
+        KVCacheGroupSpec(
+            list(g1_specs),
+            UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=g1_specs),
+        ),
+        KVCacheGroupSpec(
+            list(g2_specs),
+            UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=g2_specs),
+        ),
+    ]
+    vllm_config = MagicMock()
+    vllm_config.cache_config.num_gpu_blocks_override = None
+    vllm_config.cache_config.kv_cache_layout = None
+    config = get_kv_cache_config_from_groups(vllm_config, groups, 8 * 1024 * 1024)
+    views = allocate_and_reshape_kv_cache(
+        config, torch.device("cpu"), get_kv_cache_layout(), None
     )
+    buf_ptr = views["g1.big"].data_ptr()
 
-    # Zero span < block stride proves adjacent packed layers are never wiped.
-    assert max(zs for _, _, zs in segs) < block_stride
+    attn_groups = [
+        AttentionGroup(
+            backend=None,
+            layer_names=list(specs),
+            kv_cache_spec=next(iter(specs.values())),
+            kv_cache_group_id=gid,
+        )
+        for gid, specs in enumerate((g1_specs, g2_specs))
+    ]
+    zeroer = KVBlockZeroer(
+        torch.device("cpu"),
+        attn_groups_iter=iter(attn_groups),
+        kernel_block_sizes=[64, 64],
+        static_forward_context={
+            name: SimpleNamespace(kv_cache=views[name]) for name in views
+        },
+    )
+    seg_addrs, seg_block_strides, seg_page_sizes, _, _, n_segs = zeroer._meta
+
+    # g1.big and g2.huge overlay at offset 0 -> one segment with g2's wider
+    # span; g1.small keeps its own segment.
+    assert n_segs == 2
+    pages = {n: s.page_size_bytes for n, s in (g1_specs | g2_specs).items()}
+    by_offset = {
+        a - buf_ptr: p * 4 for a, p in zip(seg_addrs.tolist(), seg_page_sizes.tolist())
+    }
+    assert by_offset[0] == max(pages["g1.big"], pages["g2.huge"])
+    assert by_offset[pages["g1.big"]] == pages["g1.small"]
+    packed_block_stride = max(sum(pages[n] for n in g) for g in (g1_specs, g2_specs))
+    assert (seg_block_strides * 4 == packed_block_stride).all()

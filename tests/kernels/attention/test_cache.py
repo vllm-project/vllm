@@ -356,25 +356,25 @@ def test_reshape_and_cache_flash(
             dequant_nvfp4_kv_cache,
         )
 
-        def dequant_nvfp4_cache_nhd(data_cache, scale_cache, global_scale):
-            # data_cache:  [N, T, H, data_dim]  NHD (contiguous inner dims)
-            # scale_cache: [N, T, H, scale_dim] NHD (contiguous inner dims)
-            # Permute to HND layout for the dequant utility.
-            data_hnd = data_cache.permute(0, 2, 1, 3)
-            scale_hnd = scale_cache.permute(0, 2, 1, 3)
-            result_hnd = dequant_nvfp4_kv_cache(
-                data_hnd, scale_hnd, global_scale, head_size, block_size
+        def dequant_nvfp4_cache(data_cache, scale_cache, global_scale):
+            # The cache factory's logical order is [B, N, H, dim] regardless of
+            # the physical layout (the layout only changes strides). The dequant
+            # utility needs H-then-N ordering, so permute in and back out.
+            data_hn = data_cache.permute(0, 2, 1, 3)
+            scale_hn = scale_cache.permute(0, 2, 1, 3)
+            result_hn = dequant_nvfp4_kv_cache(
+                data_hn, scale_hn, global_scale, head_size, block_size
             )
-            return result_hnd.permute(0, 2, 1, 3)  # back to [N, T, H, D]
+            return result_hn.permute(0, 2, 1, 3)  # back to [B, N, H, dim]
 
-        result_key_cache = dequant_nvfp4_cache_nhd(
+        result_key_cache = dequant_nvfp4_cache(
             nvfp4_key_data, key_scale_cache, k_scale.item()
         )
-        result_value_cache = dequant_nvfp4_cache_nhd(
+        result_value_cache = dequant_nvfp4_cache(
             nvfp4_value_data, value_scale_cache, v_scale.item()
         )
 
-        # Flatten [num_blocks, block_size] → [num_slots] and index by slot_mapping.
+        # Result is [B, N, H, head_size]; flatten to (num_slots, H, head_size).
         num_slots = num_blocks * block_size
         result_key_flat = result_key_cache.reshape(num_slots, num_heads, head_size)
         result_value_flat = result_value_cache.reshape(num_slots, num_heads, head_size)
