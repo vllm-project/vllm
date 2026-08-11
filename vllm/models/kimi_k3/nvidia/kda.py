@@ -429,7 +429,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             vllm_config.model_config.dtype,
             self.gate_lower_bound,
         )
-        self._flashkda_buffers: list[torch.Tensor] | None = None
+        self._flashkda_buffer_specs: (
+            tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
+        ) = None
         if self.kda_prefill_backend == "flashkda":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             N = vllm_config.scheduler_config.max_num_seqs
@@ -437,7 +439,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             import vllm._flashkda_C  # noqa: F401
 
             workspace_size = torch.ops._flashkda_C.get_workspace_size(T, H, N)
-            self._flashkda_buffers = current_workspace_manager().get_simultaneous(
+            self._flashkda_buffer_specs = (
                 ((1, T, H, D), self.model_config.dtype),
                 ((N, H, D, D), self.get_state_dtype()[1]),
                 ((workspace_size,), torch.uint8),
@@ -702,8 +704,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 )
                 if self.kda_prefill_backend == "flashkda":
                     assert self.gate_lower_bound is not None
-                    assert self._flashkda_buffers is not None
-                    workspace_out, final_state, workspace = self._flashkda_buffers
+                    assert self._flashkda_buffer_specs is not None
+                    workspace_out, final_state, workspace = (
+                        current_workspace_manager().get_simultaneous(
+                            *self._flashkda_buffer_specs
+                        )
+                    )
                     flashkda_out = (
                         workspace_out if has_spec_decode else core_attn_out
                     )[:, : q_ns.shape[1]]
