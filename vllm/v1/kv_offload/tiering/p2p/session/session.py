@@ -374,26 +374,34 @@ class P2PSession:
                 for bh in msg[FetchMsg.KEYS]
             ]
             block_indexes = msg[FetchMsg.BLOCK_INDEXES]
+            round_seq = msg[FetchMsg.ROUND_SEQ]
             # Run the server-role state machine inline as today —
             # add_fetch_demand records demand against any blocks we've
             # already seen in `available`. Report the kv_request_id so
             # the manager (after poll() returns) can replay any parked
             # submit_store batches; their add_stored_blocks calls hit
             # the demand recorded here and submit transfers immediately.
-            self._server.on_fetch(kv_request_id, keys, block_indexes)
+            self._server.on_fetch(kv_request_id, keys, block_indexes, round_seq)
             self._new_fetch_ids.append(kv_request_id)
         elif msg_type == AbortFetchMsg.TYPE:
             AbortFetchMsg.validate(msg)
-            self._server.on_abort_fetch(msg[AbortFetchMsg.KV_REQUEST_ID])
+            self._server.on_abort_fetch(
+                msg[AbortFetchMsg.KV_REQUEST_ID],
+                msg[AbortFetchMsg.ROUND_SEQ],
+            )
         elif msg_type == TransferDoneMsg.TYPE:
             TransferDoneMsg.validate(msg)
             self._client.on_transfer_done(
                 msg[TransferDoneMsg.KV_REQUEST_ID],
                 msg[TransferDoneMsg.SUCCESS],
+                msg[TransferDoneMsg.ROUND_SEQ],
             )
         elif msg_type == AbortAckMsg.TYPE:
             AbortAckMsg.validate(msg)
-            self._client.on_abort_ack(msg[AbortAckMsg.KV_REQUEST_ID])
+            self._client.on_abort_ack(
+                msg[AbortAckMsg.KV_REQUEST_ID],
+                msg[AbortAckMsg.ROUND_SEQ],
+            )
         elif msg_type == LookupMsg.TYPE:
             LookupMsg.validate(msg)
             kv_request_id = msg[LookupMsg.KV_REQUEST_ID]
@@ -401,7 +409,7 @@ class P2PSession:
                 OffloadKey(bh if isinstance(bh, bytes) else bytes(bh))
                 for bh in msg[LookupMsg.KEYS]
             ]
-            self._server.on_lookup(kv_request_id, keys)
+            self._server.on_lookup(kv_request_id, keys, msg[LookupMsg.ROUND_SEQ])
         elif msg_type == LookupRespMsg.TYPE:
             LookupRespMsg.validate(msg)
             kv_request_id = msg[LookupRespMsg.KV_REQUEST_ID]

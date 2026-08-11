@@ -603,10 +603,6 @@ _OV2_FRAME_FACTOR = 2
 _OV2_FPS_MIN_FRAMES = 4
 
 
-def _round_by_factor(n: float, factor: int) -> int:
-    return round(n / factor) * factor
-
-
 def _ceil_by_factor(n: float, factor: int) -> int:
     import math as _math
 
@@ -1283,6 +1279,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         return LlavaOnevision2MultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     def get_hf_processor(self, **kwargs: object):
@@ -1349,7 +1346,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
             preprocessed = ImageSize(width=rw, height=rh)
         else:
             preprocessed = ImageSize(width=image_width, height=image_height)
-        padded_frames = num_frames + num_frames % temporal_patch_size
+        padded_frames = num_frames + (-num_frames % temporal_patch_size)
         grid_t = max(padded_frames // temporal_patch_size, 1)
         grid_h = preprocessed.height // patch_size
         grid_w = preprocessed.width // patch_size
@@ -1514,6 +1511,11 @@ class LlavaOnevision2DummyInputsBuilder(
 
 
 class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
+    # The patch grid is what sizes the placeholder range.
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
+    }
+
     def __init__(self, spatial_merge_size: int, *args, **kwargs):
         self._spatial_merge_size = spatial_merge_size
         super().__init__(*args, **kwargs)
@@ -1523,10 +1525,12 @@ class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={"image_embeds", "image_grid_thw"},
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_create_field_factory(self._spatial_merge_size),
             )
         return super()._parse_image_data(data)
@@ -1535,13 +1539,6 @@ class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
 class LlavaOnevision2MultiModalProcessor(
     BaseMultiModalProcessor[LlavaOnevision2ProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        # Retained for symmetry; vLLM actually fetches the parser via
-        # info.get_data_parser() (see ProcessingInfo override above).
-        return LlavaOnevision2MultiModalDataParser(
-            self.info.get_hf_config().vision_config.spatial_merge_size
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,
