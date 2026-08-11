@@ -44,7 +44,7 @@ IMAGE_END = "<|endofimg|>"
 AUDIO_START = "<|audio_comp_start|>"
 AUDIO_PAD = "<|audio_comp_pad|>"
 AUDIO_END = "<|audio_comp_end|>"
-VIDEO_PLACEHOLDER = "<|video|>"
+VIDEO_PLACEHOLDER = "<|video_pad|>"
 
 _HOP_LENGTH = 160
 _DEFAULT_SAMPLE_RATE = 16000
