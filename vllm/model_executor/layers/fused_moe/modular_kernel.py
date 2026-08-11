@@ -470,10 +470,6 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
 
 # TODO: add supported activations method (return string)
 class FusedMoEExperts(ABC):
-    @property
-    def defer_moe_finalize(self) -> bool:
-        return False
-
     def __init__(
         self,
         moe_config: FusedMoEConfig,

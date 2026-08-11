@@ -549,7 +549,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         num_tokens = hidden_states.shape[0]
         # The runner divides by the token count on the host, so an idle rank's
         # dummy 0-token forward has to keep the finalized (empty) form.
-        defer = self.defer_moe_finalize and num_tokens > 0
+        defer = self.moe_config.use_deferred_moe_finalize and num_tokens > 0
 
         routing_replay_out = self._maybe_make_routing_replay_buffer(
             num_tokens=num_tokens,
