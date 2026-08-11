@@ -104,6 +104,16 @@ class GenerateRequest(BaseModel):
     features: MultiModalFeatures | None = None
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
+    content_parts: list[dict[str, Any]] | None = None
+    """Raw multimodal input; server resolves media. Mutually exclusive
+    with ``features``."""
+
+    @model_validator(mode="after")
+    def _check_mm_fields_exclusive(self) -> "GenerateRequest":
+        if self.content_parts and self.features:
+            raise ValueError("content_parts and features are mutually exclusive")
+        return self
+
     sampling_params: SamplingParams
     """The sampling parameters for the model."""
 
