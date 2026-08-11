@@ -298,6 +298,17 @@ class AttentionGroup:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
 
+    @property
+    def supports_draft_decode_metadata_update(self) -> bool:
+        return self.get_metadata_builder().supports_draft_decode_metadata_update
+
+    def update_draft_decode_metadata(
+        self,
+        attn_metadata: Mapping[str, Any],
+    ) -> None:
+        metadata = attn_metadata[self.layer_names[0]]
+        self.get_metadata_builder().update_draft_decode_metadata(metadata)
+
 
 def select_common_block_size(
     kv_manager_block_size: int,
