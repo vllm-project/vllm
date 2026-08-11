@@ -197,14 +197,18 @@ get_buildkite_target_repo_url() {
     printf 'https://github.com/%s.git\n' "${DEFAULT_REPO_SLUG}"
 }
 
-git_fetch_for_cache() {
+git_fetch_with_timeout() {
     local timeout_secs="${ROCM_CACHE_GIT_FETCH_TIMEOUT:-60}"
 
     if command -v timeout >/dev/null 2>&1; then
-        timeout "${timeout_secs}s" git fetch "$@" 2>/dev/null
+        timeout "${timeout_secs}s" git fetch "$@"
     else
-        git fetch "$@" 2>/dev/null
+        git fetch "$@"
     fi
+}
+
+git_fetch_for_cache() {
+    git_fetch_with_timeout "$@" 2>/dev/null
 }
 
 hash_string_short() {
@@ -397,22 +401,26 @@ write_ci_git_archival_metadata() {
     if git -C "${source_root}" remote get-url origin >/dev/null 2>&1; then
         # AMD agents use shallow, no-tag clones. Reach a release tag so one
         # commit cannot acquire different versions from different depths.
-        echo "Fetching version tags for the canonical CI Docker context"
-        if [[ "${is_shallow}" == "true" ]]; then
-            (cd "${source_root}" && git_fetch_for_cache \
-                --tags --deepen=1000 origin) || return $?
-            if ! describe_ci_revision "${source_root}" "${commit}" >/dev/null; then
-                is_shallow=$(git -C "${source_root}" \
-                    rev-parse --is-shallow-repository) || return $?
-                if [[ "${is_shallow}" == "true" ]]; then
-                    echo "No version tag within 1,000 commits; fetching full history"
-                    (cd "${source_root}" && git_fetch_for_cache \
-                        --tags --unshallow origin) || return $?
-                fi
-            fi
-        else
-            (cd "${source_root}" && git_fetch_for_cache --tags origin) \
+        # Versioning only needs tags and commits, not historical source trees.
+        echo "Synchronizing version tags for the canonical CI Docker context"
+        (cd "${source_root}" && git_fetch_with_timeout --quiet \
+            --filter=tree:0 --prune origin '+refs/tags/*:refs/tags/*') \
+            || return $?
+        if [[ "${is_shallow}" == "true" ]] \
+            && ! describe_ci_revision "${source_root}" "${commit}" >/dev/null; then
+            echo "Deepening history to reach a version tag"
+            (cd "${source_root}" && git_fetch_with_timeout --quiet \
+                --filter=tree:0 --no-tags --deepen=1000 origin "${commit}") \
                 || return $?
+            is_shallow=$(git -C "${source_root}" \
+                rev-parse --is-shallow-repository) || return $?
+            if [[ "${is_shallow}" == "true" ]] \
+                && ! describe_ci_revision "${source_root}" "${commit}" >/dev/null; then
+                echo "No version tag within 1,000 commits; fetching full history"
+                (cd "${source_root}" && git_fetch_with_timeout --quiet \
+                    --filter=tree:0 --no-tags --unshallow origin "${commit}") \
+                    || return $?
+            fi
         fi
     fi
     if ! describe=$(describe_ci_revision "${source_root}" "${commit}"); then
@@ -1484,7 +1492,8 @@ prepare_git_cache_metadata() {
     if [[ -z "${PARENT_COMMIT:-}" || -z "${VLLM_MERGE_BASE_COMMIT:-}" ]] \
         && git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
         echo "Shallow clone detected - deepening for cache key computation"
-        git_fetch_for_cache --deepen=1 origin || true
+        git_fetch_for_cache --filter=tree:0 --no-tags --deepen=1 \
+            origin "$(git rev-parse HEAD)" || true
     fi
 
     if [[ -z "${PARENT_COMMIT:-}" ]]; then
