@@ -36,7 +36,7 @@ _EMPTY_REQ_CTX = make_req_context()
 
 
 def make_cpu_manager(
-    num_blocks: int = 4,
+    num_chunk_slots: int = 4,
     cache_policy: str = "lru",
     cache_policy_module_path: str | None = None,
     enable_events: bool = False,
@@ -44,7 +44,7 @@ def make_cpu_manager(
     max_tracker_size: int = 64_000,
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
-        num_blocks=num_blocks,
+        num_chunk_slots=num_chunk_slots,
         cache_policy=cache_policy,
         cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
@@ -146,7 +146,7 @@ def verify_events(
 
 def test_cpu_eviction_removed_precedes_stored():
     """An eviction is announced before the store that reuses its capacity."""
-    manager = make_cpu_manager(num_blocks=2, enable_events=True)
+    manager = make_cpu_manager(num_chunk_slots=2, enable_events=True)
 
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -164,23 +164,23 @@ def test_cpu_eviction_removed_precedes_stored():
 
 
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
-def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
+def test_already_stored_chunk_not_evicted_during_prepare_store(eviction_policy):
     """
-    Regression test: a block that is already stored must not be evicted
-    by prepare_store() when it needs to make room for new blocks.
+    Regression test: a chunk that is already stored must not be evicted
+    by prepare_store() when it needs to make room for new chunks.
     Applies to both lru and arc policies.
 
     Scenario:
-        - Store blocks [1, 2] and complete.
-        - touch([1]) makes block 2 the LRU candidate.
+        - Store chunks [1, 2] and complete.
+        - touch([1]) makes chunk 2 the LRU candidate.
         - prepare_store([2, 3, 4, 5]):
-            * block 2 is filtered out as "already stored"
-            * but without the fix, block 2 would be evicted as the LRU
+            * chunk 2 is filtered out as "already stored"
+            * but without the fix, chunk 2 would be evicted as the LRU
               candidate to make room for [3, 4, 5]
-        - After complete_store([2, 3, 4, 5]), block 2 must still be present.
+        - After complete_store([2, 3, 4, 5]), chunk 2 must still be present.
     """
     manager = make_cpu_manager(
-        num_blocks=4,
+        num_chunk_slots=4,
         cache_policy=eviction_policy,
         enable_events=True,
     )
@@ -189,33 +189,33 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
-    # touch [1] to make block 2 the LRU candidate
+    # touch [1] to make chunk 2 the LRU candidate
     manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
 
     # prepare_store([2, 3, 4, 5]):
-    #   - block 2 is already stored -> filtered out of keys_to_store
-    #   - block 2 must NOT be evicted even though it is the LRU candidate
-    #   - block 1 (ID 0) is evicted instead; new blocks [3,4,5] get IDs 2,3,0
+    #   - chunk 2 is already stored -> filtered out of keys_to_store
+    #   - chunk 2 must NOT be evicted even though it is the LRU candidate
+    #   - chunk 1 (ID 0) is evicted instead; new chunks [3,4,5] get IDs 2,3,0
     prepare_store_output = manager.prepare_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[3, 4, 5],
             store_block_ids=[2, 3, 0],
-            evicted_keys=[1],  # block 1 evicted, not block 2
+            evicted_keys=[1],  # chunk 1 evicted, not chunk 2
         ),
     )
 
-    # complete_store must not silently drop block 2
+    # complete_store must not silently drop chunk 2
     manager.complete_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
 
-    # block 2 must still be present in the cache
+    # chunk 2 must still be present in the cache
     assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
 
 
 def test_filter_reused_manager_reports_stores_skipped_counter():
     manager = make_cpu_manager(
-        num_blocks=4,
+        num_chunk_slots=4,
         cache_policy="lru",
         store_threshold=2,
     )
@@ -247,34 +247,34 @@ def test_cpu_manager_reports_cache_usage_gauge():
         ] == pytest.approx(value)
 
     # Zero-capacity manager always reports 0.0
-    manager = make_cpu_manager(num_blocks=0)
+    manager = make_cpu_manager(num_chunk_slots=0)
     check_usage_stats(manager, 0.0)
 
-    # Empty manager (4 blocks, none allocated): usage = 0.0
-    manager = make_cpu_manager(num_blocks=4)
+    # Empty manager (4 chunks, none allocated): usage = 0.0
+    manager = make_cpu_manager(num_chunk_slots=4)
     check_usage_stats(manager, 0.0)
 
-    # After allocating 2 of 4 blocks: usage = 0.5
+    # After allocating 2 of 4 chunks: usage = 0.5
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     check_usage_stats(manager, 0.5)
 
-    # After filling all 4 blocks: usage = 1.0
+    # After filling all 4 chunks: usage = 1.0
     manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
     check_usage_stats(manager, 1.0)
 
-    # After completing store, the blocks becomes evictable as it is not actively used
+    # After completing store, the chunk becomes evictable as it is not actively used
     # and usage drops.
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     check_usage_stats(manager, 0.5)
 
-    # After completing store, the blocks becomes evictable as it is not actively used
+    # After completing store, the chunk becomes evictable as it is not actively used
     # and usage drops.
     manager.complete_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
     check_usage_stats(manager, 0.0)
 
 
 def test_cpu_manager_reports_allocation_size_histogram():
-    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    manager = make_cpu_manager(num_chunk_slots=4, cache_policy="lru")
 
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -297,12 +297,12 @@ def test_cpu_manager_reports_allocation_size_histogram():
 
 
 def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):
-    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    manager = make_cpu_manager(num_chunk_slots=4, cache_policy="lru")
 
-    def fail_allocate_blocks(keys):
+    def fail_allocate_chunks(keys):
         raise RuntimeError("allocation failed")
 
-    monkeypatch.setattr(manager, "_allocate_blocks", fail_allocate_blocks)
+    monkeypatch.setattr(manager, "_allocate_chunks", fail_allocate_chunks)
 
     with pytest.raises(RuntimeError, match="allocation failed"):
         manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
@@ -316,7 +316,7 @@ def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):
 
 
 def test_cpu_manager_reports_allocation_size_on_eviction_failure():
-    manager = make_cpu_manager(num_blocks=1, cache_policy="lru")
+    manager = make_cpu_manager(num_chunk_slots=1, cache_policy="lru")
 
     manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
     manager.get_stats()
@@ -332,7 +332,7 @@ def test_cpu_manager_reports_allocation_size_on_eviction_failure():
 
 
 def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
-    manager = make_cpu_manager(num_blocks=4)
+    manager = make_cpu_manager(num_chunk_slots=4)
 
     # Store path: pins write usage until complete_store.
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -356,7 +356,7 @@ def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
 
 
 def test_cpu_manager_clears_write_usage_after_failed_store():
-    manager = make_cpu_manager(num_blocks=4)
+    manager = make_cpu_manager(num_chunk_slots=4)
 
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
@@ -370,7 +370,9 @@ def test_cpu_manager():
     Tests CPUOffloadingManager with lru policy.
     """
     # initialize a CPU manager with a capacity of 4 blocks
-    cpu_manager = make_cpu_manager(num_blocks=4, cache_policy="lru", enable_events=True)
+    cpu_manager = make_cpu_manager(
+        num_chunk_slots=4, cache_policy="lru", enable_events=True
+    )
 
     # prepare store [1, 2]
     prepare_store_output = cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -483,15 +485,15 @@ def test_cpu_manager():
 
 def test_prepare_load_preserves_key_order():
     """block_ids[i] must correspond to keys[i] (co-indexed invariant)."""
-    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    manager = make_cpu_manager(num_chunk_slots=4, cache_policy="lru")
 
     key_a, key_b, key_c = to_key(0), to_key(1), to_key(2)
 
-    # Store all three keys and learn their block ID assignments
+    # Store all three keys and learn their slot ID assignments
     store_output = manager.prepare_store([key_a, key_b, key_c], _EMPTY_REQ_CTX)
     assert store_output is not None
     assert isinstance(store_output.store_spec, CPULoadStoreSpec)
-    key_to_block_id = {
+    key_to_slot_id = {
         k: int(bid)
         for k, bid in zip(store_output.keys_to_store, store_output.store_spec.block_ids)
     }
@@ -501,9 +503,9 @@ def test_prepare_load_preserves_key_order():
     spec_fwd = manager.prepare_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)
     assert isinstance(spec_fwd, CPULoadStoreSpec)
     assert [int(x) for x in spec_fwd.block_ids] == [
-        key_to_block_id[key_a],
-        key_to_block_id[key_b],
-        key_to_block_id[key_c],
+        key_to_slot_id[key_a],
+        key_to_slot_id[key_b],
+        key_to_slot_id[key_c],
     ]
     manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
 
@@ -511,9 +513,9 @@ def test_prepare_load_preserves_key_order():
     spec_perm = manager.prepare_load([key_b, key_c, key_a], _EMPTY_REQ_CTX)
     assert isinstance(spec_perm, CPULoadStoreSpec)
     assert [int(x) for x in spec_perm.block_ids] == [
-        key_to_block_id[key_b],
-        key_to_block_id[key_c],
-        key_to_block_id[key_a],
+        key_to_slot_id[key_b],
+        key_to_slot_id[key_c],
+        key_to_slot_id[key_a],
     ]
     manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
 
@@ -522,10 +524,10 @@ class TestARCPolicy:
     """Unit tests for CPUOffloadingManager with ARC eviction policy."""
 
     def _make_manager(
-        self, num_blocks: int = 4, enable_events: bool = True
+        self, num_chunk_slots: int = 4, enable_events: bool = True
     ) -> tuple[CPUOffloadingManager, ARCCachePolicy]:
         manager = make_cpu_manager(
-            num_blocks=num_blocks,
+            num_chunk_slots=num_chunk_slots,
             cache_policy="arc",
             enable_events=enable_events,
         )
@@ -575,30 +577,30 @@ class TestARCPolicy:
 
     def test_t1_to_t2_promotion(self):
         """
-        Tests that accessing a block in T1 promotes it to T2 (frequent).
+        Tests that accessing a chunk in T1 promotes it to T2 (frequent).
         This is a key feature of ARC's adaptive behavior.
         """
         cpu_manager, arc_policy = self._make_manager(enable_events=False)
 
-        # store and complete block 1
+        # store and complete chunk 1
         cpu_manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
         cpu_manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
 
-        # block 1 starts in T1 (recent)
+        # chunk 1 starts in T1 (recent)
         assert to_keys([1])[0] in arc_policy.t1
         assert to_keys([1])[0] not in arc_policy.t2
 
-        # touch block 1 (simulate second access)
+        # touch chunk 1 (simulate second access)
         cpu_manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
 
-        # block 1 should now be in T2 (frequent)
+        # chunk 1 should now be in T2 (frequent)
         assert to_keys([1])[0] not in arc_policy.t1
         assert to_keys([1])[0] in arc_policy.t2
 
     def test_eviction_with_load(self):
         """
         Tests ARC eviction behavior similar to LRU test.
-        Verifies that blocks being loaded (ref_cnt > 0) cannot be evicted.
+        Verifies that chunks being loaded (ref_cnt > 0) cannot be evicted.
         """
         cpu_manager, _ = self._make_manager()
 
@@ -639,25 +641,27 @@ class TestARCPolicy:
     def test_adaptive_target(self):
         """
         Tests ARC's adaptive target adjustment via ghost lists.
-        When a block in B1 (ghost list) is accessed, target_t1_size increases.
-        When a block in B2 is accessed, target_t1_size decreases.
+        When a chunk in B1 (ghost list) is accessed, target_t1_size increases.
+        When a chunk in B2 is accessed, target_t1_size decreases.
         """
-        cpu_manager, arc_policy = self._make_manager(num_blocks=2, enable_events=False)
+        cpu_manager, arc_policy = self._make_manager(
+            num_chunk_slots=2, enable_events=False
+        )
 
-        # store blocks 1, 2 (fills cache)
+        # store chunks 1, 2 (fills cache)
         cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
         cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
         initial_target = arc_policy.target_t1_size
 
-        # store block 3, evicting block 1 (moves to B1 ghost list)
+        # store chunk 3, evicting chunk 1 (moves to B1 ghost list)
         cpu_manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
         cpu_manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
 
-        # block 1 should be in B1 (ghost list)
+        # chunk 1 should be in B1 (ghost list)
         assert to_keys([1])[0] in arc_policy.b1
 
-        # touch block 1 (cache miss, but in B1)
+        # touch chunk 1 (cache miss, but in B1)
         # this should increase target_t1_size (favor recency)
         cpu_manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
 
@@ -671,11 +675,11 @@ class TestARCPolicy:
         """
         cpu_manager, arc_policy = self._make_manager(enable_events=False)
 
-        # store blocks 1, 2, 3, 4
+        # store chunks 1, 2, 3, 4
         cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
         cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
-        # promote blocks 3, 4 to T2 by touching them
+        # promote chunks 3, 4 to T2 by touching them
         cpu_manager.touch(to_keys([3, 4]), _EMPTY_REQ_CTX)
 
         # now: T1 = {1, 2}, T2 = {3, 4}
@@ -686,22 +690,22 @@ class TestARCPolicy:
         # (when |T1| >= target, evict from T1)
         arc_policy.target_t1_size = 1
 
-        # store block 5, should evict from T1 (block 1, LRU in T1)
+        # store chunk 5, should evict from T1 (chunk 1, LRU in T1)
         output = cpu_manager.prepare_store(to_keys([5]), _EMPTY_REQ_CTX)
         assert output is not None
         assert to_keys([1]) == output.evicted_keys
 
         cpu_manager.complete_store(to_keys([5]), _EMPTY_REQ_CTX)
 
-        # block 1 should be in B1 (ghost list)
+        # chunk 1 should be in B1 (ghost list)
         assert to_keys([1])[0] in arc_policy.b1
-        # block 5 should be in T1
+        # chunk 5 should be in T1
         assert to_keys([5])[0] in arc_policy.t1
 
     def test_batch_eviction_scans_t1_and_t2_once(self):
         """ARC batch eviction must preserve order without restarting scans."""
         cpu_manager, arc_policy = self._make_manager(
-            num_blocks=256, enable_events=False
+            num_chunk_slots=256, enable_events=False
         )
         keys = to_keys(list(range(256)))
         cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
@@ -721,13 +725,13 @@ class TestARCPolicy:
         t2_order = list(arc_policy.t2)
         expected_t1 = [
             key
-            for key, block in arc_policy.t1.items()
-            if block.ref_cnt == 0 and key not in protected
+            for key, chunk in arc_policy.t1.items()
+            if chunk.ref_cnt == 0 and key not in protected
         ][:num_t1_evictions]
         expected_t2 = [
             key
-            for key, block in arc_policy.t2.items()
-            if block.ref_cnt == 0 and key not in protected
+            for key, chunk in arc_policy.t2.items()
+            if chunk.ref_cnt == 0 and key not in protected
         ][:num_t2_evictions]
         expected_t1_scans = t1_order.index(expected_t1[-1]) + 1
         expected_t2_scans = t2_order.index(expected_t2[-1]) + 1
@@ -746,7 +750,9 @@ class TestARCPolicy:
 
     def test_batch_eviction_falls_back_after_t1_iterator_exhausted(self):
         """An exhausted T1 scan must keep falling back to T2."""
-        cpu_manager, arc_policy = self._make_manager(num_blocks=8, enable_events=False)
+        cpu_manager, arc_policy = self._make_manager(
+            num_chunk_slots=8, enable_events=False
+        )
         keys = to_keys(list(range(8)))
         cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
         cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
@@ -764,8 +770,8 @@ class TestARCPolicy:
         # the target, so each remaining selection must retry T1 then use T2.
         eligible_t1 = [
             key
-            for key, block in arc_policy.t1.items()
-            if block.ref_cnt == 0 and key not in protected
+            for key, chunk in arc_policy.t1.items()
+            if chunk.ref_cnt == 0 and key not in protected
         ]
         assert eligible_t1 == t1_order[:1]
         assert len(t1_order) - 1 >= int(arc_policy.target_t1_size)
@@ -784,7 +790,9 @@ class TestARCPolicy:
 
     def test_batch_eviction_failure_is_atomic(self):
         """Finding only some candidates must not partially evict the cache."""
-        cpu_manager, arc_policy = self._make_manager(num_blocks=4, enable_events=False)
+        cpu_manager, arc_policy = self._make_manager(
+            num_chunk_slots=4, enable_events=False
+        )
         keys = to_keys(list(range(4)))
         cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
         cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
@@ -803,7 +811,9 @@ class TestARCPolicy:
         Tests that ghost lists (B1, B2) don't grow unbounded.
         They should be capped at cache_capacity.
         """
-        cpu_manager, arc_policy = self._make_manager(num_blocks=2, enable_events=False)
+        cpu_manager, arc_policy = self._make_manager(
+            num_chunk_slots=2, enable_events=False
+        )
 
         # fill cache with blocks 1, 2
         cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -840,13 +850,13 @@ class TestARCPolicy:
         assert len(arc_policy.t1) == 1
         assert len(arc_policy.t2) == 3
 
-        # store block 5, should evict from T1 (block 2, only one in T1)
+        # store chunk 5, should evict from T1 (chunk 2, only one in T1)
         prepare_store_output = cpu_manager.prepare_store(to_keys([5]), _EMPTY_REQ_CTX)
         verify_store_output(
             prepare_store_output,
             ExpectedPrepareStoreOutput(
                 keys_to_store=[5],
-                store_block_ids=[1],  # reuses block 2's storage
+                store_block_ids=[1],  # reuses chunk 2's slot
                 evicted_keys=[2],
             ),
         )
@@ -858,11 +868,11 @@ class TestARCPolicy:
         """
         cpu_manager, arc_policy = self._make_manager()
 
-        # store blocks 1, 2, 3, 4
+        # store chunks 1, 2, 3, 4
         cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
         cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
-        # prepare store block 5 (will evict block 1)
+        # prepare store chunk 5 (will evict chunk 1)
         prepare_store_output = cpu_manager.prepare_store(to_keys([5]), _EMPTY_REQ_CTX)
         assert prepare_store_output is not None
         assert len(prepare_store_output.evicted_keys) == 1
@@ -870,13 +880,13 @@ class TestARCPolicy:
         # complete store with failure
         cpu_manager.complete_store(to_keys([5]), _EMPTY_REQ_CTX, success=False)
 
-        # block 5 should not be in cache
+        # chunk 5 should not be in cache
         assert cpu_manager.lookup(to_key(5), _EMPTY_REQ_CTX) is LookupResult.MISS
-        # block 5 should not be in T1 or T2
+        # chunk 5 should not be in T1 or T2
         assert to_keys([5])[0] not in arc_policy.t1
         assert to_keys([5])[0] not in arc_policy.t2
 
-        # evicted block should still be gone (in B1 ghost list)
+        # evicted chunk should still be gone (in B1 ghost list)
         evicted_hash = prepare_store_output.evicted_keys[0]
         assert evicted_hash in arc_policy.b1
 
@@ -925,7 +935,7 @@ def test_filter_reused_manager():
     Tests CPUOffloadingManager reuse filtering (store_threshold=2).
     """
     manager = make_cpu_manager(
-        num_blocks=4,
+        num_chunk_slots=4,
         cache_policy="lru",
         enable_events=True,
         store_threshold=2,
@@ -971,67 +981,67 @@ def test_filter_reused_manager():
 
 def test_evictable_cache_block_count():
     """
-    Verifies _num_evictable_cache_blocks is maintained correctly through the
+    Verifies _num_evictable_cache_chunks is maintained correctly through the
     full store/load lifecycle, eviction, failed stores, concurrent loads,
     reset_cache, and the early-exit fast path in prepare_store.
     """
-    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    manager = make_cpu_manager(num_chunk_slots=4, cache_policy="lru")
 
     # Initially no blocks allocated.
-    assert manager._num_evictable_cache_blocks == 0
+    assert manager._num_evictable_cache_chunks == 0
 
     # Initial cache state [x, x, x, x]
 
-    # We get 3 blocks from the cache.
+    # We get 3 chunks from the cache.
     manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
     # cache state [1', 2', 3', x] <- 1', 2', 3' are actively being used.
-    assert manager._num_evictable_cache_blocks == 0
+    assert manager._num_evictable_cache_chunks == 0
 
     # Completing stores makes them idle.
     manager.complete_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
-    # cache state [1, 2, 3, x] <- 1, 2, 3 blocks are idle.
-    assert manager._num_evictable_cache_blocks == 3
+    # cache state [1, 2, 3, x] <- 1, 2, 3 chunks are idle.
+    assert manager._num_evictable_cache_chunks == 3
 
-    # prepare_load pins a block: idle count decrements once even if the
-    # same block is loaded by two concurrent callers.
+    # prepare_load pins a chunk: idle count decrements once even if the
+    # same chunk is loaded by two concurrent callers.
     manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)
-    # cache state [1', 2, 3, x] <- 2, 3 blocks are idle.
-    assert manager._num_evictable_cache_blocks == 2
+    # cache state [1', 2, 3, x] <- 2, 3 chunks are idle.
+    assert manager._num_evictable_cache_chunks == 2
     manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)  # 2nd concurrent load
-    # cache state [1', 2, 3, x] <- 2, 3 blocks are idle.
-    assert manager._num_evictable_cache_blocks == 2  # no double-decrement
+    # cache state [1', 2, 3, x] <- 2, 3 chunks are idle.
+    assert manager._num_evictable_cache_chunks == 2  # no double-decrement
 
     # First complete_load does not restore idle (ref_cnt still 1).
     manager.complete_load(to_keys([1]), _EMPTY_REQ_CTX)
-    # cache state [1', 2, 3, x] <- 2, 3 blocks are idle.
-    assert manager._num_evictable_cache_blocks == 2
-    # Second complete_load drops ref_cnt to 0 -> block becomes idle again.
+    # cache state [1', 2, 3, x] <- 2, 3 chunks are idle.
+    assert manager._num_evictable_cache_chunks == 2
+    # Second complete_load drops ref_cnt to 0 -> chunk becomes idle again.
     manager.complete_load(to_keys([1]), _EMPTY_REQ_CTX)
-    # cache state [1, 2, 3, x] <- 1, 2, 3 blocks are idle.
-    assert manager._num_evictable_cache_blocks == 3
+    # cache state [1, 2, 3, x] <- 1, 2, 3 chunks are idle.
+    assert manager._num_evictable_cache_chunks == 3
 
     # Eviction decrements idle count.
-    # Cache has 3 stored blocks and 1 free slot. Storing 3 new keys needs 2 eviction.
+    # Cache has 3 stored chunks and 1 free slot. Storing 3 new keys needs 2 evictions.
     manager.prepare_store(to_keys([4, 5, 6]), _EMPTY_REQ_CTX)
-    # cache state [1, 4', 5', 6'] <- block 1 is idle
-    assert manager._num_evictable_cache_blocks == 1
+    # cache state [1, 4', 5', 6'] <- chunk 1 is idle
+    assert manager._num_evictable_cache_chunks == 1
 
-    # Failed store does not increment idle count (block discarded from cache).
+    # Failed store does not increment idle count (chunk discarded from cache).
     manager.complete_store(to_keys([4, 5, 6]), _EMPTY_REQ_CTX, success=False)
-    # cache state [1, x, x, x] <- block 1 is idle. Other returned to cache.
-    assert manager._num_evictable_cache_blocks == 1
+    # cache state [1, x, x, x] <- chunk 1 is idle. Others returned to pool.
+    assert manager._num_evictable_cache_chunks == 1
 
     # reset_cache zeroes the count unconditionally.
     manager.reset_cache()
     # cache state [x, x, x, x]
-    assert manager._num_evictable_cache_blocks == 0
+    assert manager._num_evictable_cache_chunks == 0
 
-    # setup 3 blocks with loads so idle count drops to 0.
+    # setup 3 chunks with loads so idle count drops to 0.
     manager.prepare_store(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
     manager.complete_store(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
     manager.prepare_load(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
     # cache state [10', 11', 12', x]
-    assert manager._num_evictable_cache_blocks == 0
+    assert manager._num_evictable_cache_chunks == 0
 
     # prepare_store requiring eviction must return None immediately (fast exit).
     # Spy on policy.evict to confirm the fast path short-circuits before calling it.
@@ -1047,24 +1057,24 @@ def test_evictable_cache_block_count():
     # cache state [10', 11', 12', x] <- cannot evict anything
     assert manager.prepare_store(to_keys([14, 15]), _EMPTY_REQ_CTX) is None
     assert not evict_called, (
-        "_num_evictable_cache_blocks==0 should short-circuit before evict()"
+        "_num_evictable_cache_chunks==0 should short-circuit before evict()"
     )
 
     # After releasing the loads, eviction becomes possible again.
     manager.complete_load(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
     # cache state [10, 11, 12, x] <- 10, 11, 12 are idle
-    assert manager._num_evictable_cache_blocks == 3
+    assert manager._num_evictable_cache_chunks == 3
     assert manager.prepare_store(to_keys([14, 15]), _EMPTY_REQ_CTX) is not None
     # cache state [10, 11, 14', 15'] <- 10, 11 are idle
-    assert manager._num_evictable_cache_blocks == 2
+    assert manager._num_evictable_cache_chunks == 2
     manager.complete_store(to_keys([14, 15]), _EMPTY_REQ_CTX)
-    # cache state [10, 11, 14, 15] <- all blocks idle
-    assert manager._num_evictable_cache_blocks == 4
+    # cache state [10, 11, 14, 15] <- all chunks idle
+    assert manager._num_evictable_cache_chunks == 4
 
 
 def test_touch_forwards_req_context_to_policy(monkeypatch):
     """Regression: CPUOffloadingManager.touch forwards ReqContext to policy."""
-    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    manager = make_cpu_manager(num_chunk_slots=4, cache_policy="lru")
     received = []
 
     def spy_touch(keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
