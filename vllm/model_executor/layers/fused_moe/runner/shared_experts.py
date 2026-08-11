@@ -78,15 +78,22 @@ class SharedExperts(torch.nn.Module):
     @property
     def _disable_shared_experts_overlap(self) -> bool:
         # Disable shared expert overlap if:
-        #   - we are using eplb with non-default backend, because of correctness issues
+        #   - we are using eplb with non-safe backend, because of correctness issues
         #   - we are using flashinfer with DP, since there nothing to gain
+
+        # Both these comm backends have been shown to be safe for shared expert overlap.
+        _EPLB_OVERLAP_SAFE_BACKENDS = (
+            "allgather_reducescatter",
+            "flashinfer_nvlink_one_sided",
+        )
+
         parallel_config = self._moe_config.moe_parallel_config
         if getattr(self._layer, "shard_sequence_parallel", False):
             # TODO: we may enable this to optimize further
             return True
         return (
             parallel_config.enable_eplb
-            and parallel_config.all2all_backend != "allgather_reducescatter"
+            and parallel_config.all2all_backend not in _EPLB_OVERLAP_SAFE_BACKENDS
         ) or parallel_config.use_fi_nvl_two_sided_kernels
 
     def _determine_shared_experts_order(
