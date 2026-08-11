@@ -628,7 +628,11 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 continue
 
             skip_blocks = request.save_block_op.skip_leading_blocks
-            block_hashes = self._generate_block_hashes(request.token_ids, skip_blocks)
+            block_hashes = self._generate_block_hashes(
+                request.token_ids,
+                skip_blocks,
+                cache_salt=request.cache_salt,
+            )
             block_ids = request.block_ids[skip_blocks : skip_blocks + len(block_hashes)]
 
             for i in range(0, len(block_ids), self._max_device_buffer_count):
@@ -651,7 +655,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             load_op = request.load_block_op
             block_ids = request.block_ids[: load_op.num_blocks_to_load]
             block_hashes = self._generate_block_hashes(
-                request.token_ids, load_op.num_computed_blocks, len(block_ids)
+                request.token_ids,
+                load_op.num_computed_blocks,
+                len(block_ids),
+                cache_salt=request.cache_salt,
             )
 
             for i in range(0, len(block_ids), self._max_device_buffer_count):
@@ -699,6 +706,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         try:
             state = self._get_or_create_scheduling_state(request.request_id)
             state.request = request
+            state.cache_salt = request.cache_salt or ""
             assert request.prompt_token_ids is not None
 
             num_tokens_to_check = self._align_to_block_size(
@@ -714,7 +722,9 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 return 0, False
 
             token_ids_to_check = request.prompt_token_ids[:num_tokens_to_check]
-            block_hashes = self._generate_block_hashes(token_ids_to_check, 0)
+            block_hashes = self._generate_block_hashes(
+                token_ids_to_check, 0, cache_salt=state.cache_salt
+            )
 
             # Check existence
             exists_results = self._metadata_client.batch_key_exists(block_hashes)
@@ -761,6 +771,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         """Update state after block allocation."""
         state = self._get_or_create_scheduling_state(request.request_id)
         state.request = request
+        state.cache_salt = request.cache_salt or ""
 
         if num_external_tokens <= 0 or not state.needs_loading():
             return
@@ -807,6 +818,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             assert (
                 state.request is not None and state.request.prompt_token_ids is not None
             )
+            if not state.cache_salt and state.request.cache_salt:
+                state.cache_salt = state.request.cache_salt
             # Create load request metadata
             num_cached_blocks = (
                 state.load_op.num_computed_blocks + state.load_op.num_blocks_to_load
@@ -957,6 +970,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         token_ids: list[int],
         start_block_id: int,
         max_blocks_count: int | None = None,
+        *,
+        cache_salt: str = "",
     ) -> list[str]:
         """Generate block hashes for token sequence."""
         block_hashes = []
@@ -967,8 +982,9 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 break
 
             end_idx = start_idx + self._block_size
+            salt = cache_salt if start_idx == 0 else ""
             block_hash = self._compute_prefix_hash(
-                token_ids[start_idx:end_idx], previous_hash
+                token_ids[start_idx:end_idx], previous_hash, cache_salt=salt
             )
 
             block_index = start_idx // self._block_size
@@ -1005,10 +1021,16 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 )
 
     def _compute_prefix_hash(
-        self, token_ids: list[int], previous_hash: str = ""
+        self,
+        token_ids: list[int],
+        previous_hash: str = "",
+        *,
+        cache_salt: str = "",
     ) -> str:
         """Compute prefix hash for token block."""
-        combined_string = f"{previous_hash}_{token_ids}"
+        # The salt component also versions unsalted keys out of the legacy
+        # token-only namespace so pre-fix entries cannot remain addressable.
+        combined_string = f"{cache_salt}_{previous_hash}_{token_ids}"
         return hashlib.md5(combined_string.encode()).hexdigest()
 
     def _align_to_block_size(self, num_tokens: int) -> int:
