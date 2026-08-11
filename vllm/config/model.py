@@ -880,7 +880,11 @@ class ModelConfig:
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
             self.hf_config.model_type, ModelArchConfigConvertorBase
         )
-        convertor = convertor_cls(self.hf_config, self.hf_text_config)
+        convertor = convertor_cls(
+            self.hf_config,
+            self.hf_text_config,
+            revision=getattr(self, "revision", None),
+        )
         return convertor.convert(
             supports_multimodal=self._supports_multimodal_for_mm_prefix()
         )
@@ -1641,6 +1645,7 @@ class ModelConfig:
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
+                code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
@@ -1648,6 +1653,7 @@ class ModelConfig:
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
+                code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
