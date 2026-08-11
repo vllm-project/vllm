@@ -270,6 +270,12 @@ if TYPE_CHECKING:
     VLLM_OSCAR_SINK_TOKENS: int = 64
     VLLM_OSCAR_RECENT_TOKENS: int = 256
     VLLM_OSCAR_STAGING_TOKENS: int = 8192
+    VLLM_OSCAR_MLA_KV_ROTATION_PATH: str = ""
+    VLLM_OSCAR_MLA_KV_DUMP_DIR: str = ""
+    VLLM_OSCAR_MLA_KV_DUMP_MAX_TOKENS: int = 8192
+    VLLM_OSCAR_MLA_KV_GROUP_SIZE: int = 128
+    VLLM_OSCAR_MLA_KV_HP_SUBSPACE_PATH: str = ""
+    VLLM_OSCAR_LLOYD_MAX: bool = False
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
@@ -1915,6 +1921,41 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # backing the sink/recent windows.
     "VLLM_OSCAR_STAGING_TOKENS": lambda: int(
         os.getenv("VLLM_OSCAR_STAGING_TOKENS", "8192")
+    ),
+    # OSCAR INT2 "fake-quant" for the MLA shared latent (GLM-5.2 / DeepSeek-V2
+    # style models). Unlike the full-attention path above this does not change
+    # the cache layout: c_kv is quantized and immediately dequantized on write,
+    # so it measures the accuracy cost of an INT2 latent cache without an
+    # INT2-storage pool. Memory footprint is unchanged.
+    # Directory of per-layer `layer_<i>.pt` rotations (RotationZoo ships
+    # GLM-5.2-FP8/c_kv_rcov_phblock_g128), or the literal "hadamard" to
+    # synthesize an uncalibrated one. Empty disables the eval path.
+    "VLLM_OSCAR_MLA_KV_ROTATION_PATH": lambda: os.getenv(
+        "VLLM_OSCAR_MLA_KV_ROTATION_PATH", ""
+    ),
+    # Calibration: dump c_kv per layer to this directory, to be fitted offline
+    # into rotations. Setting it also activates the latent path.
+    "VLLM_OSCAR_MLA_KV_DUMP_DIR": lambda: os.getenv(
+        "VLLM_OSCAR_MLA_KV_DUMP_DIR", ""
+    ),
+    "VLLM_OSCAR_MLA_KV_DUMP_MAX_TOKENS": lambda: int(
+        os.getenv("VLLM_OSCAR_MLA_KV_DUMP_MAX_TOKENS", "8192")
+    ),
+    # Quantization group size along kv_lora_rank; must divide it (512 / 128 = 4
+    # groups for GLM-5.2, matching the published rotations).
+    "VLLM_OSCAR_MLA_KV_GROUP_SIZE": lambda: int(
+        os.getenv("VLLM_OSCAR_MLA_KV_GROUP_SIZE", "128")
+    ),
+    # Directory of per-layer `[k, kv_lora_rank]` orthonormal high-precision
+    # subspaces (top-k sensitive directions from the kv_b_proj Hessian). Their
+    # projection is kept in full precision; only the residual is quantized.
+    "VLLM_OSCAR_MLA_KV_HP_SUBSPACE_PATH": lambda: os.getenv(
+        "VLLM_OSCAR_MLA_KV_HP_SUBSPACE_PATH", ""
+    ),
+    # Use the MSE-optimal Lloyd-Max 4-level quantizer for N(0, 1) instead of
+    # uniform affine min-max. Recommended by the published GLM-5.2 recipe.
+    "VLLM_OSCAR_LLOYD_MAX": lambda: bool(
+        int(os.getenv("VLLM_OSCAR_LLOYD_MAX", "0"))
     ),
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(

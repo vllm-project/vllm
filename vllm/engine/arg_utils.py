@@ -2014,7 +2014,9 @@ class EngineArgs:
             cache_config.kv_cache_dtype_skip_layers = sorted(
                 existing | set(boundary), key=int
             )
-        elif resolved_cache_dtype.startswith("oscar_"):
+        elif resolved_cache_dtype == "oscar_int2":
+            # The MLA latent variant has no per-head boundary layers; it is
+            # handled entirely by its own backend.
             from vllm.model_executor.layers.quantization.oscar.config import (
                 OscarConfig,
             )
@@ -2394,8 +2396,9 @@ class EngineArgs:
             attention_config.flash_attn_version = 2
 
         # OSCAR shares TurboQuant's boundary-skip layers (standard backend),
-        # so the same FlashAttention >= 3 constraint applies.
-        if resolved_cache_dtype.startswith("oscar_") and (
+        # so the same FlashAttention >= 3 constraint applies. The MLA latent
+        # variant does not go through FlashAttention at all.
+        if resolved_cache_dtype == "oscar_int2" and (
             attention_config.flash_attn_version is None
             or attention_config.flash_attn_version >= 3
         ):

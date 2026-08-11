@@ -421,6 +421,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.W_UK_T_dcp_qrep: torch.Tensor | None = None
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
+        self._oscar_layer_idx: int | None = None
         self.indexer = indexer
         self.non_causal_multi_token_decode = non_causal_multi_token_decode
         self.num_kv_heads = 1
@@ -633,6 +634,35 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         return self._chunked_prefill_workspace_size
 
+    def maybe_apply_oscar_latent(self, kv_c_normed: torch.Tensor) -> torch.Tensor:
+        """Apply the OSCAR INT2 latent transform to a ``c_kv`` cache write.
+
+        No-op unless ``VLLM_OSCAR_MLA_KV_ROTATION_PATH`` or
+        ``VLLM_OSCAR_MLA_KV_DUMP_DIR`` is set. See
+        ``vllm.model_executor.layers.quantization.oscar.mla_latent``.
+        """
+        from vllm.model_executor.layers.quantization.oscar.mla_latent import (
+            get_mla_latent_quantizer,
+            oscar_mla_enabled,
+        )
+
+        if not oscar_mla_enabled():
+            return kv_c_normed
+
+        if self._oscar_layer_idx is None:
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            self._oscar_layer_idx = extract_layer_index(self.layer_name)
+
+        quantizer = get_mla_latent_quantizer(self.kv_lora_rank, kv_c_normed.device)
+        if quantizer is None:
+            return kv_c_normed
+
+        quantizer.maybe_dump(self._oscar_layer_idx, kv_c_normed)
+        if not quantizer.quantizes:
+            return kv_c_normed
+        return quantizer.apply(self._oscar_layer_idx, kv_c_normed)
+
     def forward(
         self,
         q: torch.Tensor,
@@ -672,7 +702,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             )
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                kv_for_cache,
+                self.maybe_apply_oscar_latent(kv_for_cache),
                 kpe_for_cache,
                 self_kv_cache,
                 layer_slot_mapping,
@@ -1198,7 +1228,7 @@ def unified_mla_kv_cache_update(
             attn_layer.use_pcp,
         )
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-            kv_c_normed,
+            attn_layer.maybe_apply_oscar_latent(kv_c_normed),
             k_pe,
             kv_cache,
             layer_slot_mapping,
