@@ -257,7 +257,6 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        rocm_aiter_moe_shared_expert_enabled = self.is_fused_shared_expert_enabled
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -273,7 +272,7 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
             num_experts=self.config.n_routed_experts
             + (
                 self.config.n_shared_experts
-                if rocm_aiter_moe_shared_expert_enabled
+                if self.is_fused_shared_expert_enabled
                 else 0
             ),
         )
@@ -287,7 +286,7 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
             if spec_layer is None:
                 continue
             is_fusion_moe_shared_experts_layer = (
-                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
+                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
             for param_name, weight_name, shard_id in stacked_params_mapping:
