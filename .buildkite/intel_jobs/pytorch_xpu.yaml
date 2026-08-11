@@ -46,7 +46,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    find compile/ -maxdepth 1 -name "test_*.py" -print0 | xargs -0 -n1 -I{} pytest -s -v "{}" || true'
+    find compile/ -maxdepth 1 -name '\''test_*.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
 - label: PyTorch Compilation Unit Tests (H100)
   device: intel_gpu
   timeout_in_minutes: 30
@@ -92,7 +92,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    find compile/h100/ -name "test_*.py" -print0 | xargs -0 -n1 -I{} pytest -s -v "{}" || true'
+    find compile/h100/ -name '\''test_*.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
 - label: PyTorch Compilation Passes Unit Tests
   device: intel_gpu
   timeout_in_minutes: 45
@@ -182,7 +182,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    find compile/fullgraph/ -name "test_*.py" -not -name "test_full_cudagraph.py" -not -name "test_full_graph.py" -print0 | xargs -0 -n1 -I{} pytest -s -v "{}" || true'
+    find compile/fullgraph/ -name '\''test_*.py'\'' -not -name '\''test_full_cudagraph.py'\'' -not -name '\''test_full_graph.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
 - label: PyTorch Fullgraph CUDAGraph (L4 Compatibility)
   device: intel_gpu
   timeout_in_minutes: 60
