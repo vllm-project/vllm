@@ -115,7 +115,7 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
         ["FLASH_ATTN", "TRITON_ATTN"]
         if current_platform.is_cuda()
         else ["TRITON_ATTN"]
-        if current_platform.is_rocm()
+        if current_platform.is_rocm() or current_platform.is_xpu()
         else []
     ),
 )
