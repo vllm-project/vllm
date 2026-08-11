@@ -1037,6 +1037,10 @@ class Gemma4ForConditionalGeneration(
         self.multimodal_config = multimodal_config
         self.model_dtype = vllm_config.model_config.dtype
         self.vllm_config = vllm_config
+        lora_config = vllm_config.lora_config
+        self._enable_mm_lora = bool(
+            lora_config is not None and lora_config.enable_tower_connector_lora
+        )
 
         # Only quantize towers when the quant method supports their
         # dimensions.  BNB/torchao handle arbitrary sizes; other methods
@@ -1265,8 +1269,8 @@ class Gemma4ForConditionalGeneration(
 
         Groups images by patch count (resolution bucket) so each
         encoder call processes a uniform-shape batch with no
-        cross-resolution padding.  Pooling and projection are then
-        applied over a single concatenated tensor for all images.
+        cross-resolution padding. With MM LoRA enabled, all images are
+        padded into one batch so the encoder call matches the tower mapping.
         """
         pixel_values = image_input["pixel_values"]
         pixel_position_ids = image_input["pixel_position_ids"]
@@ -1284,24 +1288,65 @@ class Gemma4ForConditionalGeneration(
             if isinstance(pixel_values, list)
             else pixel_values.shape[0]
         )
+        pool_position_ids = pixel_position_ids
 
-        for idx in range(total_images):
-            pv = pixel_values[idx]
-            pp = pixel_position_ids[idx]
-            buckets.setdefault(pv.shape[0], []).append((idx, pv, pp))
+        if self._enable_mm_lora:
+            max_soft_tokens = vision_cfg.default_output_length
+            mm_processor_kwargs = getattr(
+                getattr(self, "multimodal_config", None),
+                "mm_processor_kwargs",
+                None,
+            )
+            if isinstance(mm_processor_kwargs, Mapping):
+                value, _ = _get_max_soft_tokens(mm_processor_kwargs)
+                if isinstance(value, int) and value in _SUPPORTED_SOFT_TOKENS:
+                    max_soft_tokens = value
+
+            max_patches = max_soft_tokens * pooling_k2
+            padded_position_ids: list[torch.Tensor] = []
+            for idx in range(total_images):
+                pv = pixel_values[idx]
+                pp = pixel_position_ids[idx]
+                num_patches = pv.shape[0]
+                if num_patches > max_patches:
+                    raise ValueError(
+                        f"Image {idx} has {num_patches} patches, which exceeds "
+                        f"the MM LoRA patch limit of {max_patches}."
+                    )
+
+                pad_len = max_patches - num_patches
+                pv = torch.cat(
+                    (pv, pv.new_zeros((pad_len, *pv.shape[1:]))),
+                    dim=0,
+                )
+                pp = torch.cat(
+                    (pp, pp.new_full((pad_len, *pp.shape[1:]), -1)),
+                    dim=0,
+                )
+                buckets.setdefault(max_patches, []).append((idx, pv, pp))
+                padded_position_ids.append(pp)
+            pool_position_ids = padded_position_ids
+        else:
+            for idx in range(total_images):
+                pv = pixel_values[idx]
+                pp = pixel_position_ids[idx]
+                buckets.setdefault(pv.shape[0], []).append((idx, pv, pp))
 
         # Encode each resolution bucket in memory-safe chunks. Re-read
         # free memory per bucket because the previous bucket's encoder
         # pass has already allocated activations we should account for.
         last_hidden_states_map: dict[int, torch.Tensor] = {}
         for patches, items in buckets.items():
-            free, total = torch.accelerator.get_memory_info()
-            max_batch_size = min(
-                len(items),
-                self._encoder_chunk(
-                    patches, free, total, vision_cfg.position_embedding_size
-                ),
-            )
+            if self._enable_mm_lora:
+                max_batch_size = len(items)
+            else:
+                free, total = torch.accelerator.get_memory_info()
+                max_batch_size = min(
+                    len(items),
+                    self._encoder_chunk(
+                        patches, free, total, vision_cfg.position_embedding_size
+                    ),
+                )
 
             for chunk_idx in range(0, len(items), max_batch_size):
                 chunk_items = items[chunk_idx : chunk_idx + max_batch_size]
@@ -1338,7 +1383,7 @@ class Gemma4ForConditionalGeneration(
             output_length = chunk_hidden.shape[0] // pooling_k2
 
             single_hidden = chunk_hidden.unsqueeze(0)
-            single_pos_ids = pixel_position_ids[orig_idx].unsqueeze(0)
+            single_pos_ids = pool_position_ids[orig_idx].unsqueeze(0)
             padding_positions = (single_pos_ids == -1).all(dim=-1)
 
             pooled_states, valid_mask = vt.pooler(
@@ -2160,9 +2205,13 @@ class Gemma4ForConditionalGeneration(
                 pixel_values_key = "pixel_values_videos"
                 max_soft_tokens = _VIDEO_MAX_SOFT_TOKENS
 
-            tower_tokens = None
+            tower_tokens = (
+                max_soft_tokens * pooling_k2
+                if modality == "image"
+                else None
+            )
             connector_tokens = num_mm_embeds
-            if mm_kwargs is not None:
+            if tower_tokens is None and mm_kwargs is not None:
                 field = mm_kwargs.get(pixel_values_key)
                 if field is not None:
                     data = field.data
