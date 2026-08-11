@@ -207,6 +207,12 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
 
+        kv_transfer_config = vllm_config.kv_transfer_config
+        self.seed_first_token_enabled = bool(
+            kv_transfer_config is not None
+            and kv_transfer_config.get_from_extra_config("seed_first_token", False)
+        )
+
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
         self.grammar_compile_error_reqs: set[str] = set()
@@ -1995,7 +2001,7 @@ class Scheduler(SchedulerInterface):
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
-            self._update_from_kv_xfer_finished(kv_connector_output)
+            self._update_from_kv_xfer_finished(kv_connector_output, outputs)
 
         # EC Connector: update state from worker-side EC connector output.
         if self.ec_connector is not None and ec_connector_output:
@@ -2737,7 +2743,11 @@ class Scheduler(SchedulerInterface):
             f"{request.status.name} for request {request.request_id}"
         )
 
-    def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
+    def _update_from_kv_xfer_finished(
+        self,
+        kv_connector_output: KVConnectorOutput,
+        outputs: dict[int, list[EngineCoreOutput]] | None = None,
+    ):
         """
         KV Connector: update the scheduler state based on the output.
 
@@ -2757,7 +2767,12 @@ class Scheduler(SchedulerInterface):
             assert req_id in self.requests
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                already_reported = req_id in self.finished_recving_kv_req_ids
                 self.finished_recving_kv_req_ids.add(req_id)
+                if outputs is not None and not already_reported:
+                    seeded_output = self._try_seed_first_token(req_id)
+                    if seeded_output is not None:
+                        outputs[req.client_index].append(seeded_output)
             else:
                 assert RequestStatus.is_finished(req.status)
                 self._free_blocks(self.requests[req_id])
@@ -2765,6 +2780,52 @@ class Scheduler(SchedulerInterface):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
             self._free_blocks(self.requests[req_id])
+
+    def _try_seed_first_token(self, req_id: str) -> EngineCoreOutput | None:
+        """Emit the first token sampled on the prefill instance
+        (kv_transfer_params["first_token_ids"]), or return None to fall
+        back to the recompute path."""
+        if not self.seed_first_token_enabled:
+            return None
+        request = self.requests.get(req_id)
+        if request is None or request.status != RequestStatus.WAITING_FOR_REMOTE_KVS:
+            return None
+        if req_id in self.failed_recving_kv_req_ids:
+            return None
+        params = request.kv_transfer_params
+        first_token_ids = params.get("first_token_ids") if params else None
+        if not first_token_ids or len(first_token_ids) != 1:
+            return None
+        sampling_params = request.sampling_params
+        if (
+            sampling_params is None
+            or request.pooling_params is not None
+            or sampling_params.logprobs is not None
+            or sampling_params.prompt_logprobs is not None
+            or request.use_structured_output
+            or self.num_spec_tokens > 0
+            or request.num_output_tokens > 0
+            or request.num_preemptions > 0
+        ):
+            return None
+        token_id = first_token_ids[0]
+        # A seeded token that would immediately finish the request must go
+        # through the normal stop machinery instead.
+        if request.max_tokens <= 1 or request.num_tokens + 1 >= self.max_model_len:
+            return None
+        if 1 >= sampling_params.min_tokens:
+            if token_id == sampling_params.eos_token_id:
+                return None
+            if token_id in (sampling_params.stop_token_ids or ()):
+                return None
+
+        request.append_output_token_ids(token_id)
+        return EngineCoreOutput(
+            request_id=req_id,
+            new_token_ids=[token_id],
+            events=request.take_events(),
+            trace_headers=request.trace_headers,
+        )
 
     def _update_requests_with_invalid_blocks(
         self,

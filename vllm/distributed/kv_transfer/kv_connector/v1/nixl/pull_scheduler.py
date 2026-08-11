@@ -30,6 +30,12 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        assert vllm_config.kv_transfer_config is not None
+        self.seed_first_token = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "seed_first_token", False
+            )
+        )
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -266,7 +272,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
             remote_num_tokens = request.num_computed_tokens
 
-        return delay_free_blocks, dict(
+        params = dict(
             do_remote_prefill=is_p_node,
             do_remote_decode=is_d_node,
             remote_block_ids=block_ids,
@@ -278,3 +284,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
         )
+        if self.seed_first_token and is_p_node and request.num_output_tokens > 0:
+            params["first_token_ids"] = list(request.output_token_ids)
+        return delay_free_blocks, params
