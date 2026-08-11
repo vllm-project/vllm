@@ -27,7 +27,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -447,10 +446,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
 
-        if self.fp8_backend == Fp8MoeBackend.AITER:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
@@ -809,7 +804,6 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -1328,10 +1322,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
 
-        if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
-
         torch.accelerator.empty_cache()
 
         # Build quant config and kernel
@@ -1599,15 +1589,16 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
 
-        if not torch.allclose(
+        # Match existing NVFP4 MoE paths: fused w13 uses the w1 global scale.
+        if self.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
         ):
-            raise ValueError("Different global scales for w1 and w3 is not supported.")
+            logger.warning_once(
+                "w1_weight_scale_2 must match w3_weight_scale_2. "
+                "Accuracy may be affected."
+            )
 
-        # Use a single gscale for w13
-        w13_weight_scale_2 = torch.maximum(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-        ).contiguous()
+        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
         w2_weight_scale_2 = layer.w2_weight_scale_2
 
@@ -1654,7 +1645,6 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
                 experts_cls=self.experts_cls,
                 backend=self.nvfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -1668,6 +1658,9 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale_2,
             a2_scale=layer.w2_input_scale_2,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
+            swiglu_alpha=getattr(layer, "swiglu_alpha", None),
+            swiglu_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
         )
 
