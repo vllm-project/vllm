@@ -7,13 +7,14 @@ so no model is needed.
 """
 
 import queue
+import time
 from types import SimpleNamespace
 
 import msgspec
 import pytest
 
-from vllm.v1.engine import EngineCoreOutputs
-from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.engine import EngineCoreOutputs, core
+from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
 from vllm.v1.notifications import (
     CustomNotification,
     publish_worker_notification,
@@ -100,11 +101,6 @@ def test_worker_publish_take_roundtrip():
 
     assert take_worker_notifications() == [event]
     # None rather than [], so the quiet path allocates nothing.
-    assert take_worker_notifications() is None
-
-
-def test_empty_drain_allocates_nothing():
-    """No producer installed builds no list."""
     assert take_worker_notifications() is None
 
 
@@ -211,3 +207,72 @@ def test_proc_broadcasts_to_every_frontend():
     assert [client_index for client_index, _ in delivered] == [0, 1, 2]
     assert all(out.engine_notifications == [event] for _, out in delivered)
     assert proc.output_queue.empty()
+
+
+def test_dp_busy_loop_gathers_on_startup():
+    """The DP override of run_busy_loop shipped without either gather call
+    once; pin the startup gather so it cannot regress. Pre-loop placement is
+    the point: the ordering test below cannot tell pre-loop from
+    first-iteration, and a first-iteration gather would be an unthrottled rpc
+    per iteration."""
+    proc = DPEngineCoreProc.__new__(DPEngineCoreProc)
+    gathered = []
+    proc.gather_worker_notifications = lambda: gathered.append("startup")
+    proc._handle_shutdown = lambda: False
+
+    with pytest.raises(SystemExit):
+        proc.run_busy_loop()
+
+    assert gathered == ["startup"]
+
+
+def test_dp_busy_loop_polls_inside_each_iteration():
+    """The interval poll sits between input processing and the step, matching
+    the non-DP loop."""
+    proc = DPEngineCoreProc.__new__(DPEngineCoreProc)
+    calls = []
+    proc.gather_worker_notifications = lambda: calls.append("startup")
+    proc._handle_shutdown = lambda: True
+    proc._process_input_queue = lambda: calls.append("input")
+    proc._maybe_publish_request_counts = lambda: None
+
+    def poll():
+        calls.append("poll")
+        # The rest of the iteration needs a scheduler and an executor; the
+        # wiring is proven by reaching here, so stop the loop.
+        raise SystemExit
+
+    proc._maybe_gather_worker_notifications = poll
+
+    with pytest.raises(SystemExit):
+        proc.run_busy_loop()
+
+    assert calls == ["startup", "input", "poll"]
+
+
+def test_poll_is_off_by_default(monkeypatch):
+    """Interval 0 must mean no gather rpc at all, however overdue."""
+    monkeypatch.setattr(core.envs, "VLLM_WORKER_NOTIFICATION_POLL_INTERVAL", 0.0)
+    proc = EngineCoreProc.__new__(EngineCoreProc)
+    proc._last_notification_gather = float("-inf")
+    gathered = []
+    proc.gather_worker_notifications = lambda: gathered.append(1)
+
+    proc._maybe_gather_worker_notifications()
+
+    assert gathered == []
+
+
+def test_poll_interval_gates_the_rpc(monkeypatch):
+    """One gather when due, then nothing until the interval passes again."""
+    monkeypatch.setattr(core.envs, "VLLM_WORKER_NOTIFICATION_POLL_INTERVAL", 60.0)
+    proc = EngineCoreProc.__new__(EngineCoreProc)
+    proc._last_notification_gather = time.monotonic() - 120.0
+    gathered = []
+    proc.gather_worker_notifications = lambda: gathered.append(1)
+
+    proc._maybe_gather_worker_notifications()
+    assert len(gathered) == 1
+
+    proc._maybe_gather_worker_notifications()
+    assert len(gathered) == 1, "gathered again inside the interval"
