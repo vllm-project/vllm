@@ -1101,25 +1101,35 @@ def test_apply_matches_no_match_exits_quickly():
 
 def test_apply_matches_many_shared_targets_scales_linearly():
     """Shared replacement targets must not trigger per-item rescanning."""
-    item_count = 5_000
     replacement = [1] * 50
     update = PromptReplacement("image", [0], replacement)
-    mm_prompt_updates = {
-        "image": [[update.resolve(item_idx)] for item_idx in range(item_count)]
-    }
 
-    start = time.perf_counter()
-    result, match_result = apply_token_matches(
-        [0] * item_count,
-        mm_prompt_updates,
-        tokenizer=None,
-    )
-    elapsed = time.perf_counter() - start
+    def measure(item_count: int) -> float:
+        mm_prompt_updates = {
+            "image": [[update.resolve(item_idx)] for item_idx in range(item_count)]
+        }
+        prompt = [0] * item_count
 
-    assert elapsed < 2, f"apply_token_matches took {elapsed:.2f}s, expected < 2s"
-    assert len(result) == item_count * len(replacement)
-    assert all(token_id == 1 for token_id in result)
-    assert match_result == {"image": [0] * item_count}
+        start = time.perf_counter()
+        result, match_result = apply_token_matches(
+            prompt,
+            mm_prompt_updates,
+            tokenizer=None,
+        )
+        elapsed = time.perf_counter() - start
+
+        assert len(result) == item_count * len(replacement)
+        assert all(token_id == 1 for token_id in result)
+        assert match_result == {"image": [0] * item_count}
+
+        return elapsed
+
+    measure(100)
+    small_time = measure(1_000)
+    large_time = measure(4_000)
+
+    time_ratio = large_time / small_time
+    assert time_ratio < 8, f"Expected linear scaling, got {time_ratio:.1f}x"
 
 
 def test_iter_token_matches_rejects_negative_start_idx():
