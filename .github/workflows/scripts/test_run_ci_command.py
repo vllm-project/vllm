@@ -9,7 +9,9 @@ from typing import Any
 from unittest.mock import patch
 
 from run_ci_command import (
+    CANCELABLE_BUILD_STATES,
     CI_AUTHORIZED_COMMENT_MARKER,
+    COMMAND_CANCEL_CI,
     COMMAND_RETRY_FAILED,
     COMMAND_RUN_CI,
     COMMAND_RUN_CI_ALL,
@@ -136,12 +138,15 @@ class FakeBuildkite:
         self.job_list_calls: list[int] = []
         self.list_calls: list[tuple[str | None, tuple[str, str] | None]] = []
         self.retry_calls: list[tuple[int, str]] = []
+        self.cancel_calls: list[int] = []
 
     def list_builds(
         self,
         commit: str | None,
         *,
+        branch: str | None = None,
         metadata: tuple[str, str] | None = None,
+        states: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
         self.list_calls.append((commit, metadata))
         return self.build_lists.pop(0)
@@ -160,6 +165,10 @@ class FakeBuildkite:
     ) -> dict[str, Any]:
         self.retry_calls.append((build_number, states))
         return {"retried_jobs_count": 3}
+
+    def cancel_build(self, build_number: int) -> dict[str, Any]:
+        self.cancel_calls.append(build_number)
+        return {"number": build_number, "state": "canceling"}
 
     def list_failed_jobs(self, build_number: int) -> list[dict[str, Any]]:
         self.job_list_calls.append(build_number)
@@ -292,8 +301,10 @@ class RunCiCommandTest(unittest.TestCase):
             parse_command(COMMAND_RETRY_FAILED),
             COMMAND_RETRY_FAILED,
         )
+        self.assertEqual(parse_command(COMMAND_CANCEL_CI), COMMAND_CANCEL_CI)
         self.assertIsNone(parse_command("/ci run please"))
         self.assertIsNone(parse_command("/ci run all please"))
+        self.assertIsNone(parse_command("/ci cancel please"))
         self.assertIsNone(parse_command(" /ci run"))
 
     def test_write_access_authorizes_reviewers_and_authors(self) -> None:
@@ -531,6 +542,7 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertTrue(comment.startswith("✅ @author"))
         self.assertIn("`/ci run` starts a CI build", comment)
         self.assertIn("`/ci retry` retries failed jobs", comment)
+        self.assertIn("`/ci cancel` cancels scheduled or running", comment)
         self.assertIn("CI build for the current PR head", comment)
         self.assertIn("only jobs that failed in the latest earlier CI build", comment)
         self.assertNotIn(COMMAND_RUN_CI_ALL, comment)
@@ -854,6 +866,82 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertTrue(call["url"].endswith("/123/retry_failed_jobs"))
         self.assertEqual(call["body"], {"states": RETRY_STATES})
 
+    def test_ci_cancel_cancels_active_builds_for_pr_branch(self) -> None:
+        github = FakeGitHub()
+        buildkite = FakeBuildkite(
+            [
+                [
+                    {
+                        "branch": "feature",
+                        "number": 123,
+                        "pull_request": {"id": 42},
+                        "state": "running",
+                        "web_url": "https://buildkite.example/builds/123",
+                    },
+                    {
+                        "branch": "feature",
+                        "number": 124,
+                        "meta_data": {"github-pr-number": "42"},
+                        "state": "failing",
+                        "web_url": "https://buildkite.example/builds/124",
+                    },
+                    {
+                        "branch": "feature",
+                        "number": 125,
+                        "pull_request": {"id": 43},
+                        "state": "running",
+                        "web_url": "https://buildkite.example/builds/125",
+                    },
+                    {
+                        "branch": "other-branch",
+                        "number": 126,
+                        "pull_request": {"id": 42},
+                        "state": "running",
+                        "web_url": "https://buildkite.example/builds/126",
+                    },
+                    {
+                        "branch": "feature",
+                        "number": 127,
+                        "pull_request": {"id": 42},
+                        "state": "passed",
+                        "web_url": "https://buildkite.example/builds/127",
+                    },
+                ]
+            ]
+        )
+
+        run(make_event(COMMAND_CANCEL_CI), github, buildkite)
+
+        self.assertEqual(buildkite.cancel_calls, [123, 124])
+        self.assertIn("Requested cancellation of 2 CI builds", github.comments[0])
+        self.assertIn("#123", github.comments[0])
+        self.assertIn("#124", github.comments[0])
+
+    def test_ci_cancel_is_a_noop_without_active_builds(self) -> None:
+        github = FakeGitHub()
+        buildkite = FakeBuildkite([[]])
+
+        run(make_event(COMMAND_CANCEL_CI), github, buildkite)
+
+        self.assertEqual(buildkite.cancel_calls, [])
+        self.assertIn("No cancelable CI build is running", github.comments[0])
+
+    def test_buildkite_cancel_uses_cancel_build_endpoint(self) -> None:
+        transport = FakeTransport({"number": 123, "state": "canceling"})
+        client = BuildkiteClient(
+            "secret",
+            "vllm",
+            "ci",
+            transport=transport,
+        )
+
+        client.cancel_build(123)
+
+        call = transport.calls[0]
+        self.assertEqual(call["method"], "PUT")
+        self.assertTrue(call["url"].endswith("/123/cancel"))
+        self.assertIsNone(call["body"])
+
     def test_buildkite_list_builds_allows_query_on_builds_endpoint(self) -> None:
         transport = FakeTransport([])
         client = BuildkiteClient(
@@ -865,14 +953,20 @@ class RunCiCommandTest(unittest.TestCase):
 
         builds = client.list_builds(
             "current-commit",
+            branch="feature",
             metadata=("github-pr-number", "42"),
+            states=CANCELABLE_BUILD_STATES,
         )
 
         self.assertEqual(builds, [])
         url = transport.calls[0]["url"]
         self.assertIn("?exclude_jobs=true", url)
         self.assertIn("commit=current-commit", url)
+        self.assertIn("branch=feature", url)
         self.assertIn("meta_data%5Bgithub-pr-number%5D=42", url)
+        self.assertIn("state%5B%5D=scheduled", url)
+        self.assertIn("state%5B%5D=running", url)
+        self.assertIn("state%5B%5D=failing", url)
 
     def test_buildkite_failed_jobs_follow_cursor_pagination(self) -> None:
         next_url = (
