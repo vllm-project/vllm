@@ -5,7 +5,7 @@
 import pytest
 
 from vllm.config import StructuredOutputsConfig
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMClientError, VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 pytestmark = pytest.mark.cpu_test
@@ -103,3 +103,60 @@ def test_regex_with_nul_byte_rejected(regex):
 
     with pytest.raises(ValueError, match="NUL"):
         validate_xgrammar_grammar(params)
+
+
+INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}}
+
+
+@pytest.mark.parametrize(
+    "backend, structured_outputs",
+    [
+        ("xgrammar", StructuredOutputsParams(json=INVALID_JSON_SCHEMA)),
+        ("outlines", StructuredOutputsParams(json=INVALID_JSON_SCHEMA)),
+        ("auto", StructuredOutputsParams(json=INVALID_JSON_SCHEMA)),
+        ("auto", StructuredOutputsParams(json='{"type": ')),
+        ("xgrammar", StructuredOutputsParams(grammar="not a grammar")),
+        ("guidance", StructuredOutputsParams(grammar="not a grammar")),
+        ("lm-format-enforcer", StructuredOutputsParams(grammar="not a grammar")),
+        ("outlines", StructuredOutputsParams(regex="(")),
+        ("guidance", StructuredOutputsParams(structural_tag='{"nope": 1}')),
+    ],
+)
+def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
+    """Only `VLLMClientError` survives `AsyncLLM.generate` untouched; anything else
+    is wrapped in `EngineGenerateError` and served as a 500 instead of a 400."""
+    params = SamplingParams(structured_outputs=structured_outputs)
+    with pytest.raises(VLLMClientError):
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(backend=backend),
+            tokenizer=object(),
+        )
+
+
+@pytest.mark.parametrize(
+    "schema, expected_backend",
+    [
+        # multipleOf is unsupported by xgrammar, patternProperties also by guidance.
+        (
+            {
+                "type": "object",
+                "properties": {"n": {"type": "integer", "multipleOf": 2}},
+            },
+            "guidance",
+        ),
+        (
+            {"type": "object", "patternProperties": {"^a": {"type": "string"}}},
+            "outlines",
+        ),
+    ],
+)
+def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend):
+    """`auto` falls back on rejection, so it must catch what the validators raise."""
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(json=schema))
+    params._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        StructuredOutputsConfig(backend="auto"),
+        tokenizer=object(),
+    )
+    assert params.structured_outputs._backend == expected_backend

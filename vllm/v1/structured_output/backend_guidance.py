@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from transformers import MistralCommonBackend
 
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
@@ -269,7 +270,7 @@ def serialize_guidance_grammar(
                 begin: str = s["begin"]
                 trig = next((t for t in triggers if begin.startswith(t)), None)
                 if trig is None:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Trigger {begin} not found in triggers {triggers}"
                     )
                 tags.append(
@@ -281,7 +282,9 @@ def serialize_guidance_grammar(
                     )
                 )
             if not tags:
-                raise ValueError("No structural tags found in the grammar spec.")
+                raise VLLMValidationError(
+                    "No structural tags found in the grammar spec."
+                )
             return llguidance.StructTag.to_grammar(tags)
         else:
             logger.error(
@@ -300,7 +303,10 @@ def validate_guidance_grammar(
     if sampling_params.structured_outputs is None:
         return
     tp, grm = get_structured_output_key(sampling_params.structured_outputs)
-    guidance_grm = serialize_guidance_grammar(tp, grm)
+    try:
+        guidance_grm = serialize_guidance_grammar(tp, grm)
+    except (ValueError, KeyError, TypeError) as e:
+        raise VLLMValidationError(f"Invalid grammar specification: {e}") from e
     err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
     if err:
-        raise ValueError(f"Grammar error: {err}")
+        raise VLLMValidationError(f"Grammar error: {err}")
