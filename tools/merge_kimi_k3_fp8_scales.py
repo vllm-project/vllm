@@ -24,9 +24,13 @@ def main() -> None:
         "schema",
         "model",
         "revision",
+        "checkpoint_id",
+        "calibration_id",
         "tp_size",
         "pp_size",
         "fp8_dtype",
+        "cache_mode",
+        "local_heads",
         "qk_head_dim",
         "v_head_dim",
         "margin",
@@ -35,6 +39,8 @@ def main() -> None:
         for field in common_fields:
             if shard[field] != reference[field]:
                 raise ValueError(f"Calibration shard mismatch for {field}")
+    if not reference["checkpoint_id"] or not reference["calibration_id"]:
+        raise ValueError("Calibration shards require checkpoint and run identities")
 
     tp_size = int(reference["tp_size"])
     expected_ranks = {
@@ -63,6 +69,7 @@ def main() -> None:
 
     fp8_max = torch.finfo(torch.float8_e4m3fnuz).max
     margin = float(reference["margin"])
+    local_heads = int(reference["local_heads"])
     tensors = {}
     for layer_idx, ranks in sorted(per_layer.items()):
         if set(ranks) != set(range(tp_size)):
@@ -71,15 +78,24 @@ def main() -> None:
                 f"got ranks {sorted(ranks)}"
             )
         for tensor_name in ("q", "k", "v"):
-            maxima = torch.cat(
-                [
-                    torch.tensor(
-                        ranks[rank][f"{tensor_name}_amax"],
-                        dtype=torch.float32,
+            rank_maxima = []
+            for rank in range(tp_size):
+                maximum = torch.tensor(
+                    ranks[rank][f"{tensor_name}_amax"],
+                    dtype=torch.float32,
+                )
+                if maximum.shape != (local_heads,):
+                    raise ValueError(
+                        f"Invalid {tensor_name} maxima shape for layer {layer_idx}, "
+                        f"TP rank {rank}: {tuple(maximum.shape)}"
                     )
-                    for rank in range(tp_size)
-                ]
-            )
+                if not torch.isfinite(maximum).all() or not (maximum > 0).all():
+                    raise ValueError(
+                        f"Invalid {tensor_name} maxima for layer {layer_idx}, "
+                        f"TP rank {rank}"
+                    )
+                rank_maxima.append(maximum)
+            maxima = torch.cat(rank_maxima)
             tensors[f"layers.{layer_idx}.{tensor_name}_descale"] = (
                 maxima * margin / fp8_max
             ).clamp_min(1.0e-12)
@@ -88,11 +104,14 @@ def main() -> None:
         "schema": str(reference["schema"]),
         "model": reference["model"],
         "revision": reference["revision"],
+        "checkpoint_id": reference["checkpoint_id"],
+        "calibration_id": reference["calibration_id"],
         "tp_size": str(tp_size),
         "pp_size": str(reference["pp_size"]),
         "num_layers": str(len(per_layer)),
         "fp8_dtype": reference["fp8_dtype"],
-        "cache_mode": "bf16_latent_cache",
+        "cache_mode": reference["cache_mode"],
+        "local_heads": str(local_heads),
         "qk_head_dim": str(reference["qk_head_dim"]),
         "v_head_dim": str(reference["v_head_dim"]),
         "margin": str(margin),

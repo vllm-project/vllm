@@ -1359,7 +1359,11 @@ class Worker(WorkerBase):
             save_kimi_k3_fp8_calibration,
         )
 
-        save_kimi_k3_fp8_calibration(self.vllm_config)
+        calibration_save_error: Exception | None = None
+        try:
+            save_kimi_k3_fp8_calibration(self.vllm_config)
+        except Exception as error:
+            calibration_save_error = error
 
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process
@@ -1374,6 +1378,9 @@ class Worker(WorkerBase):
 
             if CuMemAllocator.instance is not None:
                 CuMemAllocator.instance.release_pools()
+
+        if calibration_save_error is not None:
+            raise calibration_save_error
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)

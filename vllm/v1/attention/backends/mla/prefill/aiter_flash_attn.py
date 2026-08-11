@@ -102,8 +102,14 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
                 )
                 from aiter.ops.triton.quant.per_head import (
                     dynamic_per_head_quant_fp8,
-                    static_per_head_quant_fp8,
                 )
+
+                try:
+                    from aiter.ops.triton.quant.per_head import (
+                        static_per_head_quant_fp8,
+                    )
+                except ImportError:
+                    static_per_head_quant_fp8 = None
 
                 model_dtype = vllm_config.model_config.dtype
                 self._fp8_prefill_enabled = (

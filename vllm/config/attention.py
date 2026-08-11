@@ -75,6 +75,9 @@ class AttentionConfig:
     rocm_kimi_k3_fp8_prefill_scale_margin: float = 1.1
     """Safety multiplier applied when freezing calibrated per-head amax."""
 
+    rocm_kimi_k3_fp8_prefill_calibration_id: str | None = None
+    """Unique identity shared by every rank shard in one calibration run."""
+
     use_fp4_indexer_cache: bool = False
     """If set, use fp4 indexer cache for dsv32 family model (not support yet)"""
 
@@ -130,6 +133,14 @@ class AttentionConfig:
             raise ValueError(
                 "Kimi-K3 FP8 scale load and calibration save paths are "
                 "mutually exclusive"
+            )
+        if (
+            self.rocm_kimi_k3_fp8_prefill_scale_save_path is not None
+            and not self.rocm_kimi_k3_fp8_prefill_calibration_id
+        ):
+            raise ValueError(
+                "rocm_kimi_k3_fp8_prefill_calibration_id is required when "
+                "saving calibration shards"
             )
         margin = self.rocm_kimi_k3_fp8_prefill_scale_margin
         if not math.isfinite(margin) or margin < 1.0:
