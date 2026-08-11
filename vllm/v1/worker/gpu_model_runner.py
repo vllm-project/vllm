@@ -1636,7 +1636,9 @@ class GPUModelRunner(
                 num_reqs=num_reqs,
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
                 num_accepted_tokens_cpu_tensor=(
-                    self.input_batch.num_accepted_tokens_cpu_tensor
+                    self.num_accepted_tokens.cpu
+                    if self.use_async_scheduling
+                    else self.input_batch.num_accepted_tokens_cpu_tensor
                 ),
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
@@ -1998,6 +2000,32 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
+    def _sync_num_accepted_tokens(
+        self, num_reqs: int, prev_req_id_to_index: dict | None
+    ) -> None:
+        # Async mode: condense() reordered indices, use prev_positions mapping
+        if self.use_async_scheduling:
+            if prev_req_id_to_index:
+                # Remap the previous-iteration runner snapshot through prev_positions.
+                prev_idx = self.prev_positions.np[:num_reqs]
+                new_mask = prev_idx < 0
+                self.num_accepted_tokens.np[:num_reqs] = self.num_accepted_tokens.np[
+                    np.where(new_mask, 0, prev_idx)
+                ]
+                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
+                    self.num_accepted_tokens.np[:num_reqs]
+                )
+            else:
+                # Default initialization for initial step
+                self.num_accepted_tokens.np[:num_reqs].fill(1)
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs].fill(1)
+        else:
+            # Non-async mode: InputBatch owns current-request counts.
+            self.num_accepted_tokens.np[:num_reqs] = (
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            )
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2156,23 +2184,7 @@ class GPUModelRunner(
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.synchronize()
             # Async mode: condense() reordered indices, use prev_positions mapping
-            if self.use_async_scheduling and prev_req_id_to_index:
-                prev_idx = self.prev_positions.np[:num_reqs]
-                new_mask = prev_idx < 0
-                self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[
-                        np.where(new_mask, 0, prev_idx)
-                    ]
-                )
-                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
-                    self.num_accepted_tokens.np[:num_reqs]
-                )
-            else:
-                # Non-async mode: use values directly
-                self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                )
+            self._sync_num_accepted_tokens(num_reqs, prev_req_id_to_index)
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:

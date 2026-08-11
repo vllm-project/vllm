@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import numpy as np
 import pytest
@@ -1754,3 +1754,60 @@ class TestInitFp8KvScalesHybridModels:
         assert (t1 == 0).all()
         assert (t2 == 0).all()
         assert all((t == 0).all() for t in list_entry)
+
+
+def test_async_mamba_align_accepted_counts_race():
+    """Verify async MTP align mode reads accepted counts
+    from unmutated CPU buffer (#51571).
+
+    Ensures that when InputBatch.condense() shifts row indices during async scheduling,
+    the runner reads historical accepted counts from its unmutated CPU buffer
+    snapshot rather than reading from mutated InputBatch rows.
+    """
+    runner = MagicMock()
+    runner.use_async_scheduling = True
+    runner.num_accepted_tokens_event = MagicMock()
+
+    num_reqs = 3
+
+    # 2. Step N: Runner D2H accepted counts buffer holds historical Step N output
+    # Req A (Row 0) accepted 4, Req B (Row 1) accepted 3, Req C (Row 2) accepted 2
+    runner.num_accepted_tokens.np = np.array([4, 3, 2, 0, 0], dtype=np.int32)
+    runner.num_accepted_tokens.cpu = torch.from_numpy(runner.num_accepted_tokens.np)
+
+    # 3. Step N+1: InputBatch was condensed by _update_states() BEFORE event sync!
+    # Req B (Row 1) finished. Req C moved from Row 2 -> Row 1. New Req D added at Row 2.
+    # input_batch.num_accepted_tokens_cpu became [4, 2, 1] after condense.
+    runner.input_batch.num_accepted_tokens_cpu = np.array(
+        [4, 2, 1, 0, 0], dtype=np.int32
+    )
+
+    # 4. prev_positions mapping for Step N+1:
+    # Row 0 came from prev Row 0 (Req A)
+    # Row 1 came from prev Row 2 (Req C)
+    # Row 2 is a new request (-1) (Req D)
+    runner.prev_positions.np = np.array([0, 2, -1], dtype=np.int32)
+
+    # 5. Gather logic
+    prev_idx = runner.prev_positions.np[:num_reqs]
+    new_mask = prev_idx < 0
+    src_accepted_counts = (
+        runner.num_accepted_tokens.np
+        if runner.use_async_scheduling
+        else runner.input_batch.num_accepted_tokens_cpu
+    )
+    runner.num_accepted_tokens.np[:num_reqs] = src_accepted_counts[
+        np.where(new_mask, 0, prev_idx)
+    ]
+    runner.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+
+    # 6. Assertions
+    assert runner.num_accepted_tokens.np[0] == 4, "Expected 4, got {}".format(
+        runner.num_accepted_tokens.np[0]
+    )  # Req A
+    assert runner.num_accepted_tokens.np[1] == 2, "Expected 2, got {}".format(
+        runner.num_accepted_tokens.np[1]
+    )  # Req C
+    assert runner.num_accepted_tokens.np[2] == 1, "Expected 1, got {}".format(
+        runner.num_accepted_tokens.np[2]
+    )  # Req D (New)
