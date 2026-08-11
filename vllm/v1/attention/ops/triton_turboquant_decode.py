@@ -313,6 +313,323 @@ def _tq_decode_stage1(
     tl.store(Mid_o_ptr + out_base + HEAD_DIM, lse)
 
 
+@triton.jit
+def _tq_decode_stage1_qgroup4(
+    Q_rot_ptr,
+    KV_cache_ptr,
+    Block_table_ptr,
+    Seq_lens_ptr,
+    Centroids_ptr,
+    Mid_v_ptr,
+    Mid_lse_ptr,
+    stride_qb,
+    stride_qh,
+    stride_cache_block,
+    stride_cache_pos,
+    stride_cache_head,
+    stride_bt_b,
+    stride_mid_b,
+    stride_mid_h,
+    stride_mid_s,
+    stride_mid_lse_b,
+    stride_mid_lse_h,
+    stride_mid_lse_s,
+    NUM_KV_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_KV_SPLITS: tl.constexpr,
+    KV_GROUP_SIZE: tl.constexpr,
+    MSE_BITS: tl.constexpr,
+    MSE_BYTES: tl.constexpr,
+    VAL_DATA_BYTES: tl.constexpr,
+    ATTN_SCALE: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+    NORM_CORRECTION: tl.constexpr = 0,
+):
+    bid = tl.program_id(0)
+    kv_head = tl.program_id(1)
+    sid = tl.program_id(2)
+
+    hid0 = kv_head * KV_GROUP_SIZE
+    hid1 = hid0 + 1
+    hid2 = hid0 + 2
+    hid3 = hid0 + 3
+
+    seq_len = tl.load(Seq_lens_ptr + bid)
+    split_len = tl.cdiv(seq_len, NUM_KV_SPLITS)
+    split_start = split_len * sid
+    split_end = tl.minimum(split_start + split_len, seq_len)
+
+    if split_start >= split_end:
+        return
+
+    d_offs = tl.arange(0, BLOCK_D)
+    d_mask = d_offs < HEAD_DIM
+    kv_range = tl.arange(0, BLOCK_KV)
+    d_col = tl.arange(0, BLOCK_D)[:, None]
+    d_mask_col = d_col < HEAD_DIM
+
+    q0_base = bid * stride_qb + hid0 * stride_qh
+    q1_base = bid * stride_qb + hid1 * stride_qh
+    q2_base = bid * stride_qb + hid2 * stride_qh
+    q3_base = bid * stride_qb + hid3 * stride_qh
+    q0 = tl.load(Q_rot_ptr + q0_base + d_offs, mask=d_mask, other=0.0).to(tl.float32)
+    q1 = tl.load(Q_rot_ptr + q1_base + d_offs, mask=d_mask, other=0.0).to(tl.float32)
+    q2 = tl.load(Q_rot_ptr + q2_base + d_offs, mask=d_mask, other=0.0).to(tl.float32)
+    q3 = tl.load(Q_rot_ptr + q3_base + d_offs, mask=d_mask, other=0.0).to(tl.float32)
+
+    mse_bit_off = d_offs * MSE_BITS
+    mse_byte_idx = mse_bit_off // 8
+    mse_bit_shift = mse_bit_off % 8
+    mse_mask = (1 << MSE_BITS) - 1
+
+    m0 = -float("inf")
+    m1 = -float("inf")
+    m2 = -float("inf")
+    m3 = -float("inf")
+    l0 = 0.0
+    l1 = 0.0
+    l2 = 0.0
+    l3 = 0.0
+    acc0 = tl.zeros([BLOCK_D], dtype=tl.float32)
+    acc1 = tl.zeros([BLOCK_D], dtype=tl.float32)
+    acc2 = tl.zeros([BLOCK_D], dtype=tl.float32)
+    acc3 = tl.zeros([BLOCK_D], dtype=tl.float32)
+
+    bt_base = bid * stride_bt_b
+    kv_head_i64 = tl.cast(kv_head, tl.int64)
+    key_head_offset = kv_head_i64 * MSE_BYTES * BLOCK_SIZE
+    value_region_offset = NUM_KV_HEADS * MSE_BYTES * BLOCK_SIZE
+    value_head_offset = value_region_offset + kv_head_i64 * VAL_DATA_BYTES * BLOCK_SIZE
+    meta_region_offset = (
+        value_region_offset + NUM_KV_HEADS * VAL_DATA_BYTES * BLOCK_SIZE
+    )
+    meta_token_stride = NUM_KV_HEADS * 6
+    meta_head_offset = kv_head_i64 * 6
+
+    for start_n in range(split_start, split_end, BLOCK_KV):
+        kv_offs = start_n + kv_range
+        kv_mask = kv_offs < split_end
+
+        page_idx = kv_offs // BLOCK_SIZE
+        page_off = kv_offs % BLOCK_SIZE
+        block_nums = tl.load(
+            Block_table_ptr + bt_base + page_idx,
+            mask=kv_mask,
+            other=0,
+        ).to(tl.int64)
+
+        page_bases = block_nums * stride_cache_block
+        key_head_bases = page_bases + key_head_offset
+        value_head_bases = page_bases + value_head_offset
+        meta_bases = (
+            page_bases
+            + meta_region_offset
+            + page_off.to(tl.int64) * meta_token_stride
+            + meta_head_offset
+        )
+
+        mse_addrs0 = (
+            key_head_bases[None, :]
+            + mse_byte_idx[:, None] * BLOCK_SIZE
+            + page_off[None, :].to(tl.int64)
+        )
+        mse_raw0 = tl.load(
+            KV_cache_ptr + mse_addrs0,
+            mask=kv_mask[None, :] & d_mask_col,
+            other=0,
+        ).to(tl.int32)
+        mse_raw1 = tl.load(
+            KV_cache_ptr + mse_addrs0 + BLOCK_SIZE,
+            mask=kv_mask[None, :] & d_mask_col,
+            other=0,
+        ).to(tl.int32)
+        raw16 = mse_raw0 | (mse_raw1 << 8)
+        mse_idx = (raw16 >> mse_bit_shift[:, None]) & mse_mask
+
+        c_vals = tl.load(
+            Centroids_ptr + mse_idx,
+            mask=kv_mask[None, :] & d_mask_col,
+            other=0.0,
+        )
+        if NORM_CORRECTION:
+            c_norm_sq = tl.sum(c_vals * c_vals, axis=0)
+            c_inv_norm = 1.0 / tl.sqrt(c_norm_sq + 1e-16)
+
+        norm_u16 = tl.load(
+            (KV_cache_ptr + meta_bases).to(tl.pointer_type(tl.uint16)),
+            mask=kv_mask,
+            other=0,
+        )
+        vec_norms = norm_u16.to(tl.float16, bitcast=True).to(tl.float32)
+
+        term0 = tl.sum(q0[:, None] * c_vals, axis=0)
+        term1 = tl.sum(q1[:, None] * c_vals, axis=0)
+        if NORM_CORRECTION:
+            term0 = term0 * c_inv_norm
+            term1 = term1 * c_inv_norm
+
+        scores0 = tl.where(kv_mask, vec_norms * term0 * ATTN_SCALE, -float("inf"))
+        scores1 = tl.where(kv_mask, vec_norms * term1 * ATTN_SCALE, -float("inf"))
+
+        n0 = tl.maximum(tl.max(scores0, 0), m0)
+        n1 = tl.maximum(tl.max(scores1, 0), m1)
+        re0 = tl.exp(m0 - n0)
+        re1 = tl.exp(m1 - n1)
+        p0 = tl.exp(scores0 - n0)
+        p1 = tl.exp(scores1 - n1)
+
+        vb_idx = d_offs // 2
+        vb_shift = (d_offs % 2) * 4
+        val_addrs = (
+            value_head_bases[None, :]
+            + vb_idx[:, None] * BLOCK_SIZE
+            + page_off[None, :].to(tl.int64)
+        )
+        val_raw = tl.load(
+            KV_cache_ptr + val_addrs,
+            mask=kv_mask[None, :] & d_mask_col,
+            other=0,
+        ).to(tl.int32)
+        v_idx = ((val_raw >> vb_shift[:, None]) & 0xF).to(tl.float32)
+
+        scale_u16 = tl.load(
+            (KV_cache_ptr + meta_bases + 2).to(tl.pointer_type(tl.uint16)),
+            mask=kv_mask,
+            other=0,
+        )
+        v_scales = scale_u16.to(tl.float16, bitcast=True).to(tl.float32)
+        zero_u16 = tl.load(
+            (KV_cache_ptr + meta_bases + 4).to(tl.pointer_type(tl.uint16)),
+            mask=kv_mask,
+            other=0,
+        )
+        v_zeros = zero_u16.to(tl.float16, bitcast=True).to(tl.float32)
+        values = v_idx * v_scales[None, :] + v_zeros[None, :]
+
+        acc0 = acc0 * re0 + tl.sum(p0[None, :] * values, axis=1)
+        acc1 = acc1 * re1 + tl.sum(p1[None, :] * values, axis=1)
+        l0 = l0 * re0 + tl.sum(p0, 0)
+        l1 = l1 * re1 + tl.sum(p1, 0)
+        m0 = n0
+        m1 = n1
+
+        term2 = tl.sum(q2[:, None] * c_vals, axis=0)
+        term3 = tl.sum(q3[:, None] * c_vals, axis=0)
+        if NORM_CORRECTION:
+            term2 = term2 * c_inv_norm
+            term3 = term3 * c_inv_norm
+
+        scores2 = tl.where(kv_mask, vec_norms * term2 * ATTN_SCALE, -float("inf"))
+        scores3 = tl.where(kv_mask, vec_norms * term3 * ATTN_SCALE, -float("inf"))
+
+        n2 = tl.maximum(tl.max(scores2, 0), m2)
+        n3 = tl.maximum(tl.max(scores3, 0), m3)
+        re2 = tl.exp(m2 - n2)
+        re3 = tl.exp(m3 - n3)
+        p2 = tl.exp(scores2 - n2)
+        p3 = tl.exp(scores3 - n3)
+
+        acc2 = acc2 * re2 + tl.sum(p2[None, :] * values, axis=1)
+        acc3 = acc3 * re3 + tl.sum(p3[None, :] * values, axis=1)
+        l2 = l2 * re2 + tl.sum(p2, 0)
+        l3 = l3 * re3 + tl.sum(p3, 0)
+        m2 = n2
+        m3 = n3
+
+    out0 = bid * stride_mid_b + hid0 * stride_mid_h + sid * stride_mid_s
+    out1 = bid * stride_mid_b + hid1 * stride_mid_h + sid * stride_mid_s
+    out2 = bid * stride_mid_b + hid2 * stride_mid_h + sid * stride_mid_s
+    out3 = bid * stride_mid_b + hid3 * stride_mid_h + sid * stride_mid_s
+    lse0 = bid * stride_mid_lse_b + hid0 * stride_mid_lse_h + sid * stride_mid_lse_s
+    lse1 = bid * stride_mid_lse_b + hid1 * stride_mid_lse_h + sid * stride_mid_lse_s
+    lse2 = bid * stride_mid_lse_b + hid2 * stride_mid_lse_h + sid * stride_mid_lse_s
+    lse3 = bid * stride_mid_lse_b + hid3 * stride_mid_lse_h + sid * stride_mid_lse_s
+    safe_l0 = tl.where(l0 > 0.0, l0, 1.0)
+    safe_l1 = tl.where(l1 > 0.0, l1, 1.0)
+    safe_l2 = tl.where(l2 > 0.0, l2, 1.0)
+    safe_l3 = tl.where(l3 > 0.0, l3, 1.0)
+    tl.store(Mid_v_ptr + out0 + d_offs, acc0 / safe_l0, mask=d_mask)
+    tl.store(Mid_v_ptr + out1 + d_offs, acc1 / safe_l1, mask=d_mask)
+    tl.store(Mid_v_ptr + out2 + d_offs, acc2 / safe_l2, mask=d_mask)
+    tl.store(Mid_v_ptr + out3 + d_offs, acc3 / safe_l3, mask=d_mask)
+    tl.store(Mid_lse_ptr + lse0, m0 + tl.log(safe_l0))
+    tl.store(Mid_lse_ptr + lse1, m1 + tl.log(safe_l1))
+    tl.store(Mid_lse_ptr + lse2, m2 + tl.log(safe_l2))
+    tl.store(Mid_lse_ptr + lse3, m3 + tl.log(safe_l3))
+
+
+@triton.jit
+def _tq_qgroup4_stage2_splitmid(
+    Mid_v,
+    Mid_lse,
+    o,
+    lse,
+    B_Seqlen,
+    stride_mid_vb,
+    stride_mid_vh,
+    stride_mid_vs,
+    stride_mid_lseb,
+    stride_mid_lseh,
+    stride_mid_lses,
+    stride_obs,
+    stride_oh,
+    stride_lse_bs,
+    NUM_KV_SPLITS: tl.constexpr,
+    BLOCK_DV: tl.constexpr,
+    Lv: tl.constexpr,
+    OUTPUT_FP16: tl.constexpr = 0,
+):
+    cur_batch = tl.program_id(0)
+    cur_head = tl.program_id(1)
+
+    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
+
+    offs_d = tl.arange(0, BLOCK_DV)
+    mask_d = offs_d < Lv
+
+    e_sum = 0.0
+    e_max = -float("inf")
+    acc = tl.zeros([BLOCK_DV], dtype=tl.float32)
+
+    offs_v = cur_batch * stride_mid_vb + cur_head * stride_mid_vh + offs_d
+    offs_logic = cur_batch * stride_mid_lseb + cur_head * stride_mid_lseh
+
+    for split_kv_id in range(0, NUM_KV_SPLITS):
+        kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
+        split_kv_start = kv_len_per_split * split_kv_id
+        split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
+
+        if split_kv_end > split_kv_start:
+            tv = tl.load(
+                Mid_v + offs_v + split_kv_id * stride_mid_vs,
+                mask=mask_d,
+                other=0.0,
+            ).to(tl.float32)
+            tlogic = tl.load(Mid_lse + offs_logic + split_kv_id * stride_mid_lses)
+            n_e_max = tl.maximum(tlogic, e_max)
+
+            old_scale = tl.exp(e_max - n_e_max)
+            acc *= old_scale
+            exp_logic = tl.exp(tlogic - n_e_max)
+            acc += exp_logic * tv
+
+            e_sum = e_sum * old_scale + exp_logic
+            e_max = n_e_max
+
+    result = acc / e_sum
+    if OUTPUT_FP16:
+        result = result.to(tl.float16)
+    tl.store(
+        o + cur_batch * stride_obs + cur_head * stride_oh + offs_d,
+        result,
+        mask=mask_d,
+    )
+    lse_val = e_max + tl.log(e_sum)
+    tl.store(lse + cur_batch * stride_lse_bs + cur_head, lse_val)
+
+
 # ---------------------------------------------------------------------------
 # Pre-dequant kernel: Bulk dequant K (MSE+norms) and V to fp16
 # ---------------------------------------------------------------------------
@@ -455,6 +772,123 @@ def _tq_full_dequant_kv(
     tl.store(V_out_ptr + vo_base + d_offs, v_vals.to(tl.float16), mask=d_mask)
 
 
+@triton.jit
+def _tq_full_dequant_kv_qgroup4(
+    KV_cache_ptr,
+    Block_table_ptr,
+    Centroids_ptr,
+    K_out_ptr,  # [B, Hk, max_seq, D] float16
+    V_out_ptr,  # [B, Hk, max_seq, D] float16
+    stride_ko_b,
+    stride_ko_h,
+    stride_ko_s,
+    stride_vo_b,
+    stride_vo_h,
+    stride_vo_s,
+    stride_cache_block,
+    stride_cache_pos,
+    stride_cache_head,
+    stride_bt_b,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    MSE_BYTES: tl.constexpr,
+    VQB: tl.constexpr,
+    VAL_DATA_BYTES: tl.constexpr,
+    MSE_BITS: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    NORM_CORRECTION: tl.constexpr = 0,
+):
+    """Full dequant reader for the qgroup4 page-plane layout."""
+    pos = tl.program_id(0)
+    bh = tl.program_id(1)
+    bid = bh // NUM_KV_HEADS
+    hid = bh % NUM_KV_HEADS
+
+    page_idx = pos // BLOCK_SIZE
+    page_off = pos % BLOCK_SIZE
+    block_num = tl.load(Block_table_ptr + bid * stride_bt_b + page_idx).to(tl.int64)
+    page_base = block_num * stride_cache_block
+    key_head_base = page_base + tl.cast(hid, tl.int64) * MSE_BYTES * BLOCK_SIZE
+    value_region_base = page_base + NUM_KV_HEADS * MSE_BYTES * BLOCK_SIZE
+    value_head_base = (
+        value_region_base + tl.cast(hid, tl.int64) * VAL_DATA_BYTES * BLOCK_SIZE
+    )
+    meta_base = (
+        value_region_base
+        + NUM_KV_HEADS * VAL_DATA_BYTES * BLOCK_SIZE
+        + (tl.cast(page_off, tl.int64) * NUM_KV_HEADS + tl.cast(hid, tl.int64)) * 6
+    )
+
+    d_offs = tl.arange(0, BLOCK_D)
+    d_mask = d_offs < HEAD_DIM
+
+    ko_base = bid * stride_ko_b + hid * stride_ko_h + pos * stride_ko_s
+    mse_bit_off = d_offs * MSE_BITS
+    mse_byte_idx = mse_bit_off // 8
+    mse_bit_shift = mse_bit_off % 8
+    mse_umask = (1 << MSE_BITS) - 1
+
+    mse_raw0 = tl.load(
+        KV_cache_ptr + key_head_base + mse_byte_idx * BLOCK_SIZE + page_off,
+        mask=d_mask,
+        other=0,
+    ).to(tl.int32)
+    mse_raw1 = tl.load(
+        KV_cache_ptr
+        + key_head_base
+        + mse_byte_idx * BLOCK_SIZE
+        + page_off
+        + BLOCK_SIZE,
+        mask=d_mask,
+        other=0,
+    ).to(tl.int32)
+    raw16_key = mse_raw0 | (mse_raw1 << 8)
+    mse_idx = (raw16_key >> mse_bit_shift) & mse_umask
+
+    k_mse = tl.load(Centroids_ptr + mse_idx, mask=d_mask, other=0.0)
+    if NORM_CORRECTION:
+        c_norm_sq = tl.sum(tl.where(d_mask, k_mse * k_mse, 0.0), axis=0)
+        c_inv_norm = 1.0 / tl.sqrt(c_norm_sq + 1e-16)
+        k_mse = k_mse * c_inv_norm
+
+    vec_norm = (
+        tl.load((KV_cache_ptr + meta_base).to(tl.pointer_type(tl.uint16)))
+        .to(tl.float16, bitcast=True)
+        .to(tl.float32)
+    )
+
+    k_recon = vec_norm * k_mse
+    tl.store(K_out_ptr + ko_base + d_offs, k_recon.to(tl.float16), mask=d_mask)
+
+    vo_base = bid * stride_vo_b + hid * stride_vo_h + pos * stride_vo_s
+    if VQB == 4:
+        vb_idx = d_offs // 2
+        vb_shift = (d_offs % 2) * 4
+        val_raw = tl.load(
+            KV_cache_ptr + value_head_base + vb_idx * BLOCK_SIZE + page_off,
+            mask=d_mask,
+            other=0,
+        ).to(tl.int32)
+        v_idx = ((val_raw >> vb_shift) & 0xF).to(tl.float32)
+
+        v_scale = (
+            tl.load((KV_cache_ptr + meta_base + 2).to(tl.pointer_type(tl.uint16)))
+            .to(tl.float16, bitcast=True)
+            .to(tl.float32)
+        )
+        v_zero = (
+            tl.load((KV_cache_ptr + meta_base + 4).to(tl.pointer_type(tl.uint16)))
+            .to(tl.float16, bitcast=True)
+            .to(tl.float32)
+        )
+        v_vals = v_idx * v_scale + v_zero
+    else:
+        v_vals = tl.zeros([BLOCK_D], dtype=tl.float32)
+
+    tl.store(V_out_ptr + vo_base + d_offs, v_vals.to(tl.float16), mask=d_mask)
+
+
 # ---------------------------------------------------------------------------
 # Stage 2: Reuse from triton_decode_attention.py
 # ---------------------------------------------------------------------------
@@ -528,6 +962,132 @@ def triton_turboquant_decode_attention(
         q_rot = (q_float @ PiT).contiguous()
 
     NUM_KV_SPLITS = max_num_kv_splits
+    use_qgroup4 = (not key_fp8) and value_quant_bits == 4 and kv_group_size == 4
+
+    if use_qgroup4:
+        mid_dtype = torch.float32
+        mid_v = None
+        mid_lse = None
+        if buf_holder is not None:
+            existing_mid_v = getattr(buf_holder, "_tq_qgroup4_mid_v_buf", None)
+            if (
+                existing_mid_v is not None
+                and existing_mid_v.shape[0] >= B
+                and existing_mid_v.shape[1] >= Hq
+                and existing_mid_v.shape[2] >= NUM_KV_SPLITS
+                and existing_mid_v.shape[3] >= D
+                and existing_mid_v.dtype == mid_dtype
+            ):
+                mid_v = existing_mid_v[:B, :Hq, :NUM_KV_SPLITS, :D]
+            existing_mid_lse = getattr(buf_holder, "_tq_qgroup4_mid_lse_buf", None)
+            if (
+                existing_mid_lse is not None
+                and existing_mid_lse.shape[0] >= B
+                and existing_mid_lse.shape[1] >= Hq
+                and existing_mid_lse.shape[2] >= NUM_KV_SPLITS
+            ):
+                mid_lse = existing_mid_lse[:B, :Hq, :NUM_KV_SPLITS]
+        if mid_v is None:
+            mid_v = torch.empty(
+                B,
+                Hq,
+                NUM_KV_SPLITS,
+                D,
+                dtype=mid_dtype,
+                device=device,
+            )
+            if buf_holder is not None:
+                buf_holder._tq_qgroup4_mid_v_buf = mid_v
+        if mid_lse is None:
+            mid_lse = torch.empty(
+                B,
+                Hq,
+                NUM_KV_SPLITS,
+                dtype=torch.float32,
+                device=device,
+            )
+            if buf_holder is not None:
+                buf_holder._tq_qgroup4_mid_lse_buf = mid_lse
+
+        BLOCK_KV = 4
+        grid = (B, Hk, NUM_KV_SPLITS)
+        _tq_decode_stage1_qgroup4[grid](
+            q_rot,
+            kv_cache,
+            block_table,
+            seq_lens,
+            centroids,
+            mid_v,
+            mid_lse,
+            q_rot.stride(0),
+            q_rot.stride(1),
+            kv_cache.stride(0),
+            kv_cache.stride(1),
+            kv_cache.stride(2),
+            block_table.stride(0),
+            mid_v.stride(0),
+            mid_v.stride(1),
+            mid_v.stride(2),
+            mid_lse.stride(0),
+            mid_lse.stride(1),
+            mid_lse.stride(2),
+            NUM_KV_HEADS=Hk,
+            HEAD_DIM=D,
+            BLOCK_SIZE=block_size,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            KV_GROUP_SIZE=kv_group_size,
+            MSE_BITS=mse_bits,
+            MSE_BYTES=cfg["mse_bytes"],
+            VAL_DATA_BYTES=cfg["val_data_bytes"],
+            ATTN_SCALE=scale,
+            BLOCK_D=cfg["BLOCK_D"],
+            BLOCK_KV=BLOCK_KV,
+            NORM_CORRECTION=1 if norm_correction else 0,
+            num_warps=1,
+            num_stages=1,
+        )
+
+        out_dtype = query.dtype
+        if (
+            output_buf is not None
+            and output_buf.shape[0] >= B
+            and output_buf.dtype == out_dtype
+        ):
+            output = output_buf[:B, :Hq, :D]
+        else:
+            output = torch.empty(B, Hq, D, dtype=out_dtype, device=device)
+            if buf_holder is not None:
+                buf_holder._tq_output_buf = output
+        if lse_buf is not None and lse_buf.shape[0] >= B:
+            lse = lse_buf[:B, :Hq]
+        else:
+            lse = torch.empty(B, Hq, dtype=torch.float32, device=device)
+            if buf_holder is not None:
+                buf_holder._tq_lse_buf = lse
+
+        _tq_qgroup4_stage2_splitmid[(B, Hq)](
+            mid_v,
+            mid_lse,
+            output,
+            lse,
+            seq_lens,
+            mid_v.stride(0),
+            mid_v.stride(1),
+            mid_v.stride(2),
+            mid_lse.stride(0),
+            mid_lse.stride(1),
+            mid_lse.stride(2),
+            output.stride(0),
+            output.stride(1),
+            lse.stride(0),
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            BLOCK_DV=cfg["BLOCK_D"],
+            Lv=D,
+            OUTPUT_FP16=1 if out_dtype == torch.float16 else 0,
+            num_warps=4,
+            num_stages=2,
+        )
+        return output
 
     if (
         mid_o_buf is not None
