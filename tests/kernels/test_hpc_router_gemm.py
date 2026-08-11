@@ -5,15 +5,15 @@ import pytest
 import torch
 
 from vllm._custom_ops import fp32_router_gemm
-from vllm.model_executor.layers.fused_moe.router.gate_linear import (
-    hpc_gemm_bf16xfp32_dispatch_impl,
+from vllm.utils.hpc import (
+    has_hpc_bf16xfp32_gemm,
+    hpc_gemm_bf16xfp32,
 )
-from vllm.utils.hpc import has_hpc_bf16xfp32_gemm
 
 SHAPES = [
-    (4096, 192),
     (3072, 256),
     (6144, 128),
+    (6144, 256),
 ]
 FP32_ROUTER_SHAPES = [
     (3072, 256),
@@ -25,6 +25,27 @@ TOKEN_COUNTS = [1, 2, 8, 16, 32, 128, 512]
 ATOL = 1e-1
 RTOL = 8e-2
 MAX_RELATIVE_L2 = 2e-3
+HPC_GEMM_WEIGHT_SCALE = 1.0 / 256.0
+
+
+HPC_GEMM_WEIGHT_SCALE = 1.0 / 256.0
+
+
+def _run_hpc_gemm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    weight_high = weight.to(torch.bfloat16)
+    weight_low = ((weight - weight_high.float()) / HPC_GEMM_WEIGHT_SCALE).to(
+        torch.bfloat16
+    )
+    import hpc
+
+    split_flag = hpc.get_gemm_bf16xfp32_workspace(weight.shape[0])
+    return hpc_gemm_bf16xfp32(
+        x=x,
+        weight_high=weight_high,
+        weight_low=weight_low,
+        scale=HPC_GEMM_WEIGHT_SCALE,
+        split_flag=split_flag,
+    )
 
 
 def _requires_hpc_sm90() -> None:
@@ -64,7 +85,7 @@ def test_hpc_router_gemm_numerics(
         * 0.02
     )
 
-    output = hpc_gemm_bf16xfp32_dispatch_impl(x, weight)
+    output = _run_hpc_gemm(x, weight)
 
     # FP64 reference avoids TF32/cuBLAS FP32 reference uncertainty.
     reference = torch.nn.functional.linear(
@@ -117,7 +138,7 @@ def test_hpc_vs_native_router(
         * 0.02
     )
 
-    hpc_output = hpc_gemm_bf16xfp32_dispatch_impl(x, weight)
+    hpc_output = _run_hpc_gemm(x, weight)
     reference = torch.nn.functional.linear(
         x.double(),
         weight.double(),
