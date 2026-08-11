@@ -544,16 +544,13 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
         ("W4A16_NVFP4", True, True),  # native W4A16 ckpt
     ],
 )
-def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
+def test_modelopt_nvfp4_moe_reports_missing_activation_key_for_w4a16(
     quant_method, expected_use_a16, act_key_is_none
 ):
     """``ModelOptNvFp4FusedMoE``: when the ckpt's ``quant_method`` is
     ``W4A16_NVFP4``, the MoE class must pass ``activation_key=None`` to
-    ``select_nvfp4_moe_backend``. That filters out every W4A4 backend
-    (their ``_supports_quant_scheme`` requires
-    ``(kNvfp4Static, kNvfp4Dynamic)`` exactly); Marlin survives because
-    it only checks ``weight_key``. A regression here would mean a W4A16
-    ckpt silently went to the cutlass W4A4 path.
+    ``select_nvfp4_moe_backend``. The oracle decides which backends can
+    tolerate that W4A16 contract.
     """
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptNvFp4Config,
@@ -593,6 +590,201 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is None
     else:
         assert kwargs["activation_key"] is kNvfp4Dynamic
+
+
+def test_nvfp4_oracle_auto_treats_w4a16_as_dynamic_for_cutedsl():
+    from vllm.model_executor.layers.fused_moe.oracle import nvfp4
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        NvFp4MoeBackend,
+        select_nvfp4_moe_backend,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kNvfp4Dynamic,
+        kNvfp4Static,
+    )
+
+    calls = []
+
+    def fake_kernel_cls(backend):
+        class FakeKernel:
+            @staticmethod
+            def is_supported_config(
+                cls,
+                config,
+                weight_key,
+                activation_key,
+                activation_format,
+            ):
+                calls.append((backend, activation_key))
+                return (
+                    backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+                    and activation_key is kNvfp4Dynamic,
+                    None,
+                )
+
+        return [FakeKernel]
+
+    moe_config = MagicMock()
+    moe_config.moe_backend = "auto"
+    moe_config.swiglu_limit = None
+    moe_config.moe_parallel_config.use_batched_activation_format = False
+
+    with patch.object(nvfp4, "backend_to_kernel_cls", side_effect=fake_kernel_cls):
+        backend, _ = select_nvfp4_moe_backend(
+            config=moe_config,
+            weight_key=kNvfp4Static,
+            activation_key=None,
+        )
+
+    assert backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+    assert (NvFp4MoeBackend.FLASHINFER_TRTLLM, None) in calls
+    assert (NvFp4MoeBackend.FLASHINFER_CUTEDSL, kNvfp4Dynamic) in calls
+
+
+def test_nvfp4_oracle_explicit_cutedsl_treats_w4a16_as_dynamic():
+    from vllm.model_executor.layers.fused_moe.oracle import nvfp4
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        NvFp4MoeBackend,
+        select_nvfp4_moe_backend,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kNvfp4Dynamic,
+        kNvfp4Static,
+    )
+
+    captured_activation_keys = []
+
+    class FakeCuteDslKernel:
+        @staticmethod
+        def is_supported_config(
+            cls,
+            config,
+            weight_key,
+            activation_key,
+            activation_format,
+        ):
+            captured_activation_keys.append(activation_key)
+            return activation_key is kNvfp4Dynamic, None
+
+    moe_config = MagicMock()
+    moe_config.moe_backend = "flashinfer_cutedsl"
+    moe_config.swiglu_limit = None
+    moe_config.moe_parallel_config.use_batched_activation_format = False
+
+    with patch.object(
+        nvfp4,
+        "backend_to_kernel_cls",
+        return_value=[FakeCuteDslKernel],
+    ):
+        backend, _ = select_nvfp4_moe_backend(
+            config=moe_config,
+            weight_key=kNvfp4Static,
+            activation_key=None,
+        )
+
+    assert backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+    assert captured_activation_keys == [kNvfp4Dynamic]
+
+
+def test_modelopt_w4a16_moe_cutedsl_passes_missing_activation_scales():
+    """W4A16 checkpoints do not carry calibrated activation scales.
+
+    ModelOpt should report that to the NVFP4 conversion helper instead of
+    manufacturing identity tensors at the quantization-method boundary.
+    """
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+        ModelOptNvFp4FusedMoE,
+    )
+
+    config = ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+        group_size=16,
+    )
+    moe_config = MagicMock()
+    moe_config.moe_backend = "flashinfer_cutedsl"
+    moe_config.is_act_and_mul = True
+
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
+            return_value=(NvFp4MoeBackend.FLASHINFER_CUTEDSL, MagicMock()),
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt."
+            "is_global_sf_supported_for_nvfp4_backend",
+            return_value=True,
+        ),
+    ):
+        method = ModelOptNvFp4FusedMoE(config, moe_config)
+
+    layer = torch.nn.Module()
+    layer.num_experts = 2
+    layer.w13_weight = torch.nn.Parameter(
+        torch.empty(2, 4, 8, dtype=torch.uint8), requires_grad=False
+    )
+    layer.w2_weight = torch.nn.Parameter(
+        torch.empty(2, 8, 2, dtype=torch.uint8), requires_grad=False
+    )
+    layer.w13_weight_scale = torch.nn.Parameter(
+        torch.empty(2, 4, 2, dtype=torch.float8_e4m3fn), requires_grad=False
+    )
+    layer.w2_weight_scale = torch.nn.Parameter(
+        torch.empty(2, 8, 1, dtype=torch.float8_e4m3fn), requires_grad=False
+    )
+    layer.w13_weight_scale_2 = torch.nn.Parameter(
+        torch.ones(2, 2), requires_grad=False
+    )
+    layer.w2_weight_scale_2 = torch.nn.Parameter(torch.ones(2), requires_grad=False)
+    layer.w13_input_scale = torch.nn.Parameter(
+        torch.full((4, 2), 7.0), requires_grad=False
+    )
+    layer.w2_input_scale = torch.nn.Parameter(
+        torch.full((4,), 11.0), requires_grad=False
+    )
+    layer._expert_routing_tables = MagicMock(return_value=None)
+
+    captured_kwargs = {}
+    def fake_convert_to_nvfp4_moe_kernel_format(**kwargs):
+        captured_kwargs.update(kwargs)
+        return (
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w13_weight_scale_2,
+            torch.ones(layer.num_experts),
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            layer.w2_weight_scale_2,
+            torch.ones(layer.num_experts),
+        )
+
+    moe_kernel = MagicMock()
+    moe_kernel.fused_experts.process_weights_after_loading = MagicMock()
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt."
+            "convert_to_nvfp4_moe_kernel_format",
+            side_effect=fake_convert_to_nvfp4_moe_kernel_format,
+        ),
+        patch.object(
+            ModelOptNvFp4FusedMoE,
+            "get_fused_moe_quant_config",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.make_nvfp4_moe_kernel",
+            return_value=moe_kernel,
+        ),
+    ):
+        method.process_weights_after_loading(layer)
+
+    assert captured_kwargs["a13_scale"] is None
+    assert captured_kwargs["a2_scale"] is None
 
 
 @pytest.mark.parametrize(

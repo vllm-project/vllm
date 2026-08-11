@@ -31,6 +31,8 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 
 logger = init_logger(__name__)
@@ -229,6 +231,26 @@ def select_nvfp4_moe_backend(
                 "deployment configuration."
             )
 
+    def _activation_key_for_backend(
+        backend: NvFp4MoeBackend,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        # W4A16 checkpoints do not carry calibrated activation scales and enter
+        # selection with activation_key=None. CuTeDSL can still run them by
+        # doing runtime activation quantization, but its support predicate is
+        # keyed as (kNvfp4Static, kNvfp4Dynamic). Use kNvfp4Dynamic only for the
+        # CuTeDSL capability check; the ModelOpt path still treats activation
+        # scales as missing and later materializes identity scales for the
+        # kernel wrapper.
+        if (
+            backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+            and weight_key is kNvfp4Static
+            and activation_key is None
+        ):
+            return kNvfp4Dynamic
+        return activation_key
+
     def _return_or_raise(
         backend: NvFp4MoeBackend,
         config: FusedMoEConfig,
@@ -236,6 +258,9 @@ def select_nvfp4_moe_backend(
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
+        activation_key = _activation_key_for_backend(
+            backend, weight_key, activation_key
+        )
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, weight_key, activation_key, activation_format
@@ -279,12 +304,15 @@ def select_nvfp4_moe_backend(
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
+        backend_activation_key = _activation_key_for_backend(
+            backend, weight_key, activation_key
+        )
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
                 k_cls,
                 config,
                 weight_key,
-                activation_key,
+                backend_activation_key,
                 activation_format,
             )
             if supported:

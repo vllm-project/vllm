@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
 from vllm.model_executor.layers.quantization.utils import flashinfer_fp4_moe
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
+    prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_trtllm_fp4_moe_hidden_dim_for_fi,
@@ -53,6 +54,39 @@ def test_shared_nvfp4_input_scales_have_writable_storage(monkeypatch):
     a2_scale.copy_(distinct_values)
     torch.testing.assert_close(a13_scale, distinct_values)
     torch.testing.assert_close(a2_scale, distinct_values)
+
+
+def test_cutedsl_missing_nvfp4_input_scales_use_identity(monkeypatch):
+    monkeypatch.setattr(flashinfer_fp4_moe, "swizzle_blockscale", lambda x: x)
+
+    num_experts = 3
+    layer = SimpleNamespace(
+        activation=SimpleNamespace(is_gated=True),
+        moe_config=SimpleNamespace(
+            moe_parallel_config=SimpleNamespace(enable_eplb=False)
+        ),
+    )
+    w13 = torch.zeros((num_experts, 128, 8), dtype=torch.uint8)
+    w2 = torch.zeros((num_experts, 16, 64), dtype=torch.uint8)
+    w13_scale = torch.zeros((num_experts, 128, 1), dtype=torch.float8_e4m3fn)
+    w2_scale = torch.zeros((num_experts, 16, 4), dtype=torch.float8_e4m3fn)
+    weight_scale = torch.ones(num_experts)
+
+    outputs = prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
+        layer=layer,
+        w13=w13,
+        w13_scale=w13_scale,
+        w13_scale_2=weight_scale,
+        a13_scale=None,
+        w2=w2,
+        w2_scale=w2_scale,
+        w2_scale_2=weight_scale,
+        a2_scale=None,
+    )
+    a13_scale, a2_scale = outputs[3], outputs[7]
+
+    torch.testing.assert_close(a13_scale, torch.ones(num_experts))
+    torch.testing.assert_close(a2_scale, torch.ones(num_experts))
 
 
 def test_align_trtllm_fp4_moe_hidden_dim_noop():

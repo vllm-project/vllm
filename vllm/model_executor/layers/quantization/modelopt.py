@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -1383,12 +1384,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With
-        # activation_key=None every W4A4 backend's _supports_quant_scheme
-        # rejects itself (they all require (kNvfp4Static, kNvfp4Dynamic)
-        # exactly); only Marlin survives. Marlin's MoE path drops
-        # activation scales in convert_to_nvfp4_moe_kernel_format, so no
-        # other change is needed.
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
@@ -1537,6 +1532,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
+        w13_input_scale = layer.w13_input_scale
+        w2_input_scale = layer.w2_input_scale
+        if (
+            self.use_a16
+            and self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+        ):
+            w13_input_scale = None
+            w2_input_scale = None
+
         (
             w13,
             w13_scale,
@@ -1552,11 +1556,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w13=layer.w13_weight,
             w13_scale=layer.w13_weight_scale,
             w13_scale_2=w13_weight_scale_2,
-            a13_scale=layer.w13_input_scale,
+            a13_scale=w13_input_scale,
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
             w2_scale_2=layer.w2_weight_scale_2,
-            a2_scale=layer.w2_input_scale,
+            a2_scale=w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
         )
 
