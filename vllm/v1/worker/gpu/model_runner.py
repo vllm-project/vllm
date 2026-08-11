@@ -58,6 +58,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
     get_dummy_encoder_profile_inputs,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -85,7 +86,6 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
     init_kv_cache,
 )
-from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import (
     async_copy_to_gpu,
     set_default_max_concurrency,
@@ -122,14 +122,12 @@ from vllm.v1.worker.gpu.lora_utils import (
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
-from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
-from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
     maybe_create_adaptive_verification_manager,
@@ -195,6 +193,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.output_copy_stream = torch.cuda.Stream(self.device)
 
+        # Component objects for the V2 model runner, provided by the platform.
+        # Hardware backends override `Platform.get_runner_component()`
+        # to substitute their own implementations instead of copying the runner.
+        self.runner_components = current_platform.get_runner_component()
+
         # Pipeline parallelism.
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.is_first_pp_rank = get_pp_group().is_first_rank
@@ -245,7 +248,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
-                self.speculator = init_speculator(self.vllm_config, self.device)
+                self.speculator = self.runner_components.speculator_factory(
+                    self.vllm_config, self.device
+                )
 
             if self.speculative_config.method in ("eagle3", "dflash", "dspark"):
                 # Drafting may require auxiliary hidden states from target model outputs
@@ -389,7 +394,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Initialize the components that require the model.
-        self.model_state = init_model_state(
+        self.model_state = self.runner_components.model_state_factory(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
 
@@ -400,7 +405,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Initialize samplers. Model states may override via custom_sampler().
         if self.is_last_pp_rank and not self.is_pooling_model:
-            self.sampler = Sampler(
+            self.sampler = self.runner_components.sampler_cls(
                 max_num_reqs=self.max_num_reqs,
                 vocab_size=self.vocab_size,
                 device=self.device,
@@ -551,7 +556,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_total_logits=get_max_chunk_logits(self.vocab_size),
         )
 
-        self.block_tables = BlockTables(
+        self.block_tables = self.runner_components.block_tables_cls(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
@@ -562,14 +567,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
         )
-        self.pcp_manager = pcp.maybe_build_pcp_manager(
-            self.vllm_config,
-            self.device,
-            self.supports_mm_inputs,
-            self.req_states,
-            self.block_tables,
-            cls=self.pcp_manager_cls,
-        )
+        if self.parallel_config.prefill_context_parallel_size > 1:
+            self.pcp_manager = self.runner_components.pcp_manager_cls(
+                self.vllm_config,
+                self.device,
+                self.supports_mm_inputs,
+                self.req_states,
+                self.block_tables,
+            )
+        else:
+            self.pcp_manager = None
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
         )
@@ -584,13 +591,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
         )
-        self.cudagraph_manager = ModelCudaGraphManager(
+        self.cudagraph_manager = self.runner_components.cudagraph_manager_cls(
             self.vllm_config,
             self.device,
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
             varlen_decode=self.adaptive_verification is not None,
+            input_batch_cls=self.runner_components.input_batch_cls,
         )
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
@@ -773,7 +781,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
-        dummy_input_batch = InputBatch.make_dummy(
+        dummy_input_batch = self.runner_components.input_batch_cls.make_dummy(
             num_reqs, num_reqs, self.input_buffers
         )
 
@@ -1262,7 +1270,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
-        input_batch = InputBatch(
+        input_batch = self.runner_components.input_batch_cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs_padded,
@@ -1501,9 +1509,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._set_active_loras(*lora_inputs)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
-            dummy_num_reqs = batch_desc.num_reqs or num_reqs
-            input_batch = InputBatch.make_dummy(
-                dummy_num_reqs,
+            input_batch = self.runner_components.input_batch_cls.make_dummy(
+                batch_desc.num_reqs or num_reqs,
                 batch_desc.num_tokens,
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
@@ -1972,11 +1979,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     ########### EPLB methods end ###########
-
-    # Out-of-tree hardware runners can select a PCP manager class.
-    @property
-    def pcp_manager_cls(self) -> type[pcp.PCPManager]:
-        return pcp.PCPManager
 
 
 class ExecuteModelState(NamedTuple):
