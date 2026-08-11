@@ -72,7 +72,7 @@ RUN sed -i '/mamba_ssm/d'                  requirements/test/zen.in && \
        --index-strategy unsafe-best-match --torch-backend cpu
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/test/zen.txt
+    uv pip install -r requirements/test/zen.txt --torch-backend cpu
 
 # Reassert zentorch's torch in case test-deps moved it.
 RUN --mount=type=cache,target=/root/.cache/uv \
