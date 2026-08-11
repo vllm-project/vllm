@@ -107,6 +107,12 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 
 ## Set up using Docker
 
+### Deploy on Sealos
+
+[![Deploy on Sealos](https://sealos.io/Deploy-on-Sealos.svg)](https://sealos.io/products/app-store/vllm)
+
+The template pins the CPU image and persists the Hugging Face cache so downloaded weights survive restarts.
+
 ### Pre-built images
 
 === "Intel/AMD x86"
