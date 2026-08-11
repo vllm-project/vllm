@@ -5,6 +5,7 @@
 on partial hits, and same-step deferral."""
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -31,6 +32,41 @@ from vllm.v1.kv_cache_interface import (
 @pytest.fixture(autouse=True)
 def _auto_init_hash_fn():
     init_none_hash(sha256)
+
+
+def test_connector_without_divergent_hit_support_uses_common_lookup():
+    common_blocks = MagicMock()
+    manager = MagicMock()
+    manager.get_computed_blocks.return_value = (common_blocks, 0, 0)
+    scheduler = SimpleNamespace(
+        connector=SimpleNamespace(supports_divergent_local_hybrid_hits=False),
+        kv_cache_manager=manager,
+    )
+
+    result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
+
+    assert result == (common_blocks, 0, 0, False)
+    manager.get_computed_blocks_for_connector.assert_not_called()
+
+
+def test_capable_connector_uses_divergent_partial_hit_lookup():
+    per_group_blocks = MagicMock()
+    manager = MagicMock()
+    manager.get_computed_blocks_for_connector.return_value = (
+        per_group_blocks,
+        6,
+        0,
+        True,
+    )
+    scheduler = SimpleNamespace(
+        connector=SimpleNamespace(supports_divergent_local_hybrid_hits=True),
+        kv_cache_manager=manager,
+    )
+
+    result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
+
+    assert result == (per_group_blocks, 6, 0, True)
+    manager.get_computed_blocks.assert_not_called()
 
 
 def test_mamba_align_split_partial_tail_schedule():
@@ -297,6 +333,78 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     assert get_block_hash(moved[0].block_hash) == partial_mamba_hash
     assert get_group_id(moved[0].block_hash) == 1
     assert moved[0].block_hash_num_tokens == 6
+
+
+def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
+    """An external mid-block hit must become a running request even when its
+    first continuation does not need another Mamba block."""
+    hash_block_size = 2
+    mamba_block_size = 4 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    request = make_request("0", [0] * 15, hash_block_size, sha256)
+    loaded_blocks = manager.allocate_slots(
+        request,
+        num_new_tokens=0,
+        num_external_computed_tokens=10,
+        delay_cache_blocks=True,
+    )
+    assert loaded_blocks is not None
+
+    request.num_computed_tokens = 10
+    first_step_blocks = manager.allocate_slots(request, num_new_tokens=4)
+    assert first_step_blocks is not None
+
+    source_block_id = manager.get_blocks("0").get_block_ids()[1][1]
+    partial_hash = request.block_hashes[14 // hash_block_size - 1]
+    partial_block = manager.block_pool.get_cached_block(
+        partial_hash, kv_cache_group_ids=[1]
+    )
+    assert partial_block is not None
+    assert partial_block[0].block_id == source_block_id
+
+    request.num_computed_tokens = 14
+    continuation_blocks = manager.allocate_slots(request, num_new_tokens=1)
+    assert continuation_blocks is not None
+
+    assert continuation_blocks.get_block_ids()[1] == []
+    assert manager.get_blocks("0").get_block_ids()[1][1] == source_block_id
+    copies, _ = manager.take_kv_cache_block_copies()
+    cow_copy = next(c for c in copies if c.src_block_id == source_block_id)
+    assert cow_copy.dst_block_id != source_block_id
+
+    moved = manager.block_pool.get_cached_block(partial_hash, kv_cache_group_ids=[1])
+    assert moved is not None
+    assert moved[0].block_id == cow_copy.dst_block_id
 
 
 def test_take_partial_tail_offloads_returns_cow_target():
@@ -690,6 +798,70 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
 
     assert [len(group) for group in truncated.blocks] == [2, 1]
     assert truncated.blocks[1][0].is_null
+    assert [len(group) for group in blocks.blocks] == [3, 2]
+
+
+def test_truncate_computed_blocks_allows_short_mamba_group_only():
+    """External state may replace a short Mamba hit, but other groups must
+    cover the aligned local endpoint."""
+    hash_block_size = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=2 * hash_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    producer = make_request("producer", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    blocks, num_computed, _ = manager.get_computed_blocks(producer)
+    assert manager.allocate_slots(producer, 6, num_computed, blocks) is not None
+    manager.free(producer)
+    manager.new_step_starts()
+
+    consumer = make_request(
+        "consumer", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256
+    )
+    blocks, num_computed, _ = manager.get_computed_blocks(consumer)
+    assert num_computed == 6
+    assert [len(group) for group in blocks.blocks] == [3, 2]
+
+    short_mamba = manager.create_kv_cache_blocks((list(blocks.blocks[0]), []))
+    truncated = manager.truncate_computed_blocks(short_mamba, 4)
+    assert [len(group) for group in truncated.blocks] == [2, 0]
+
+    short_full_attention = manager.create_kv_cache_blocks(
+        (list(blocks.blocks[0][:1]), list(blocks.blocks[1]))
+    )
+    with pytest.raises(AssertionError):
+        manager.truncate_computed_blocks(short_full_attention, 4)
+
+    with pytest.raises(AssertionError):
+        manager.truncate_computed_blocks(blocks, 6)
+
+    # The lookup result itself is never mutated.
     assert [len(group) for group in blocks.blocks] == [3, 2]
 
 

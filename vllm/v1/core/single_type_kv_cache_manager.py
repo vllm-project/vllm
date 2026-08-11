@@ -1604,6 +1604,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
             # over-allocated at last round.
             if num_required_blocks <= len(align_req_blocks) and not has_partial_hit:
+                self._allocated_block_reqs.add(request_id)
                 return []
             else:
                 prev_block_len = len(align_req_blocks)
