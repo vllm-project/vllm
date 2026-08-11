@@ -931,12 +931,18 @@ def apply_top_k_top_p_triton(
     # Smaller tiles compile and run faster on CPU; GPU benefits from larger tiles.
     # On XPU, large BLOCK_SIZE causes precision loss in the single-pass pivot
     # approximation; use smaller tiles for accurate top-p results.
+    launch_kwargs = {}
     if logits.device.type == "cpu":
         block_size, block_size_trunc = 256, 128
     elif logits.device.type == "xpu":
         block_size, block_size_trunc = 4096, 2048
     else:
         block_size, block_size_trunc = 8192, 4096
+        # Each program serially sweeps the vocab row in BLOCK_SIZE tiles, so
+        # per-tile latency bounds kernel latency, and Triton's default of 4
+        # warps leaves an 8192-wide tile at 16 elements per lane. 8 warps is
+        # faster on every arch measured (SM90, SM100, SM120, gfx950); 16 is not.
+        launch_kwargs["num_warps"] = 8
 
     _topk_topp_kernel[(NUM_PROGRAMS,)](
         logits,
@@ -953,6 +959,7 @@ def apply_top_k_top_p_triton(
         BLOCK_SIZE_TRUNC=block_size_trunc,
         TOPK_ENABLED=topk_enabled,
         TOPP_ENABLED=topp_enabled,
+        **launch_kwargs,
     )
 
     return logits
