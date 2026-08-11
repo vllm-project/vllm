@@ -606,6 +606,55 @@ class Platform:
         return None
 
     @classmethod
+    def _find_non_ssm_backend_across_pp(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> "type[AttentionBackend] | None":
+        """Find the first non-SSM backend across all pipeline stages."""
+        backend_cls = cls._find_non_ssm_backend(vllm_config)
+
+        from vllm.distributed.parallel_state import (
+            get_pp_group,
+            model_parallel_is_initialized,
+        )
+
+        if not model_parallel_is_initialized():
+            return backend_cls
+
+        pp_group = get_pp_group()
+        if pp_group.world_size == 1:
+            return backend_cls
+
+        local_backend_id = (
+            backend_cls.full_cls_name() if backend_cls is not None else None
+        )
+        backend_ids: list[tuple[str, str] | None] = [None] * pp_group.world_size
+        torch.distributed.all_gather_object(
+            backend_ids,
+            local_backend_id,
+            group=pp_group.cpu_group,
+        )
+
+        selected_backend_id = next(
+            (backend_id for backend_id in backend_ids if backend_id is not None),
+            None,
+        )
+        if selected_backend_id is None:
+            return None
+
+        if selected_backend_id == local_backend_id:
+            return backend_cls
+
+        import importlib
+
+        module_name, qualname = selected_backend_id
+        selected_backend: Any = importlib.import_module(module_name)
+        for attr in qualname.split("."):
+            selected_backend = getattr(selected_backend, attr)
+
+        return selected_backend
+
+    @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         """
         Ensure block_size is compatible with the attention backend.
@@ -621,7 +670,7 @@ class Platform:
         if not model_config:
             return
 
-        backend_cls = cls._find_non_ssm_backend(vllm_config)
+        backend_cls = cls._find_non_ssm_backend_across_pp(vllm_config)
         if backend_cls is None:
             return
 

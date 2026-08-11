@@ -356,7 +356,7 @@ class CpuPlatform(Platform):
             return
 
         # reconcile attention and mamba page sizes
-        backend_cls = cls._find_non_ssm_backend(vllm_config)
+        backend_cls = cls._find_non_ssm_backend_across_pp(vllm_config)
         if backend_cls is None:
             return
 
