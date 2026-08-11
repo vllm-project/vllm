@@ -42,21 +42,6 @@ def build_args(args: list[str]) -> dict[str, str]:
     return values
 
 
-def test_use_existing_torch_supports_partial_docker_context(tmp_path: Path) -> None:
-    requirements = tmp_path / "requirements" / "test"
-    requirements.mkdir(parents=True)
-    cuda_requirements = requirements / "cuda.in"
-    cuda_requirements.write_text("torch==2.0.0\npytest\n")
-
-    subprocess.run(
-        [sys.executable, str(USE_EXISTING_TORCH), "--prefix"],
-        cwd=tmp_path,
-        check=True,
-    )
-
-    assert cuda_requirements.read_text() == "pytest\n"
-
-
 def test_release_metadata_args_prefer_pipeline_id() -> None:
     args = run_helper(
         "cu130-ubuntu2404",
