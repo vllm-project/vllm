@@ -132,7 +132,7 @@ class DistributionBasedRouting(RoutingStrategy):
 
         if self.distribution == "uniform":
             # Generate random scores, and take the top-k to avoid duplicate topk_ids
-            scores = torch.rand(num_tokens, num_experts, device=device)  
+            scores = torch.rand(num_tokens, num_experts, device=device)
             _, topk_ids = torch.topk(scores, top_k, dim=-1)
             return topk_ids.to(indices_type)
 

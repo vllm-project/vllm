@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.block_table import get_block_table_width
@@ -147,7 +148,7 @@ class KVBlockZeroer:
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
-            if not isinstance(spec, FullAttentionSpec):
+            if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
