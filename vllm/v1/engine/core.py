@@ -762,8 +762,15 @@ class EngineCore:
         cleanup_dist_env_and_memory()
         logger.debug_once("[shutdown] EngineCore: local resource teardown complete")
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        self.model_executor.profile(is_start, profile_prefix)
+    def profile(
+        self, is_start: bool = True, profile_prefix: str | None = None
+    ) -> Future[list[None]]:
+        # non_block=True so this utility call doesn't block run_busy_loop
+        # waiting on the worker RPC round trip -- _invoke_utility_method
+        # already knows how to defer a UtilityOutput until a returned Future
+        # resolves (see its `isinstance(result, Future)` branch), the same
+        # mechanism sample_tokens()/execute_model() rely on.
+        return self.model_executor.profile(is_start, profile_prefix, non_block=True)
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
