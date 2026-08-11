@@ -117,6 +117,21 @@ class CPUWorker(Worker):
                 activities=["CPU"],
             )
 
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        super().load_model(load_dummy_weights=load_dummy_weights)
+
+        # Shard the MoE experts across this rank's NUMA nodes, if it has more
+        # than one. Here rather than earlier because the decision depends on the
+        # thread binding and the placement on the weights being resident, and
+        # both are settled only once the model is loaded. The policy declines
+        # and this is inert whenever a rank already owns a single node, which is
+        # what VLLM_CPU_OMP_THREADS_BIND=auto gives.
+        from vllm.model_executor.layers.fused_moe.cpu_numa_shard import (
+            configure_and_place,
+        )
+
+        configure_and_place(self.model_runner.model)
+
     def init_device(self):
         self.device = torch.device("cpu")
 
