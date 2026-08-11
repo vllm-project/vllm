@@ -216,8 +216,11 @@ class AdaptiveVerificationManager:
             (draft_curve, verify_curve), src=0
         )
         if not draft_curve or not verify_curve:
-            logger.warning_once("DSpark could not profile step costs.")
-            return
+            raise RuntimeError(
+                "Adaptive verification could not profile step costs. Pass "
+                "`enable_adaptive_verification=false` in the speculative config to "
+                "verify a fixed number of drafts instead."
+            )
         self.cost_tables = build_cost_tables_from_curves(
             draft_curve,
             verify_curve,

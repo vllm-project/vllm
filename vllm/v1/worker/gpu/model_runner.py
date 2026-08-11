@@ -61,6 +61,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
@@ -528,6 +529,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise ValueError(
                     "Adaptive verification trims verification requests on device, which"
                     f" the {backend} attention backend does not support. Pass "
+                    "enable_adaptive_verification=false in the speculative config, or "
+                    "use a backend that does."
+                )
+            # Decode graphs become varlen
+            if attn_cg_support.min_cg_support != AttentionCGSupport.ALWAYS:
+                raise ValueError(
+                    "Adaptive verification captures varlen decode cudagraphs, so every"
+                    " attention builder must report AttentionCGSupport.ALWAYS, but "
+                    f"{attn_cg_support.min_cg_attn_backend} reports "
+                    f"{attn_cg_support.min_cg_support}. Pass "
                     "enable_adaptive_verification=false in the speculative config, or "
                     "use a backend that does."
                 )
@@ -1090,7 +1101,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         adaptive_verification = (
             self.adaptive_verification if num_draft_tokens_per_req is not None else None
         )
-        scheduled_num_tokens = num_scheduled_tokens
+        num_scheduled_tokens_upper_bound = num_scheduled_tokens
         if adaptive_verification is not None:
             # num_scheduled_tokens represents the draft budget evenly distributed across
             # all verification requests, `reallocate_drafts` will unevenly assign the
@@ -1185,7 +1196,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
         np.add(
             num_computed_tokens_np,
-            scheduled_num_tokens,
+            num_scheduled_tokens_upper_bound,
             out=seq_lens_cpu_upper_bound_np[:num_reqs],
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
@@ -1208,7 +1219,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
             expanded_local_pos=expanded_local_pos,
-            num_scheduled_tokens=num_scheduled_tokens,
+            num_scheduled_tokens=num_scheduled_tokens_upper_bound,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
             num_draft_tokens=total_num_draft_tokens,
@@ -1232,7 +1243,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             prompt_lens=prompt_lens,
             max_query_len=(
-                int(scheduled_num_tokens.max())
+                int(num_scheduled_tokens_upper_bound.max())
                 if adaptive_verification is not None
                 else None
             ),

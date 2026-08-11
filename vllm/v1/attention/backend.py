@@ -286,10 +286,14 @@ class AttentionBackend(ABC):
         with the CPU one; backends that plan off the CPU query lengths must opt out.
 
         Currently only verification requests are affected: adaptive verification trims
-        their drafts on device, so the CPU lengths bound them from above. The
-        decode/prefill split point and the CPU prefill query lengths both stay correct.
+        their drafts on device. On the CPU the draft budget is evenly distributed across
+        requests, so the total draft budget, the decode/prefill split point and the CPU
+        prefill query lengths all stay correct.
+
+        SSM backends opt out: their recurrent-state planning is built from the CPU
+        per-request boundaries, which the trimmed batch no longer matches.
         """
-        return True
+        return not cls.is_ssm()
 
     @classmethod
     def supports_pcp(cls) -> bool:

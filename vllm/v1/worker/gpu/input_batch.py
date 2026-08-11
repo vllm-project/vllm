@@ -54,9 +54,10 @@ class InputBatch:
     expanded_local_pos: torch.Tensor
 
     # [num_reqs]
-    # batch_idx -> num_scheduled_tokens
+    # batch_idx -> num_scheduled_tokens, (upper bound when using adaptive verification)
     num_scheduled_tokens: np.ndarray
-    # sum(num_scheduled_tokens)
+    # number of tokens in the batch,
+    #  may be < sum(num_scheduled_tokens) when using adaptive verification
     num_tokens: int
     num_tokens_after_padding: int
     # Sum of draft tokens scheduled across requests.
