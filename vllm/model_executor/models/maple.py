@@ -108,6 +108,18 @@ class MapleMoE(nn.Module):
         return final_hidden_states.view(orig_shape)
 
 
+def sliding_window_for_layer(config: MapleConfig, layer_idx: int) -> int | None:
+    """Window size for `layer_idx`, or `None` for the full-attention layers.
+
+    The reference implementation runs FlashAttention with
+    `window_size=(sliding_window, 0)`, whose boundary token is inclusive, so a
+    local window spans `sliding_window + 1` positions.
+    """
+    if config.layer_types[layer_idx] != "sliding_attention":
+        return None
+    return config.sliding_window + 1
+
+
 class MapleAttention(nn.Module):
     """Maple GQA with per-head QK norm and interleaved sliding-window layers.
 
@@ -143,8 +155,8 @@ class MapleAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
-        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
-        self.sliding_window = config.sliding_window if is_sliding else None
+        self.sliding_window = sliding_window_for_layer(config, layer_idx)
+        is_sliding = self.sliding_window is not None
         self.use_rope = is_sliding or not config.nope_on_global_attention
 
         self.qkv_proj = QKVParallelLinear(

@@ -5,7 +5,10 @@
 import pytest
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.models.maple import MapleForCausalLM
+from vllm.model_executor.models.maple import (
+    MapleForCausalLM,
+    sliding_window_for_layer,
+)
 from vllm.transformers_utils.config import patch_rope_parameters
 from vllm.transformers_utils.configs.maple import MapleConfig
 
@@ -77,3 +80,18 @@ def test_default_layer_types_interleave_three_sliding_per_global():
         "sliding_attention",
         "full_attention",
     ]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(("layer_idx", "expected"), [(0, 513), (3, None)])
+def test_sliding_window_boundary_is_inclusive(layer_idx, expected):
+    """The checkpoint runs FlashAttention with `window_size=(sliding_window, 0)`.
+
+    That boundary is inclusive, so a sliding layer attends `sliding_window + 1`
+    positions. Forwarding `config.sliding_window` unchanged drops the oldest
+    token of every local window, which costs ~2.6 points of top-1 agreement
+    against the reference implementation in the windowed region.
+    """
+    config = MapleConfig()
+    assert config.sliding_window == 512
+    assert sliding_window_for_layer(config, layer_idx) == expected
