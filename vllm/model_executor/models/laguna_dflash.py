@@ -31,7 +31,12 @@ from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle
 from vllm.multimodal.inputs import NestedTensors
 
 from .laguna import LagunaDecoderLayer
-from .qwen3_dflash import DFlashQwen3Model
+from .qwen3_dflash import (
+    ContextKVStrategy,
+    DFlashQwen3Model,
+    _decide_context_kv_strategy,
+    _project_kv_per_layer,
+)
 from .utils import (
     AutoWeightsLoader,
     get_draft_quant_config,
@@ -155,14 +160,26 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         layers_attn: list[nn.Module],
         has_bias: bool,
     ) -> None:
-        self._kv_weights = torch.stack(
-            [a.qkv_proj.weight[a.q_size :] for a in layers_attn], dim=0
-        ).contiguous()
-        if has_bias:
-            self._kv_biases: torch.Tensor | None = torch.stack(
-                [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
+        # Two tiers: FUSED (all unquantized -> stacked bmm) or PER_LAYER
+        # (any quantized scheme -> per-layer quantized projection).
+        self._fuse_context_kv = (
+            _decide_context_kv_strategy(
+                (a.qkv_proj for a in layers_attn)
+            )
+            == ContextKVStrategy.FUSED
+        )
+        if self._fuse_context_kv:
+            self._kv_weights = torch.stack(
+                [a.qkv_proj.weight[a.q_size :] for a in layers_attn], dim=0
             ).contiguous()
+            if has_bias:
+                self._kv_biases: torch.Tensor | None = torch.stack(
+                    [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
+                ).contiguous()
+            else:
+                self._kv_biases = None
         else:
+            self._kv_projections = [(a.qkv_proj, a.q_size) for a in layers_attn]
             self._kv_biases = None
         self._input_layernorm_weights = torch.stack(
             [layer.input_layernorm.weight.data for layer in self.layers], dim=0
@@ -190,12 +207,21 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
             self._input_layernorm_weights,
             self._rms_norm_eps,
         )
-        all_kv_flat = torch.bmm(
-            normed_context_states,
-            self._kv_weights.transpose(1, 2),
-        )
-        if self._kv_biases is not None:
-            all_kv_flat += self._kv_biases[:, None, :]
+        if self._fuse_context_kv:
+            all_kv_flat = torch.bmm(
+                normed_context_states,
+                self._kv_weights.transpose(1, 2),
+            )
+            if self._kv_biases is not None:
+                all_kv_flat += self._kv_biases[:, None, :]
+        else:
+            # Per-layer quantized projection; each layer uses its own normed input.
+            all_kv_flat = _project_kv_per_layer(
+                normed_context_states,
+                self._kv_projections,
+                per_layer_input=True,
+                stack=True,
+            )
         all_kv = (
             all_kv_flat.view(num_layers, num_ctx, 2, num_kv_heads, head_dim)
             .permute(2, 0, 1, 3, 4)
@@ -204,16 +230,6 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         all_k = all_kv[0]
         all_v = all_kv[1]
         return all_k, all_v
-
-    def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
-        all_k_normed = torch.empty_like(all_k)
-        ops.rms_norm(
-            all_k_normed,
-            all_k,
-            self._k_norm_weights,
-            self._rms_norm_eps,
-        )
-        return all_k_normed
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
@@ -338,5 +354,7 @@ class DFlashLagunaForCausalLM(nn.Module, SupportsEagle3):
         loaded_weight_names = loader.load_weights(model_weights.items())
         loaded_weight_names.add("lm_head.weight")
         loaded_weight_names.add("model.embed_tokens.weight")
-        self.model._build_fused_kv_buffers()
+        # The fused-KV buffers are built lazily on first use (after the loader
+        # has called ``process_weights_after_loading``), so quantized weights
+        # are in their final layout.
         return loaded_weight_names

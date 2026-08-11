@@ -23,7 +23,13 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
-from .qwen3_dflash import DFlashQwen3Model, _dflash_layer_causal
+from .qwen3_dflash import (
+    ContextKVStrategy,
+    DFlashQwen3Model,
+    _dflash_layer_causal,
+    _decide_context_kv_strategy,
+    _project_kv_per_layer,
+)
 from .qwen3_dspark import DSparkMarkovHead, Qwen3DSparkForCausalLM
 from .utils import extract_layer_index, maybe_prefix
 
@@ -208,10 +214,24 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         self, layers_attn: list[nn.Module], has_bias: bool
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
-        self._fused_k_weight = torch.cat([a.k_proj.weight for a in layers_attn], dim=0)
-        self._fused_k_bias: torch.Tensor | None = (
-            torch.cat([a.k_proj.bias for a in layers_attn], dim=0) if has_bias else None
+        # Two tiers: FUSED (all unquantized -> fused F.linear) or PER_LAYER
+        # (any quantized scheme -> per-layer quantized k_proj projection).
+        self._fuse_context_kv = (
+            _decide_context_kv_strategy((a.k_proj for a in layers_attn))
+            == ContextKVStrategy.FUSED
         )
+        if self._fuse_context_kv:
+            self._fused_k_weight = torch.cat(
+                [a.k_proj.weight for a in layers_attn], dim=0
+            )
+            self._fused_k_bias: torch.Tensor | None = (
+                torch.cat([a.k_proj.bias for a in layers_attn], dim=0)
+                if has_bias
+                else None
+            )
+        else:
+            self._k_projections = [a.k_proj for a in layers_attn]
+            self._fused_k_bias = None
         self._k_norm_weights = torch.stack(
             [a.k_norm.weight.data for a in layers_attn], dim=0
         ).contiguous()
@@ -237,7 +257,13 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         ops.rms_norm(
             normed, context_states, self._hidden_norm_weight, self._rms_norm_eps
         )
-        all_k_flat = F.linear(normed, self._fused_k_weight, self._fused_k_bias)
+        if self._fuse_context_kv:
+            all_k_flat = F.linear(normed, self._fused_k_weight, self._fused_k_bias)
+        else:
+            # Per-layer quantized k_proj projection (k_eq_v: K == V source).
+            all_k_flat = _project_kv_per_layer(
+                normed, [(p, None) for p in self._k_projections]
+            )
         all_k = (
             all_k_flat.view(num_ctx, num_layers, num_kv_heads, head_dim)
             .permute(1, 0, 2, 3)
@@ -306,5 +332,7 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
                     p = params[name]
                     getattr(p, "weight_loader", default_weight_loader)(p, w)
                     loaded.add(name)
-        self.model._build_fused_kv_buffers()
+        # The fused-KV buffers are built lazily on first use (after the loader
+        # has called ``process_weights_after_loading``), so quantized weights
+        # are in their final layout.
         return loaded
