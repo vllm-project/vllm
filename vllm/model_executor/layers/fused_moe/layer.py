@@ -203,8 +203,7 @@ def FusedMoEFactory(
         n_shared_experts: Number of shared experts to fuse into the routed
             grouped GEMM (ROCm; requires aiter FSE or the router-append path)
         fuse_shared_experts: Explicitly enable or disable shared-expert fusion.
-            ``True`` enables the modular CUDA path. ``None`` preserves the
-            existing ROCm environment-controlled behavior.
+            ``None`` preserves the existing ROCm environment-controlled behavior.
         router_logits_dtype: Data type for router logits buffers
         gate: Pre-configured gate module
         shared_experts: Pre-configured shared experts module

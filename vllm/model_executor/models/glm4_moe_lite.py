@@ -256,6 +256,14 @@ class Glm4MoeLiteModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
+        self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+            self.layers,
+            self.start_layer,
+            self.end_layer,
+            Glm4MoeLite,
+            "mlp",
+        )
+
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -322,13 +330,7 @@ class Glm4MoeLiteModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        rocm_aiter_moe_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
-            self.layers,
-            self.start_layer,
-            self.end_layer,
-            Glm4MoeLite,
-            "mlp",
-        )
+        rocm_aiter_moe_shared_expert_enabled = self.is_fused_shared_expert_enabled
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),

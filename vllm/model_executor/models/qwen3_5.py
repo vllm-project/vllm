@@ -257,6 +257,13 @@ class Qwen3_5Model(Qwen3NextModel):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+            self.layers,
+            self.start_layer,
+            self.end_layer,
+            Qwen3NextSparseMoeBlock,
+            "mlp",
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -275,13 +282,7 @@ class Qwen3_5Model(Qwen3NextModel):
         if "moe" in self.config.model_type:
             weights = maybe_fuse_shared_experts(
                 weights,
-                enabled=resolve_model_fused_shared_expert_fusion(
-                    self.layers,
-                    self.start_layer,
-                    self.end_layer,
-                    Qwen3NextSparseMoeBlock,
-                    "mlp",
-                ),
+                enabled=self.is_fused_shared_expert_enabled,
                 n_routed_experts=self.config.num_experts,
                 n_shared_experts=1,
                 ckpt_prefix="mlp.shared_expert",

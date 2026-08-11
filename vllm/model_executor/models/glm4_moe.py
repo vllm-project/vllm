@@ -450,6 +450,14 @@ class Glm4MoeModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
+        self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+            self.layers,
+            self.start_layer,
+            self.end_layer,
+            Glm4MoE,
+            "mlp",
+        )
+
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -495,13 +503,7 @@ class Glm4MoeModel(nn.Module):
             skip_spec_layers(weights, self.config),
             n_routed_experts=self.config.n_routed_experts,
             n_shared_experts=self.config.n_shared_experts or 1,
-            enabled=resolve_model_fused_shared_expert_fusion(
-                self.layers,
-                self.start_layer,
-                self.end_layer,
-                Glm4MoE,
-                "mlp",
-            ),
+            enabled=self.is_fused_shared_expert_enabled,
         )
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

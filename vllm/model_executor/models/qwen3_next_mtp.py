@@ -95,6 +95,13 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             for idx in range(self.num_mtp_layers)
         )
 
+        self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+            self.layers,
+            0,
+            len(self.layers),
+            Qwen3NextSparseMoeBlock,
+            "mlp",
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -159,13 +166,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights,
-            enabled=resolve_model_fused_shared_expert_fusion(
-                self.layers,
-                0,
-                len(self.layers),
-                Qwen3NextSparseMoeBlock,
-                "mlp",
-            ),
+            enabled=self.is_fused_shared_expert_enabled,
             n_routed_experts=self.config.num_experts,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
