@@ -141,6 +141,8 @@ class MoESwiGLUFFN(nn.Module):
 
     def __init__(self, config: DotsMoEVitConfig, layer_number: int):
         super().__init__()
+        self.config = config
+        self.layer_number = layer_number
         self.hidden_size = config.embed_dim
         self.num_routed = config.pyramid_num_routed[layer_number]
         self.capacity_factor = config.capacity_factor

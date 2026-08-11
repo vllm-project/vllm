@@ -239,6 +239,10 @@ class VisionAttentionV2(_VisionAttentionBase):
         return self.proj(attn_output)
 
 
+# MoE checkpoints historically named this implementation ``VisionEagerAttention``.
+VisionEagerAttention = VisionAttentionV2
+
+
 class VisionFlashAttention2(_VisionAttentionBase):
     def forward(
         self,
@@ -457,6 +461,7 @@ __all__ = [
     "VisionAttention",
     "VisionAttentionParams",
     "VisionAttentionV2",
+    "VisionEagerAttention",
     "VisionFlashAttention2",
     "VisionFlashAttention3",
     "VisionRotaryEmbedding",
