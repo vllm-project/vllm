@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib.metadata
 from typing import Any
 
 import pytest
 
+import tests.v1.logits_processors.utils as logitproc_test_utils
 from tests.utils import create_new_process_for_each_test, set_random_seed
 from tests.v1.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG,
@@ -40,6 +42,32 @@ sampling_params_list = [
     ),
     SamplingParams(temperature=TEMP_GREEDY, max_tokens=MAX_TOKENS),
 ]
+
+
+def test_fake_entrypoint_preserves_other_groups(monkeypatch):
+    other_group_entrypoints = object()
+    monkeypatch.setattr(
+        importlib.metadata,
+        "entry_points",
+        lambda **kwargs: other_group_entrypoints,
+    )
+    monkeypatch.setattr(
+        logitproc_test_utils, "requires_spawn_multiprocessing", lambda: False
+    )
+
+    setup_fake_entrypoint(monkeypatch)
+
+    logitproc_entrypoints = importlib.metadata.entry_points(
+        group=logitproc_test_utils.LOGITSPROCS_GROUP
+    )
+    assert logitproc_entrypoints.names == [
+        logitproc_test_utils.DUMMY_LOGITPROC_ENTRYPOINT
+    ]
+    assert (
+        importlib.metadata.entry_points(group="another.entrypoint.group")
+        is other_group_entrypoints
+    )
+    assert importlib.metadata.entry_points() is other_group_entrypoints
 
 
 def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
