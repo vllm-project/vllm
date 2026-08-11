@@ -257,6 +257,19 @@ class Indexer(nn.Module):
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.softmax_scale = self.head_dim**-0.5
 
+        # Hadamard rotation for the indexer query (sglang rotate_activation).
+        # The K compress stores Hk, so q must become Hq for the fp8 MQA logits to
+        # equal the trained q·k. Precomputed as a buffer -> CUDA-graph safe (no
+        # dynamic tensor build during capture). head_dim (128) is a power of 2.
+        import math as _math
+
+        _h = torch.tensor([[1.0, 1.0], [1.0, -1.0]], dtype=torch.float32)
+        while _h.shape[0] < self.head_dim:
+            _h = torch.cat([torch.cat([_h, _h], 1), torch.cat([_h, -_h], 1)], 0)
+        self.register_buffer(
+            "_hadamard", _h / _math.sqrt(self.head_dim), persistent=False
+        )
+
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
@@ -338,6 +351,12 @@ class Indexer(nn.Module):
         # nope), so skip the rope split / rotary / cat entirely; otherwise the
         # split/reshape would build 0-element tensors (breaks dynamo tracing).
 
+        # Match sglang rotate_activation(query): Hadamard-128 on head_dim so the
+        # fp8 MQA logits are (Hq).(Hk) == q.k (the K compress already stores Hk).
+        # Without this the head-gate is scored against q.(Hk) -- a rotated basis
+        # the gate was never trained against, destroying long-context pool
+        # discrimination (the needle's pool drops out of the top-k).
+        q = (q.float() @ self._hadamard).to(q.dtype)
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
         q_fp8, q_scale = per_token_group_quant_fp8(
