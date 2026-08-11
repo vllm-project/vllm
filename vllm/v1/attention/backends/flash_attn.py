@@ -332,8 +332,6 @@ class FlashAttentionMetadata:
 
     causal: bool | torch.Tensor = True
 
-    sliding_window: tuple[int, int] | None = None
-
     # PrefixLM bidirectional range containing each scheduled query token.
     # Shape: (num_actual_tokens, 2) int32, absolute [start, end] bounds;
     # (-1, -1) for query tokens outside every multimodal range.
@@ -415,6 +413,57 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     ) -> AttentionCGSupport:
         return cls._cudagraph_support
 
+    def _get_scheduler_metadata(
+        self,
+        *,
+        aot_schedule: bool,
+        batch_size: int,
+        cu_query_lens: torch.Tensor,
+        max_query_len: int,
+        seqlens: torch.Tensor,
+        max_seq_len: int,
+        causal: bool | torch.Tensor,
+        max_num_splits: int,
+    ) -> torch.Tensor | None:
+        if not aot_schedule:
+            return None
+
+        cache_dtype = self.cache_config.cache_dtype
+        if is_quantized_kv_cache(cache_dtype):
+            qkv_dtype = current_platform.fp8_dtype()
+        else:
+            qkv_dtype = self.kv_cache_dtype
+        return get_scheduler_metadata(
+            batch_size=batch_size,
+            max_seqlen_q=max_query_len,
+            max_seqlen_k=max_seq_len,
+            num_heads_q=self.num_heads_q * self.dcp_world_size,
+            num_heads_kv=self.num_heads_kv,
+            headdim=self.headdim,
+            cache_seqlens=seqlens,
+            qkv_dtype=qkv_dtype,
+            cu_seqlens_q=cu_query_lens,
+            page_size=self.block_size,
+            causal=causal,
+            window_size=_maybe_symmetrize_window(self.aot_sliding_window, causal),
+            num_splits=max_num_splits,
+        )
+
+    def _store_scheduler_metadata(
+        self, scheduler_metadata: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        if self.use_full_cuda_graph and scheduler_metadata is not None:
+            n = scheduler_metadata.shape[0]
+            assert self.scheduler_metadata is not None
+            self.scheduler_metadata[:n] = scheduler_metadata
+            # NOTE(woosuk): We should zero out the rest of the scheduler
+            # metadata to guarantee the correctness. Otherwise, some thread
+            # blocks may use the invalid scheduler metadata and overwrite the
+            # output buffer.
+            self.scheduler_metadata[n:] = 0
+            return self.scheduler_metadata[:n]
+        return scheduler_metadata
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -449,6 +498,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+
+        # Fused draft decode reuses the captured metadata object across draft
+        # steps. For DCP, build-time host-side decisions such as
+        # skip_dcp_context_attention() can change the metadata shape/control
+        # path (for example max_dcp_context_kv_len), and those Python-side
+        # fields are not refreshed in-place between graph replays. Keep the
+        # fused path disabled until DCP gets a full replay-safe refresh model.
+        self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
 
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
@@ -578,34 +635,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if envs.VLLM_BATCH_INVARIANT:
             max_num_splits = 1
 
-        def schedule(
-            batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
-        ):
-            cache_dtype = self.cache_config.cache_dtype
-            if is_quantized_kv_cache(cache_dtype):
-                qkv_dtype = current_platform.fp8_dtype()
-            else:
-                qkv_dtype = self.kv_cache_dtype
-            if aot_schedule:
-                return get_scheduler_metadata(
-                    batch_size=batch_size,
-                    max_seqlen_q=max_query_len,
-                    max_seqlen_k=max_seq_len,
-                    num_heads_q=self.num_heads_q * self.dcp_world_size,
-                    num_heads_kv=self.num_heads_kv,
-                    headdim=self.headdim,
-                    cache_seqlens=seqlens,
-                    qkv_dtype=qkv_dtype,
-                    cu_seqlens_q=cu_query_lens,
-                    page_size=self.block_size,
-                    causal=causal,
-                    window_size=_maybe_symmetrize_window(
-                        self.aot_sliding_window, causal
-                    ),
-                    num_splits=max_num_splits,
-                )
-            return None
-
         use_cascade = common_prefix_len > 0
         max_dcp_context_kv_len = 0
         dcp_context_kv_lens = None
@@ -672,13 +701,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     (max_seq_len + num_partitions - 1) // num_partitions
                 ) * self.cp_kv_cache_interleave_size
 
-                scheduler_metadata = schedule(
+                scheduler_metadata = self._get_scheduler_metadata(
+                    aot_schedule=aot_schedule,
                     batch_size=num_reqs,
                     cu_query_lens=query_start_loc,
                     max_query_len=max_query_len,
                     seqlens=dcp_context_kv_lens,
                     max_seq_len=max_dcp_context_kv_len,
                     causal=False,
+                    max_num_splits=max_num_splits,
                 )
         elif use_cascade:
             cu_prefix_query_lens = torch.tensor(
@@ -689,51 +720,41 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             )
             # Use GPU tensor directly - no CPU sync needed
             suffix_kv_lens = seq_lens[:num_reqs] - common_prefix_len
-            prefix_scheduler_metadata = schedule(
+            prefix_scheduler_metadata = self._get_scheduler_metadata(
+                aot_schedule=aot_schedule,
                 batch_size=1,
                 cu_query_lens=cu_prefix_query_lens,
                 max_query_len=num_actual_tokens,
                 seqlens=prefix_kv_lens,
                 max_seq_len=common_prefix_len,
                 causal=False,
+                max_num_splits=max_num_splits,
             )
-            scheduler_metadata = schedule(
+            scheduler_metadata = self._get_scheduler_metadata(
+                aot_schedule=aot_schedule,
                 batch_size=num_reqs,
                 cu_query_lens=query_start_loc,
                 max_query_len=max_query_len,
                 seqlens=suffix_kv_lens,
                 max_seq_len=max_seq_len - common_prefix_len,
                 causal=True,
+                max_num_splits=max_num_splits,
             )
         else:
-            scheduler_metadata = schedule(
+            scheduler_metadata = self._get_scheduler_metadata(
+                aot_schedule=aot_schedule,
                 batch_size=num_reqs,
                 cu_query_lens=query_start_loc,
                 max_query_len=max_query_len,
                 seqlens=seq_lens,
                 max_seq_len=max_seq_len,
                 causal=causal,
+                max_num_splits=max_num_splits,
             )
-        # For FA3 + full cudagraph
-        if self.use_full_cuda_graph and scheduler_metadata is not None:
-            n = scheduler_metadata.shape[0]
-            self.scheduler_metadata[:n] = scheduler_metadata
-            # NOTE(woosuk): We should zero out the rest of the scheduler
-            # metadata to guarantee the correctness. Otherwise, some thread
-            # blocks may use the invalid scheduler metadata and overwrite the
-            # output buffer.
-            self.scheduler_metadata[n:] = 0
-            scheduler_metadata = self.scheduler_metadata[:n]
+        scheduler_metadata = self._store_scheduler_metadata(scheduler_metadata)
 
         if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
             causal = causal.to(torch.int32)
-
-        # Symmetrize the spec's sliding_window for non-causal attention
-        group_sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
-        base_window = (
-            (-1, -1) if group_sliding_window is None else (group_sliding_window - 1, 0)
-        )
-        effective_sliding_window = _maybe_symmetrize_window(base_window, causal)
 
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -758,7 +779,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
-            sliding_window=effective_sliding_window,
         )
 
         # Compute mm_prefix range tensor if the batch contains
@@ -816,6 +836,28 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         new_metadata.block_table = blk_table
         new_metadata.slot_mapping = slot_mapping
         return new_metadata
+
+    def update_draft_decode_metadata(self, metadata: FlashAttentionMetadata) -> None:
+        if metadata.scheduler_metadata is None:
+            return
+
+        num_reqs = metadata.num_decode_reqs or metadata.seq_lens.shape[0]
+
+        assert self.dcp_world_size == 1
+        assert not metadata.use_cascade
+
+        scheduler_metadata = self._get_scheduler_metadata(
+            aot_schedule=True,
+            batch_size=num_reqs,
+            cu_query_lens=metadata.query_start_loc,
+            max_query_len=metadata.max_query_len,
+            seqlens=metadata.seq_lens,
+            max_seq_len=metadata.max_seq_len,
+            causal=metadata.causal,
+            max_num_splits=metadata.max_num_splits,
+        )
+
+        metadata.scheduler_metadata = self._store_scheduler_metadata(scheduler_metadata)
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
@@ -1047,17 +1089,17 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
-                window = (
-                    attn_metadata.sliding_window
-                    if attn_metadata.sliding_window is not None
-                    else self.sliding_window
-                )
+                causal = attn_metadata.causal
+                is_dynamic_causal = isinstance(causal, torch.Tensor)
+
+                # The layer's own window wins over the group's: one KV cache
+                # group can hold both windowed and global layers (e.g. Gemma-3
+                # with the hybrid KV cache manager disabled), and the group spec
+                # cannot describe both.
+                window = _maybe_symmetrize_window(self.sliding_window, causal)
                 sliding_window_size: list[int] | None = (
                     list(window) if window is not None else None
                 )
-
-                causal = attn_metadata.causal
-                is_dynamic_causal = isinstance(causal, torch.Tensor)
 
                 mm_prefix_query_ranges = attn_metadata.mm_prefix_query_range_tensor
                 mm_mask_mod = None
@@ -1068,10 +1110,6 @@ class FlashAttentionImpl(AttentionImpl):
                     and causal is True
                     and self.vllm_flash_attn_version == 4
                 ):
-                    # Use the layer impl's window, not attn_metadata's. The
-                    # metadata field comes from kv_cache_spec (model-wide, e.g.
-                    # Gemma4's 512), while the impl holds the per-layer window
-                    # the mask_mod must encode (e.g. a test override).
                     # Triton convention: 1 + window_size[0]. Global layers store
                     # (-1, -1) → sw stays None.
                     layer_window = self.sliding_window
