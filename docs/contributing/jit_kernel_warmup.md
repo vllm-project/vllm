@@ -103,10 +103,12 @@ runtime implementation is selected:
 MY_KERNEL.register_warmup()
 ```
 
-Registration stores metadata only; it does not compile or launch the kernel.
-No dummy forward run is needed. Later, `kernel_warmup()` consumes the registry,
-calls `get_warmup_keys(vllm_config)` for default registrations, deduplicates
-keys across repeated registrations, and compiles each owner/key pair once.
+`JitWarmupRegistry.activate()` scopes collection during model and supporting
+infrastructure setup. Registration outside that scope is a no-op. When
+`enable_jit_warmup` is enabled, `kernel_warmup()` expands collected
+registrations: calls without arguments receive `vllm_config`, explicit
+arguments are forwarded unchanged, and repeated owner/key pairs are compiled
+once. Registration itself only records metadata; it never compiles or launches.
 
 Register at the narrowest stable selection point. Shared components should
 register their own owners rather than relying on a global model-name list.
@@ -211,6 +213,9 @@ def dispatch(self, *, num_tokens: int, block_size: int) -> CompileKey:
         PADDED_TOKENS=round_up(num_tokens, multiple=block_size),
     )
 ```
+
+The tracer supports Python builtins such as `min(...)`, `max(...)`, and
+`len(...)`, unless that name is overridden locally or globally.
 
 Helper calls cannot use `**kwargs`, and `CompileKey(...)` cannot be constructed
 from `**kwargs`. This keeps traced fields explicit.
@@ -340,6 +345,9 @@ return self._trace_dispatch(self.dispatch)(
     _when=self._is_valid_warmup_input,
 )
 ```
+
+`_when` accepts a function, bound method, or lambda and supports the same AST
+subset as `dispatch(...)`, including local assignments in function predicates.
 
 The predicate is evaluated on the expanded warmup inputs. If it returns
 `False`, that input point is skipped and no `CompileKey` is produced for it.
