@@ -23,9 +23,13 @@ HW_MODULE = "vllm.model_executor.hw_agnostic.layers.layernorm"
 
 @pytest.fixture
 def fake_hw_layernorm(monkeypatch):
-    """Inject a hw-agnostic `layernorm` module exposing a sentinel `RMSNorm`."""
-    module = types.ModuleType(HW_MODULE)
-    module.RMSNorm = type("HwRMSNorm", (), {})
+    """Inject a hw-agnostic `layernorm` module exposing a sentinel `RMSNorm`.
+
+    A `SimpleNamespace` stands in for the module: `importlib.import_module`
+    returns it from `sys.modules` and `getattr` resolves `RMSNorm`, while its
+    attributes are set at construction (no `ModuleType` attribute-set that mypy
+    rejects, no constant `setattr` that ruff rejects)."""
+    module = types.SimpleNamespace(RMSNorm=type("HwRMSNorm", (), {}))
     monkeypatch.setitem(sys.modules, HW_MODULE, module)
     return module
 
@@ -58,7 +62,7 @@ def test_falls_back_when_symbol_missing(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         resolved = layers._resolve("layernorm", "RMSNorm")
     assert resolved is VllmRMSNorm
-    assert "falling back to vLLM" in caplog.text
+    assert "falling back to default" in caplog.text
 
 
 def test_act_and_mul_falls_back_for_unknown_activation(
