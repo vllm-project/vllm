@@ -324,8 +324,10 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             fc2_expert_weights = w2.view(torch.long)
         elif self.quant_config.use_wfp4afp8_humming:
             # SM90 humming (MXFP4 weight x kernel-internal FP8 act). The
-            # per-expert fp32 residuals arrive via g1/g2_alphas; fold them into
-            # per-token, expert-contiguous routed-token scales (validated by
+            # per-expert fp32 residuals arrive via g1/g2_alphas and are handed
+            # to the kernel as-is: since flashinfer #4431 slots 1 and 4 are
+            # [num_local_experts] and the kernel selects each routed row's
+            # residual with its own expert map (validated by
             # scripts/humming_offline_check.py).
             assert self.w1_scale is not None and self.w2_scale is not None
             assert self.g1_alphas is not None and self.g2_alphas is not None
@@ -341,18 +343,12 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             # (matches HUMMING_EPILOGUE_COMPENSATION in the flashinfer reference
             # test test_moe_fp8_mxfp4_humming_prescale_hopper_correctness).
             HUMMING_EPILOGUE_COMPENSATION = 64.0
-            # topk_ids are GLOBAL expert ids; the kernel filters to this rank's
-            # [start_expert, end_expert) and remaps to local. The per-expert
-            # residuals (g1/g2_alphas) are LOCAL (length num_local_experts), so
-            # index them by local id. Non-local tokens get a sentinel local id
-            # and are sorted to the tail; the kernel only reads the leading
-            # num_valid_local rows in local-expert order.
-            num_local = self.num_experts  # == moe_config.num_local_experts
-            start_expert = self.ep_rank * num_local
-            # The epilogue compensation is a constant, so fold it into the
-            # residuals once instead of re-scaling the gathered values on every
-            # forward. g1/g2_alphas are shared with the nvfp4 paths above and
-            # must not be scaled in place.
+            # The compensation is a constant, so fold it into the residuals once
+            # instead of re-scaling on every forward. g1/g2_alphas are shared
+            # with the nvfp4 paths above and must not be scaled in place.
+            # topk_ids stay GLOBAL expert ids: the kernel's permutation converts
+            # valid routes to rank-local indices before reading these arrays, so
+            # EP needs nothing extra here.
             if self._humming_g1_scaled is None or self._humming_g2_scaled is None:
                 self._humming_g1_scaled = (
                     self.g1_alphas * HUMMING_EPILOGUE_COMPENSATION
@@ -360,31 +356,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 self._humming_g2_scaled = (
                     self.g2_alphas * HUMMING_EPILOGUE_COMPENSATION
                 ).contiguous()
-            g1_scaled = self._humming_g1_scaled
-            g2_scaled = self._humming_g2_scaled
-            sel = topk_ids.to(torch.long).reshape(-1)
-            local_id = sel - start_expert
-            is_local = (local_id >= 0) & (local_id < num_local)
-            # Send OOB ids to 0 for a safe gather; masked out below. Scalar
-            # `other` avoids materialising a zeros tensor each call.
-            gather_id = torch.where(is_local, local_id, 0)
-            fc1_route = g1_scaled[gather_id]
-            fc2_route = g2_scaled[gather_id]
-
-            # Sort key = local expert id, with non-local tokens pushed to the
-            # tail (sentinel num_local). Stable argsort keeps output size fixed
-            # (= topk_ids.numel()), so it is cudagraph-safe; the leading
-            # num_valid_local entries then match the kernel's permuted rows,
-            # ordered by local expert id. At ep_size=1 this reduces to the
-            # global expert-contiguous order (validated in
-            # scripts/humming_offline_check.py).
-            sort_key = torch.where(is_local, local_id, num_local)
-            # Both GEMMs' per-token residual scales live in the same expert-
-            # permuted token space (kernel reads fc1 via [permuted_row], fc2 via
-            # [token], both in that space), so fc1 and fc2 share one perm.
-            perm = torch.argsort(sort_key, stable=True)
-            fc1_residual_token = fc1_route.reshape(-1)[perm].contiguous()
-            fc2_residual_token = fc2_route.reshape(-1)[perm].contiguous()
             if self._humming_one is None:
                 self._humming_one = torch.ones(
                     (), device=self.device, dtype=torch.float32
@@ -394,16 +365,16 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             # slots by position, so the order below is load-bearing and a
             # reordering fails silently with wrong values rather than raising.
             #   0 fc1 weight E8M0 exponent offsets (int32-viewed)
-            #   1 fc1 per-token residual, in expert-permuted token order
+            #   1 fc1 residual, one fp32 per local expert (x 2^6)
             #   2 fc2 activation global scale (1.0; fc2 input is kernel-produced)
             #   3 fc2 weight E8M0 exponent offsets (int32-viewed)
-            #   4 fc2 per-token residual, same permuted order as slot 1
+            #   4 fc2 residual, same per-local-expert layout as slot 1
             quant_scales = [
                 self.w1_scale.view(torch.int32),
-                fc1_residual_token,
+                self._humming_g1_scaled,
                 fc2_act_global,
                 self.w2_scale.view(torch.int32),
-                fc2_residual_token,
+                self._humming_g2_scaled,
             ]
             fc1_expert_weights = w1
             fc2_expert_weights = w2
