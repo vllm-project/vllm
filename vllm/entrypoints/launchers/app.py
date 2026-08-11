@@ -20,6 +20,7 @@ def build_app(
     args: Namespace,
     supported_tasks: tuple["SupportedTask", ...] | None = None,
     model_config: ModelConfig | None = None,
+    snapshot_control_path: str | None = None,
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
@@ -41,6 +42,30 @@ def build_app(
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
     app.root_path = args.root_path
+
+    if args.enable_engine_snapshot:
+        from vllm.snapshot.middleware import (
+            EngineSnapshotGate,
+            EngineSnapshotMiddleware,
+            snapshot_control_error_handler,
+        )
+        from vllm.snapshot.protocol import (
+            SnapshotControlClient,
+            SnapshotControlError,
+        )
+
+        control_path = (
+            snapshot_control_path
+            if snapshot_control_path is not None
+            else args.engine_snapshot_control_socket
+        )
+        app.state.engine_snapshot_client = SnapshotControlClient(control_path)
+        app.state.engine_snapshot_gate = EngineSnapshotGate()
+        app.add_middleware(
+            EngineSnapshotMiddleware,
+            gate=app.state.engine_snapshot_gate,
+        )
+        app.exception_handler(SnapshotControlError)(snapshot_control_error_handler)
 
     register_api_routers(args, app, supported_tasks, model_config)
 
