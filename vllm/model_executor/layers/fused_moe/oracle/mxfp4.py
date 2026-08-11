@@ -642,7 +642,6 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     hidden_size: int,
     intermediate_size: int,
     activation: MoEActivation | None = None,
-    routing_method: RoutingMethodType | None = None,
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
     if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and activation == MoEActivation.SITU:
@@ -653,11 +652,9 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif (
-        backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
-        and activation == MoEActivation.SILU
-        and routing_method == RoutingMethodType.DeepseekV4
+        backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and activation == MoEActivation.SILU
     ):
-        # DSV4's AITER A16W4 SiLU kernel handles its native TP8 I384 shard.
+        # AITER's A16W4 SiLU kernel handles native dimensions aligned to 128.
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif backend == Mxfp4MoeBackend.EMULATION:

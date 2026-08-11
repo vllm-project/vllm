@@ -1610,8 +1610,8 @@ def test_rocm_mxfp4_moe_oracle(
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(), reason="AITER is not installed or supported"
 )
-def test_aiter_mxfp4_bf16_preserves_dsv4_native_tp_shard():
-    """Keep DSV4's TP8 intermediate shard at its native I384 width."""
+def test_aiter_mxfp4_bf16_silu_preserves_native_tp_shard():
+    """Keep 128-aligned SiLU shards at their native widths."""
     from vllm.model_executor.layers.fused_moe import FusedMoEConfig
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.config import (
@@ -1636,7 +1636,7 @@ def test_aiter_mxfp4_bf16_preserves_dsv4_native_tp_shard():
         num_logical_experts=384,
         activation=MoEActivation.SILU,
         device="cpu",
-        routing_method=RoutingMethodType.DeepseekV4,
+        routing_method=RoutingMethodType.Renormalize,
         moe_parallel_config=moe_parallel_config,
         in_dtype=torch.bfloat16,
     )
