@@ -305,6 +305,8 @@ def dispatch_cpu_unquantized_gemm(
     if current_platform.is_zen_cpu() and hasattr(
         torch.ops.zentorch, "zentorch_linear_unary"
     ):
+        if remove_weight:
+            layer._cpu_unpacked_weight = layer.weight.detach().clone()
         zen_weight = layer.weight.detach()
         is_prepacked = False
 
@@ -358,6 +360,8 @@ def dispatch_cpu_unquantized_gemm(
     ):
         try:
             origin_weight = layer.weight
+            if remove_weight:
+                layer._cpu_unpacked_weight = origin_weight.detach().clone()
             handler = ops.create_onednn_mm(origin_weight.t(), 32)
             layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(handler, x, bias)
             if remove_weight:

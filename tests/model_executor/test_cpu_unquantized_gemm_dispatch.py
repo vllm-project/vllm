@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers import utils
+from vllm.platforms import CpuArchEnum
 from vllm.platforms import current_platform
 
 
@@ -63,9 +64,31 @@ def test_dispatch_cpu_unquantized_gemm_zen_remove_weight(monkeypatch):
     monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
 
     layer = torch.nn.Linear(16, 8, bias=True)
+    original_weight = layer.weight.detach().clone()
     utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
 
     assert layer.weight.numel() == 0
+    torch.testing.assert_close(layer._cpu_unpacked_weight, original_weight)
+
+
+def test_dispatch_cpu_unquantized_gemm_onednn_remove_weight_preserves_copy(
+    monkeypatch,
+):
+    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: False)
+    monkeypatch.setattr(
+        current_platform,
+        "get_cpu_architecture",
+        lambda: CpuArchEnum.X86,
+    )
+    monkeypatch.setattr(utils.ops, "_supports_onednn", True)
+    monkeypatch.setattr(utils.ops, "create_onednn_mm", lambda *_: object())
+
+    layer = torch.nn.Linear(16, 8, bias=True)
+    original_weight = layer.weight.detach().clone()
+    utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+
+    assert layer.weight.numel() == 0
+    torch.testing.assert_close(layer._cpu_unpacked_weight, original_weight)
 
 
 @pytest.mark.usefixtures("_mock_zentorch_linear_unary")

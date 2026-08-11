@@ -200,6 +200,36 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
 
 
+def test_mla_post_load_uses_cpu_unpacked_weight(monkeypatch):
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.kv_lora_rank = 2
+    layer.num_heads = 2
+    layer.qk_nope_head_dim = 3
+    layer.v_head_dim = 4
+    layer.kv_b_proj = torch.nn.Module()
+    original_weight = torch.arange(28.0, dtype=torch.float32).reshape(14, 2)
+    layer.kv_b_proj._cpu_unpacked_weight = original_weight.clone()
+    layer.kv_b_proj.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+    layer.kv_b_proj.quant_method = None
+    layer.is_aiter_triton_fp4_bmm_enabled = False
+    layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.dcp_q_replicate = False
+    layer.quant_config = None
+    layer.layer_name = "test"
+
+    monkeypatch.setattr(
+        mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
+    )
+
+    layer.process_weights_after_loading(torch.float32)
+
+    kv_b_proj_weight = original_weight.T.view(2, 2, 7)
+    w_uk, w_uv = kv_b_proj_weight.split([3, 4], dim=-1)
+    torch.testing.assert_close(layer.W_UV, w_uv.transpose(0, 1))
+    torch.testing.assert_close(layer.W_UK_T, w_uk.permute(1, 2, 0))
+
+
 # Validate parameter combinations during collection, before GPU fixtures run.
 PREFILL_BACKENDS_TO_TEST = [
     MLAPrefillBackendEnum.ROCM_AITER_FA,
