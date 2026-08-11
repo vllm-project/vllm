@@ -14,10 +14,7 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import (
-    MMEncoderAttention,
-)
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -124,9 +121,7 @@ def process_weights_after_loading(
     # encoder. NOTE: Happens after other modules so we can easily decompress
     # weights.
     for _, module in model.named_modules():
-        if isinstance(module, (AttentionLayerBase, MMEncoderAttention)) and hasattr(
-            module, "process_weights_after_loading"
-        ):
+        if is_deferred_attention_layer(module):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
