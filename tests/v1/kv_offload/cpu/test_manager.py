@@ -1083,3 +1083,43 @@ def test_touch_forwards_req_context_to_policy(monkeypatch):
     assert len(received) == 1
     assert received[0][0] == keys
     assert received[0][1] is ctx
+
+
+@pytest.mark.parametrize("transfer", ["store", "load"])
+def test_lru_restores_prefix_order_after_transfer(transfer: str):
+    """Transfer completion must not make an early prefix block LRU."""
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    prefix = to_keys([1, 2, 3, 4])
+
+    output = manager.prepare_store(prefix, _EMPTY_REQ_CTX)
+    assert output is not None
+    manager.complete_store(prefix, _EMPTY_REQ_CTX)
+    manager.restore_order_after_transfer((prefix,), _EMPTY_REQ_CTX)
+
+    if transfer == "load":
+        manager.prepare_load(prefix, _EMPTY_REQ_CTX)
+        manager.complete_load(prefix, _EMPTY_REQ_CTX)
+        manager.restore_order_after_transfer((prefix,), _EMPTY_REQ_CTX)
+
+    output = manager.prepare_store(to_keys([5]), _EMPTY_REQ_CTX)
+    assert output is not None
+    assert output.evicted_keys == to_keys([4])
+
+
+def test_arc_does_not_promote_new_blocks_after_transfer():
+    """Order restoration is a no-op when the policy retains active blocks."""
+    manager = make_cpu_manager(num_blocks=4, cache_policy="arc")
+    policy = manager._policy
+    assert isinstance(policy, ARCCachePolicy)
+    prefix = to_keys([1, 2, 3, 4])
+
+    output = manager.prepare_store(prefix, _EMPTY_REQ_CTX)
+    assert output is not None
+    manager.touch(prefix, _EMPTY_REQ_CTX)
+    manager.complete_store(prefix, _EMPTY_REQ_CTX)
+    t1_before = list(policy.t1)
+
+    manager.restore_order_after_transfer((prefix,), _EMPTY_REQ_CTX)
+
+    assert list(policy.t1) == t1_before
+    assert not policy.t2

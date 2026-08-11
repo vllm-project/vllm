@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 
 from typing_extensions import override
 
@@ -148,6 +148,14 @@ class CPUOffloadingManager(OffloadingManager):
     @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
         self._policy.touch(keys, req_context)
+
+    @override
+    def restore_order_after_transfer(
+        self,
+        key_groups: Sequence[Collection[OffloadKey]],
+        req_context: ReqContext,
+    ) -> None:
+        self._policy.restore_order_after_transfer(key_groups, req_context)
 
     @override
     def complete_load(

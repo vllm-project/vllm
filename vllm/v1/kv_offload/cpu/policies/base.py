@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Sequence
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
@@ -65,6 +65,14 @@ class CachePolicy(ABC):
             keys: Blocks to mark as recently used.
             req_context: Per-request context for the request touching these blocks.
         """
+
+    def restore_order_after_transfer(
+        self,
+        key_groups: Sequence[Collection[OffloadKey]],
+        req_context: ReqContext,
+    ) -> None:
+        """Restore policy order if transfer pinning can discard it."""
+        return
 
     @abstractmethod
     def evict(

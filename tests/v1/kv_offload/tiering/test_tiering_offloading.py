@@ -731,6 +731,52 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.touch.assert_called_once_with(blocks, _CTX)
         self.secondary_tier2.touch.assert_called_once_with(blocks, _CTX)
 
+    def test_prefix_order_restored_after_cascade(self, manager_setup):
+        """Cascade pins defer LRU restoration until every tier releases it."""
+        blocks = to_keys(range(5))
+        self._start_request()
+        output = self.manager.prepare_store(blocks, _CTX)
+        assert output is not None
+        self.manager.complete_store(blocks, _CTX, success=True)
+
+        self.manager.restore_order_after_transfer((blocks,), _CTX)
+        assert _CTX.req_id in self.manager._deferred_order_restores
+
+        self.manager._process_finished_jobs()
+
+        assert not self.manager._deferred_order_restores
+        assert list(self.primary_tier._policy.evictable_blocks) == list(
+            reversed(blocks)
+        )
+        output = self.manager.prepare_store(to_keys([5]), _CTX)
+        assert output is not None
+        assert output.evicted_keys == [blocks[-1]]
+
+    def test_request_level_recascade_restores_prefix_order(self, manager_setup):
+        """An internal-only cascade also preserves suffix-first eviction."""
+        blocks = to_keys(range(5))
+        self._start_request()
+        output = self.manager.prepare_store(blocks, _CTX)
+        assert output is not None
+        self.manager.complete_store(blocks, _CTX, success=True)
+        self.manager._process_finished_jobs()
+
+        self.secondary_tier1.on_new_request = lambda req_context: (
+            RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+        )
+        ctx = ReqContext(req_id="request-level")
+        self.manager.on_new_request(ctx)
+        self.manager.touch(blocks, ctx)
+
+        output = self.manager.prepare_store(blocks, ctx)
+        assert output is not None
+        assert not output.keys_to_store
+        self.manager._process_finished_jobs()
+
+        output = self.manager.prepare_store(to_keys([5]), ctx)
+        assert output is not None
+        assert output.evicted_keys == [blocks[-1]]
+
     def test_failed_store_no_cascade(self, manager_setup):
         """Test that failed GPU→primary store doesn't cascade."""
         blocks = to_keys(range(3))
@@ -1091,6 +1137,8 @@ class TestTieringOffloadingManager:
         self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
         assert self.manager._jobs
+        self.manager.restore_order_after_transfer((blocks,), _CTX)
+        assert self.manager._deferred_order_restores
 
         # Pending promotion submission (deferred — no on_schedule_end after
         # the lookup that staged it).
@@ -1123,6 +1171,7 @@ class TestTieringOffloadingManager:
         # Orchestrator state cleared.
         assert self.manager._jobs == {}
         assert self.manager._pending_load_submissions == {}
+        assert self.manager._deferred_order_restores == {}
         assert set(self.manager._req_state) == {_CTX.req_id, rl_ctx.req_id}
         assert self.manager._processed_jobs_this_step is False
 

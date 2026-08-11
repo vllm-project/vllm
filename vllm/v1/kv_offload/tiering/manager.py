@@ -224,6 +224,11 @@ class TieringOffloadingManager(OffloadingManager):
         # complete_store(), since complete_store() can still submit cascades.
         self._req_state: dict[str, RequestState] = {}
 
+        self._deferred_order_restores: dict[
+            str,
+            tuple[tuple[tuple[OffloadKey, ...], ...], ReqContext, set[JobId]],
+        ] = {}
+
         # Cached ParentManager wrappers for each secondary tier.
         self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
             tier: _SecondaryTierFacingParent(self, tier_idx)
@@ -243,10 +248,30 @@ class TieringOffloadingManager(OffloadingManager):
     def _register_job(self, transfer_job: TransferJob, tier_idx: int) -> None:
         job_metadata = JobMetadata(transfer_job, tier_idx)
         self._jobs[transfer_job.job_id] = job_metadata
+        deferred = self._deferred_order_restores.get(transfer_job.req_context.req_id)
+        if deferred is not None:
+            deferred[2].add(transfer_job.job_id)
         self._metrics.on_job_registered(job_metadata)
 
     def _pop_job(self, job_id: JobId) -> JobMetadata | None:
         return self._jobs.pop(job_id, None)
+
+    def _job_ids_for_request(self, req_id: str) -> set[JobId]:
+        return {
+            job_id
+            for job_id, metadata in self._jobs.items()
+            if metadata.transfer_job.req_context.req_id == req_id
+        }
+
+    def _restore_deferred_order(self, req_id: str, job_id: JobId) -> None:
+        deferred = self._deferred_order_restores.get(req_id)
+        if deferred is None:
+            return
+        key_groups, req_context, pending_job_ids = deferred
+        pending_job_ids.discard(job_id)
+        self.primary_tier.restore_order_after_transfer(key_groups, req_context)
+        if not pending_job_ids:
+            del self._deferred_order_restores[req_id]
 
     def _maybe_process_finished_jobs(self):
         """
@@ -331,6 +356,12 @@ class TieringOffloadingManager(OffloadingManager):
                     self.primary_tier.complete_read(
                         transfer_job.keys, transfer_job.req_context
                     )
+                    self.primary_tier.restore_order_after_transfer(
+                        (transfer_job.keys,), transfer_job.req_context
+                    )
+                self._restore_deferred_order(
+                    transfer_job.req_context.req_id, transfer_job.job_id
+                )
 
     @override
     def lookup(
@@ -525,6 +556,22 @@ class TieringOffloadingManager(OffloadingManager):
         self.primary_tier.touch(keys, req_context)
         for tier in self.secondary_tiers:
             tier.touch(keys, req_context)
+
+    @override
+    def restore_order_after_transfer(
+        self,
+        key_groups: Sequence[Collection[OffloadKey]],
+        req_context: ReqContext,
+    ) -> None:
+        self.primary_tier.restore_order_after_transfer(key_groups, req_context)
+        pending_job_ids = self._job_ids_for_request(req_context.req_id)
+        if pending_job_ids:
+            key_groups_snapshot = tuple(tuple(keys) for keys in key_groups)
+            self._deferred_order_restores[req_context.req_id] = (
+                key_groups_snapshot,
+                req_context,
+                pending_job_ids,
+            )
 
     @override
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
@@ -843,6 +890,7 @@ class TieringOffloadingManager(OffloadingManager):
         # reset below invalidates; their submit_load() has not yet been
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
+        self._deferred_order_restores.clear()
         self._metrics.assert_idle()
 
         finished_req_ids = []
