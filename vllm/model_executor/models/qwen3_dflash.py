@@ -28,6 +28,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PerTensorOnlineLinearMethod,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
 )
@@ -118,24 +122,24 @@ class ContextKVStrategy(str, enum.Enum):
     PER_LAYER = "per_layer"
 
 
-# Schemes whose scale can be folded into a per-output-column vector
-# (per-tensor / per-channel). Grouped(int4)/block(NVFP4/MXFP4)/Marlin scales
-# cannot be folded and must go through the per-layer path.
-_SIMPLE_FUSABLE_QUANT_METHODS = (
-    "Fp8LinearMethod",
-    "Fp8PerTensorOnlineLinearMethod",
-)
-
-
 def _is_simple_fusable(proj: nn.Module) -> bool:
-    """Simple FP8 per-tensor/per-channel (non-Marlin, non-block)."""
+    """Simple FP8 per-tensor/per-channel (non-Marlin, non-block, non-DeepGEMM).
+
+    Mirrors the schemes ``get_and_maybe_dequant_weights`` (quant_utils) can
+    dequantize into a plain ``[out, in]`` bf16 weight with a per-output-column
+    scale, so a fused buffer is only built when the dequant / W8A8 primitive
+    exists. Grouped(int4)/block(NVFP4/MXFP4)/Marlin scales cannot be folded and
+    must go through the per-layer path.
+    """
     method = getattr(proj, "quant_method", None)
     if method is None or isinstance(method, UnquantizedLinearMethod):
         return True
-    if type(method).__name__ not in _SIMPLE_FUSABLE_QUANT_METHODS:
+    if not isinstance(method, (Fp8LinearMethod, Fp8PerTensorOnlineLinearMethod)):
         return False
-    return not getattr(method, "use_marlin", False) and not getattr(
-        method, "block_quant", False
+    return not (
+        getattr(method, "use_marlin", False)
+        or getattr(method, "block_quant", False)
+        or getattr(method, "use_deep_gemm", False)
     )
 
 

@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.model_executor.layers.linear import LinearMethodBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.models.qwen3_dflash import (
     ContextKVStrategy,
     DFlashQwen3Model,
@@ -138,30 +139,37 @@ def test_decide_strategy_quantized_and_mixed():
     assert _decide_context_kv_strategy([u, p]) is ContextKVStrategy.PER_LAYER
 
 
+def _simple_fp8(*, use_marlin=False, block_quant=False, use_deep_gemm=False):
+    """Real ``Fp8LinearMethod`` without running ``__init__`` (needs a config /
+    layer); only the attributes the strategy check reads are set."""
+    m = object.__new__(Fp8LinearMethod)
+    m.use_marlin = use_marlin
+    m.block_quant = block_quant
+    m.use_deep_gemm = use_deep_gemm
+    return m
+
+
 def test_decide_strategy_simple_fp8_gates_on_cutlass(monkeypatch):
     """Simple FP8 (non-Marlin) -> SCALED_MM when cutlass-fp8 is available,
     FUSED_DEQUANT otherwise."""
     from vllm.model_executor.models import qwen3_dflash as mod
 
-    class Fp8LinearMethod:  # named to match _SIMPLE_FUSABLE_QUANT_METHODS
-        use_marlin = False
-        block_quant = False
-
-    p = _Projection(_ints(4, 4), None, Fp8LinearMethod())
+    p = _Projection(_ints(4, 4), None, _simple_fp8())
     monkeypatch.setattr(mod, "cutlass_fp8_supported", lambda: True)
     assert _decide_context_kv_strategy([p, p]) is ContextKVStrategy.SCALED_MM
     monkeypatch.setattr(mod, "cutlass_fp8_supported", lambda: False)
     assert _decide_context_kv_strategy([p, p]) is ContextKVStrategy.FUSED_DEQUANT
 
 
+def test_decide_strategy_deep_gemm_goes_per_layer():
+    """FP8 on a DeepGEMM path transforms its scales -> PER_LAYER."""
+    p = _Projection(_ints(4, 4), None, _simple_fp8(use_deep_gemm=True))
+    assert _decide_context_kv_strategy([p, p]) is ContextKVStrategy.PER_LAYER
+
+
 def test_decide_strategy_marlin_goes_per_layer():
     """Marlin (weight-only FP8) cannot be fused -> PER_LAYER."""
-
-    class _Marlin:
-        use_marlin = True
-        block_quant = False
-
-    p = _Projection(_ints(4, 4), None, _Marlin())
+    p = _Projection(_ints(4, 4), None, _simple_fp8(use_marlin=True))
     assert _decide_context_kv_strategy([p, p]) is ContextKVStrategy.PER_LAYER
 
 
