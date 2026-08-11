@@ -170,7 +170,11 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
         )
         self.set_moe_parameters()
         self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
-            self.moe_mlp_layers
+            torch.nn.ModuleList(self.model.layers.values()),
+            0,
+            len(self.model.layers),
+            DeepseekV2MoE,
+            "mtp_block.mlp",
         )
 
     def set_moe_parameters(self):

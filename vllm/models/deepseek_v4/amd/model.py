@@ -268,6 +268,7 @@ class DeepseekV4MoE(nn.Module):
             n_shared_experts=(
                 config.n_shared_experts if self.is_fused_shared_expert_enabled else None
             ),
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
             gate=self.gate,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -575,7 +576,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
-            layer.ffn for layer in self.layers[self.start_layer : self.end_layer]
+            self.layers,
+            self.start_layer,
+            self.end_layer,
+            DeepseekV4MoE,
+            "ffn",
         )
 
         if get_pp_group().is_last_rank:

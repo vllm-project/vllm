@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from collections.abc import Iterable
 from math import prod
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -88,9 +88,25 @@ def resolve_fused_shared_expert_fusion(
 
 
 def resolve_model_fused_shared_expert_fusion(
-    moe_layers: Iterable[object],
+    layers: nn.ModuleList,
+    start_layer: int,
+    end_layer: int,
+    moe_cls: type[nn.Module],
+    moe_name: str,
 ) -> bool:
     """Resolve one fused-shared-expert state for a model's MoE layers."""
+
+    def get_moe_layer(layer: nn.Module) -> nn.Module:
+        for name in moe_name.split("."):
+            layer = getattr(layer, name)
+        return layer
+
+    moe_layers = (
+        moe_layer
+        for layer in layers[start_layer:end_layer]
+        if isinstance(moe_layer := get_moe_layer(layer), moe_cls)
+    )
+
     enabled = [
         getattr(layer, "is_fused_shared_expert_enabled", False) for layer in moe_layers
     ]
@@ -100,9 +116,10 @@ def resolve_model_fused_shared_expert_fusion(
         raise NotImplementedError(
             "Fused shared experts must be enabled for all MoE layers; found "
             f"{enabled_count} enabled and {disabled_count} disabled layers. "
-            "Please open an issue."
+            "Per-layer fused shared experts is not yet supported. Please open "
+            "an issue."
         )
-    return any(enabled)
+    return enabled_count > 0 and disabled_count == 0
 
 
 @triton.jit

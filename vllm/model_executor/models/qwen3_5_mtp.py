@@ -27,6 +27,7 @@ from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5RMSNorm,
 )
 from vllm.model_executor.models.qwen3_next import (
+    Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
     _all_gather_hidden_and_residual,
 )
@@ -188,7 +189,11 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         weights = maybe_fuse_shared_experts(
             weights,
             enabled=resolve_model_fused_shared_expert_fusion(
-                layer.mlp for layer in self.layers
+                self.layers,
+                0,
+                len(self.layers),
+                Qwen3NextSparseMoeBlock,
+                "mlp",
             ),
             n_routed_experts=getattr(self.config, "num_experts", 0),
             n_shared_experts=1,

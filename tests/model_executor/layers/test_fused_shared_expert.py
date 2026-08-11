@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
 import pytest
+from torch import nn
 
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
+from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
 )
@@ -14,6 +14,26 @@ from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
 )
+
+
+def test_determine_expert_counts_fuse_shared_experts_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.layer.rocm_aiter_ops."
+        "is_fusion_moe_shared_experts_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.layer.envs."
+        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS",
+        False,
+    )
+
+    common_args = (8, 0, 2, True)
+    assert determine_expert_counts(*common_args, True)[2] == 2
+    assert determine_expert_counts(*common_args, False)[2] == 0
+    assert determine_expert_counts(*common_args, None)[2] == 0
 
 
 def test_resolve_fused_shared_expert_fusion_skips_compatibility_when_disabled(
@@ -94,17 +114,33 @@ def test_resolve_fused_shared_expert_fusion_rejects_incompatible_quantization(
 
 
 def test_resolve_model_fused_shared_expert_fusion_requires_consistent_layers() -> None:
-    enabled_layer = SimpleNamespace(is_fused_shared_expert_enabled=True)
-    disabled_layer = SimpleNamespace(is_fused_shared_expert_enabled=False)
+    class MoE(nn.Module):
+        def __init__(self, enabled: bool) -> None:
+            super().__init__()
+            self.is_fused_shared_expert_enabled = enabled
 
-    assert fused_moe_utils.resolve_model_fused_shared_expert_fusion([enabled_layer])
-    assert not fused_moe_utils.resolve_model_fused_shared_expert_fusion(
-        [disabled_layer]
+    class Layer(nn.Module):
+        def __init__(self, enabled: bool) -> None:
+            super().__init__()
+            self.mlp = MoE(enabled)
+
+    enabled_layers = nn.ModuleList([Layer(True)])
+    disabled_layers = nn.ModuleList([Layer(False)])
+    mixed_layers = nn.ModuleList([Layer(True), Layer(False)])
+    empty_layers = nn.ModuleList()
+
+    assert fused_moe_utils.resolve_model_fused_shared_expert_fusion(
+        enabled_layers, 0, len(enabled_layers), MoE, "mlp"
     )
-    assert not fused_moe_utils.resolve_model_fused_shared_expert_fusion([])
+    assert not fused_moe_utils.resolve_model_fused_shared_expert_fusion(
+        disabled_layers, 0, len(disabled_layers), MoE, "mlp"
+    )
+    assert not fused_moe_utils.resolve_model_fused_shared_expert_fusion(
+        empty_layers, 0, len(empty_layers), MoE, "mlp"
+    )
     with pytest.raises(NotImplementedError, match="1 enabled and 1 disabled layers"):
         fused_moe_utils.resolve_model_fused_shared_expert_fusion(
-            [enabled_layer, disabled_layer]
+            mixed_layers, 0, len(mixed_layers), MoE, "mlp"
         )
 
 

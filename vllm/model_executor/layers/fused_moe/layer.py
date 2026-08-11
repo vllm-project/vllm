@@ -75,6 +75,7 @@ def determine_expert_counts(
     num_redundant_experts: int,
     n_shared_experts: int | None,
     is_act_and_mul: bool,
+    fuse_shared_experts: bool | None,
 ) -> tuple[int, int, int]:
     global_num_experts = num_experts + num_redundant_experts
     logical_num_experts = num_experts
@@ -85,9 +86,14 @@ def determine_expert_counts(
     # backend-neutral router-append path (env alone, independent of the master
     # switch; e.g. the MM3 triton/flydsl mxfp8 MoE). Gated activations only.
     fuse_shared_enabled = (
-        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        or envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-    ) and is_act_and_mul
+        (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            or envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+        )
+        and is_act_and_mul
+        if fuse_shared_experts is None
+        else fuse_shared_experts
+    )
 
     num_fused_shared_experts = (
         n_shared_experts if n_shared_experts is not None and fuse_shared_enabled else 0
@@ -131,6 +137,7 @@ def FusedMoEFactory(
     reduce_results: bool = True,
     ckpt_names: tuple[str, str, str] = ("gate_proj", "down_proj", "up_proj"),
     n_shared_experts: int | None = None,
+    fuse_shared_experts: bool | None = None,
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
     shared_experts: torch.nn.Module | None = None,
@@ -195,6 +202,9 @@ def FusedMoEFactory(
             up_proj) used for weight loading
         n_shared_experts: Number of shared experts to fuse into the routed
             grouped GEMM (ROCm; requires aiter FSE or the router-append path)
+        fuse_shared_experts: Explicitly enable or disable shared-expert fusion.
+            ``True`` enables the modular CUDA path. ``None`` preserves the
+            existing ROCm environment-controlled behavior.
         router_logits_dtype: Data type for router logits buffers
         gate: Pre-configured gate module
         shared_experts: Pre-configured shared experts module
@@ -242,6 +252,7 @@ def FusedMoEFactory(
             num_redundant_experts,
             n_shared_experts,
             is_act_and_mul,
+            fuse_shared_experts,
         )
     )
 

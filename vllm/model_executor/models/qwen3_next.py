@@ -170,6 +170,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=1 if self.shared_expert is None else None,
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
             shared_expert_gate=self.shared_expert_gate
             if self.shared_expert is None
             else None,
@@ -698,9 +699,11 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         weights = maybe_fuse_shared_experts(
             weights,
             enabled=resolve_model_fused_shared_expert_fusion(
-                layer.mlp
-                for layer in self.layers[self.start_layer : self.end_layer]
-                if isinstance(layer.mlp, Qwen3NextSparseMoeBlock)
+                self.layers,
+                self.start_layer,
+                self.end_layer,
+                Qwen3NextSparseMoeBlock,
+                "mlp",
             ),
             n_routed_experts=getattr(self.config, "num_experts", 0),
             n_shared_experts=1,

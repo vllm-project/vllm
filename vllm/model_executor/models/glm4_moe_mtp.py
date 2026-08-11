@@ -215,7 +215,11 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
                 self.moe_layers.append(layer.mlp.experts)
         self.extract_moe_parameters(example_moe)
         self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
-            self.moe_mlp_layers
+            torch.nn.ModuleList(self.model.layers.values()),
+            0,
+            len(self.model.layers),
+            Glm4MoE,
+            "mtp_block.mlp",
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

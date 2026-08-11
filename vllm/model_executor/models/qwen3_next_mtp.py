@@ -160,9 +160,11 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         weights = maybe_fuse_shared_experts(
             weights,
             enabled=resolve_model_fused_shared_expert_fusion(
-                layer.mlp
-                for layer in self.layers
-                if isinstance(layer.mlp, Qwen3NextSparseMoeBlock)
+                self.layers,
+                0,
+                len(self.layers),
+                Qwen3NextSparseMoeBlock,
+                "mlp",
             ),
             n_routed_experts=self.config.num_experts,
             n_shared_experts=1,

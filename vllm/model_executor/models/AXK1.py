@@ -205,6 +205,7 @@ class AXK1MoE(nn.Module):
             n_shared_experts=config.n_shared_experts
             if self.is_fused_shared_expert_enabled
             else None,
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -810,9 +811,11 @@ class AXK1Model(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rocm_aiter_moe_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
-            layer.mlp
-            for layer in self.layers[self.start_layer : self.end_layer]
-            if isinstance(layer.mlp, AXK1MoE)
+            self.layers,
+            self.start_layer,
+            self.end_layer,
+            AXK1MoE,
+            "mlp",
         )
         stacked_params_mapping: list[tuple[str, str, int | str]] = [
             # (param_name, shard_name, shard_id)

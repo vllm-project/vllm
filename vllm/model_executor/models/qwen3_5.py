@@ -276,8 +276,11 @@ class Qwen3_5Model(Qwen3NextModel):
             weights = maybe_fuse_shared_experts(
                 weights,
                 enabled=resolve_model_fused_shared_expert_fusion(
-                    layer.mlp
-                    for layer in self.layers[self.start_layer : self.end_layer]
+                    self.layers,
+                    self.start_layer,
+                    self.end_layer,
+                    Qwen3NextSparseMoeBlock,
+                    "mlp",
                 ),
                 n_routed_experts=self.config.num_experts,
                 n_shared_experts=1,

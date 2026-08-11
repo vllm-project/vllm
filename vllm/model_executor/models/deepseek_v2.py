@@ -393,6 +393,7 @@ class DeepseekV2MoE(nn.Module):
             n_shared_experts=config.n_shared_experts
             if self.is_fused_shared_expert_enabled
             else None,
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
             router_logits_dtype=self.gate.out_dtype,
         )
 
@@ -1526,9 +1527,11 @@ class DeepseekV2Model(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rocm_aiter_moe_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
-            layer.mlp
-            for layer in self.layers[self.start_layer : self.end_layer]
-            if isinstance(layer.mlp, DeepseekV2MoE)
+            self.layers,
+            self.start_layer,
+            self.end_layer,
+            DeepseekV2MoE,
+            "mlp",
         )
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

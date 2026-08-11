@@ -413,6 +413,7 @@ class MiniMaxM3MoE(nn.Module):
             n_shared_experts=(
                 self.n_shared_experts if self.is_fused_shared_expert_enabled else None
             ),
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
         )
@@ -1101,9 +1102,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
-            layer.block_sparse_moe
-            for layer in self.layers[self.start_layer : self.end_layer]
-            if layer.is_moe_layer
+            self.layers,
+            self.start_layer,
+            self.end_layer,
+            MiniMaxM3MoE,
+            "block_sparse_moe",
         )
 
         if get_pp_group().is_last_rank:
