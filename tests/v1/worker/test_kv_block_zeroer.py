@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.v1.kv_cache_interface import SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.worker.utils import (
     AttentionGroup,
     KVBlockZeroer,
@@ -21,16 +24,29 @@ class _BlockFirstBackend:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_sliding_window_blocks_are_zeroed():
+@pytest.mark.parametrize(
+    "spec",
+    [
+        SlidingWindowSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.uint8,
+            sliding_window=4,
+        ),
+        ChunkedLocalAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.uint8,
+            attention_chunk_size=4,
+        ),
+    ],
+    ids=["sliding-window", "chunked-local"],
+)
+def test_attention_blocks_are_zeroed(spec):
     device = torch.device("cuda")
     storage = torch.ones((4, 1, 2, 2), dtype=torch.uint8, device=device)
-    spec = SlidingWindowSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.uint8,
-        sliding_window=4,
-    )
     layer_name = "draft.self_attn"
     zeroer = KVBlockZeroer(
         device,
