@@ -451,15 +451,6 @@ impl EngineCoreClient {
             .world_size
     }
 
-    /// Return the data parallel size from the parallel config, if available.
-    pub fn data_parallel_size(&self) -> u64 {
-        self.engines
-            .first()
-            .expect("engine core client requires at least one engine")
-            .ready_response
-            .data_parallel_size
-    }
-
     /// Get the model name associated with this client used for metrics
     /// labeling.
     pub fn model_name(&self) -> &str {
@@ -519,7 +510,7 @@ impl EngineCoreClient {
                 "registered request to engine"
             );
 
-            self.inner.send_to_engine(&engine_id, EngineCoreRequestType::Add, &req).await?;
+            self.inner.send_request_to_engine(&engine_id, req).await?;
             Ok(())
         }
         .await;

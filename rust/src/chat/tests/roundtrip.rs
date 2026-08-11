@@ -16,9 +16,9 @@ use serde_json_fmt::JsonFormat as JsonFmt;
 use serial_test::file_serial;
 use vllm_chat::{
     AssistantContentBlock, AssistantMessage, AssistantMessageExt as _, AssistantToolCall,
-    ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice, FinishReason,
-    GenerationPromptMode, LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection,
-    RendererSelection, load_model_backends,
+    ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, FinishReason, GenerationPromptMode,
+    LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection, RendererSelection,
+    load_model_backends,
 };
 use vllm_text::{DecodedTextEvent, Finished, Prompt};
 use vllm_tokenizer::Tokenizer;
@@ -845,15 +845,12 @@ fn roundtrip_request(
     tools: Vec<ChatTool>,
     thinking: Option<bool>,
 ) -> ChatRequest {
+    let tool_context = vllm_chat::ResolvedToolContext::new(&messages, tools, None, true)
+        .expect("tool context should resolve");
     let mut request = ChatRequest {
         request_id: request_id.into(),
         messages,
-        tool_choice: if tools.is_empty() {
-            ChatToolChoice::None
-        } else {
-            ChatToolChoice::Auto
-        },
-        tools,
+        tool_context,
         ..ChatRequest::for_test()
     };
 

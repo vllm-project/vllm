@@ -27,8 +27,8 @@ from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (  # no
     _AITER_SWIGLU_BETA,
     AiterMxfp8Experts,
 )
-from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (  # noqa: E402
-    Mxfp8NativeTritonExperts,
+from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (  # noqa: E402
+    Mxfp8EmulationTritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (  # noqa: E402
     FusedMoEActivationFormat,
@@ -150,16 +150,20 @@ def test_explicit_moe_backend_aiter():
 
 def test_gfx950_picks_aiter():
     """Auto-select on real ROCm hardware with flydsl usable -> FlyDSL wins."""
-    with _flydsl_installed(True):
+    # NOTE: Fp8MoeBackend.AITER_MXFP8 does not require VLLM_ROCM_USE_AITER=1
+    with (
+        patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=True),
+        _flydsl_installed(True),
+    ):
         backend, experts_cls = select_mxfp8_moe_backend(_config())
     assert backend is Fp8MoeBackend.AITER_MXFP8
     assert experts_cls is AiterMxfp8Experts
 
 
-def test_gfx942_picks_triton():
+def test_gfx942_picks_emulation():
     """flydsl unusable (e.g. gfx942, no FlyDSL support) -> native Triton
     dot_scaled backend wins instead."""
-    with _flydsl_installed(False):
+    with patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False):
         backend, experts_cls = select_mxfp8_moe_backend(_config())
-    assert backend is Fp8MoeBackend.TRITON_MXFP8
-    assert experts_cls is Mxfp8NativeTritonExperts
+    assert backend is Fp8MoeBackend.EMULATION
+    assert experts_cls is Mxfp8EmulationTritonExperts
