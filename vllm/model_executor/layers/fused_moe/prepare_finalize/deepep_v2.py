@@ -115,8 +115,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         # Decode: do_expand=False + do_cpu_sync=False (cudagraph-safe)
         # Prefill: do_expand=True + do_cpu_sync=True (memory-efficient)
-        do_expand = not self.use_cudagraph
-        do_cpu_sync = not self.use_cudagraph
+        do_expand = False
+        do_cpu_sync = False
 
         # In do_expand=False mode, the recv buffer is the worst case
         # R * num_max_tokens_per_rank. Defaulting to the buffer's init value
@@ -426,7 +426,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
 @triton.jit
 def _globalize_recv_topk_idx_kernel(
-    topk_idx_ptr,  # [N*topk] local expert IDs (-1 = non-local), modified in place
+    # [N*topk] local expert IDs (-1 = non-local), modified in place
+    topk_idx_ptr,
     psum_ptr,  # [P] per-scaleup-rank recv prefix sum; num_recv = psum[P-1]
     P,
     rank_expert_offset,
