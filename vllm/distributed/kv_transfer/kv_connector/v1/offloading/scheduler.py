@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from itertools import chain, islice
 from typing import Any, NamedTuple
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
@@ -38,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     Locality,
@@ -91,15 +93,10 @@ class GroupOffloadConfig(NamedTuple):
     kv_event_group_spec: OffloadingEventGroupSpec
     # None below means full attention
     sliding_window_size_in_chunks: int | None
+    kv_cache_spec: KVCacheSpec
     # Partial-tail data for this group comes from the scheduler's CoW hand-off
     # rather than the request block table.
     requires_cow_source: bool = False
-    # Number of this group's offloaded chunks per full-attention alignment
-    # segment. Used to skip storing SWA chunks that can never serve a load
-    # hit (e.g. DeepSeek V4 where SWA groups have much smaller block sizes
-    # than the MLA full-attention group).
-    # None for full-attention groups or when the optimization doesn't apply.
-    alignment_chunk_count: int | None = None
     # True for EAGLE/MTP draft-model attention groups. The trailing chunk
     # of these groups is volatile and lacks a stable hash, so it must
     # be excluded from store and load scheduling.
@@ -124,26 +121,6 @@ def get_sliding_window_size_in_chunks(
 
     assert isinstance(kv_cache_spec, FullAttentionSpec)
     return None
-
-
-def is_store_reachable_swa_chunk(
-    absolute_chunk_index: int,
-    storable_chunk_count: int,
-    alignment_chunk_count: int | None,
-    sliding_window_chunks: int | None,
-    is_eagle_group: bool,
-) -> bool:
-    """Return whether an SWA chunk can participate in an external-cache hit."""
-    if alignment_chunk_count is None:
-        return True
-    assert sliding_window_chunks is not None
-    position_in_segment = absolute_chunk_index % alignment_chunk_count
-    segment_start = absolute_chunk_index - position_in_segment
-    actual_segment_length = min(
-        alignment_chunk_count, storable_chunk_count - segment_start
-    )
-    reachable_tail = sliding_window_chunks + int(is_eagle_group)
-    return position_in_segment >= actual_segment_length - reachable_tail
 
 
 def resolve_mamba_align_size(
@@ -176,6 +153,8 @@ class SchedulerOffloadConfig(NamedTuple):
     num_workers: int
     offload_prompt_only: bool
     supports_partial_tail: bool
+    alignment_tokens: int | None = None
+    retention_interval: int | None = None
 
     @classmethod
     def from_spec(
@@ -204,18 +183,7 @@ class SchedulerOffloadConfig(NamedTuple):
         if len(full_attn_tokens_per_chunk) == 1:
             alignment_tokens = full_attn_tokens_per_chunk.pop()
 
-        def _alignment_chunk_count(
-            tokens_per_chunk: int,
-            sliding_window_size_in_chunks: int | None,
-        ) -> int | None:
-            if alignment_tokens is None or sliding_window_size_in_chunks is None:
-                return None
-            if alignment_tokens <= tokens_per_chunk:
-                return None
-            per_segment = alignment_tokens // tokens_per_chunk
-            if sliding_window_size_in_chunks >= per_segment:
-                return None
-            return per_segment
+        retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
 
         eagle_groups = {
             idx
@@ -255,9 +223,7 @@ class SchedulerOffloadConfig(NamedTuple):
                         // spec.tokens_per_hash
                     ),
                     sliding_window_size_in_chunks=sw,
-                    alignment_chunk_count=_alignment_chunk_count(
-                        tokens_per_block * spec.blocks_per_chunk, sw
-                    ),
+                    kv_cache_spec=kv_spec,
                     kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),
                     is_eagle_group=idx in eagle_groups,
                     requires_cow_source=(
@@ -289,6 +255,34 @@ class SchedulerOffloadConfig(NamedTuple):
             and vllm_config.parallel_config.decode_context_parallel_size == 1
         )
 
+        if retention_interval is not None:
+            has_swa_or_mamba = any(
+                config.sliding_window_size_in_chunks is not None
+                for config in kv_group_configs
+            )
+            if not has_swa_or_mamba:
+                raise ValueError(
+                    "VLLM_PREFIX_CACHE_RETENTION_INTERVAL is set but this "
+                    "model has no sliding-window or Mamba KV cache group, "
+                    "so retention has no effect. Unset it (it only applies "
+                    "to sliding-window and Mamba attention)."
+                )
+            if retention_interval < 0:
+                raise ValueError(
+                    f"VLLM_PREFIX_CACHE_RETENTION_INTERVAL "
+                    f"({retention_interval}) must be non-negative."
+                )
+            for config in kv_group_configs:
+                if (
+                    config.sliding_window_size_in_chunks is not None
+                    and retention_interval % config.tokens_per_chunk != 0
+                ):
+                    raise ValueError(
+                        f"VLLM_PREFIX_CACHE_RETENTION_INTERVAL "
+                        f"({retention_interval}) must be a multiple of "
+                        f"tokens_per_chunk ({config.tokens_per_chunk})."
+                    )
+
         return cls(
             num_workers=vllm_config.parallel_config.world_size,
             kv_group_configs=kv_group_configs,
@@ -296,6 +290,8 @@ class SchedulerOffloadConfig(NamedTuple):
             tokens_per_hash=spec.tokens_per_hash,
             offload_prompt_only=spec.offload_prompt_only,
             supports_partial_tail=supports_partial_tail,
+            alignment_tokens=alignment_tokens,
+            retention_interval=retention_interval,
         )
 
 
@@ -1298,24 +1294,33 @@ class OffloadingConnectorScheduler:
                 ]
                 assert len(offload_keys) == len(offload_block_ids)
 
+                # Use reachable_block_mask to filter unreachable chunks
+                # (SWA/Mamba sparsity + retention interval).
+                reachable_boundaries = (
+                    (req.num_prompt_tokens - 1,)
+                    if self.config.retention_interval is not None
+                    else ()
+                )
+                manager_cls = KVCacheSpecRegistry.get_manager_class(
+                    group_config.kv_cache_spec
+                )
+                assert manager_cls is not None
+                block_mask = manager_cls.reachable_block_mask(
+                    start_block=start_chunk_idx,
+                    end_block=num_chunks,
+                    alignment_tokens=self.config.alignment_tokens,
+                    kv_cache_spec=group_config.kv_cache_spec,
+                    use_eagle=group_config.is_eagle_group,
+                    retention_interval=self.config.retention_interval,
+                    reachable_boundaries=reachable_boundaries,
+                )
+
                 for key_idx, (offload_key, block_id) in enumerate(
                     zip(offload_keys, offload_block_ids)
                 ):
                     if block_id == 0:
                         continue
-                    # Skip SWA chunks that can never serve a load hit:
-                    # within each full-attention alignment segment, only the
-                    # trailing chunks queried by _sliding_window_lookup are
-                    # reachable. EAGLE/MTP requires one additional chunk that
-                    # lookup later drops as its volatile draft tail.
-                    abs_chunk_idx = start_chunk_idx + key_idx
-                    if not is_store_reachable_swa_chunk(
-                        abs_chunk_idx,
-                        num_chunks,
-                        group_config.alignment_chunk_count,
-                        group_config.sliding_window_size_in_chunks,
-                        group_config.is_eagle_group,
-                    ):
+                    if block_mask is not None and not block_mask[key_idx]:
                         continue
                     new_offload_keys.append(offload_key)
 

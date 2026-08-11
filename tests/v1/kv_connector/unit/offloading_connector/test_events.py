@@ -89,6 +89,12 @@ def _group_config(
         tokens_per_chunk=block_size * blocks_per_chunk,
         hashes_per_chunk=blocks_per_chunk,
         sliding_window_size_in_chunks=sliding_window_size_in_chunks,
+        kv_cache_spec=FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        ),
         kv_event_group_spec=_FULL_ATTENTION_EVENT_SPEC,
     )
 

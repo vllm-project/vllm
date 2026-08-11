@@ -33,7 +33,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
     get_sliding_window_size_in_chunks,
-    is_store_reachable_swa_chunk,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
@@ -308,55 +307,6 @@ def test_scheduler_reports_lookup_sync_delay(request_runner):
     reduced = _reduce_kv_connector_stats(runner)
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_count"] == 1
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
-
-
-@pytest.mark.parametrize(
-    (
-        "absolute_chunk_index",
-        "storable_chunk_count",
-        "alignment_chunk_count",
-        "sliding_window_chunks",
-        "is_eagle_group",
-        "expected",
-    ),
-    [
-        # Full 64-chunk segment: ordinary SWA keeps 62-63; EAGLE also keeps 61.
-        (61, 64, 64, 2, False, False),
-        (62, 64, 64, 2, False, True),
-        (60, 64, 64, 2, True, False),
-        (61, 64, 64, 2, True, True),
-        # Partial 48-of-64 segment: the reachable tail ends at chunk 47.
-        (45, 48, 64, 2, False, False),
-        (46, 48, 64, 2, False, True),
-        (44, 48, 64, 2, True, False),
-        (45, 48, 64, 2, True, True),
-        # A later partial segment uses its own actual end (chunks 64-79).
-        (76, 80, 64, 3, False, False),
-        (77, 80, 64, 3, False, True),
-        # No alignment means no store-pruning optimization.
-        (0, 1, None, None, False, True),
-        # A tail at least as large as the segment keeps every chunk.
-        (0, 2, 64, 2, False, True),
-    ],
-)
-def test_is_store_reachable_swa_chunk(
-    absolute_chunk_index: int,
-    storable_chunk_count: int,
-    alignment_chunk_count: int | None,
-    sliding_window_chunks: int | None,
-    is_eagle_group: bool,
-    expected: bool,
-):
-    assert (
-        is_store_reachable_swa_chunk(
-            absolute_chunk_index,
-            storable_chunk_count,
-            alignment_chunk_count,
-            sliding_window_chunks,
-            is_eagle_group,
-        )
-        is expected
-    )
 
 
 def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
@@ -2113,7 +2063,7 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
       - Group 0: full attention (MLA-like), block_size=16
       - Group 1: SWA, block_size=4, sliding_window=8
 
-    alignment_chunk_count = 16 / 4 = 4 SWA blocks per alignment segment.
+    alignment_tokens = 16, so 16 / 4 = 4 SWA blocks per alignment segment.
     sliding_window_size_in_chunks = ceil(8 / 4) = 2.
     Within each segment of 4 SWA blocks, only the trailing 2 are stored.
 
@@ -2157,17 +2107,17 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
         kv_cache_groups=kv_cache_groups,
     )
 
-    # Verify config: alignment_chunk_count computed correctly
+    # Verify config
     kv_group_configs = runner.connector_scheduler.config.kv_group_configs
     assert len(kv_group_configs) == 2
-    # Group 0: full attention -> no alignment skip
-    assert kv_group_configs[0].alignment_chunk_count is None
+    # Group 0: full attention
     assert kv_group_configs[0].sliding_window_size_in_chunks is None
     assert kv_group_configs[0].tokens_per_chunk == full_attn_block_size
-    # Group 1: SWA -> alignment_chunk_count = 16/4 = 4, tail = 2
-    assert kv_group_configs[1].alignment_chunk_count == 4
+    # Group 1: SWA with sliding_window_size of 2 chunks
     assert kv_group_configs[1].sliding_window_size_in_chunks == 2
     assert kv_group_configs[1].tokens_per_chunk == swa_block_size
+    # alignment_tokens = full_attn_block_size = 16
+    assert runner.connector_scheduler.config.alignment_tokens == full_attn_block_size
 
     # Send 32 tokens = 2 full-attn blocks (block_size=16) = 8 SWA blocks
     # (block_size=4). Decode 1 token to kick off processing (stores are
