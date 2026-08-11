@@ -679,8 +679,10 @@ class Worker(WorkerBase):
         with self._maybe_get_memory_pool_context(tag="kv_cache"):
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
-        if self.model_config.enable_return_routed_experts:
-            self.model_runner.init_routed_experts_capturer()
+        if self.vllm_config.artifact_config.enabled:
+            self.model_runner.init_artifact_connector(  # type: ignore[attr-defined]
+                kv_cache_config
+            )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
@@ -1365,30 +1367,33 @@ class Worker(WorkerBase):
     def shutdown(self) -> None:
         gc.unfreeze()
 
-        # has_kv_transfer_group can be None during interpreter shutdown.
-        if ensure_kv_transfer_shutdown is not None:
-            ensure_kv_transfer_shutdown()
-        if ensure_ec_transfer_shutdown is not None:
-            ensure_ec_transfer_shutdown()
-        if self.profiler is not None:
-            self.profiler.shutdown()
+        try:
+            # has_kv_transfer_group can be None during interpreter shutdown.
+            if ensure_kv_transfer_shutdown is not None:
+                ensure_kv_transfer_shutdown()
+            if ensure_ec_transfer_shutdown is not None:
+                ensure_ec_transfer_shutdown()
+            if self.profiler is not None:
+                self.profiler.shutdown()
 
-        if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
-            weight_transfer_engine.shutdown()
+            if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
+                weight_transfer_engine.shutdown()
+        finally:
+            try:
+                # Release GPU resources held by the model runner so that memory
+                # can be reclaimed when running in-process
+                if model_runner := getattr(self, "model_runner", None):
+                    model_runner.shutdown()
+            finally:
+                # Release kept-alive cumem pools while the pluggable allocator
+                # wrappers and callbacks are still alive, so MemPool teardown is
+                # not deferred to interpreter finalization
+                # (pytorch/pytorch#145168).
+                if current_platform.is_cuda_alike():
+                    from vllm.device_allocator.cumem import CuMemAllocator
 
-        # Release GPU resources held by the model runner so that memory
-        # can be reclaimed when running in-process
-        if model_runner := getattr(self, "model_runner", None):
-            model_runner.shutdown()
-
-        # Release kept-alive cumem pools while the pluggable allocator wrappers
-        # and callbacks are still alive, so MemPool teardown is not deferred to
-        # interpreter finalization (pytorch/pytorch#145168).
-        if current_platform.is_cuda_alike():
-            from vllm.device_allocator.cumem import CuMemAllocator
-
-            if CuMemAllocator.instance is not None:
-                CuMemAllocator.instance.release_pools()
+                    if CuMemAllocator.instance is not None:
+                        CuMemAllocator.instance.release_pools()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)

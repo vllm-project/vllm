@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -12,6 +12,28 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+
+
+def test_shutdown_closes_model_runner_after_transfer_error(monkeypatch):
+    import vllm.v1.worker.gpu_worker as gpu_worker
+
+    worker = object.__new__(gpu_worker.Worker)
+    worker.model_runner = Mock()
+    worker.profiler = None
+    monkeypatch.setattr(gpu_worker.gc, "unfreeze", Mock())
+    monkeypatch.setattr(
+        gpu_worker,
+        "ensure_kv_transfer_shutdown",
+        Mock(side_effect=RuntimeError("transfer shutdown failed")),
+    )
+    monkeypatch.setattr(gpu_worker, "ensure_ec_transfer_shutdown", None)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: False)
+
+    with pytest.raises(RuntimeError, match="transfer shutdown failed"):
+        worker.shutdown()
+
+    worker.model_runner.shutdown.assert_called_once_with()
+
 
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
