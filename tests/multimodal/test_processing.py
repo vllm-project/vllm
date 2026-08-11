@@ -1099,6 +1099,29 @@ def test_apply_matches_no_match_exits_quickly():
     assert "".join(result) == long_prompt
 
 
+def test_apply_matches_many_shared_targets_scales_linearly():
+    """Shared replacement targets must not trigger per-item rescanning."""
+    item_count = 5_000
+    replacement = [1] * 50
+    update = PromptReplacement("image", [0], replacement)
+    mm_prompt_updates = {
+        "image": [[update.resolve(item_idx)] for item_idx in range(item_count)]
+    }
+
+    start = time.perf_counter()
+    result, match_result = apply_token_matches(
+        [0] * item_count,
+        mm_prompt_updates,
+        tokenizer=None,
+    )
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 2, f"apply_token_matches took {elapsed:.2f}s, expected < 2s"
+    assert len(result) == item_count * len(replacement)
+    assert all(token_id == 1 for token_id in result)
+    assert match_result == {"image": [0] * item_count}
+
+
 def test_iter_token_matches_rejects_negative_start_idx():
     with pytest.raises(ValueError, match="non-negative"):
         list(iter_token_matches([1, 2, 3], [2], start_idx=-1))
