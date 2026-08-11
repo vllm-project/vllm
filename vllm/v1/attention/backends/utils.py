@@ -293,6 +293,38 @@ def infer_global_hyperparameters(
     return global_params
 
 
+def max_local_attention_virtual_batches(
+    attn_chunk_size: int,
+    max_num_reqs: int,
+    max_num_batched_tokens: int,
+) -> int:
+    """Upper bound on the ``num_reqs`` that local attention can produce.
+
+    `make_local_attention_virtual_batches` emits one virtual batch per local
+    attention block, so the ``num_reqs`` it reports is decoupled from
+    `max_num_seqs`. Backends that preallocate per-request buffers must size them
+    from this bound instead.
+
+    Each request contributes ``1 + cdiv(q_i - f_i, c)`` blocks with
+    ``f_i = q_tokens_in_first_block >= 1``, summing to at most
+    ``2 * max_num_reqs + cdiv(max_num_batched_tokens, attn_chunk_size)``; the
+    ``2 *`` term is required, not slack. Every virtual batch also owns at least
+    one query token, capping the count at ``max_num_batched_tokens``.
+
+    Args:
+        attn_chunk_size: Local attention chunk size.
+        max_num_reqs: Maximum number of real requests in a batch.
+        max_num_batched_tokens: Maximum number of query tokens in a batch.
+
+    Returns:
+        Maximum number of virtual batches.
+    """
+    return min(
+        2 * max_num_reqs + cdiv(max_num_batched_tokens, attn_chunk_size),
+        max_num_batched_tokens,
+    )
+
+
 #
 # Take in `query_start_loc_np` and `seq_lens_np` and break the sequences into
 # local attention blocks, where each block is passed to the attention kernel

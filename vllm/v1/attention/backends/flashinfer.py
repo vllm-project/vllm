@@ -69,6 +69,7 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
+    max_local_attention_virtual_batches,
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
@@ -660,6 +661,25 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
+        # Chunked local attention emits one virtual batch per local attention
+        # block, so `build()` sees a `num_reqs` far above `max_num_seqs`. These
+        # buffers back fixed-address CUDA graph buffers, so size for that worst
+        # case rather than reallocating on overflow. A merged spec can carry
+        # `attention_chunk_size` for a group whose layers use full attention,
+        # so only ever grow the allocation.
+        attn_chunk_size = getattr(self.kv_cache_spec, "attention_chunk_size", None)
+        if attn_chunk_size is None:
+            self.max_buffer_reqs = max_num_reqs
+        else:
+            self.max_buffer_reqs = max_local_attention_virtual_batches(
+                attn_chunk_size, max_num_reqs, self.max_num_batched_tokens
+            )
+            # Each virtual batch attends to at most `attn_chunk_size` KV tokens.
+            max_num_pages = max(
+                max_num_pages,
+                self.max_buffer_reqs
+                * cdiv(attn_chunk_size, self.kv_cache_spec.block_size),
+            )
         speculative_config = vllm_config.speculative_config
         num_spec_tokens = (
             speculative_config.num_speculative_tokens
@@ -837,12 +857,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # reused CPU buffers to avoid a race condition between step N async copies to
         # GPU and step N+1 buffer updates.
         self.pin_memory = not vllm_config.use_v2_model_runner and PIN_MEMORY
-        self.paged_kv_indptr = self._make_buffer(max_num_reqs + 1)
+        self.paged_kv_indptr = self._make_buffer(self.max_buffer_reqs + 1)
         self.paged_kv_indptr_cpu_buffer = torch.zeros_like(
             self.paged_kv_indptr.cpu, pin_memory=self.pin_memory
         )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
         self.paged_kv_indices = self._make_buffer(max_num_pages)
-        self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
+        self.paged_kv_last_page_len = self._make_buffer(self.max_buffer_reqs)
 
     # Keep SM90 prefill/decode Q dtype selection in one place.
     def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
@@ -1059,6 +1079,36 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         return self._cascade_wrapper
 
+    def _ensure_paged_kv_capacity(self, num_reqs: int, num_pages: int = 0) -> None:
+        """Grow the persistent paged-KV buffers if the batch outgrows them.
+
+        A backstop; `__init__` already sizes for chunked local attention. It
+        cannot run under decode CUDA graphs, where `_get_decode_wrapper` has
+        handed the `.gpu` tensors to FlashInfer as fixed-address buffers and
+        `fast_plan_decode` skips the indices copy on that basis. Rebinding them
+        updates no wrapper, so those plans would read stale storage.
+        """
+        grow_reqs = num_reqs > self.max_buffer_reqs
+        grow_pages = num_pages > self.paged_kv_indices.np.shape[0]
+        if not grow_reqs and not grow_pages:
+            return
+        if self.enable_cuda_graph:
+            raise ValueError(
+                f"FlashInfer paged-KV buffers hold {self.max_buffer_reqs} "
+                f"requests / {self.paged_kv_indices.np.shape[0]} pages but the "
+                f"batch needs {num_reqs} / {num_pages}, and they cannot be "
+                "grown while captured decode CUDA graphs hold their addresses."
+            )
+        if grow_reqs:
+            self.max_buffer_reqs = num_reqs
+            self.paged_kv_indptr = self._make_buffer(num_reqs + 1)
+            self.paged_kv_indptr_cpu_buffer = torch.zeros_like(
+                self.paged_kv_indptr.cpu, pin_memory=self.pin_memory
+            )
+            self.paged_kv_last_page_len = self._make_buffer(num_reqs)
+        if grow_pages:
+            self.paged_kv_indices = self._make_buffer(num_pages)
+
     def _compute_flashinfer_kv_metadata(
         self,
         num_blocks_np: np.ndarray,
@@ -1095,6 +1145,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # write self.paged_kv_indices inplace
         num_actual_pages = self.paged_kv_indptr.np[num_reqs]
+        self._ensure_paged_kv_capacity(num_reqs, int(num_actual_pages))
         paged_kv_indices = self.paged_kv_indices.gpu[:num_actual_pages]
         _copy_page_indices_kernel[(num_reqs,)](
             paged_kv_indices,
@@ -1123,6 +1174,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         fast_build: bool = False,
     ) -> FlashInferMetadata:
         num_reqs = common_attn_metadata.num_reqs
+        self._ensure_paged_kv_capacity(num_reqs)
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         causal = common_attn_metadata.causal
         if causal:

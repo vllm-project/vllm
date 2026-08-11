@@ -8,7 +8,11 @@ import torch
 
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import make_local_attention_virtual_batches
+from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import (
+    make_local_attention_virtual_batches,
+    max_local_attention_virtual_batches,
+)
 
 
 @dataclass
@@ -202,3 +206,57 @@ def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
     print(f"Actual block table:\n{result.block_table_tensor}")
 
     torch.testing.assert_close(result.block_table_tensor, expected_block_table_tensor)
+
+
+@pytest.mark.parametrize(
+    "query_lens,seq_lens,attn_chunk_size,max_num_seqs,expected_num_reqs",
+    [
+        # A single prefill longer than the chunk size, with max_num_seqs=1:
+        # the condition that overflowed FlashInfer's per-request buffers in
+        # https://github.com/vllm-project/vllm/issues/49980.
+        ([1000], [1000], 256, 1, 4),
+        # Partially computed context, so the first local block is partial.
+        ([1000], [1255], 256, 1, 5),
+        # Several requests, each spanning several chunks.
+        ([300, 700, 90], [300, 1400, 90], 128, 4, 10),
+        # Chunk size larger than every sequence: no extra virtual batches.
+        ([64, 64], [64, 64], 256, 2, 2),
+        # Decodes: one virtual batch each, so the token-count cap binds exactly.
+        ([1, 1, 1, 1], [16, 32, 48, 64], 16, 4, 4),
+    ],
+)
+def test_max_local_attention_virtual_batches_bounds_num_reqs(
+    query_lens: list[int],
+    seq_lens: list[int],
+    attn_chunk_size: int,
+    max_num_seqs: int,
+    expected_num_reqs: int,
+):
+    """The virtual batch count must never exceed the advertised upper bound.
+
+    Attention backends preallocate per-request buffers from this bound, so an
+    underestimate overflows or silently truncates them. `expected_num_reqs`
+    pins the split itself, so a bound that collapsed back to `max_num_seqs`
+    fails here rather than passing vacuously.
+    """
+    block_size = 16
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(query_lens=query_lens, seq_lens=seq_lens),
+        block_size,
+        torch.device("cpu"),
+    )
+    result, _ = make_local_attention_virtual_batches(
+        attn_chunk_size, common_attn_metadata, block_size
+    )
+    assert result.num_reqs == expected_num_reqs
+
+    bound = max_local_attention_virtual_batches(
+        attn_chunk_size, max_num_seqs, sum(query_lens)
+    )
+    assert result.num_reqs <= bound
+
+    # Total pages must also fit `bound * pages_per_virtual_batch`, which is how
+    # the FlashInfer builder sizes `paged_kv_indices`.
+    pages_per_virtual_batch = cdiv(attn_chunk_size, block_size)
+    num_pages = sum(cdiv(int(k), block_size) for k in result.seq_lens)
+    assert num_pages <= bound * pages_per_virtual_batch
