@@ -132,6 +132,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
+        is_fused_checkpoint_transposed: bool = False,
     ):
         super().__init__()
 
@@ -208,6 +209,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            is_fused_checkpoint_transposed=is_fused_checkpoint_transposed,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -339,7 +341,12 @@ class Qwen3MoeAttention(nn.Module):
 
 
 class Qwen3MoeDecoderLayer(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        is_fused_checkpoint_transposed: bool = False,
+    ) -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
@@ -375,7 +382,9 @@ class Qwen3MoeDecoderLayer(nn.Module):
             config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
         ):
             self.mlp = Qwen3MoeSparseMoeBlock(
-                vllm_config=vllm_config, prefix=f"{prefix}.mlp"
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.mlp",
+                is_fused_checkpoint_transposed=is_fused_checkpoint_transposed,
             )
         else:
             self.mlp = Qwen3MoeMLP(
