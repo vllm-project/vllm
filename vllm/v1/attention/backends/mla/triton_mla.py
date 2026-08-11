@@ -249,15 +249,20 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert attn_metadata.decode is not None
 
         if type(q) is tuple:
-            q = torch.cat(q, dim=-1)
-
-        assert isinstance(q, torch.Tensor)
-        B = q.shape[0]
-        q_num_heads = q.shape[1]
+            # Keep (ql_nope, q_pe) unmaterialized: decode_attention_fwd loads
+            # the two segments through separate pointers, so the per-layer
+            # head-dim concat (an extra kernel launch and a full copy of q on
+            # every decode step) is skipped.
+            q_ref = q[0]
+        else:
+            assert isinstance(q, torch.Tensor)
+            q_ref = q
+        B = q_ref.shape[0]
+        q_num_heads = q_ref.shape[1]
         o = torch.zeros(
-            B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
+            B, q_num_heads, self.kv_lora_rank, dtype=q_ref.dtype, device=q_ref.device
         )
-        lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
+        lse = torch.zeros(B, q_num_heads, dtype=q_ref.dtype, device=q_ref.device)
 
         # For batch invariance, use only 1 split to ensure deterministic reduction
         if envs.VLLM_BATCH_INVARIANT:
@@ -280,7 +285,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             )
         else:
             attn_logits = torch.empty(
-                logits_shape, dtype=torch.float32, device=q.device
+                logits_shape, dtype=torch.float32, device=q_ref.device
             )
 
         # Add a head dim of 1

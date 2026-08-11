@@ -323,3 +323,78 @@ def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SI
     # Same data and same compute order; only addressing differs.
     assert torch.equal(o_ref, o_xl)
     assert torch.equal(lse_ref, lse_xl)
+
+
+@pytest.mark.parametrize("B", [3, 37])
+@pytest.mark.parametrize("L", [1027])
+@pytest.mark.parametrize("H_Q", [16, 128])
+@pytest.mark.parametrize("D_QK, D_V", [(576, 512), (288, 256)])
+@pytest.mark.parametrize("PAGE_SIZE", [16, 64])
+def test_decode_attention_mla_tuple_q(B, L, H_Q, D_QK, D_V, PAGE_SIZE):
+    """MLA decode accepts q as a (q_nope, q_pe) tuple and produces bitwise
+    identical results to the packed [*, nope | pe] layout, including when the
+    tuple components are non-contiguous views (the layouts the MLA decode
+    path actually produces: a transposed bmm output and a split of q)."""
+    torch.manual_seed(0)
+    CACHE_SIZE = 8192
+    dtype = torch.bfloat16
+    seq_len = L
+    sm_scale = 1.0 / (D_QK**0.5)
+    num_kv_splits = 8
+
+    num_pages_per_batch = cdiv(seq_len, PAGE_SIZE)
+    req_to_page = torch.randint(
+        0, CACHE_SIZE // PAGE_SIZE, (B, num_pages_per_batch), device=DEVICE_TYPE
+    )
+
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+
+    kv_buffer = torch.randn(
+        CACHE_SIZE // PAGE_SIZE, PAGE_SIZE, 1, D_QK, dtype=dtype, device=DEVICE_TYPE
+    )
+    k_buffer = kv_buffer
+    v_buffer = kv_buffer[..., :D_V]
+
+    b_seq_len = torch.full((B,), seq_len, device=DEVICE_TYPE)
+
+    def run(q_arg):
+        o = torch.zeros(B, H_Q, D_V, dtype=dtype, device=DEVICE_TYPE)
+        lse = torch.zeros(B, H_Q, dtype=dtype, device=DEVICE_TYPE)
+        attn_logits = torch.empty(
+            (B, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device=DEVICE_TYPE
+        )
+        decode_attention_fwd(
+            q_arg,
+            k_buffer,
+            v_buffer,
+            o,
+            lse,
+            req_to_page,
+            b_seq_len,
+            attn_logits,
+            num_kv_splits,
+            sm_scale,
+            PAGE_SIZE,
+            is_mla=True,
+        )
+        return o, lse
+
+    o_ref, lse_ref = run(q)
+
+    # Contiguous tuple components.
+    o_t, lse_t = run((q[..., :D_V].contiguous(), q[..., D_V:].contiguous()))
+    assert torch.equal(o_ref, o_t)
+    assert torch.equal(lse_ref, lse_t)
+
+    # Strided tuple components, mimicking the decode path: q_nope as a
+    # transposed (H, B, D_V) buffer (bmm absorb output) and q_pe as a
+    # last-dim split view of a packed tensor.
+    q_nope_hbd = q[..., :D_V].transpose(0, 1).contiguous()
+    q_nope_strided = q_nope_hbd.transpose(0, 1)
+    assert not q_nope_strided.is_contiguous()
+    q_pe_view = q[..., D_V:]
+    torch.testing.assert_close(q_nope_strided, q[..., :D_V], rtol=0, atol=0)
+
+    o_s, lse_s = run((q_nope_strided, q_pe_view))
+    assert torch.equal(o_ref, o_s)
+    assert torch.equal(lse_ref, lse_s)
