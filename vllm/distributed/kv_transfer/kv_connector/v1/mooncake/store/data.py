@@ -268,8 +268,8 @@ class ChunkedTokenDatabase:
         rank regardless of where the processed suffix begins.
 
         Args:
-            token_len: Total number of tokens. Must be hash-block aligned and
-                covered by ``block_hashes`` when hashes are present.
+            token_len: Total number of tokens. Clamped internally to the
+                range covered by ``block_hashes``.
             block_hashes: Block hashes computed at ``hash_block_size`` granularity.
                 When ``block_size > hash_block_size`` each group's ``block_size`` chunk
                 is keyed by its last sub-hash via ``chunk_hashes_for_block_size``.
@@ -282,8 +282,29 @@ class ChunkedTokenDatabase:
         assert put_step > 0
         if not block_hashes:
             return
-        assert token_len % self.hash_block_size == 0
-        assert token_len // self.hash_block_size <= len(block_hashes)
+        # Clamp token_len to hash coverage.  With speculative decoding (MTP),
+        # the caller's token count can temporarily exceed the number of
+        # block hashes available.  Rather than crashing, save up to the
+        # covered range; the unsaved tail is picked up on the next step
+        # once hashes catch up.
+        max_covered = len(block_hashes) * self.hash_block_size
+        if token_len > max_covered:
+            logger.warning(
+                "Mooncake store: clamping save length from %d to %d tokens "
+                "(model=%s tp_rank=%d, hash_block_size=%d); block_hashes "
+                "have not caught up with the scheduler's token count yet. "
+                "Expected under MTP/async-scheduling races; the unsaved "
+                "tail is retried once hashes catch up.",
+                token_len,
+                max_covered,
+                self.metadata.model_name,
+                self.metadata.tp_rank,
+                self.hash_block_size,
+            )
+            token_len = max_covered
+        token_len = token_len // self.hash_block_size * self.hash_block_size
+        if token_len == 0:
+            return
         start_chunk = max(0, cdiv(mask_num, self.block_size))
         max_chunks = cdiv(token_len, self.block_size)
         if chunk_mask is not None:

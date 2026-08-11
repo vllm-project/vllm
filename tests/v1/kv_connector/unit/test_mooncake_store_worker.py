@@ -491,6 +491,70 @@ def test_process_tokens_applies_stride_before_hash_access():
     assert results == [(96, 128, bytes([15]))]
 
 
+def test_process_tokens_clamps_when_token_len_exceeds_hash_coverage():
+    """Regression test for the MTP/async-scheduling assertion crash: the
+    scheduler-side tracker can report more tokens than have actually been
+    hashed yet (block_hashes only ever covers confirmed tokens, while async
+    scheduling + speculative decoding advance token bookkeeping optimistically).
+    process_tokens must clamp to the covered range instead of asserting.
+    """
+    db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0),
+        block_size=32,
+        hash_block_size=8,
+    )
+    # Only 2 hash-blocks (16 tokens) are hashed, but the caller optimistically
+    # claims 32 tokens are ready to save.
+    block_hashes = _RecordingBlockHashes([bytes([i]) for i in range(2)])
+
+    results = list(db.process_tokens(token_len=32, block_hashes=block_hashes))
+
+    assert results == [(0, 16, bytes([1]))]
+
+
+def test_process_tokens_clamp_can_yield_nothing_when_start_is_past_coverage():
+    """mask_num (the already-saved offset) can land past the clamped
+    coverage entirely -- must yield nothing, not raise or underflow."""
+    db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0),
+        block_size=32,
+        hash_block_size=8,
+    )
+    # 16 tokens hashed, but token_len and mask_num both optimistically assume
+    # more tokens exist than are actually covered.
+    block_hashes = _RecordingBlockHashes([bytes([i]) for i in range(2)])
+
+    results = list(
+        db.process_tokens(token_len=64, block_hashes=block_hashes, mask_num=32)
+    )
+
+    assert results == []
+
+
+def test_store_sending_thread_clamps_when_block_hashes_lag_token_len():
+    """End-to-end regression test for the incident: previously, a ReqMeta
+    whose token_len_chunk outran its block_hashes (as happens on decode with
+    MTP speculative acceptance under async scheduling) raised an
+    AssertionError inside process_tokens. KVCacheStoreSendingThread.run()
+    catches and logs that per request, but in the real cascade this fed the
+    prefill scheduler's invalid-block handling and triggered a fatal engine
+    crash. The sending thread must now save only the covered prefix instead
+    of raising.
+    """
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256]
+    thread = _make_store_sending_thread(store)
+
+    thread.add_stored_request("req-a")
+    # token_len_chunk=32 (2 scheduler blocks) but only 1 hash-block's worth
+    # of tokens has actually been hashed on the request.
+    thread._handle_request(_make_store_req("req-a", [b"a0"]))
+
+    assert store.batch_is_exist.call_count == 1
+    assert len(store.batch_is_exist.call_args.args[0]) == 1
+
+
 def test_store_sending_thread_delta_saves_only_new_full_attention_chunks():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
