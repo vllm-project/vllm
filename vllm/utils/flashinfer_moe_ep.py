@@ -21,8 +21,9 @@ if TYPE_CHECKING:
 
 # Every mega kernel is Blackwell-only, so the arch is a property of the family
 # rather than of a particular backend: validate it against the live device
-# instead of encoding it in the backend name.
-FI_MOE_EP_MIN_CAPABILITY = (10, 0)
+# instead of encoding it in the backend name. An explicit allowlist so new
+# archs (SM110/SM120, Rubin) fail loudly until flashinfer supports them.
+FI_MOE_EP_SUPPORTED_CAPABILITIES = frozenset({(10, 0), (10, 3)})
 
 
 @dataclass(frozen=True)
@@ -56,38 +57,10 @@ FI_MOE_EP_BACKENDS: dict[str, FiMoeEpBackendSpec] = {
 }
 
 _FI_RUNTIME_HANDLE: Any = None
-_FI_MOE_EP_RUNTIME_AVAILABLE: bool | None = None
-
-
-def _has_fi_moe_ep_runtime() -> bool:
-    """True when the installed flashinfer exposes the moe_ep runtime helpers."""
-    global _FI_MOE_EP_RUNTIME_AVAILABLE
-    if _FI_MOE_EP_RUNTIME_AVAILABLE is not None:
-        return _FI_MOE_EP_RUNTIME_AVAILABLE
-    try:
-        from flashinfer.moe_ep import (  # noqa: F401
-            bootstrap_moe_ep_runtime,
-            ensure_moe_ep_cuda_device,
-            finalize_moe_ep_runtime,
-        )
-    except ImportError:
-        _FI_MOE_EP_RUNTIME_AVAILABLE = False
-    else:
-        _FI_MOE_EP_RUNTIME_AVAILABLE = True
-    return _FI_MOE_EP_RUNTIME_AVAILABLE
 
 
 def is_fi_moe_ep_backend(moe_backend: str) -> bool:
-    if moe_backend not in FI_MOE_EP_BACKENDS:
-        return False
-    if not _has_fi_moe_ep_runtime():
-        raise ImportError(
-            f"moe_backend={moe_backend!r} requires the flashinfer.moe_ep "
-            "runtime, which the installed flashinfer does not provide. "
-            "Install a flashinfer build with moe_ep support, or use "
-            "moe_backend=deep_gemm_mega_moe for the native mega path."
-        )
-    return True
+    return moe_backend in FI_MOE_EP_BACKENDS
 
 
 def fi_moe_ep_backend_spec(moe_backend: str) -> FiMoeEpBackendSpec:
@@ -112,12 +85,14 @@ def validate_fi_moe_ep_config(vllm_config: VllmConfig) -> None:
     capability = current_platform.get_device_capability()
     if capability is not None:
         cc = (capability.major, capability.minor)
-        if cc < FI_MOE_EP_MIN_CAPABILITY:
-            want = FI_MOE_EP_MIN_CAPABILITY
+        if cc not in FI_MOE_EP_SUPPORTED_CAPABILITIES:
+            supported = ", ".join(
+                f"{m}.{n}" for m, n in sorted(FI_MOE_EP_SUPPORTED_CAPABILITIES)
+            )
             raise ValueError(
-                f"moe_backend={moe_backend!r} requires compute capability "
-                f"{want[0]}.{want[1]}+ (the mega kernels are Blackwell-only), "
-                f"but this device is {cc[0]}.{cc[1]}."
+                f"moe_backend={moe_backend!r} is only supported on compute "
+                f"capability {supported} (SM100/SM103), but this device is "
+                f"{cc[0]}.{cc[1]}."
             )
 
     if vllm_config.parallel_config.enable_eplb:
@@ -161,12 +136,6 @@ def ensure_fi_moe_ep_runtime(vllm_config: VllmConfig) -> None:
         return
 
     from flashinfer.moe_ep import bootstrap_moe_ep_runtime
-
-    if not _has_fi_moe_ep_runtime():
-        raise ImportError(
-            "flashinfer.moe_ep runtime helpers are not available in this "
-            "flashinfer build."
-        )
 
     bootstrap = make_fi_moe_ep_bootstrap()
     spec = fi_moe_ep_backend_spec(vllm_config.kernel_config.moe_backend)
