@@ -6,7 +6,6 @@ ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
 ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
-ARG ROCM_TRITON_KERNELS_SHA256=3bf25681b3e22ce9eb8160e5161fc3d18a6a58e7c9c1ac806d55dc0b786ed3b3
 # NIC backend for MoRI RDMA support.
 # By default (all), drivers and userspace libraries for all supported NIC types
 # (ainic and bnxt) are installed; MoRI selects the appropriate one at runtime.
@@ -278,9 +277,7 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
 # vLLM source COPYs makes the download reusable when native sources change.
 FROM base AS rocm-triton-kernels
 ARG ROCM_TRITON_KERNELS_COMMIT
-ARG ROCM_TRITON_KERNELS_SHA256
-ADD --checksum=sha256:${ROCM_TRITON_KERNELS_SHA256} \
-    https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
+ADD https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
     /tmp/rocm-triton.tar.gz
 RUN mkdir -p /opt/rocm-triton-kernels \
     && tar --extract --gzip --file /tmp/rocm-triton.tar.gz \
