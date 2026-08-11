@@ -25,6 +25,7 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
     monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1151", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
     monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
@@ -42,6 +43,36 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_rocm_unquantized_gemm_gfx1151_falls_back(monkeypatch, dtype):
+    x = torch.randn(2, 64, dtype=dtype)
+    weight = torch.randn(128, 64, dtype=dtype)
+    ref = torch.nn.functional.linear(x, weight, None)
+
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1151", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
+
+    wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
+    monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
+    llmm1_mock = MagicMock(side_effect=lambda w, x_view, _: x_view @ w.t())
+    monkeypatch.setattr(utils.ops, "LLMM1", llmm1_mock)
+    linear_mock = MagicMock(side_effect=torch.nn.functional.linear)
+    monkeypatch.setattr(torch.nn.functional, "linear", linear_mock)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+
+    wvsplitk_mock.assert_not_called()
+    llmm1_mock.assert_not_called()
+    linear_mock.assert_called_once()
+    assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
+
 def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch):
     # wvSplitK skinny GEMM handles n in [1, 5] (see PR #40687); n > 5 must
     # fall back to torch.nn.functional.linear.
@@ -52,6 +83,7 @@ def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch):
     monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1151", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
     monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
@@ -77,6 +109,7 @@ def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1151", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: True)
     monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
