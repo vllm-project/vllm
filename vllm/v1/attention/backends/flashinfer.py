@@ -494,7 +494,10 @@ class FlashInferBackend(AttentionBackend):
             return torch.float8_e4m3fn
         elif kv_cache_dtype == "fp8_e5m2":
             return torch.float8_e5m2
-        elif kv_cache_dtype.startswith("nvfp4") or kv_cache_dtype == ("fp8_k_nvfp4_v"):
+        elif (
+            kv_cache_dtype.startswith("nvfp4")
+            or kv_cache_dtype == "fp8_k_nvfp4_v"
+        ):
             return torch.uint8
         else:
             raise ValueError(f"Unrecognized dtype: {kv_cache_dtype}")
