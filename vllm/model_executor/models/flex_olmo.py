@@ -20,7 +20,9 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.olmoe import OlmoeAttention, OlmoeForCausalLM
@@ -71,12 +73,11 @@ class FlexOlmoMoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=hf_config.num_experts,
             top_k=hf_config.num_experts_per_tok,
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
-            reduce_results=True,
             renormalize=False,
             quant_config=None,
             tp_size=tp_size,

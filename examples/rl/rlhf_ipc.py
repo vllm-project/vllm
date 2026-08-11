@@ -29,10 +29,12 @@ from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.ipc_engine import (
-    IPCTrainerSendWeightsArgs,
-    IPCWeightTransferEngine,
+from vllm.distributed.weight_transfer import (
+    ModuleSource,
+    RayVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
 )
+from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
 
 class MyLLM(LLM):
@@ -65,19 +67,19 @@ class TrainModel:
         self.llm_handle = llm_handle
 
     def init_weight_transfer(self):
-        # IPC backend doesn't need initialization info
-        ray.get(
-            self.llm_handle.init_weight_transfer_engine.remote(dict(init_info=dict()))
+        """Build the trainer-side IPC engine (no rendezvous needed for IPC)."""
+        self.engine = WeightTransferTrainerFactory.trainer_init(
+            init_info=IPCTrainerInitInfo(rank=0, packed=False),  # rank 0 = sender
+            client=RayVLLMWeightSyncClient(self.llm_handle),
+            source=ModuleSource(self.train_model),
         )
 
-    def broadcast_weights(self, llm_handle: ray.actor.ActorHandle):
-        """Broadcast weights to the inference engine using IPC."""
-        self.llm_handle = llm_handle
-        trainer_args = IPCTrainerSendWeightsArgs(mode="ray", llm_handle=llm_handle)
-        IPCWeightTransferEngine.trainer_send_weights(
-            iterator=self.train_model.named_parameters(),
-            trainer_args=trainer_args,
-        )
+    def broadcast_weights(self):
+        """Broadcast weights to the inference engine using IPC.
+
+        Drives start/update/finish on the inference side internally.
+        """
+        self.engine.send_weights()
 
 
 ray.init()
@@ -134,15 +136,15 @@ for output in outputs:
 ray.get(llm.sleep.remote(level=0))
 
 ray.get(train_model.init_weight_transfer.remote())
-# Synchronize the updated weights to the inference engine using batched API.
-ray.get(train_model.broadcast_weights.remote(llm))
+# One call drives start_weight_update / update_weights / finish_weight_update.
+ray.get(train_model.broadcast_weights.remote())
 
 ray.get(llm.wake_up.remote(tags=["scheduling"]))
 
-# Generate text with the updated model.
-outputs_updated = ray.get(llm.generate.remote(prompts, sampling_params))
+outputs_packed = ray.get(llm.generate.remote(prompts, sampling_params))
 print("-" * 50)
-for output in outputs_updated:
+print("Results after packed/chunked IPC weight sync:")
+for output in outputs_packed:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")

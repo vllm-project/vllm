@@ -40,15 +40,6 @@ using __hip_fp8_e5m2 = __hip_fp8_e5m2_fnuz;
   #define __HIP__FP8MFMA__
 #endif
 
-#if defined(__HIPCC__) && (defined(__gfx1100__) || defined(__gfx1101__) || \
-                           defined(__gfx1150__) || defined(__gfx1151__))
-  #define __HIP__GFX11__
-#endif
-
-#if defined(__HIPCC__) && (defined(__gfx1200__) || defined(__gfx1201__))
-  #define __HIP__GFX12__
-#endif
-
 #if defined(NDEBUG)
   #undef NDEBUG
   #include <assert.h>
@@ -1054,7 +1045,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* q_ptr =
         q + query_start_off * q_stride + wg_start_head_idx * HEAD_SIZE;
     const _B16x8* q_ptrh8 = reinterpret_cast<const _B16x8*>(q_ptr);
-    const int qhead_elemh8 = laneid / 4;
+    const int qhead_elemh8 = MIN(laneid / 4, HEAD_SIZE / 8 - 1);
 
     for (int h = 0; h < QHLOOP - 1; h++) {
       const int qhead_idx = h * 4 + lane4id;
@@ -1629,7 +1620,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   }
 }
 
-#elif defined(__HIP__GFX11__)
+#elif defined(__GFX11__)
 
 using floatx8 = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
@@ -2388,7 +2379,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
 }
 
-#elif defined(__HIP__GFX12__)
+#elif defined(__GFX12__)
 
 using floatx8 = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
@@ -2414,6 +2405,16 @@ template <typename T, int absz, int cbid, int blgp>
 __device__ __forceinline__ floatx8 gcn_wmma16x16x16_instr(const bit16x8& inpA,
                                                           const bit16x8& inpB,
                                                           const floatx8& inpC) {
+  #if defined(__gfx1250__)
+  // gfx1250 (gfx12 family) does not provide the gfx12 WMMA variant used by
+  // gfx1200/1201 (needs wmma-128b-insts). This custom-attention WMMA path is
+  // unsupported on gfx1250; trap if ever launched (fail loud, not
+  // silent-wrong).
+  (void)inpA;
+  (void)inpB;
+  __builtin_trap();
+  return inpC;
+  #else
   if constexpr (std::is_same<T, _Float16>::value) {
     return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(inpA, inpB, inpC);
   } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
@@ -2421,6 +2422,7 @@ __device__ __forceinline__ floatx8 gcn_wmma16x16x16_instr(const bit16x8& inpA,
   } else {
     static_assert(false, "unsupported 16b dtype");
   }
+  #endif
 }
 
 template <typename T>

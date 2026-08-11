@@ -29,20 +29,35 @@ causes unexpected behavior.
 import os
 
 import ray
+import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLTrainerSendWeightsArgs,
-    NCCLWeightTransferEngine,
+from vllm.distributed.weight_transfer import (
+    ModuleSource,
+    RayVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
 )
+from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, get_open_port
 
 MODEL_NAME = "facebook/opt-125m"
 # MODEL_NAME = "inference-optimization/Qwen3-0.6B-W4A16-G128"
+
+
+def get_assigned_gpu():
+    """This is a temporary workaround for a runtime bug in RCCL on ROCm."""
+    if not current_platform.is_rocm():
+        return 0
+    assigned_gpu = int(ray.get_gpu_ids()[0])
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    os.environ.pop("HIP_VISIBLE_DEVICES", None)
+    torch.accelerator.set_device_idx(assigned_gpu)
+    return assigned_gpu
 
 
 class MyLLM(LLM):
@@ -58,47 +73,42 @@ class TrainModel:
     """Ray actor that wraps the training model on a dedicated GPU."""
 
     def __init__(self, model_name: str):
+        assigned_gpu = get_assigned_gpu()
+
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-        ).to("cuda:0")
+        ).to(f"cuda:{assigned_gpu}")
 
         self.port = get_open_port()
         self.master_address = get_ip()
 
-    def get_master_address_and_port(self):
-        return self.master_address, self.port
+    def init_weight_transfer(self, world_size, llm_handle):
+        """Build the trainer-side weight-transfer engine.
 
-    def get_weight_metadata(self):
-        """Return weight names, dtypes, and shapes for weight transfer."""
-        names = []
-        dtype_names = []
-        shapes = []
-        for name, p in self.model.named_parameters():
-            names.append(name)
-            dtype_names.append(str(p.dtype).split(".")[-1])
-            shapes.append(list(p.shape))
-        return names, dtype_names, shapes
-
-    def init_weight_transfer_group(self, world_size):
-        """Initialize the NCCL process group for weight transfer."""
-        self.model_update_group = NCCLWeightTransferEngine.trainer_init(
-            dict(
+        `trainer_init` drives the full handshake: it kicks off the inference
+        side's `init_weight_transfer_engine` (via the Ray client) on a worker
+        thread while opening the trainer's NCCL endpoint, so both ends
+        rendezvous together. After this returns, `send_weights()` is callable.
+        """
+        self.engine = WeightTransferTrainerFactory.trainer_init(
+            init_info=NCCLTrainerInitInfo(
                 master_address=self.master_address,
                 master_port=self.port,
                 world_size=world_size,
+                rank=0,  # single-GPU trainer is the sole (sender) rank
+                packed=True,
             ),
+            client=RayVLLMWeightSyncClient(llm_handle),
+            source=ModuleSource(self.model),
         )
 
-    def broadcast_weights(self, packed: bool = True):
-        """Broadcast weights to the inference engine."""
-        trainer_args = NCCLTrainerSendWeightsArgs(
-            group=self.model_update_group,
-            packed=packed,
-        )
-        NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
-            trainer_args=trainer_args,
-        )
+    def broadcast_weights(self):
+        """Push the current weights to the inference engine.
+
+        Drives start/update/finish on the inference side and the NCCL
+        broadcast internally — one call.
+        """
+        self.engine.send_weights()
 
 
 # Initialize Ray and set the visible devices. The vLLM engine will
@@ -163,45 +173,15 @@ for output in outputs:
 ray.get(llm.sleep.remote(level=0))
 
 # Set up the communication channel between the training process and the
-# inference engine.
-master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
-
+# inference engine. The trainer engine now owns the full handshake — the
+# driver only has to hand it the vLLM actor handle and the world size.
 world_size = ray.get(llm.get_world_size.remote()) + 1  # +1 for the trainer
-inference_handle = llm.init_weight_transfer_engine.remote(
-    dict(
-        init_info=dict(
-            master_address=master_address,
-            master_port=master_port,
-            rank_offset=1,
-            world_size=world_size,
-        )
-    )
-)
+ray.get(train_model.init_weight_transfer.remote(world_size, llm))
 
-# Initialize weight transfer group on both the training actor and inference engine
-train_handle = train_model.init_weight_transfer_group.remote(world_size)
-ray.get([train_handle, inference_handle])
-
-# Synchronize the updated weights to the inference engine using batched API.
-# Collect all weight metadata from the training actor
-names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
-
-# Issue update_weights call with NCCL-specific update info
-# packed=True enables efficient batched tensor broadcasting
-inference_handle = llm.update_weights.remote(
-    dict(
-        update_info=dict(
-            names=names,
-            dtype_names=dtype_names,
-            shapes=shapes,
-            packed=True,
-        )
-    )
-)
-
-# Broadcast all weights from trainer using the weight transfer API
-train_handle = train_model.broadcast_weights.remote(packed=True)
-ray.get([train_handle, inference_handle])
+# Synchronize the updated weights to the inference engine. The engine drives
+# start_weight_update / update_weights / finish_weight_update on the inference
+# side internally, concurrent with the NCCL broadcast.
+ray.get(train_model.broadcast_weights.remote())
 
 ray.get(llm.wake_up.remote(tags=["scheduling"]))
 

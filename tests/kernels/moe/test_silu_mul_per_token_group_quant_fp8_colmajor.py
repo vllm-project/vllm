@@ -66,6 +66,24 @@ def reference(x: torch.Tensor, use_ue8m0: bool) -> tuple[torch.Tensor, torch.Ten
     return reference_quant(ref_act_out, use_ue8m0)
 
 
+def reference_with_clamp(
+    x: torch.Tensor, use_ue8m0: bool, clamp_limit: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pre-clamp inputs (gate from above, up symmetric) at the input dtype to
+    match the C++ compute() template, then run the standard silu_and_mul +
+    quant reference."""
+    N_2 = x.size(1) // 2
+    dtype = x.dtype
+    gate = x[..., :N_2].to(torch.float32).clamp(max=clamp_limit).to(dtype)
+    up = (
+        x[..., N_2:]
+        .to(torch.float32)
+        .clamp(min=-clamp_limit, max=clamp_limit)
+        .to(dtype)
+    )
+    return reference(torch.cat([gate, up], dim=-1), use_ue8m0)
+
+
 @pytest.mark.parametrize("T", [128, 256, 512])
 @pytest.mark.parametrize("N", [128 * 2, 256 * 2, 768 * 2, 2048 * 2, 7168 * 2])
 @pytest.mark.skipif(
@@ -86,6 +104,35 @@ def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
 
     # Reference
     ref_output, ref_output_scales = reference(input, use_ue8m0)
+
+    torch.testing.assert_close(output.to(torch.float32), ref_output.to(torch.float32))
+    torch.testing.assert_close(output_scales, ref_output_scales)
+
+
+@pytest.mark.parametrize("T", [128, 256, 512])
+@pytest.mark.parametrize("N", [128 * 2, 256 * 2, 768 * 2, 2048 * 2, 7168 * 2])
+@pytest.mark.parametrize("clamp_limit", [7.0, 10.0])
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="ROCm does not support DeepGemm.",
+)
+def test_silu_mul_fp8_quant_deep_gemm_clamp(T: int, N: int, clamp_limit: float):
+    set_random_seed(42)
+
+    # Use a wide distribution so values routinely exceed both clamp limits and
+    # the clamp branch is actually exercised (uniform [0, 1) inputs would never
+    # trigger it).
+    input = torch.randn((T, N), dtype=torch.bfloat16, device="cuda") * 8.0
+
+    use_ue8m0 = is_deep_gemm_e8m0_used()
+
+    # Test
+    output, output_scales = silu_mul_per_token_group_quant_fp8_colmajor(
+        input, use_ue8m0=use_ue8m0, clamp_limit=clamp_limit
+    )
+
+    # Reference
+    ref_output, ref_output_scales = reference_with_clamp(input, use_ue8m0, clamp_limit)
 
     torch.testing.assert_close(output.to(torch.float32), ref_output.to(torch.float32))
     torch.testing.assert_close(output_scales, ref_output_scales)

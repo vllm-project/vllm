@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
@@ -13,6 +15,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     selective_state_update,
 )
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -27,7 +30,9 @@ except ImportError:
     HAS_FLASHINFER = False
 
 
-def _kv_cache_config_with_ssu(mamba_type: str = "mamba2") -> KVCacheConfig:
+def _kv_cache_config_with_ssu(
+    mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2,
+) -> KVCacheConfig:
     spec = MambaSpec(
         block_size=16,
         shapes=((16, 64),),
@@ -66,6 +71,48 @@ def test_flashinfer_backend_init():
     assert backend.name == "flashinfer"
 
 
+@pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
+@pytest.mark.parametrize(
+    ("algorithm", "expected"),
+    [
+        (None, "auto"),
+        ("auto", "auto"),
+        ("simple", "simple"),
+        ("vertical", "vertical"),
+        ("horizontal", "horizontal"),
+    ],
+)
+def test_flashinfer_forwards_ssu_algorithm(
+    algorithm: MambaSSUAlgorithm | None,
+    expected: MambaSSUAlgorithm,
+    monkeypatch,
+):
+    import flashinfer.mamba
+
+    kernel = Mock()
+    monkeypatch.setattr(flashinfer.mamba, "selective_state_update", kernel)
+    backend = FlashInferSSUBackend(
+        MambaConfig(
+            backend=MambaBackendEnum.FLASHINFER,
+            ssu_algorithm=algorithm,
+        )
+    )
+
+    tensor = torch.empty(1)
+    backend(
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+    )
+
+    assert kernel.call_args.kwargs["algorithm"] == expected
+
+
 def test_uninitialized_backend_raises():
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
 
@@ -77,7 +124,12 @@ def test_uninitialized_backend_raises():
 
 
 @pytest.mark.parametrize(
-    "mamba_type", ["linear_attention", "gdn_attention", "short_conv"]
+    "mamba_type",
+    [
+        MambaAttentionBackendEnum.LINEAR,
+        MambaAttentionBackendEnum.GDN_ATTN,
+        MambaAttentionBackendEnum.SHORT_CONV,
+    ],
 )
 def test_init_is_noop_for_non_ssu_mamba_type(mamba_type):
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod

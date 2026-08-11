@@ -59,6 +59,14 @@ class FlashMLABackend(MLACommonBackend):
         return [64]
 
     @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (1, 0, 2, 3)
+        return (0, 1, 2)
+
+    @staticmethod
     def get_name() -> str:
         return "FLASHMLA"
 
@@ -84,6 +92,7 @@ class FlashMLABackend(MLACommonBackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         if use_sparse:
@@ -162,7 +171,10 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         # we use the max but all should be the same due to uniform length requirement
         max_query_len = query_lens_cpu.max().item()
-        num_q_tokens_per_head_k = max_query_len * self.num_q_heads // 1
+        num_q_heads = self.num_q_heads
+        if self.dcp_world_size > 1:
+            num_q_heads *= self.dcp_world_size
+        num_q_tokens_per_head_k = max_query_len * num_q_heads // 1
         scheduler_metadata, _ = get_mla_metadata(
             seq_lens_device,
             num_q_tokens_per_head_k,

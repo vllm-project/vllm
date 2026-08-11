@@ -15,7 +15,7 @@ Register a lazy module mapping.
 Example:
     ToolParserManager.register_lazy_module(
         name="kimi_k2",
-        module_path="vllm.tool_parsers.kimi_k2_parser",
+        module_path="vllm.tool_parsers.kimi_k2_tool_parser",
         class_name="KimiK2ToolParser",
     )
 """
@@ -31,20 +31,36 @@ _TOOL_PARSERS_TO_REGISTER = {
         "DeepSeekV31ToolParser",
     ),
     "deepseek_v32": (
-        "deepseekv32_tool_parser",
-        "DeepSeekV32ToolParser",
+        "deepseekv32_engine_tool_parser",
+        "DeepSeekV32EngineToolParser",
+    ),
+    "deepseek_v4": (
+        "deepseekv4_engine_tool_parser",
+        "DeepSeekV4EngineToolParser",
+    ),
+    "cohere_command3": (
+        "cohere_command_tool_parser",
+        "CohereCommand3ToolParser",
+    ),
+    "cohere_command4": (
+        "cohere_command_tool_parser",
+        "CohereCommand4ToolParser",
     ),
     "ernie45": (
         "ernie45_tool_parser",
         "Ernie45ToolParser",
     ),
     "glm45": (
-        "glm4_moe_tool_parser",
-        "Glm4MoeModelToolParser",
+        "glm47_moe_tool_parser",
+        "Glm47MoeModelToolParser",
     ),
     "glm47": (
         "glm47_moe_tool_parser",
         "Glm47MoeModelToolParser",
+    ),
+    "ling3": (
+        "ling3_tool_parser",
+        "Ling3ToolParser",
     ),
     "granite-20b-fc": (
         "granite_20b_fc_tool_parser",
@@ -62,9 +78,17 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hermes_tool_parser",
         "Hermes2ProToolParser",
     ),
+    "poolside_v1": (
+        "poolside_v1_tool_parser",
+        "PoolsideV1ToolParser",
+    ),
     "hunyuan_a13b": (
         "hunyuan_a13b_tool_parser",
         "HunyuanA13BToolParser",
+    ),
+    "hy_v3": (
+        "hy_v3_tool_parser",
+        "HYV3ToolParser",
     ),
     "internlm": (
         "internlm2_tool_parser",
@@ -74,9 +98,17 @@ _TOOL_PARSERS_TO_REGISTER = {
         "jamba_tool_parser",
         "JambaToolParser",
     ),
+    "lfm2": (
+        "lfm2_tool_parser",
+        "Lfm2ToolParser",
+    ),
     "kimi_k2": (
         "kimi_k2_tool_parser",
         "KimiK2ToolParser",
+    ),
+    "kimi_k3": (
+        "kimi_k3_tool_parser",
+        "KimiK3ToolParser",
     ),
     "llama3_json": (
         "llama_tool_parser",
@@ -95,16 +127,20 @@ _TOOL_PARSERS_TO_REGISTER = {
         "LongcatFlashToolParser",
     ),
     "mimo": (
-        "qwen3xml_tool_parser",
-        "Qwen3XMLToolParser",
+        "qwen3_engine_tool_parser",
+        "Qwen3EngineToolParser",
     ),
     "minimax_m2": (
         "minimax_m2_tool_parser",
         "MinimaxM2ToolParser",
     ),
-    "minimax": (
-        "minimax_tool_parser",
-        "MinimaxToolParser",
+    "minimax_m3": (
+        "minimax_m3_tool_parser",
+        "MinimaxM3ToolParser",
+    ),
+    "minicpm5": (
+        "minicpm5xml_tool_parser",
+        "MiniCPM5XMLToolParser",
     ),
     "mistral": (
         "mistral_tool_parser",
@@ -115,8 +151,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Olmo3PythonicToolParser",
     ),
     "openai": (
-        "openai_tool_parser",
-        "OpenAIToolParser",
+        "gptoss_tool_parser",
+        "GptOssToolParser",
     ),
     "phi4_mini_json": (
         "phi4mini_tool_parser",
@@ -127,16 +163,16 @@ _TOOL_PARSERS_TO_REGISTER = {
         "PythonicToolParser",
     ),
     "qwen3_coder": (
-        "qwen3coder_tool_parser",
-        "Qwen3CoderToolParser",
+        "qwen3_engine_tool_parser",
+        "Qwen3EngineToolParser",
     ),
     "qwen3_xml": (
-        "qwen3xml_tool_parser",
-        "Qwen3XMLToolParser",
+        "qwen3_engine_tool_parser",
+        "Qwen3EngineToolParser",
     ),
     "seed_oss": (
-        "seed_oss_tool_parser",
-        "SeedOssToolParser",
+        "seed_oss_engine_tool_parser",
+        "SeedOssEngineToolParser",
     ),
     "step3": (
         "step3_tool_parser",
@@ -145,6 +181,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "step3p5": (
         "step3p5_tool_parser",
         "Step3p5ToolParser",
+    ),
+    "inkling": (
+        "inkling_tool_parser",
+        "InklingEngineToolParser",
     ),
     "xlam": (
         "xlam_tool_parser",
@@ -159,8 +199,12 @@ _TOOL_PARSERS_TO_REGISTER = {
         "FunctionGemmaToolParser",
     ),
     "gemma4": (
-        "gemma4_tool_parser",
-        "Gemma4ToolParser",
+        "gemma4_engine_tool_parser",
+        "Gemma4EngineToolParser",
+    ),
+    "apertus": (
+        "apertus_tool_parser",
+        "ApertusToolParser",
     ),
 }
 

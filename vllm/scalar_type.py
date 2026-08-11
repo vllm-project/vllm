@@ -348,6 +348,9 @@ class scalar_types:
     uint2b2 = ScalarType.uint(2, 2)
     uint3b4 = ScalarType.uint(3, 4)
     uint4b8 = ScalarType.uint(4, 8)
+    uint5b16 = ScalarType.uint(5, 16)
+    uint6b32 = ScalarType.uint(6, 32)
+    uint7b64 = ScalarType.uint(7, 64)
     uint8b128 = ScalarType.uint(8, 128)
 
     # colloquial names

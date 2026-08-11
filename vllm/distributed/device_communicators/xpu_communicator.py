@@ -20,16 +20,14 @@ class XpuCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: ProcessGroup | None = None,
         unique_name: str = "",
+        use_all2all: bool = False,
     ):
-        super().__init__(cpu_group, device, device_group, unique_name)
+        super().__init__(
+            cpu_group, device, device_group, unique_name, use_all2all=use_all2all
+        )
+        self.ca_comm: None = None
         if self.use_all2all:
-            if self.all2all_backend == "naive":
-                from .all2all import NaiveAll2AllManager
-
-                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
-                logger.info("Using naive all2all manager.")
-
-            elif self.all2all_backend == "allgather_reducescatter":
+            if self.all2all_backend in ("naive", "allgather_reducescatter"):
                 from .all2all import AgRsAll2AllManager
 
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
@@ -48,7 +46,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 logger.info("Using AgRs manager on XPU device.")
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        output = input_.clone() if torch.compiler.is_compiling() else input_
+        output = input_.clone()
         dist.all_reduce(output, group=self.device_group)
         return output
 

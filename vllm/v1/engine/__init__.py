@@ -11,6 +11,7 @@ import msgspec
 import numpy as np
 import torch
 
+from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -31,10 +32,10 @@ FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
 
 EEP_NOTIFICATION_CALL_ID = -1
 
+FT_STATUS_CALL_ID = -2
+
 
 class EEPNotificationType(enum.Enum):
-    NEW_CORE_ENGINES_INIT_READY = "NEW_CORE_ENGINES_INIT_READY"
-    NEW_CORE_ENGINES_WEIGHTS_INIT_READY = "NEW_CORE_ENGINES_WEIGHTS_INIT_READY"
     RECONFIGURE_FINISHED = "RECONFIGURE_FINISHED"
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
@@ -74,7 +75,23 @@ class EngineCoreReadyResponse:
 
     max_model_len: int
     num_gpu_blocks: int
+    block_size: int
     dp_stats_address: str | None
+    dtype: str
+    vllm_version: str
+    world_size: int
+    data_parallel_size: int
+    tensor_parallel_size: int
+    pipeline_parallel_size: int
+    decode_context_parallel_size: int
+    data_parallel_rank: int
+    max_num_seqs: int
+    max_num_batched_tokens: int
+    instance_id: str
+    # KV cache capacity (None for encoder-only/attention-free models).
+    kv_cache_size_tokens: int | None = None
+    kv_cache_max_concurrency: float | None = None
+    kv_events_config: KVEventsConfig | None = None
 
 
 class EngineCoreRequest(
@@ -93,6 +110,12 @@ class EngineCoreRequest(
     cache_salt: str | None
     data_parallel_rank: int | None
     prompt_embeds: torch.Tensor | None = None
+
+    # Per-position mask for mixed-mode inputs (e.g chat completion with
+    # prompt_embeds content parts). `True` means the position is a real
+    # token ID; `False` means the position uses a pre-computed entry from
+    # `prompt_embeds`. `None` for pure-tokens and pure-embeds requests.
+    prompt_is_token_ids: list[bool] | None = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
@@ -114,6 +137,15 @@ class EngineCoreRequest(
     external_req_id: str | None = None
 
     reasoning_ended: bool | None = None
+    reasoning_parser_kwargs: dict[str, Any] | None = None
+
+    # If True, the request should be added to the scheduler's waiting queue
+    # and immediately aborted, so connector-side cleanup runs via the standard
+    # request_finished hook. Used to free P-side prefill blocks when a
+    # KV-transfer request is rejected on the D node before engine admission.
+    abort_immediately: bool = False
+
+    session_id: str | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -135,7 +167,7 @@ class EngineCoreEventType(enum.IntEnum):
 class EngineCoreEvent(msgspec.Struct):
     """A timestamped engine core event associated with a request.
 
-    The timestamp is a monotonic timestamps and is used for by the engine
+    The timestamp is a monotonic timestamp and is used by the engine
     frontend to calculate intervals between engine core events. These
     timestamps should not be compared with timestamps from other processes.
     """
@@ -169,6 +201,7 @@ class EngineCoreOutput(
     stop_reason: int | str | None = None
     events: list[EngineCoreEvent] | None = None
     kv_transfer_params: dict[str, Any] | None = None
+    ec_transfer_params: dict[str, Any] | None = None
 
     trace_headers: Mapping[str, str] | None = None
 
@@ -260,3 +293,9 @@ class ReconfigureRankType(enum.IntEnum):
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2
+
+
+class EngineStatusType(enum.IntEnum):
+    HEALTHY = 0
+    DEAD = 1
+    UNHEALTHY = 2

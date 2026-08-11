@@ -21,12 +21,19 @@ GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
 # Model to test
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-10240}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.7}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
 
 # Set 1 to use multimodal prompts; else to use text-only
 USE_MM_PROMPTS="${USE_MM_PROMPTS:-1}"
-MM_FLAG=""
-if [ "$USE_MM_PROMPTS" = "1" ]; then
-    MM_FLAG="--use_mm_prompts"
+USE_TWO_IMAGE_PROMPT="${USE_TWO_IMAGE_PROMPT:-1}"
+TEST_FLAGS=()
+if [[ "$USE_MM_PROMPTS" == "1" ]]; then
+    TEST_FLAGS+=(--use_mm_prompts)
+fi
+if [[ "$USE_TWO_IMAGE_PROMPT" != "1" ]]; then
+    TEST_FLAGS+=(--skip_two_image_prompt)
 fi
 
 # GPU configuration
@@ -35,6 +42,16 @@ GPU_P="${GPU_P:-1}"
 GPU_D="${GPU_D:-2}"
 GPU_SINGLE="${GPU_SINGLE:-$GPU_P}"
 GPU_PD="${GPU_PD:-$GPU_P}"
+
+# Device platform and affinity environment variable
+DEVICE_PLATFORM="${DEVICE_PLATFORM:-cuda}"
+if [[ -z "${DEVICE_AFFINITY_ENV:-}" ]]; then
+    if [[ "${DEVICE_PLATFORM,,}" == "xpu" ]]; then
+        DEVICE_AFFINITY_ENV="ZE_AFFINITY_MASK"
+    else
+        DEVICE_AFFINITY_ENV="CUDA_VISIBLE_DEVICES"
+    fi
+fi
 
 # Port
 ENCODE_PORT="${ENCODE_PORT:-19534}"
@@ -87,11 +104,12 @@ run_baseline() {
     
     # Start baseline instance
     echo "Starting baseline instance on GPU $GPU_SINGLE, port $PORT"
-    CUDA_VISIBLE_DEVICES="$GPU_SINGLE" vllm serve "$MODEL" \
+    env "$DEVICE_AFFINITY_ENV=$GPU_SINGLE" vllm serve "$MODEL" \
         --port "$PORT" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
-        --gpu-memory-utilization 0.7 \
-        --max-num-seqs 128 \
+        --gpu-memory-utilization 0.9 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
         --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         > "$LOG_PATH"/baseline.log 2>&1 &
     
@@ -112,7 +130,7 @@ run_baseline() {
         --model_name "$MODEL" \
         --mode baseline \
         --baseline_file "$BASELINE_FILE" \
-        $MM_FLAG
+        "${TEST_FLAGS[@]}"
     
     # Cleanup baseline
     echo "Stopping baseline instance..."
@@ -139,14 +157,15 @@ run_epd_1e_1pd() {
     
     # Start encoder instance
     echo "Starting encoder instance on GPU $GPU_E, port $ENCODE_PORT"
-    CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
+    env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
         --port "$ENCODE_PORT" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
         --gpu-memory-utilization 0.01 \
         --enable-request-id-headers \
         --no-enable-prefix-caching \
         --max-num-batched-tokens 114688 \
-        --max-num-seqs 128 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
         --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECExampleConnector",
@@ -160,12 +179,13 @@ run_epd_1e_1pd() {
     
     # Start prefill+decode instance
     echo "Starting PD instance on GPU $GPU_PD, port $PREFILL_DECODE_PORT"
-    CUDA_VISIBLE_DEVICES="$GPU_PD" vllm serve "$MODEL" \
+    env "$DEVICE_AFFINITY_ENV=$GPU_PD" vllm serve "$MODEL" \
         --port "$PREFILL_DECODE_PORT" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
-        --gpu-memory-utilization 0.7 \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enable-request-id-headers \
-        --max-num-seqs 128 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
         --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECExampleConnector",
@@ -185,7 +205,7 @@ run_epd_1e_1pd() {
 
     # Start proxy
     echo "Starting EPD proxy on port $PROXY_PORT"
-    python "${GIT_ROOT}/examples/online_serving/disaggregated_encoder/disagg_epd_proxy.py" \
+    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
         --host "0.0.0.0" \
         --port "$PROXY_PORT" \
         --encode-servers-urls "http://localhost:$ENCODE_PORT" \
@@ -212,7 +232,7 @@ run_epd_1e_1pd() {
         --model_name "$MODEL" \
         --mode disagg \
         --baseline_file "$BASELINE_FILE" \
-        $MM_FLAG
+        "${TEST_FLAGS[@]}"
     
     # Cleanup
     echo "✓✓ 1E+1PD Correctness Test finished"
@@ -242,14 +262,15 @@ run_baseline_1p_1d() {
     
     # Start prefill instance
     echo "Starting prefill instance on GPU $GPU_P, port $PREFILL_PORT"
-    CUDA_VISIBLE_DEVICES="$GPU_P" \
+    env "$DEVICE_AFFINITY_ENV=$GPU_P" \
     VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
     vllm serve "$MODEL" \
         --port "$PREFILL_PORT" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
-        --gpu-memory-utilization 0.7 \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enable-request-id-headers \
-        --max-num-seqs 128 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
         --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
@@ -260,14 +281,15 @@ run_baseline_1p_1d() {
     
     # Start decode instance
     echo "Starting decode instance on GPU $GPU_D, port $DECODE_PORT"
-    CUDA_VISIBLE_DEVICES="$GPU_D" \
+    env "$DEVICE_AFFINITY_ENV=$GPU_D" \
     VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
     vllm serve "$MODEL" \
         --port "$DECODE_PORT" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
-        --gpu-memory-utilization 0.7 \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enable-request-id-headers \
-        --max-num-seqs 128 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
         --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
@@ -309,7 +331,7 @@ run_baseline_1p_1d() {
         --model_name "$MODEL" \
         --mode baseline_pd \
         --baseline_file "$BASELINE_PD_FILE" \
-        $MM_FLAG
+        "${TEST_FLAGS[@]}"
     
     # Cleanup
     echo "Stopping PD (1P+1D) instances..."
@@ -339,14 +361,15 @@ run_epd_1e_1p_1d() {
     
     # Start encoder instance
     echo "Starting encoder instance on GPU $GPU_E, port $ENCODE_PORT"
-    CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
+    env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
         --port "$ENCODE_PORT" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
         --gpu-memory-utilization 0.01 \
         --enable-request-id-headers \
         --no-enable-prefix-caching \
         --max-num-batched-tokens 114688 \
-        --max-num-seqs 128 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
         --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECExampleConnector",
@@ -360,14 +383,15 @@ run_epd_1e_1p_1d() {
     
     # Start prefill instance
     echo "Starting prefill instance on GPU $GPU_P, port $PREFILL_PORT"
-    CUDA_VISIBLE_DEVICES="$GPU_P" \
+    env "$DEVICE_AFFINITY_ENV=$GPU_P" \
     VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
     vllm serve "$MODEL" \
         --port "$PREFILL_PORT" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
-        --gpu-memory-utilization 0.7 \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enable-request-id-headers \
-        --max-num-seqs 128 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
         --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECExampleConnector",
@@ -385,14 +409,15 @@ run_epd_1e_1p_1d() {
     
     # Start decode instance
     echo "Starting decode instance on GPU $GPU_D, port $DECODE_PORT"
-    CUDA_VISIBLE_DEVICES="$GPU_D" \
+    env "$DEVICE_AFFINITY_ENV=$GPU_D" \
     VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
     vllm serve "$MODEL" \
         --port "$DECODE_PORT" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
-        --gpu-memory-utilization 0.7 \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enable-request-id-headers \
-        --max-num-seqs 128 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
         --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
@@ -411,7 +436,7 @@ run_epd_1e_1p_1d() {
     
     # Start proxy
     echo "Starting EPD proxy on port $PROXY_PORT"
-    python "${GIT_ROOT}/examples/online_serving/disaggregated_encoder/disagg_epd_proxy.py" \
+    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
         --host "0.0.0.0" \
         --port "$PROXY_PORT" \
         --encode-servers-urls "http://localhost:$ENCODE_PORT" \
@@ -438,7 +463,7 @@ run_epd_1e_1p_1d() {
         --model_name "$MODEL" \
         --mode disagg \
         --baseline_file "$BASELINE_PD_FILE" \
-        $MM_FLAG
+        "${TEST_FLAGS[@]}"
     
     # Cleanup
     echo "✓✓ 1E+1P+1D Correctness Test finished"
@@ -465,7 +490,7 @@ run_epd_1e_1pd
 # Step 3: Test baseline 1P + 1D
 run_baseline_1p_1d
 
-# Step 4: Test 1E + 1P + 1D
+# # Step 4: Test 1E + 1P + 1D
 run_epd_1e_1p_1d
 
 # Cleanup output file

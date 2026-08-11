@@ -8,8 +8,18 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    FusedTopKBiasRouter,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+    FusedTopKRouter,
+)
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+    GroupedTopKRouter,
 )
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
@@ -19,13 +29,13 @@ from vllm.platforms import current_platform
 
 
 def _is_aiter_capable() -> bool:
-    """Check if the platform supports AITER (gfx942/gfx950)."""
+    """Check if the platform supports AITER (gfx942/gfx950/gfx1250)."""
     if not current_platform.is_rocm():
         return False
     try:
-        from vllm.platforms.rocm import _ON_MI3XX
+        from vllm.platforms.rocm import get_cdna_version
 
-        return _ON_MI3XX
+        return get_cdna_version() > 2
     except ImportError:
         return False
 
@@ -36,9 +46,117 @@ TOP_KS = [2, 4, 6]
 NUM_EXPERTS = [8, 16, 64]
 
 
-def setup_eplb_state(enable_eplb: bool, global_num_experts: int) -> EplbLayerState:
+def test_degenerate_grouped_config_uses_standard_topk() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="softmax",
+        renormalize=True,
+    )
+
+    assert isinstance(router, FusedTopKRouter)
+    hidden_states, router_logits = make_test_data(32, 256, 128)
+
+    topk_weights, topk_ids = router.select_experts(hidden_states, router_logits)
+    baseline_weights, baseline_ids = baseline_fused_topk(
+        router_logits,
+        top_k=4,
+        renormalize=True,
+    )
+
+    assert_routing_results_close(
+        topk_weights,
+        topk_ids,
+        baseline_weights,
+        baseline_ids,
+    )
+
+
+def test_multiple_expert_groups_use_grouped_topk() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=8,
+        topk_group=4,
+        scoring_func="softmax",
+        renormalize=True,
+    )
+
+    assert isinstance(router, GroupedTopKRouter)
+
+
+def test_degenerate_grouped_config_with_bias_uses_topk_bias() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="softmax",
+        renormalize=True,
+        e_score_correction_bias=torch.empty(128),
+    )
+
+    assert isinstance(router, FusedTopKBiasRouter)
+
+
+def test_degenerate_grouped_config_with_bias_keeps_routed_scale() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="softmax",
+        renormalize=True,
+        routed_scaling_factor=1.1,
+        e_score_correction_bias=torch.empty(128),
+    )
+
+    assert isinstance(router, FusedTopKBiasRouter)
+    assert router.routed_scaling_factor == 1.1
+
+
+def test_degenerate_deepseek_v3_routing_stays_grouped() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="sigmoid",
+        renormalize=True,
+        e_score_correction_bias=torch.empty(128),
+    )
+
+    assert isinstance(router, GroupedTopKRouter)
+    assert router.routing_method_type == RoutingMethodType.DeepSeekV3
+
+
+def test_single_expert_group_with_non_unit_scale_uses_grouped_topk() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="softmax",
+        renormalize=True,
+        routed_scaling_factor=1.1,
+    )
+
+    assert isinstance(router, GroupedTopKRouter)
+
+
+def setup_eplb_state(
+    enable_eplb: bool, global_num_experts: int
+) -> EplbLayerState | None:
     if not enable_eplb:
-        return EplbLayerState()
+        return None
 
     # Initialize EPLB state with proper tensors for testing
     # For testing purposes, we use a simple 1:1 mapping (no redundant experts)
@@ -59,12 +177,14 @@ def setup_eplb_state(enable_eplb: bool, global_num_experts: int) -> EplbLayerSta
         global_num_experts, dtype=torch.int64, device="cuda"
     )
     should_record_tensor = torch.ones((), dtype=torch.bool, device="cuda")
+    num_unpadded_tokens_tensors = [torch.tensor(0, dtype=torch.int32, device="cuda")]
 
     return EplbLayerState(
         expert_load_view=expert_load_view,
         logical_to_physical_map=logical_to_physical_map,
         logical_replica_count=logical_replica_count,
         should_record_tensor=should_record_tensor,
+        num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
     )
 
 
@@ -349,7 +469,6 @@ def test_fused_topk(
         top_k=top_k,
         global_num_experts=global_num_experts,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 
@@ -400,7 +519,6 @@ def test_fused_topk_bias(
         top_k=top_k,
         global_num_experts=global_num_experts,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 
@@ -469,7 +587,6 @@ def test_grouped_topk(
         top_k=top_k,
         global_num_experts=global_num_experts,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 
@@ -540,7 +657,6 @@ def test_custom(
         global_num_experts=global_num_experts,
         custom_routing_function=custom_routing_function,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 
@@ -580,7 +696,6 @@ def test_custom(
 #     router = create_fused_moe_router(
 #         top_k=top_k,
 #         global_num_experts=global_num_experts,
-#         enable_eplb=enable_eplb,
 #         eplb_state=eplb_state,
 #     )
 
@@ -662,6 +777,52 @@ def test_eplb_map_no_redundancy(
         assert load.sum().item() == 0
 
 
+@pytest.mark.parametrize("top_k,R", [(2, 2), (4, 2), (8, 4), (8, 8)])
+def test_eplb_map_hot_expert_replica_balance(top_k, R):
+    """Hot logical expert with R replicas must be balanced across replicas
+    even when ``top_k`` is a multiple of ``R``. In that regime every top-k
+    offset for the hot expert lands on a multiple of ``top_k`` in the flat
+    ``topk_ids`` view, so per-replica assignment must not collapse onto a
+    single replica.
+    """
+    num_tokens = 8192
+    num_logical = 16
+    num_physical = R + (num_logical - 1)
+
+    l2p = torch.full((num_logical, R), -1, dtype=torch.int64, device="cuda")
+    l2p[0] = torch.arange(R, dtype=torch.int64, device="cuda")
+    for i in range(1, num_logical):
+        l2p[i, 0] = R + i - 1
+    rc = torch.tensor([R] + [1] * (num_logical - 1), dtype=torch.int64, device="cuda")
+
+    torch.manual_seed(0)
+    topk_ids = torch.randint(
+        1,
+        num_logical,
+        (num_tokens, top_k),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    topk_ids[:, 0] = 0
+
+    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
+    rec = torch.tensor(True, dtype=torch.bool, device="cuda")
+
+    eplb_map_to_physical_and_record(
+        topk_ids=topk_ids,
+        expert_load_view=load,
+        logical_to_physical_map=l2p,
+        logical_replica_count=rc,
+        record_enabled=rec,
+    )
+
+    hot_load = load[:R].float()
+    max_mean = (hot_load.max() / hot_load.mean()).item()
+    assert max_mean < 1.15, (
+        f"Hot expert replicas uneven: {hot_load.tolist()}, max/mean={max_mean:.3f}"
+    )
+
+
 @pytest.mark.parametrize("record_enabled", [True, False])
 @pytest.mark.parametrize(
     "l2p_map, replica_count, num_physical, topk_ids, expected_out, expected_load",
@@ -672,10 +833,12 @@ def test_eplb_map_no_redundancy(
             [2, 2, 1, 1],
             6,
             [[0, 1], [2, 3], [0, 2]],
-            # offs: 0→0%2=0→p0, 1→1%2=1→p5, 2→2%1=0→p2,
-            #        3→3%1=0→p3, 4→4%2=0→p0, 5→5%1=0→p2
-            [[0, 5], [2, 3], [0, 2]],
-            [2, 0, 2, 1, 0, 1],
+            # replica = (token_idx * KNUTH) & 0xFFFFFFFF % R.
+            # token 0 hash=0x00000000: %2=0, %1=0.
+            # token 1 hash=0x9E3779B9: %2=1, %1=0.
+            # token 2 hash=0x3C6EF372: %2=0, %1=0.
+            [[0, 1], [2, 3], [0, 2]],
+            [2, 1, 2, 1, 0, 0],
             id="partial",
         ),
         pytest.param(
@@ -684,10 +847,11 @@ def test_eplb_map_no_redundancy(
             [2, 2, 2, 2],
             8,
             [[0, 1], [2, 3], [0, 2]],
-            # offs: 0→0%2=0→p0, 1→1%2=1→p5, 2→2%2=0→p2,
-            #        3→3%2=1→p7, 4→4%2=0→p0, 5→5%2=1→p6
-            [[0, 5], [2, 7], [0, 6]],
-            [2, 0, 1, 0, 0, 1, 1, 1],
+            # token 0 hash=0x00000000: %2=0.
+            # token 1 hash=0x9E3779B9: %2=1.
+            # token 2 hash=0x3C6EF372: %2=0.
+            [[0, 1], [6, 7], [0, 2]],
+            [2, 1, 1, 0, 0, 0, 1, 1],
             id="full",
         ),
         pytest.param(
@@ -696,10 +860,11 @@ def test_eplb_map_no_redundancy(
             [4, 2, 2],
             8,
             [[0, 1], [2, 0], [1, 2]],
-            # offs: 0→0%4=0→p0, 1→1%2=1→p4, 2→2%2=0→p2,
-            #        3→3%4=3→p7, 4→4%2=0→p1, 5→5%2=1→p6
-            [[0, 4], [2, 7], [1, 6]],
-            [1, 1, 1, 0, 1, 0, 1, 1],
+            # token 0 hash=0x00000000: %4=0, %2=0.
+            # token 1 hash=0x9E3779B9: %4=1, %2=1.
+            # token 2 hash=0x3C6EF372: %4=2, %2=0.
+            [[0, 1], [6, 3], [1, 2]],
+            [1, 2, 1, 1, 0, 0, 1, 0],
             id="uneven",
         ),
     ],
@@ -735,3 +900,67 @@ def test_eplb_map_with_redundancy(
         torch.testing.assert_close(load, exp_load)
     else:
         assert load.sum().item() == 0
+
+
+@pytest.mark.parametrize(
+    "l2p_map, replica_count, num_physical, topk_ids, "
+    "num_unpadded, expected_out, expected_load",
+    [
+        pytest.param(
+            [[0], [1], [2], [3]],
+            [1, 1, 1, 1],
+            4,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            2,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            # only rows 0,1 counted: expert 0→1, 1→1, 2→1, 3→1
+            [1, 1, 1, 1],
+            id="half_padded",
+        ),
+        pytest.param(
+            # record everything (None = no padding info)
+            [[0], [1], [2], [3]],
+            [1, 1, 1, 1],
+            4,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            None,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            [2, 2, 2, 2],
+            id="no_padding_info",
+        ),
+    ],
+)
+def test_eplb_map_num_unpadded_tokens(
+    l2p_map,
+    replica_count,
+    num_physical,
+    topk_ids,
+    num_unpadded,
+    expected_out,
+    expected_load,
+):
+    l2p = torch.tensor(l2p_map, dtype=torch.int64, device="cuda")
+    rc = torch.tensor(replica_count, dtype=torch.int64, device="cuda")
+    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
+    rec = torch.tensor(True, dtype=torch.bool, device="cuda")
+    ids = torch.tensor(topk_ids, dtype=torch.int32, device="cuda")
+    num_unpadded_t = (
+        torch.tensor(num_unpadded, dtype=torch.int32, device="cuda")
+        if num_unpadded is not None
+        else None
+    )
+
+    out = eplb_map_to_physical_and_record(
+        topk_ids=ids,
+        expert_load_view=load,
+        logical_to_physical_map=l2p,
+        logical_replica_count=rc,
+        record_enabled=rec,
+        num_unpadded_tokens=num_unpadded_t,
+    )
+
+    exp_out = torch.tensor(expected_out, dtype=out.dtype, device="cuda")
+    torch.testing.assert_close(out, exp_out)
+
+    exp_load = torch.tensor(expected_load, dtype=torch.int32, device="cuda")
+    torch.testing.assert_close(load, exp_load)

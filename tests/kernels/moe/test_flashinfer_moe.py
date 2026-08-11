@@ -20,9 +20,10 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
     FlashInferExperts,
     is_valid_flashinfer_cutlass_fused_moe,
 )
@@ -50,6 +51,74 @@ MNK_FACTORS = [
     (224, 1024, 1024),
     (224, 1024, 1536),
 ]
+
+
+@pytest.mark.parametrize(
+    "activation",
+    [MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUOAI_UNINTERLEAVE],
+)
+def test_flashinfer_swigluoai_params_are_forwarded(activation, monkeypatch):
+    from flashinfer.fused_moe.core import ActivationType
+
+    moe_config = FusedMoEConfig(
+        num_experts=2,
+        experts_per_token=1,
+        hidden_dim=128,
+        intermediate_size=128,
+        num_local_experts=2,
+        num_logical_experts=2,
+        activation=activation,
+        device="cuda",
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+        routing_method=RoutingMethodType.TopK,
+    )
+    quant_config = FusedMoEQuantConfig.make(
+        gemm1_alpha=1.702,
+        gemm1_beta=1.0,
+        gemm1_clamp_limit=7.0,
+    )
+    experts = FlashInferExperts(moe_config=moe_config, quant_config=quant_config)
+
+    call_args = {}
+
+    def fake_flashinfer_cutlass_fused_moe(**kwargs):
+        call_args.update(kwargs)
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.experts."
+        "flashinfer_cutlass_moe.flashinfer_cutlass_fused_moe",
+        fake_flashinfer_cutlass_fused_moe,
+    )
+    experts.apply(
+        output=torch.empty((1, 128), device="cuda", dtype=torch.bfloat16),
+        hidden_states=torch.empty((1, 128), device="cuda", dtype=torch.bfloat16),
+        w1=torch.empty((2, 256, 128), device="cuda", dtype=torch.bfloat16),
+        w2=torch.empty((2, 128, 128), device="cuda", dtype=torch.bfloat16),
+        topk_weights=torch.ones((1, 1), device="cuda", dtype=torch.float32),
+        topk_ids=torch.zeros((1, 1), device="cuda", dtype=torch.int64),
+        activation=activation,
+        global_num_experts=2,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=None,
+        workspace2=None,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+
+    assert experts._supports_activation(activation)
+    assert call_args["activation_type"] == ActivationType.Swiglu
+    for name, value in (
+        ("swiglu_alpha", 1.702),
+        ("swiglu_beta", 1.0),
+        ("swiglu_limit", 7.0),
+    ):
+        torch.testing.assert_close(
+            call_args[name],
+            torch.full((2,), value, device="cuda", dtype=torch.float32),
+        )
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
@@ -97,14 +166,13 @@ def test_flashinfer_fp4_moe_no_graph(
             num_experts=e,
             experts_per_token=topk,
             hidden_dim=k,
-            intermediate_size_per_partition=n,
+            intermediate_size=n,
             num_local_experts=e,
             num_logical_experts=e,
             activation=activation,
             device="cuda",
             moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
             in_dtype=dtype,
-            is_act_and_mul=is_gated_act,
             routing_method=RoutingMethodType.TopK,
             max_num_tokens=next_power_of_2(m),
         )
@@ -117,7 +185,6 @@ def test_flashinfer_fp4_moe_no_graph(
                 use_monolithic=False,
             ),
             FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
-            inplace=False,
         )
 
         flashinfer_output = flashinfer_experts.apply(

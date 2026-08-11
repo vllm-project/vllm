@@ -458,12 +458,26 @@ class PixtralForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         _vision_encoder_stacked_params = [
             # (param_name, shard_name, shard_id)
+            # HF format
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+            # Mistral native (consolidated) format
+            (".qkv_proj", ".wq", "q"),
+            (".qkv_proj", ".wk", "k"),
+            (".qkv_proj", ".wv", "v"),
+            (".gate_up_proj", ".w1", 0),
+            (".gate_up_proj", ".w3", 1),
         ]
+
+        # Remap Mistral native names to HF-style names
+        # used by the vLLM vision encoder modules.
+        _vision_encoder_name_remap = {
+            ".wo.": ".o_proj.",
+            ".w2.": ".down_proj.",
+        }
 
         def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith(("vision_encoder", "vision_tower"))
@@ -518,6 +532,11 @@ class PixtralForConditionalGeneration(
                             weight_loader(param, w, shard_id)
                             break
                     else:
+                        for old, new in _vision_encoder_name_remap.items():
+                            if old in trimmed_name:
+                                trimmed_name = trimmed_name.replace(old, new)
+                                break
+
                         param = vision_encoder_dict.get(trimmed_name)
                         if param is not None:
                             weight_loader = getattr(

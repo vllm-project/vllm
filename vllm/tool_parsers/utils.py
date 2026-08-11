@@ -3,12 +3,17 @@
 
 import ast
 import json
+import keyword as _python_keyword
+import math
+import warnings
+from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
 from openai.types.responses import (
     FunctionTool,
+    NamespaceTool,
     ToolChoiceFunction,
 )
 from openai.types.responses.tool import Tool as ResponsesTool
@@ -29,6 +34,12 @@ from vllm.logger import init_logger
 Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 
 logger = init_logger(__name__)
+
+
+def safe_literal_eval(text: str):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.literal_eval(text)
 
 
 def partial_tag_overlap(text: str, tag: str) -> int:
@@ -138,10 +149,113 @@ def is_complete_json(input_str: str) -> bool:
         return False
 
 
+def _is_json_finite(obj: Any) -> bool:
+    """Whether *obj* can be serialized to valid JSON.
+
+    ``json.dumps(..., allow_nan=False)`` raises ``ValueError`` on any
+    non-finite float (``inf``/``-inf``/``nan``) anywhere in the value, so this
+    detects non-finite floats nested inside parsed lists/dicts too.
+    """
+    try:
+        json.dumps(obj, allow_nan=False)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def consume_space(i: int, s: str) -> int:
     while i < len(s) and s[i].isspace():
         i += 1
     return i
+
+
+_NAMESPACE_TOOL_SEPARATOR = "__"
+
+
+@dataclass(frozen=True)
+class ResponsesToolCallName:
+    name: str
+    namespace: str | None = None
+
+
+def flat_namespace_tool_name(namespace: str, name: str) -> str:
+    return f"{namespace}{_NAMESPACE_TOOL_SEPARATOR}{name}"
+
+
+def iter_response_function_tool_info(
+    tool: ResponsesTool,
+) -> list[tuple[str, dict[str, Any] | None]]:
+    if isinstance(tool, FunctionTool):
+        return [(tool.name, tool.parameters)]
+    if not isinstance(tool, NamespaceTool):
+        return []
+
+    namespace = tool.name
+    return [
+        (
+            flat_namespace_tool_name(namespace, namespaced_tool.name),
+            namespaced_tool.parameters,
+        )
+        for namespaced_tool in tool.tools
+        if namespaced_tool.type == "function"
+    ]
+
+
+def iter_response_function_tool_dicts(
+    tools: list[ResponsesTool],
+) -> list[dict[str, Any]]:
+    function_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        if isinstance(tool, NamespaceTool):
+            namespace = tool.name
+            for namespaced_tool in tool.tools:
+                if namespaced_tool.type != "function":
+                    continue
+                tool_dict = namespaced_tool.model_dump()
+                tool_dict["name"] = flat_namespace_tool_name(
+                    namespace, namespaced_tool.name
+                )
+                function_tools.append(tool_dict)
+        elif isinstance(tool, FunctionTool):
+            function_tools.append(tool.model_dump())
+    return function_tools
+
+
+def build_responses_tool_call_name_map(
+    tools: list[ResponsesTool] | None,
+) -> dict[str, ResponsesToolCallName]:
+    if not tools:
+        return {}
+
+    name_map: dict[str, ResponsesToolCallName] = {}
+    for tool in tools:
+        if not isinstance(tool, NamespaceTool):
+            continue
+        namespace = tool.name
+        for namespaced_tool in tool.tools:
+            if namespaced_tool.type != "function":
+                continue
+            flat_name = flat_namespace_tool_name(namespace, namespaced_tool.name)
+            name_map[flat_name] = ResponsesToolCallName(
+                name=namespaced_tool.name,
+                namespace=namespace,
+            )
+    return name_map
+
+
+def resolve_responses_tool_call_name(
+    name: str,
+    tools: list[ResponsesTool] | None = None,
+    tool_call_name_map: dict[str, ResponsesToolCallName] | None = None,
+) -> ResponsesToolCallName:
+    name_map = tool_call_name_map
+    if name_map is None:
+        name_map = build_responses_tool_call_name_map(tools)
+    return name_map.get(name, ResponsesToolCallName(name=name))
+
+
+def _is_function_tool(tool: Tool) -> bool:
+    return isinstance(tool, (FunctionTool, ChatCompletionToolsParam))
 
 
 def _extract_tool_info(
@@ -163,14 +277,43 @@ def find_tool_properties(
     if not tools:
         return {}
     for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool)):
+            for name, params in iter_response_function_tool_info(tool):
+                if name == tool_name:
+                    return (params or {}).get("properties", {})
+            continue
+        if not _is_function_tool(tool):
+            continue
         name, params = _extract_tool_info(tool)
         if name == tool_name:
             return (params or {}).get("properties", {})
     return {}
 
 
-def _get_tool_schema_from_tool(tool: Tool) -> dict:
-    name, params = _extract_tool_info(tool)
+def find_tool_name(
+    tools: list[Tool] | None,
+    tool_name: str,
+) -> bool:
+    """Return whether a function tool with *tool_name* exists."""
+    if not tools:
+        return False
+    for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool)):
+            for name, _ in iter_response_function_tool_info(tool):
+                if name == tool_name:
+                    return True
+            continue
+        if not _is_function_tool(tool):
+            continue
+        name, _ = _extract_tool_info(tool)
+        if name == tool_name:
+            return True
+    return False
+
+
+def _get_tool_schema_from_name_and_params(
+    name: str, params: dict[str, Any] | None
+) -> dict:
     params = params if params else {"type": "object", "properties": {}}
     return {
         "properties": {
@@ -179,6 +322,11 @@ def _get_tool_schema_from_tool(tool: Tool) -> dict:
         },
         "required": ["name", "parameters"],
     }
+
+
+def _get_tool_schema_from_tool(tool: Tool) -> dict:
+    name, params = _extract_tool_info(tool)
+    return _get_tool_schema_from_name_and_params(name, params)
 
 
 def _get_tool_schema_defs(
@@ -203,15 +351,28 @@ def _get_tool_schema_defs(
 def _get_json_schema_from_tools(
     tools: list[Tool],
 ) -> dict:
+    fn_tool_schemas: list[dict[str, Any]] = []
+    fn_tools: list[Tool] = []
+    for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool)):
+            fn_tool_schemas.extend(
+                _get_tool_schema_from_name_and_params(name, params)
+                for name, params in iter_response_function_tool_info(tool)
+            )
+            if isinstance(tool, FunctionTool):
+                fn_tools.append(tool)
+        elif _is_function_tool(tool):
+            fn_tool_schemas.append(_get_tool_schema_from_tool(tool))
+            fn_tools.append(tool)
     json_schema = {
         "type": "array",
         "minItems": 1,
         "items": {
             "type": "object",
-            "anyOf": [_get_tool_schema_from_tool(tool) for tool in tools],
+            "anyOf": fn_tool_schemas,
         },
     }
-    json_schema_defs = _get_tool_schema_defs(tools)
+    json_schema_defs = _get_tool_schema_defs(fn_tools)
     if json_schema_defs:
         json_schema["$defs"] = json_schema_defs
     return json_schema
@@ -229,23 +390,30 @@ def get_json_schema_from_tools(
         tool_choice, ToolChoiceFunction
     ):
         tool_name = tool_choice.name
-        tool_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
-        if tool_name not in tool_map:
+        responses_tool_map: dict[str, dict[str, Any] | None] = {}
+        for tool in tools:
+            if not isinstance(tool, (FunctionTool, NamespaceTool)):
+                continue
+            for name, params in iter_response_function_tool_info(tool):
+                responses_tool_map[name] = params
+                if "__" in name:
+                    responses_tool_map.setdefault(name.rsplit("__", 1)[1], params)
+        if tool_name not in responses_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return tool_map[tool_name].parameters
+        return responses_tool_map[tool_name]
     # tool_choice: Forced Function (ChatCompletion)
     if (not isinstance(tool_choice, str)) and isinstance(
         tool_choice, ChatCompletionNamedToolChoiceParam
     ):
         tool_name = tool_choice.function.name
-        tool_map = {
+        chat_tool_map: dict[str, ChatCompletionToolsParam] = {
             tool.function.name: tool
             for tool in tools
             if isinstance(tool, ChatCompletionToolsParam)
         }
-        if tool_name not in tool_map:
+        if tool_name not in chat_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return tool_map[tool_name].function.parameters
+        return chat_tool_map[tool_name].function.parameters
     # tool_choice: "required"
     if tool_choice == "required":
         return _get_json_schema_from_tools(tools)
@@ -284,7 +452,16 @@ def get_parameter_value(val: ast.expr) -> Any:
         UnexpectedAstError: If the AST node is not a supported literal type.
     """
     if isinstance(val, ast.Constant):
-        return val.value
+        if val.value is None or isinstance(val.value, (str, int, float)):
+            return val.value
+        # bytes/Ellipsis/complex constants have no JSON representation and
+        # would otherwise surface as a TypeError deep inside json.dumps;
+        # reject them explicitly like other unsupported nodes.
+        logger.warning(
+            "Non-JSON-representable constant in tool call arguments: %s",
+            ast.dump(val),
+        )
+        raise UnexpectedAstError("Tool call arguments must be JSON values")
     elif isinstance(val, ast.Dict):
         if not all(isinstance(k, ast.Constant) for k in val.keys):
             logger.warning(
@@ -298,8 +475,44 @@ def get_parameter_value(val: ast.expr) -> Any:
         }
     elif isinstance(val, ast.List):
         return [get_parameter_value(v) for v in val.elts]
+    elif isinstance(val, ast.Tuple):
+        # JSON has no tuple type; a tuple argument (e.g. ``size=(800, 600)``)
+        # is treated as a list so it round-trips through ``json.dumps``.
+        # Without this the whole call is dropped.
+        return [get_parameter_value(v) for v in val.elts]
+    elif isinstance(val, ast.Set):
+        # JSON has no set type either; a set argument (e.g.
+        # ``tags={'a', 'b'}``) is treated as a list, preserving source order.
+        return [get_parameter_value(v) for v in val.elts]
+    elif isinstance(val, ast.JoinedStr) and all(
+        isinstance(part, ast.Constant) for part in val.values
+    ):
+        # An f-string without placeholders (``f'hello'``) is a plain string
+        # constant, but Python parses it as JoinedStr rather than Constant;
+        # without this branch the whole call is dropped. F-strings with real
+        # placeholders still fall through to the raise below.
+        return "".join(
+            str(part.value)  # type: ignore
+            for part in val.values
+        )
     elif isinstance(val, ast.Name) and val.id in _JSON_NAME_LITERALS:
         return _JSON_NAME_LITERALS[val.id]
+    elif isinstance(val, ast.UnaryOp) and isinstance(val.op, (ast.USub, ast.UAdd)):
+        # A negative (or explicitly positive) number is parsed by Python as a
+        # unary operation over a numeric constant, e.g. ``-1`` becomes
+        # ``UnaryOp(USub, Constant(1))`` rather than a plain ``Constant(-1)``.
+        # These are extremely common tool arguments (negative longitudes,
+        # offsets, deltas); without this branch the whole call is dropped.
+        # Restrict to numeric operands so ``not``/``~`` and other expressions
+        # still raise below.
+        operand = get_parameter_value(val.operand)
+        if isinstance(operand, (int, float)) and not isinstance(operand, bool):
+            return -operand if isinstance(val.op, ast.USub) else operand
+        logger.warning(
+            "Unsupported unary operand in tool call arguments: %s",
+            ast.dump(val),
+        )
+        raise UnexpectedAstError("Tool call arguments must be literals")
     else:
         logger.warning(
             "Unsupported AST node type in tool call arguments: %s",
@@ -308,20 +521,43 @@ def get_parameter_value(val: ast.expr) -> Any:
         raise UnexpectedAstError("Tool call arguments must be literals")
 
 
+def _ast_callable_dotted_name(node: ast.expr) -> str:
+    """Return the dotted name for a call target, walking ``ast.Attribute``
+    chains so ``a.b.c(...)`` becomes ``"a.b.c"``.
+
+    Raises:
+        UnexpectedAstError: If the chain does not bottom out in an
+            ``ast.Name`` (e.g. subscript or call expression as receiver).
+    """
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        raise UnexpectedAstError("Invalid tool call name")
+    parts.append(current.id)
+    return ".".join(reversed(parts))
+
+
 def handle_single_tool(call: ast.Call) -> ToolCall:
     """Convert a single AST function call node into a ToolCall object.
 
+    Accepts both bare names (``foo(...)``) and dotted attribute chains
+    (``a.b.c(...)``); the resulting tool call ``name`` field preserves the
+    dotted form.
+
     Raises:
-        UnexpectedAstError: If the call node does not have a simple
-            function name (e.g. it's an attribute access or subscript).
+        UnexpectedAstError: If the call target is neither a simple name
+            nor a chain of attribute accesses bottoming out in a name.
     """
-    if not isinstance(call.func, ast.Name):
+    if not isinstance(call.func, (ast.Name, ast.Attribute)):
         logger.warning(
             "Tool call has non-simple function name: %s",
             ast.dump(call.func),
         )
         raise UnexpectedAstError("Invalid tool call name")
-    function_name = call.func.id
+    function_name = _ast_callable_dotted_name(call.func)
     arguments = {}
     for keyword in call.keywords:
         arguments[keyword.arg] = get_parameter_value(keyword.value)
@@ -332,6 +568,343 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
             arguments=json.dumps(arguments, ensure_ascii=False),
         ),
     )
+
+
+def escape_ctrl_chars_in_strings(text: str) -> str:
+    """Escape literal control chars inside string literals of pythonic text.
+
+    Models emitting pythonic tool calls frequently place raw newlines inside a
+    string argument (e.g. ``exec(command='line1\\nline2')`` written with a real
+    line break). That is invalid Python — ``ast.parse`` fails with "unterminated
+    string literal" — so the call would be dropped even though the intent is
+    unambiguous. A NUL byte is worse: ``ast.parse`` rejects it anywhere in the
+    source with ``ValueError``. Escaping ``\\n``/``\\r``/``\\t``/``\\x00`` only
+    *inside* string literals makes the text parseable while preserving the
+    argument value exactly (the escape sequences evaluate back to the original
+    control chars).
+
+    Text outside string literals is returned unchanged.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if quote is None:
+            if char in {"'", '"'}:
+                quote = char
+            out.append(char)
+        elif char == "\\" and index + 1 < length:
+            out.append(char)
+            out.append(text[index + 1])
+            index += 2
+            continue
+        elif char == quote:
+            quote = None
+            out.append(char)
+        elif char == "\n":
+            out.append("\\n")
+        elif char == "\r":
+            out.append("\\r")
+        elif char == "\t":
+            out.append("\\t")
+        elif char == "\x00":
+            out.append("\\x00")
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
+_RESERVED_KW_SUFFIX = "_pyreservedkw_"
+
+
+def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
+    """Rename Python-keyword parameter names so pythonic tool text parses.
+
+    Tools legitimately name parameters ``from``, ``in``, ``class`` — but
+    ``memory_get(from=1)`` is a Python ``SyntaxError``, so the whole call
+    would be dropped. Rename ``from=`` to ``from_pyreservedkw_=`` (outside
+    string literals only, and only in keyword-argument position: preceded by
+    ``(`` or ``,`` and followed by a single ``=``), parse, then restore the
+    original name with :func:`restore_reserved_kwarg_names`.
+
+    Returns (rewritten_text, changed). Keyword *values* (``x=True``) and
+    keywords inside string arguments are never touched.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    changed = False
+    last_sig = ""
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if quote is not None:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            out.append(char)
+            last_sig = char
+            index += 1
+            continue
+        if char.isalpha() or char == "_":
+            end = index
+            while end < length and (text[end].isalnum() or text[end] == "_"):
+                end += 1
+            name = text[index:end]
+            look = end
+            while look < length and text[look].isspace():
+                look += 1
+            if (
+                _python_keyword.iskeyword(name)
+                and look < length
+                and text[look] == "="
+                and (look + 1 >= length or text[look + 1] != "=")
+                and last_sig in {"(", ","}
+            ):
+                out.append(name + _RESERVED_KW_SUFFIX)
+                changed = True
+            else:
+                out.append(name)
+            last_sig = name[-1]
+            index = end
+            continue
+        out.append(char)
+        if not char.isspace():
+            last_sig = char
+        index += 1
+    return "".join(out), changed
+
+
+def restore_reserved_kwarg_names(arguments: dict) -> dict:
+    """Undo :func:`rename_reserved_kwargs` on a decoded arguments dict.
+
+    Only keys that carry the rename suffix *and* whose stem is a Python
+    keyword are restored, making this an exact inverse of the rename.
+    """
+    restored = {}
+    for key, value in arguments.items():
+        if (
+            isinstance(key, str)
+            and key.endswith(_RESERVED_KW_SUFFIX)
+            and _python_keyword.iskeyword(key[: -len(_RESERVED_KW_SUFFIX)])
+        ):
+            restored[key[: -len(_RESERVED_KW_SUFFIX)]] = value
+        else:
+            restored[key] = value
+    return restored
+
+
+def normalize_leading_zero_ints(text: str) -> str:
+    """Strip leading zeros from decimal integer literals so the text parses.
+
+    Models emit zero-padded integers (``month=07``), which Python rejects
+    ("leading zeros in decimal integer literals are not permitted"), so the
+    whole call would be dropped. Rewrite ``07`` to ``7`` outside string
+    literals only. Tokens that are already valid Python are left alone:
+    all-zero literals (``00``), floats and fractional parts (``07.5``,
+    ``1.07``), exponents (``1e07``, consumed as a name run), and ``0x``/
+    ``0o``/``0b`` prefixes (the digit run stops at the prefix letter).
+    """
+    out: list[str] = []
+    quote: str | None = None
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if quote is not None:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if char.isalpha() or char == "_":
+            end = index
+            while end < length and (text[end].isalnum() or text[end] == "_"):
+                end += 1
+            out.append(text[index:end])
+            index = end
+            continue
+        if char.isdigit():
+            end = index
+            while end < length and (text[end].isdigit() or text[end] == "_"):
+                end += 1
+            token = text[index:end]
+            digits = token.replace("_", "")
+            follower = text[end] if end < length else ""
+            preceded_by_dot = index > 0 and text[index - 1] == "."
+            if (
+                digits[0] == "0"
+                and digits.strip("0")
+                and not preceded_by_dot
+                and follower not in {".", "e", "E", "j", "J"}
+            ):
+                out.append(str(int(digits)))
+            else:
+                out.append(token)
+            index = end
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+_QUOTE_FOLLOWERS = {",", ")", "]", "}", ":"}
+
+
+def escape_nested_quotes_in_strings(text: str) -> tuple[str, bool]:
+    """Close a broken string literal at the only closing quote that works.
+
+    Models emitting shell commands frequently nest unescaped same-style
+    quotes inside a string argument — ``command='sed -n '360,450p' f.py'``,
+    or a quoted ``python3 -c`` payload that itself contains quoted strings —
+    which Python reads as juxtaposed garbage, so the call is dropped even
+    though the intent is unambiguous. A string is treated as broken when
+    its first unescaped quote cannot syntactically close it (what follows
+    is none of ``,``, ``)``, ``]``, ``}``, ``:``). For a broken string,
+    every syntactically plausible closing quote is tried: interior quotes
+    escaped, the rest of the text kept verbatim, and the result (with
+    control chars escaped) validated with ``ast.parse``. Exactly one
+    candidate parsing means recovery — the decoded value is exactly the
+    text the model wrote. Zero or several parsing candidates means the
+    nesting is genuinely ambiguous and the text is returned unchanged
+    rather than guessed at.
+
+    Returns (rewritten_text, changed); run the result through
+    escape_ctrl_chars_in_strings before parsing — quotes chosen here can
+    move raw control chars inside the string.
+    """
+
+    def unescaped_quotes(start: int, quote: str) -> list[int]:
+        positions = []
+        j = start
+        while j < len(text):
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == quote:
+                positions.append(j)
+            j += 1
+        return positions
+
+    def is_closer(pos: int) -> bool:
+        k = pos + 1
+        while k < len(text) and text[k].isspace():
+            k += 1
+        return k < len(text) and text[k] in _QUOTE_FOLLOWERS
+
+    prefix: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char not in {"'", '"'}:
+            prefix.append(char)
+            index += 1
+            continue
+        quotes = unescaped_quotes(index + 1, char)
+        if not quotes:
+            return text, False
+        if is_closer(quotes[0]):
+            # The normal reading closes this string; move past it.
+            prefix.append(text[index : quotes[0] + 1])
+            index = quotes[0] + 1
+            continue
+        winners = []
+        for close in (j for j in quotes if is_closer(j)):
+            interior: list[str] = []
+            for j in range(index + 1, close):
+                if text[j] == char and not _is_escaped(text, j):
+                    interior.append("\\")
+                interior.append(text[j])
+            candidate = "".join(
+                ["".join(prefix), char, "".join(interior), char, text[close + 1 :]]
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                try:
+                    ast.parse(escape_ctrl_chars_in_strings(candidate))
+                except (SyntaxError, ValueError):
+                    continue
+            winners.append(candidate)
+        if len(winners) == 1:
+            return winners[0], True
+        return text, False
+    return text, False
+
+
+def contains_broken_string_literal(text: str) -> bool:
+    """Whether some string literal's first closing quote cannot close it.
+
+    Streaming guard companion to escape_nested_quotes_in_strings:
+    completion-based partial parses of nested-quote text read the string as
+    implicit concatenation and stream argument prefixes that can never be
+    retracted. Callers should withhold tool deltas while this returns True
+    and let the requote recovery run on the final text instead. A string
+    whose closing quote has not arrived yet is NOT broken (normal
+    streaming); a closing quote at the very end of the text counts as
+    broken only because its follower is still unknown.
+    """
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char not in {"'", '"'}:
+            index += 1
+            continue
+        j = index + 1
+        close = -1
+        while j < len(text):
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == char:
+                close = j
+                break
+            j += 1
+        if close == -1:
+            return False
+        k = close + 1
+        while k < len(text) and text[k].isspace():
+            k += 1
+        if k >= len(text) or text[k] not in _QUOTE_FOLLOWERS:
+            return True
+        index = close + 1
+    return False
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    """Whether the character at ``index`` is backslash-escaped.
+
+    A character is escaped iff it is preceded by an *odd* number of consecutive
+    backslashes. Checking only the single preceding character is wrong for even
+    runs: in ``'ab\\'`` the closing quote follows an escaped backslash (``\\\\``)
+    and is therefore NOT escaped — it closes the string. Common in regex/code
+    arguments such as ``r'\\\\b'``.
+    """
+    backslashes = 0
+    j = index - 1
+    while j >= 0 and text[j] == "\\":
+        backslashes += 1
+        j -= 1
+    return backslashes % 2 == 1
 
 
 def make_valid_python(text: str) -> tuple[str, str] | None:
@@ -351,6 +924,14 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     """
     bracket_stack: list[str] = []
     for index, char in enumerate(text):
+        # Inside a string literal only an unescaped matching quote is
+        # significant; brackets are literal text. Without this guard a bracket
+        # in a string argument (e.g. `cmd='grep -F "]"'`) corrupts the bracket
+        # stack and the whole tool call is rejected as mismatched.
+        if bracket_stack and bracket_stack[-1] in {"'", '"'}:
+            if char == bracket_stack[-1] and not _is_escaped(text, index):
+                bracket_stack.pop()
+            continue
         if char in {"[", "(", "{"}:
             bracket_stack.append(char)
         elif char == "]":
@@ -363,15 +944,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
             if not bracket_stack or bracket_stack.pop() != "{":
                 raise UnexpectedAstError("Mismatched curly braces")
         elif char in {"'", '"'}:
-            if bracket_stack and bracket_stack[-1] == char:
-                if index > 0 and text[index - 1] == "\\":
-                    pass
-                else:
-                    bracket_stack.pop()
-            elif bracket_stack and bracket_stack[-1] in {"'", '"'}:
-                pass
-            else:
-                bracket_stack.append(char)
+            bracket_stack.append(char)
 
     text = text.rstrip()
     if text.endswith("=") or text.endswith(":"):
@@ -403,7 +976,192 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     for char in reversed(bracket_stack):
         added_text += _CLOSING[char]
 
-    return text + added_text, added_text
+    candidate = text + added_text
+
+    # Streaming partial text can land in shapes the bracket-counting
+    # heuristics above don't catch. Two failure modes:
+    #   1. Mid-key inside a dict (`..., "k`) closes to `..., "k"}` — a
+    #      syntactically invalid mixed dict/set.
+    #   2. A bare string inside a dict (`{"k`) closes to `{"k"}` — valid
+    #      Python but a *set* literal that is really a truncated dict.
+    # Validate the candidate parses and has a body, and treat Set nodes as
+    # incomplete — but only when this completion added a `}` itself; a set
+    # already closed in the model text is a genuine set argument, not an
+    # artifact. Callers whose models emit raw control chars inside string
+    # arguments must escape them (see escape_ctrl_chars_in_strings) before
+    # calling.
+    try:
+        module = ast.parse(candidate)
+    except SyntaxError:
+        return None
+    if not module.body:
+        return None
+    if "}" in added_text:
+        for node in ast.walk(module):
+            if isinstance(node, ast.Set):
+                return None
+
+    return candidate, added_text
+
+
+def extract_types_from_schema(schema: Any) -> list[str]:
+    """Extract all possible type strings from a JSON Schema definition.
+
+    Handles ``type`` (string or list), ``enum`` value inference, and
+    recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
+    when no type information can be determined.
+    """
+    if schema is None or not isinstance(schema, dict):
+        return ["string"]
+
+    types: set[str] = set()
+
+    if "type" in schema:
+        type_value = schema["type"]
+        if isinstance(type_value, str):
+            types.add(type_value)
+        elif isinstance(type_value, list):
+            for t in type_value:
+                if isinstance(t, str):
+                    types.add(t)
+
+    if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
+        for value in schema["enum"]:
+            if value is None:
+                types.add("null")
+            elif isinstance(value, bool):
+                types.add("boolean")
+            elif isinstance(value, int):
+                types.add("integer")
+            elif isinstance(value, float):
+                types.add("number")
+            elif isinstance(value, str):
+                types.add("string")
+            elif isinstance(value, list):
+                types.add("array")
+            elif isinstance(value, dict):
+                types.add("object")
+
+    for choice_field in ("anyOf", "oneOf", "allOf"):
+        if choice_field in schema and isinstance(schema[choice_field], list):
+            for choice in schema[choice_field]:
+                types.update(extract_types_from_schema(choice))
+
+    return list(types) if types else ["string"]
+
+
+_TYPE_ALIASES: dict[str, str] = {
+    "str": "string",
+    "text": "string",
+    "varchar": "string",
+    "char": "string",
+    "enum": "string",
+    "int": "integer",
+    "int32": "integer",
+    "int64": "integer",
+    "uint": "integer",
+    "uint32": "integer",
+    "uint64": "integer",
+    "long": "integer",
+    "short": "integer",
+    "unsigned": "integer",
+    "float": "number",
+    "float32": "number",
+    "float64": "number",
+    "double": "number",
+    "bool": "boolean",
+    "dict": "object",
+    "arr": "array",
+    "list": "array",
+    "sequence": "array",
+}
+
+
+def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
+    """Best-effort coercion of a raw string value to a JSON Schema type.
+
+    Tries each type in priority order (null > integer > number > boolean >
+    object > array > string) and returns the first successful coercion.
+    Falls back to the original string when no coercion succeeds.
+
+    Args:
+        value: The raw string value from the model output.
+        schema_type: One or more JSON Schema type strings
+            (e.g. ``"string"`` or ``["string", "null"]``).
+    """
+    if isinstance(schema_type, str):
+        schema_type = [schema_type]
+
+    normalized_types = {
+        _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
+    }
+
+    # Priority: null > integer > number > boolean > object > array > string
+    type_priority = [
+        "null",
+        "integer",
+        "number",
+        "boolean",
+        "object",
+        "array",
+        "string",
+    ]
+
+    for candidate_type in type_priority:
+        if candidate_type not in normalized_types:
+            continue
+
+        if candidate_type == "null":
+            if value.lower() == "null":
+                return None
+            continue
+        if candidate_type == "string":
+            return value
+        if candidate_type == "integer":
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                continue
+        if candidate_type == "number":
+            try:
+                val = float(value)
+            except (ValueError, TypeError):
+                continue
+            if not math.isfinite(val):
+                # inf/-inf/nan are not valid JSON numbers. Fall through so
+                # the value is preserved as a string instead of crashing
+                # (int(float("inf")) raises OverflowError) or emitting
+                # invalid JSON (json.dumps(inf) -> "Infinity").
+                continue
+            return val if val != int(val) else int(val)
+        if candidate_type == "boolean":
+            lower_val = value.lower().strip()
+            if lower_val in ("true", "1"):
+                return True
+            if lower_val in ("false", "0"):
+                return False
+            continue
+        if candidate_type in ("object", "array"):
+            try:
+                parsed = json.loads(value)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+            if _is_json_finite(parsed):
+                return parsed
+            # Non-finite floats (e.g. "[1e999]" -> [inf]) cannot be
+            # serialized back to valid JSON; preserve the raw string.
+            continue
+
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return value
+    # Reject non-finite results (e.g. json.loads("1e999") -> inf, or nested
+    # inf/nan inside a parsed list/dict) which json.dumps would render as
+    # invalid JSON (Infinity/NaN). Preserve the raw string instead.
+    if not _is_json_finite(parsed):
+        return value
+    return parsed
 
 
 def compute_tool_delta(

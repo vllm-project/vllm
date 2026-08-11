@@ -40,6 +40,15 @@ class AllPool(TokenPoolingMethod):
         scheduler_config = vllm_config.scheduler_config
 
         self.enable_chunked_prefill = scheduler_config.enable_chunked_prefill
+        # With async scheduling, the next step may overwrite the hidden states
+        # buffer before outputs are copied to CPU, so they must own their storage.
+        self.clone_finished = bool(scheduler_config.async_scheduling)
+
+    def extra_repr(self) -> str:
+        return (
+            f"enable_chunked_prefill={self.enable_chunked_prefill}, "
+            f"clone_finished={self.clone_finished}"
+        )
 
     def forward(
         self,
@@ -47,27 +56,37 @@ class AllPool(TokenPoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> list[TokenPoolingMethodOutputItem]:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        hidden_states_lst = [
-            hidden_states[first : last + 1]
-            for first, last in zip(
-                pooling_cursor.first_token_indices_gpu.tolist(),
-                pooling_cursor.last_token_indices_gpu.tolist(),
-            )
-        ]
+        # Use the already-CPU num_scheduled_tokens tensor so `.tolist()`
+        # doesn't trigger a GPU->CPU sync. torch.split produces the same
+        # consecutive slices as indexing with first/last per-sequence indices.
+        hidden_states_lst = list(
+            torch.split(hidden_states, pooling_cursor.num_scheduled_tokens_cpu.tolist())
+        )
 
         if not self.enable_chunked_prefill:
+            if self.clone_finished:
+                return [hs.clone() for hs in hidden_states_lst]
             return hidden_states_lst
 
         pooling_states = pooling_metadata.pooling_states
+        finished_mask = pooling_cursor.is_finished().tolist()
 
         # If chunked_prefill is enabled
         # 1. first store the chunked hidden_states in pooling_states.hidden_states_cache
-        for p, hs_chunk in zip(pooling_states, hidden_states_lst):
-            p.hidden_states_cache.append(hs_chunk)
+        for p, hs_chunk, finished in zip(
+            pooling_states, hidden_states_lst, finished_mask
+        ):
+            # Own data retained across steps or returned without concatenation.
+            needs_owned_storage = not finished or (
+                self.clone_finished and not p.hidden_states_cache
+            )
+            p.hidden_states_cache.append(
+                hs_chunk.clone() if needs_owned_storage else hs_chunk
+            )
 
         # 2. Once prefill is finished, send hidden_states_cache to PoolerHead
         output_list = list[TokenPoolingMethodOutputItem]()
-        for p, finished in zip(pooling_states, pooling_cursor.is_finished()):
+        for p, finished in zip(pooling_states, finished_mask):
             if finished:
                 hidden_states_cache = p.hidden_states_cache
                 if len(hidden_states_cache) == 1:
@@ -91,12 +110,14 @@ class StepPool(AllPool):
         pooling_metadata: PoolingMetadata,
     ) -> list[TokenPoolingMethodOutputItem]:
         pooled_data_lst = super().forward(hidden_states, pooling_metadata)
-        prompt_token_ids = pooling_metadata.get_prompt_token_ids()
+        # Use the CPU copy of prompt_token_ids so the step_tag_id mask can be
+        # resolved to indices without a d2h sync from boolean indexing.
+        prompt_token_ids_cpu = pooling_metadata.get_prompt_token_ids_cpu()
         pooling_params = pooling_metadata.pooling_params
 
         pooled_data = list[torch.Tensor | None]()
-        for data, token_id, pooling_param in zip(
-            pooled_data_lst, prompt_token_ids, pooling_params
+        for data, token_id_cpu, pooling_param in zip(
+            pooled_data_lst, prompt_token_ids_cpu, pooling_params
         ):
             # for unfinished chunked prefill
             if data is None:
@@ -109,9 +130,11 @@ class StepPool(AllPool):
                     data = data[:, returned_token_ids]
 
                 if step_tag_id is not None:
-                    data = data[token_id == step_tag_id]
+                    idx_cpu = (token_id_cpu == step_tag_id).nonzero(as_tuple=True)[0]
+                    idx = idx_cpu.to(data.device, non_blocking=True)
+                    data = data[idx]
 
-            pooled_data.append(data)
+                pooled_data.append(data)
 
         return pooled_data
 

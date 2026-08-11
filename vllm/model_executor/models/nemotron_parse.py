@@ -77,24 +77,6 @@ class BartScaledWordEmbedding(VocabParallelEmbedding):
         return super().forward(input_ids) * self.embed_scale
 
 
-class BartParallelLMHead(ParallelLMHead):
-    """
-    This module overrides ParallelLMHead's
-    forward by dividing by embeddings scale,
-    yielding effectively the inverse of
-    BartScaledWordEmbedding
-    """
-
-    def __init__(
-        self, num_embeddings: int, embedding_dim: int, embed_scale: float = 1.0
-    ):
-        super().__init__(num_embeddings, embedding_dim)
-        self.embed_scale = embed_scale
-
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return super().forward(input_ids) / self.embed_scale
-
-
 class BartDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -280,6 +262,9 @@ class MBartDecoderNoPos(nn.Module):
 
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
         self.layer_norm = nn.LayerNorm(config.d_model)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,

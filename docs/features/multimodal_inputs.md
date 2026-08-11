@@ -68,7 +68,7 @@ You can pass a single image to the `'image'` field of the multi-modal dictionary
         print(generated_text)
     ```
 
-Full example: [examples/offline_inference/vision_language.py](../../examples/offline_inference/vision_language.py)
+Full example: [examples/generate/multimodal/vision_language_offline.py](../../examples/generate/multimodal/vision_language_offline.py)
 
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
 
@@ -101,7 +101,7 @@ To substitute multiple images inside the same text prompt, you can pass in a lis
         print(generated_text)
     ```
 
-Full example: [examples/offline_inference/vision_language_multi_image.py](../../examples/offline_inference/vision_language_multi_image.py)
+Full example: [examples/generate/multimodal/vision_language_multi_image_offline.py](../../examples/generate/multimodal/vision_language_multi_image_offline.py)
 
 If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
 
@@ -215,6 +215,67 @@ When loading RGBA images (images with transparency), vLLM converts them to RGB f
     - This setting only affects RGBA images with transparency; RGB images are unchanged
     - If not specified, the default white background `(255, 255, 255)` is used for backward compatibility
 
+#### Moondream3 Prompt Recipes { #moondream3-prompt-recipes }
+
+`Moondream3ForCausalLM` supports two task-specific prompt formats:
+
+- `query`: ask a question about the image.
+- `caption`: generate a caption for the image.
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.assets.image import ImageAsset
+
+llm = LLM(
+    model="moondream/moondream3-preview",
+    tokenizer="moondream/starmie-v1",
+    trust_remote_code=True,
+    max_model_len=2048,
+    limit_mm_per_prompt={"image": 1},
+)
+
+image = ImageAsset("stop_sign").pil_image
+
+
+def make_query_prompt(question: str) -> str:
+    return (
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>"
+        f"{question}<|md_reserved_2|>"
+    )
+
+
+def make_caption_prompt(length: str = "normal") -> str:
+    return (
+        "<|endoftext|><image><|md_reserved_0|>"
+        f"describe<|md_reserved_1|>{length}<|md_reserved_2|>"
+    )
+
+
+query_out = llm.generate(
+    {
+        "prompt": make_query_prompt("What is shown in this image?"),
+        "multi_modal_data": {"image": image},
+    },
+    SamplingParams(max_tokens=64, temperature=0),
+)[0].outputs[0].text
+
+caption_out = llm.generate(
+    {
+        "prompt": make_caption_prompt(),
+        "multi_modal_data": {"image": image},
+    },
+    SamplingParams(max_tokens=100, temperature=0),
+)[0].outputs[0].text
+
+print("query:", query_out)
+print("caption:", caption_out)
+```
+
+!!! note
+    The native Moondream3 model also has `detect` and `point` skills. Those
+    require custom coordinate decoding and are not exposed by this vLLM
+    implementation.
+
 ### Video Inputs
 
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
@@ -287,13 +348,38 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
     !!! note
         'process_vision_info' is only applicable to Qwen2.5-VL and similar models.
 
-Full example: [examples/offline_inference/vision_language.py](../../examples/offline_inference/vision_language.py)
+Full example: [examples/generate/multimodal/vision_language_offline.py](../../examples/generate/multimodal/vision_language_offline.py)
+
+#### Video Token Pruning
+
+For supported models, vLLM can prune video tokens after the vision encoder to
+reduce prefill time and KV cache usage, at some cost in accuracy. Set
+`--video-pruning-rate <q>` to prune the fraction `q` of video tokens from each
+video, and `--video-pruning-method` to choose the training-free algorithm:
+
+- **`evs`** (Efficient Video Sampling, default): drops the tokens with the
+  lowest temporal dissimilarity to the previous frame. The first frame is
+  always fully retained.
+- **`vidcom2`** (Video Compression Commander): scores tokens by similarity to
+  video-level and frame-level feature centers and gives distinctive frames a
+  larger share of the budget. At least one token per frame is retained.
+
+```bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct \
+    --video-pruning-rate 0.75 --video-pruning-method vidcom2
+```
+
+!!! note
+    `evs` is supported by all models implementing multimodal pruning;
+    `vidcom2` is currently supported by Qwen3-VL only. Unsupported combinations
+    are rejected at startup. Enabling video pruning also disables encoder CUDA
+    graphs, since the retained token count becomes data-dependent.
 
 ### Audio Inputs
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
 
-Full example: [examples/offline_inference/audio_language.py](../../examples/offline_inference/audio_language.py)
+Full example: [examples/generate/multimodal/audio_language_offline.py](../../examples/generate/multimodal/audio_language_offline.py)
 
 #### Chunking Long Audio for Transcription
 
@@ -335,6 +421,7 @@ full_transcription = " ".join(transcriptions)
 
 The `split_audio` function:
 
+- Expects 1D mono audio (`load_audio` downmixes by default)
 - Splits audio at quiet points to avoid cutting through speech
 - Uses RMS energy to find low-amplitude regions within the overlap window
 - Preserves all audio samples (no data loss)
@@ -674,7 +761,7 @@ Then, you can use the OpenAI client as follows:
     print("Chat completion output:", chat_response.choices[0].message.content)
     ```
 
-Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
+Full example: [examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py](../../examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py)
 
 !!! tip
     Loading from local file paths is also supported on vLLM: You can specify the allowed local media path via `--allowed-local-media-path` when launching the API server/engine,
@@ -717,7 +804,7 @@ Then, you can use the OpenAI client as follows:
         base_url=openai_api_base,
     )
 
-    video_url = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4"
+    video_url = "https://huggingface.co/datasets/raushan-testing-hf/videos-test/resolve/main/sample_demo_1.mp4"
 
     ## Use video url in the payload
     chat_completion_from_url = client.chat.completions.create(
@@ -745,7 +832,7 @@ Then, you can use the OpenAI client as follows:
     print("Chat completion output from image url:", result)
     ```
 
-Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
+Full example: [examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py](../../examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py)
 
 !!! note
     By default, the timeout for fetching videos through HTTP URL is `30` seconds.
@@ -754,6 +841,63 @@ Full example: [examples/online_serving/openai_chat_completion_client_for_multimo
     ```bash
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
+
+#### Video Decoding Backend
+
+vLLM decodes video bytes into frames using a selectable decoding backend. Five
+backends are supported:
+
+| Backend | Device | Description |
+| --- | --- | --- |
+| `opencv` (default) | CPU | OpenCV-based decoder |
+| `pyav` | CPU | PyAV decoder |
+| `torchcodec` | CPU | TorchCodec (PyTorch-native) decoder |
+| `pynvvideocodec` | GPU | NVIDIA PyNvVideoCodec decoder |
+| `deepstream` | GPU | NVIDIA DeepStream decoder |
+
+The three CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
+choose which FFmpeg version is used while `opencv` and `pyav` rely on whichever
+FFmpeg build they were linked against.
+
+Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "torchcodec"}}'
+```
+
+**TorchCodec-specific parameters:**
+
+The following parameters only apply to the `torchcodec` backend:
+
+- `num_ffmpeg_threads`: Number of FFmpeg decoding threads. `0` (default) relies
+  on the FFmpeg default, which is `min(cpu_count + 1, 16)`. This allows you to
+  control thread over-subscription.
+- `seek_mode`: Seek mode for the decoder. `"exact"` (default) guarantees
+  frame-accurate sampling by scanning the file when the decoder is created.
+  `"approximate"` skips that scan for faster decoder creation, at the cost of
+  relying on the file's metadata (which may yield less accurate seeking).
+
+```bash
+# Example: TorchCodec with approximate seek mode and 4 FFmpeg threads
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "torchcodec", "seek_mode": "approximate", "num_ffmpeg_threads": 4}}'
+```
+
+**PyNvVideoCodec-specific parameters:**
+
+- `hw_decoders`: Maximum number of concurrent hardware decoder slots retained
+  by each API server process. It must be a positive integer and defaults to `2`,
+  which is the recommended starting point for concurrent video workloads.
+  Because vLLM reserves GPU memory for these slots at startup, this value cannot
+  be overridden per request. Benchmark before increasing it because each
+  additional slot increases the GPU memory reservation.
+
+```bash
+# Example: explicitly use the recommended 2 hardware decoders
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "hw_decoders": 2}}'
+```
 
 #### Video Frame Recovery
 
@@ -779,6 +923,163 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 4. This approach handles both mid-video corruption and end-of-video truncation
 
 Works with common video formats like MP4 when using OpenCV backends.
+
+#### GPU Video Decoding with PyNvVideoCodec (NVDEC)
+
+The `pynvvideocodec` backend uses NVIDIA NVDEC to decode the sampled video
+frames on the GPU before copying them into host memory for multimodal
+preprocessing. For workloads with large videos and relatively light inference,
+such as video tagging, this can alleviate bottlenecks in CPU-based video
+decoders.
+
+!!! warning
+    [CUDA Multi-Process Service (MPS)](https://docs.nvidia.com/deploy/mps/quick-start.html)
+    is required when using this backend. Video decoding runs in the API server
+    process while model serving runs in the engine process, so multiple CUDA
+    processes share the same GPU. Configure and start MPS before starting vLLM.
+
+You must also set a positive `--mm-ipc-gpu-memory-gb` value to reserve VRAM for
+video decoding. vLLM carves this budget out of the memory available to the KV
+cache and uses it to bound concurrent frontend decode allocations. If the
+budget is exhausted, decode work waits instead of consuming the engine's VRAM
+headroom and potentially causing an out-of-memory error while serving requests.
+
+Select the backend with an environment variable and specify a workload-appropriate
+VRAM budget. For example, to reserve 1 GiB:
+
+```bash
+export VLLM_VIDEO_LOADER_BACKEND=pynvvideocodec
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --mm-ipc-gpu-memory-gb 1
+```
+
+Alternatively, select it with `--media-io-kwargs`:
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "pynvvideocodec"}}' \
+  --mm-ipc-gpu-memory-gb 1
+```
+
+Choose a budget large enough for the largest sampled video that a single API
+server process must decode. When using multiple API server processes, vLLM
+divides the configured budget evenly among them.
+
+For streaming video sources, use the DeepStream backend instead.
+
+#### GPU Video Decoding with DeepStream (NVDEC)
+
+By default vLLM decodes video on the CPU. On NVIDIA GPUs you can instead decode
+directly on the hardware video engine (NVDEC) with the DeepStream backend, which
+keeps decoding off the CPU and can significantly increase video throughput. It
+is the recommended GPU backend for streaming video sources.
+
+Install the backend (Linux x86-64 only):
+
+```bash
+pip install vllm[deepstream]
+```
+
+The pip wheel bundles the DeepStream libraries but still relies on a few system
+packages that pip cannot install. On Ubuntu:
+
+```bash
+apt-get install -y \
+  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad gstreamer1.0-libav \
+  python3-gi python3-gst-1.0 libv4l-0 cuda-libraries-13-0
+```
+
+Select the backend either with an environment variable:
+
+```bash
+export VLLM_VIDEO_LOADER_BACKEND=deepstream
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct
+```
+
+or per request via `--media-io-kwargs`:
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "deepstream"}}'
+```
+
+**Parameters:**
+
+- `pool_size`: Number of GPU decode workers in the process-wide decode pool
+  (clamped to `[1, 16]`). When unset it defaults to
+  `VLLM_MEDIA_LOADING_THREAD_COUNT` (default `8`). The pool is a singleton, so
+  the first request's value wins.
+
+```bash
+# Example: 12 decode workers
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "deepstream", "pool_size": 12}}'
+```
+
+#### Pre-extracted Frame Sequences with `media_io_kwargs`
+
+When you extract video frames on the client side and send them as `video/jpeg` (base64-concatenated JPEG frames), you can preserve the original video metadata by using `media_io_kwargs` in your request. This enables more accurate video understanding by preserving temporal information that would otherwise be lost during client-side frame extraction.
+
+**Supported Parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `fps` | float | Frame rate of the original video |
+| `frames_indices` | list[int] | Indices of the actually sampled frames |
+| `total_num_frames` | int | Total frame count of the original video |
+| `duration` | float | Duration of the original video in seconds |
+| `do_sample_frames` | bool | Whether to perform frame sampling |
+
+??? code
+
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+    # Client-side frame extraction
+    frames = extract_frames(video_path, num_frames=32)
+    frames_b64 = ",".join([encode_image(f) for f in frames])
+    video_url = f"data:video/jpeg;base64,{frames_b64}"
+
+    # Pass video metadata via media_io_kwargs
+    response = client.chat.completions.create(
+        model="your-multimodal-model",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "video_url", "video_url": {"url": video_url}},
+                {"type": "text", "text": "Describe what happens in this video."}
+            ]
+        }],
+        extra_body={
+            "media_io_kwargs": {
+                "video": {
+                    "fps": 30.0,
+                    "frames_indices": [0, 10, 20, 30, 40, 50, 60, 70, 80, 90,
+                                       100, 110, 120, 130, 140, 150, 160, 170,
+                                       180, 190, 200, 210, 220, 230, 240, 250,
+                                       260, 270, 280, 290, 300, 310],
+                    "total_num_frames": 900,
+                    "duration": 30.0,
+                }
+            }
+        },
+    )
+
+    print(response.choices[0].message.content)
+    ```
+
+**Why use `media_io_kwargs`?**
+
+When extracting frames client-side, the server loses important context about the original video:
+
+- **Temporal information**: Which frames were sampled and their positions in the original timeline
+- **Video duration**: How long the original video was
+- **Frame rate**: The original playback speed
+
+By passing this metadata, the model can better understand the temporal distribution of the sampled frames and whether important moments might have been skipped.
 
 #### Custom RGBA Background Color
 
@@ -894,7 +1195,7 @@ Alternatively, you can pass `audio_url`, which is the audio counterpart of `imag
     print("Chat completion output from audio url:", result)
     ```
 
-Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
+Full example: [examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py](../../examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py)
 
 !!! note
     By default, the timeout for fetching audios through HTTP URL is `10` seconds.

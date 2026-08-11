@@ -43,6 +43,12 @@ class ConchLinearKernel(MPLinearKernel):
             )
             return False, error_msg
 
+        if c.has_g_idx:
+            return (
+                False,
+                "Activation reordering (g_idx) is not supported by ConchLinearKernel",
+            )
+
         if find_spec("conch") is None:
             error_msg = (
                 "conch-triton-kernels is not installed, please "

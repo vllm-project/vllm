@@ -6,8 +6,9 @@ set -e
 
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
-DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
-DEEPGEMM_GIT_REF="477618cd51baffca09c4b0b87e97c03fe827ef03"
+DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
+# NOTE: This is currently targeting nv-dev branch due to sm120 support
+DEEPGEMM_GIT_REF="e21c821f39a2056d68067a466c64ddc942200106"
 WHEEL_DIR=""
 
 # Parse command line arguments
