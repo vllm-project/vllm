@@ -57,6 +57,8 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_DSA_MODE: str = "raw"
+    VLLM_LITETOPK: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -545,6 +547,17 @@ def get_env_or_set_default(
 # --8<-- [start:env-vars-definition]
 
 logger = logging.getLogger(__name__)
+
+
+def _get_dsa_mode() -> str:
+    value = os.getenv("VLLM_DSA_MODE", "raw").lower()
+    choices = ("raw", "litetopk", "litedsa")
+    if value not in choices:
+        raise ValueError(
+            f"Invalid value {value!r} for VLLM_DSA_MODE. "
+            f"Valid options: {list(choices)}."
+        )
+    return value
 
 
 def _deprecated_triton_attn_use_td() -> None:
@@ -1067,6 +1080,108 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
     ),
+    # DSA sparse-prefill acceleration mode (SM100 only), a linear escalation:
+    #   "raw"      dense logits + top_k_per_row + TRTLLM attention (default);
+    #   "litetopk" fused LiteTopK indexer (no [num_q, seq_len] logit matrix)
+    #              + TRTLLM attention;
+    #   "litedsa"  fused LiteTopK indexer + grouped sparse attention (G adjacent
+    #              tokens' heads packed into one 128-row call over their top-k
+    #              UNION with an exact per-query membership mask; G auto =
+    #              128 // num_local_heads, fp8 KV cache only).
+    # Each mode falls back to the previous when its requirements are unmet.
+    "VLLM_DSA_MODE": _get_dsa_mode,
+    # Enable the vendored LiteTopK JIT extension. Kept separate from DSA_MODE
+    # so litedsa can safely retain the dense indexer when the extension is not
+    # installed or intentionally disabled.
+    "VLLM_LITETOPK": lambda: bool(int(os.getenv("VLLM_LITETOPK", "0"))),
+    # LiteTopK and packed-attention integration controls. Register every
+    # supported VLLM_* knob so strict environment validation and compile
+    # provenance do not reject or omit an explicitly qualified run.
+    "VLLM_LITETOPK_BUILD": lambda: os.getenv("VLLM_LITETOPK_BUILD", ""),
+    "VLLM_LITETOPK_SO": lambda: os.getenv("VLLM_LITETOPK_SO", ""),
+    "VLLM_LITETOPK_SO_SHA256": lambda: os.getenv("VLLM_LITETOPK_SO_SHA256", ""),
+    "VLLM_LITETOPK_PRODUCTION_MIN_S": lambda: int(
+        os.getenv("VLLM_LITETOPK_PRODUCTION_MIN_S", "196608")
+    ),
+    "VLLM_LITETOPK_FP4_PRODUCTION_MIN_S": lambda: int(
+        os.getenv("VLLM_LITETOPK_FP4_PRODUCTION_MIN_S", "65536")
+    ),
+    "VLLM_LITETOPK_DENSE_SELECT": lambda: bool(
+        int(os.getenv("VLLM_LITETOPK_DENSE_SELECT", "1"))
+    ),
+    "VLLM_LITETOPK_DENSE_SELECT_MIN_S": lambda: int(
+        os.getenv("VLLM_LITETOPK_DENSE_SELECT_MIN_S", "40960")
+    ),
+    "VLLM_LITETOPK_DENSE_SELECT_MAX_S": lambda: int(
+        os.getenv("VLLM_LITETOPK_DENSE_SELECT_MAX_S", "262144")
+    ),
+    "VLLM_LITETOPK_DENSE_SELECT_BINS": lambda: int(
+        os.getenv("VLLM_LITETOPK_DENSE_SELECT_BINS", "4096")
+    ),
+    "VLLM_LITETOPK_DENSE_SELECT_MIN_LOGITS_MB": lambda: int(
+        os.getenv("VLLM_LITETOPK_DENSE_SELECT_MIN_LOGITS_MB", "0")
+    ),
+    "VLLM_LITETOPK_MERGE_CAP": lambda: int(
+        os.getenv("VLLM_LITETOPK_MERGE_CAP", "196608")
+    ),
+    "VLLM_LITETOPK_NB": lambda: int(os.getenv("VLLM_LITETOPK_NB", "256")),
+    "VLLM_LITETOPK_HEADROOM": lambda: float(os.getenv("VLLM_LITETOPK_HEADROOM", "0")),
+    "VLLM_LITETOPK_PROBE_EVERY": lambda: int(
+        os.getenv("VLLM_LITETOPK_PROBE_EVERY", "8")
+    ),
+    "VLLM_LITETOPK_OVF_WATERMARK": lambda: int(
+        os.getenv("VLLM_LITETOPK_OVF_WATERMARK", "65536")
+    ),
+    "VLLM_LITETOPK_CHECK": lambda: bool(int(os.getenv("VLLM_LITETOPK_CHECK", "0"))),
+    "VLLM_LITETOPK_OVF_LOG": lambda: bool(int(os.getenv("VLLM_LITETOPK_OVF_LOG", "0"))),
+    "VLLM_LITETOPK_DEDUP_CARRY_WAIT": lambda: bool(
+        int(os.getenv("VLLM_LITETOPK_DEDUP_CARRY_WAIT", "1"))
+    ),
+    "VLLM_LITETOPK_CARRY_EVERY": lambda: int(
+        os.getenv("VLLM_LITETOPK_CARRY_EVERY", "1")
+    ),
+    "VLLM_LITETOPK_CARRY_IO": lambda: bool(
+        int(os.getenv("VLLM_LITETOPK_CARRY_IO", "1"))
+    ),
+    "VLLM_LITETOPK_CARRY_DEBUG": lambda: bool(
+        int(os.getenv("VLLM_LITETOPK_CARRY_DEBUG", "0"))
+    ),
+    "VLLM_LITETOPK_CARRY_TIMING": lambda: bool(
+        int(os.getenv("VLLM_LITETOPK_CARRY_TIMING", "0"))
+    ),
+    "VLLM_LITETOPK_PATH_TIMING": lambda: bool(
+        int(os.getenv("VLLM_LITETOPK_PATH_TIMING", "0"))
+    ),
+    "VLLM_LITETOPK_HOST_TIMING": lambda: bool(
+        int(os.getenv("VLLM_LITETOPK_HOST_TIMING", "0"))
+    ),
+    "VLLM_LITETOPK_COLDSTART_IDENTITY": lambda: bool(
+        int(os.getenv("VLLM_LITETOPK_COLDSTART_IDENTITY", "0"))
+    ),
+    "VLLM_LITETOPK_NOOP_INDEXER": lambda: bool(
+        int(os.getenv("VLLM_LITETOPK_NOOP_INDEXER", "0"))
+    ),
+    "VLLM_LITETOPK_NOOP_MODE": lambda: os.getenv("VLLM_LITETOPK_NOOP_MODE", "arange"),
+    "VLLM_LITEDSA_SO": lambda: os.getenv("VLLM_LITEDSA_SO", ""),
+    "VLLM_LITEDSA_UNION_SO": lambda: os.getenv("VLLM_LITEDSA_UNION_SO", ""),
+    "VLLM_LITEDSA_DYNAMIC_SPAN": lambda: bool(
+        int(os.getenv("VLLM_LITEDSA_DYNAMIC_SPAN", "1"))
+    ),
+    "VLLM_LITEDSA_UNION_STATS": lambda: bool(
+        int(os.getenv("VLLM_LITEDSA_UNION_STATS", "0"))
+    ),
+    "VLLM_LITEDSA_REUSE_OUTPUT_BUFS": lambda: bool(
+        int(os.getenv("VLLM_LITEDSA_REUSE_OUTPUT_BUFS", "0"))
+    ),
+    "VLLM_DSV4_PACKED_ATTN": lambda: bool(int(os.getenv("VLLM_DSV4_PACKED_ATTN", "0"))),
+    "VLLM_DSV4_PACKED_CHECK": lambda: bool(
+        int(os.getenv("VLLM_DSV4_PACKED_CHECK", "0"))
+    ),
+    "VLLM_DSV4_PACKED_SO": lambda: os.getenv("VLLM_DSV4_PACKED_SO", ""),
+    "VLLM_DSA_DUMP_DIR": lambda: os.getenv("VLLM_DSA_DUMP_DIR", ""),
+    "VLLM_DSA_DUMP_MIN_S": lambda: int(os.getenv("VLLM_DSA_DUMP_MIN_S", "245760")),
+    "VLLM_DSA_DUMP_MAX": lambda: int(os.getenv("VLLM_DSA_DUMP_MAX", "2")),
+    "VLLM_DSA_DUMP_DEBUG": lambda: bool(int(os.getenv("VLLM_DSA_DUMP_DEBUG", "0"))),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH": lambda: bool(

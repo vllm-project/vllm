@@ -79,6 +79,8 @@ class DeepseekV32Indexer(nn.Module):
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128
         self.topk_indices_buffer = topk_indices_buffer
+        self.num_init_tokens = getattr(config, "index_init_tokens", 0)
+        self.num_local_tokens = getattr(config, "index_local_tokens", 0)
 
         assert cache_config is not None, "DeepSeek V3.2 indexer requires cache_config"
         self.k_cache = type(self).indexer_cache_cls(
@@ -104,6 +106,8 @@ class DeepseekV32Indexer(nn.Module):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
+            num_init_tokens=self.num_init_tokens,
+            num_local_tokens=self.num_local_tokens,
         )
 
     def forward(
@@ -339,7 +343,9 @@ class DeepseekV32Attention(MLAAttention):
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        if self.indexer is not None and not self.skip_topk:
+        run_indexer = self.indexer is not None and not self.skip_topk
+        if run_indexer:
+            assert self.indexer is not None
             kw = self.indexer.wk_weights_proj(hidden_states)[0]
             index_k = kw[:, : self.indexer.head_dim]
             index_weights = kw[:, self.indexer.head_dim :]
@@ -366,8 +372,10 @@ class DeepseekV32Attention(MLAAttention):
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
 
-        if self.indexer is not None and not self.skip_topk:
-            has_indexer = True
+        if run_indexer:
+            assert self.indexer is not None
+            assert index_k is not None
+            assert index_weights is not None
             indexer_k_norm_w = self.indexer.k_norm.weight
             indexer_k_norm_bias = self.indexer.k_norm.bias
             indexer_k_norm_eps = self.indexer.k_norm.eps
@@ -376,7 +384,6 @@ class DeepseekV32Attention(MLAAttention):
             indexer_softmax_scale = self.indexer.softmax_scale
             indexer_n_head_scale = self.indexer.n_head**-0.5
         else:
-            has_indexer = False
             indexer_k_norm_w = None
             indexer_k_norm_bias = None
             indexer_k_norm_eps = 1e-6
@@ -415,7 +422,7 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
-            has_indexer=has_indexer,
+            has_indexer=run_indexer,
             index_rope_interleave=self._index_rope_interleave,
         )
 
@@ -424,7 +431,8 @@ class DeepseekV32Attention(MLAAttention):
         q_nope = q_nope.transpose(0, 1)
         ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
 
-        if self.indexer is not None and not self.skip_topk:
+        if run_indexer:
+            assert self.indexer is not None
             index_q = self.indexer.wq_b(q_c)[0]
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
@@ -435,13 +443,13 @@ class DeepseekV32Attention(MLAAttention):
             q_pe,
             self.rotary_emb.cos_sin_cache,
             index_q,
-            self.indexer_rope_emb.cos_sin_cache if has_indexer else None,
+            self.indexer_rope_emb.cos_sin_cache if run_indexer else None,
             ql_nope,
             self._q_scale,
             index_weights,
             indexer_softmax_scale,
             indexer_n_head_scale,
-            has_indexer=has_indexer,
+            has_indexer=run_indexer,
             index_rope_interleave=self._index_rope_interleave,
             quantize_mqa=self._fp8_query,
         )
@@ -488,6 +496,8 @@ class DeepseekV32Attention(MLAAttention):
                 use_fp4_cache=False,
                 # fused_norm_rope already cleared the topk buffer this forward.
                 skip_topk_buffer_clear=True,
+                num_init_tokens=self.indexer.num_init_tokens,
+                num_local_tokens=self.indexer.num_local_tokens,
             )
 
         attn_metadata_raw = get_forward_context().attn_metadata
