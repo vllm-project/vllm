@@ -397,6 +397,11 @@ def flash_attn_varlen_func(
                 "instead of passing None"
             )
 
+        # FA4 only accepts descales for FP8 inputs. The attention backends
+        # initialize these tensors even when the inputs are not quantized.
+        if v.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
+            q_descale = k_descale = v_descale = None
+
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
         out, softmax_lse, _, _ = _flash_attn_fwd(
