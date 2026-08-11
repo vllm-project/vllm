@@ -8,6 +8,7 @@ from vllm.utils.torch_utils import (
     available_cpu_count,
     common_broadcastable_dtype,
     current_stream,
+    fp8_k_nvfp4_v_cache_split_views,
     get_kv_cache_torch_dtype,
     is_lossless_cast,
     is_quantized_kv_cache,
@@ -26,6 +27,55 @@ def test_nvfp4_4over6_cache_dtype() -> None:
     assert get_kv_cache_torch_dtype(cache_config.cache_dtype) == torch.uint8
     assert is_quantized_kv_cache(cache_config.cache_dtype)
     assert get_kv_quant_mode(cache_config.cache_dtype) == KVQuantMode.NVFP4
+
+
+def test_fp8_k_nvfp4_v_cache_dtype() -> None:
+    from vllm.config.cache import CacheConfig
+    from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
+
+    cache_config = CacheConfig(cache_dtype="fp8_k_nvfp4_v")
+
+    assert get_kv_cache_torch_dtype(cache_config.cache_dtype) == torch.uint8
+    assert is_quantized_kv_cache(cache_config.cache_dtype)
+    assert get_kv_quant_mode(cache_config.cache_dtype) == KVQuantMode.FP8_K_NVFP4_V
+
+
+@pytest.mark.parametrize("layout", ["NHD", "HND"])
+def test_fp8_k_nvfp4_v_cache_split_views(layout: str) -> None:
+    num_pages, block_size, num_heads, head_size = 2, 64, 4, 128
+    value_dim = head_size // 2
+    scale_dim = head_size // 16
+    total_dim = head_size + value_dim + scale_dim
+
+    if layout == "NHD":
+        physical = torch.zeros(
+            num_pages, block_size, num_heads, total_dim, dtype=torch.uint8
+        )
+    else:
+        physical = torch.zeros(
+            num_pages, num_heads, block_size, total_dim, dtype=torch.uint8
+        )
+
+    key, value, value_scale = fp8_k_nvfp4_v_cache_split_views(physical, head_size)
+    assert key.shape == (*physical.shape[:3], head_size)
+    assert value.shape == (*physical.shape[:3], value_dim)
+    assert value_scale.shape == (*physical.shape[:3], scale_dim)
+    assert key.dtype == torch.float8_e4m3fn
+    assert value.dtype == torch.uint8
+    assert value_scale.dtype == torch.float8_e4m3fn
+
+    items_per_page = block_size * num_heads
+    assert value.storage_offset() == items_per_page * head_size
+    assert value_scale.storage_offset() == items_per_page * (head_size + value_dim)
+
+
+def test_fp8_k_nvfp4_v_cache_split_views_rejects_invalid_input() -> None:
+    with pytest.raises(ValueError, match="4D uint8"):
+        fp8_k_nvfp4_v_cache_split_views(torch.empty(2, 64, 4, 200), 128)
+    with pytest.raises(ValueError, match="Invalid"):
+        fp8_k_nvfp4_v_cache_split_views(
+            torch.empty(2, 64, 4, 201, dtype=torch.uint8), 128
+        )
 
 
 @pytest.mark.parametrize(
