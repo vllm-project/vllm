@@ -151,3 +151,87 @@ async def test_render_to_generate_roundtrip(client, test_image):
     assert "red" in text.lower(), (
         f"Expected model to identify the red image, got: {text!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_content_parts_generates_tokens(client, test_image):
+    """content_parts with raw media should produce output tokens."""
+    data_url = encode_image_url(test_image, format="PNG")
+
+    render_resp = await client.post(
+        RENDER_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "text", "text": "What color is this?"},
+                    ],
+                }
+            ],
+        },
+    )
+    render_resp.raise_for_status()
+    token_ids = render_resp.json()["token_ids"]
+
+    gen_resp = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "token_ids": token_ids,
+            "content_parts": [{"type": "image_url", "url": data_url}],
+            "sampling_params": {"max_tokens": 10, "temperature": 0.0},
+        },
+    )
+    gen_resp.raise_for_status()
+    gen_data = gen_resp.json()
+
+    assert "choices" in gen_data
+    choice = gen_data["choices"][0]
+    assert "token_ids" in choice
+    assert len(choice["token_ids"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_content_parts_streaming(client, test_image):
+    """content_parts should work with streaming."""
+    import json as json_mod
+
+    data_url = encode_image_url(test_image, format="PNG")
+
+    render_resp = await client.post(
+        RENDER_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "text", "text": "Describe this."},
+                    ],
+                }
+            ],
+        },
+    )
+    render_resp.raise_for_status()
+    token_ids = render_resp.json()["token_ids"]
+
+    async with client.stream(
+        "POST",
+        GEN_ENDPOINT,
+        json={
+            "token_ids": token_ids,
+            "content_parts": [{"type": "image_url", "url": data_url}],
+            "sampling_params": {"max_tokens": 8, "temperature": 0.0},
+            "stream": True,
+        },
+    ) as resp:
+        resp.raise_for_status()
+        chunks = []
+        async for line in resp.aiter_lines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunks.append(json_mod.loads(line[6:]))
+
+    assert len(chunks) > 0
