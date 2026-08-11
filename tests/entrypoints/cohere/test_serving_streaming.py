@@ -81,6 +81,7 @@ def _make_chunk(
     reasoning: str | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
     finish_reason: str | None = None,
+    stop_reason: int | str | None = None,
     usage: dict[str, Any] | None = None,
     omit_choices: bool = False,
     citations: list[Any] | None = None,
@@ -107,7 +108,12 @@ def _make_chunk(
     }
     if not omit_choices:
         payload["choices"] = [
-            {"index": 0, "delta": delta, "finish_reason": finish_reason}
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+                "stop_reason": stop_reason,
+            }
         ]
     else:
         payload["choices"] = []
@@ -651,6 +657,23 @@ class TestChatCompletionStreamToV2:
         end_payload = _parse_event(frames[-2])
         assert end_payload["delta"]["finish_reason"] == "COMPLETE"
         assert end_payload["delta"]["usage"]["billed_units"]["input_tokens"] == 4
+
+    @pytest.mark.asyncio
+    async def test_stop_sequence_finish_reason(self):
+        serving = _serving()
+        frames = await _drain(
+            serving,
+            [
+                _make_chunk(role="assistant"),
+                _make_chunk(
+                    finish_reason="stop",
+                    stop_reason="<END>",
+                ),
+                _make_chunk(omit_choices=True),
+            ],
+        )
+        end_payload = _parse_event(frames[-2])
+        assert end_payload["delta"]["finish_reason"] == "STOP_SEQUENCE"
 
     @pytest.mark.asyncio
     async def test_text_then_tool_call_closes_text_first(self):
