@@ -1184,6 +1184,18 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   target_compile_definitions(_C_stable_libtorch PRIVATE
     TORCH_TARGET_VERSION=0x020B000000000000ULL)
 
+  # The Kimi-K3 DSpark draft MLA kernel uses v_mfma_scale_f32_16x16x128_f8f6f4
+  # and ds_read_b64_tr_b8, both gfx950-only, and C++20 for std::bit_cast.
+  if(VLLM_GPU_LANG STREQUAL "HIP" AND "gfx950" IN_LIST VLLM_GPU_ARCHES)
+    set(KIMI_K3_H40_DRAFT_MLA_ARCHS "gfx950")
+    set(KIMI_K3_H40_DRAFT_MLA_SRC
+      "csrc/libtorch_stable/kimi_k3/h40_draft_mla_decode_rocm.hip")
+    set_source_files_properties(${KIMI_K3_H40_DRAFT_MLA_SRC} PROPERTIES
+      COMPILE_OPTIONS "-std=c++20")
+    list(APPEND VLLM_STABLE_EXT_SRC "${KIMI_K3_H40_DRAFT_MLA_SRC}")
+    message(STATUS "Building Kimi-K3 H40 draft MLA decode for gfx950")
+  endif()
+
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
@@ -1204,6 +1216,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
   elseif(VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_ROCM)
+    if(KIMI_K3_H40_DRAFT_MLA_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_KIMI_K3_H40_DRAFT_MLA=1)
+    endif()
   endif()
 
   # On ROCm, _C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in

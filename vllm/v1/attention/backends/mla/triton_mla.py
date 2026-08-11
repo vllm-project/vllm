@@ -157,6 +157,30 @@ class TritonMLABackend(MLACommonBackend):
         return True
 
 
+
+_SCALE_CACHE: dict[int, tuple[torch.Tensor, float]] = {}
+
+
+def _scalar(t) -> float:
+    """float(t) without a per-call device->host sync.
+
+    The entry holds the tensor, not just the value: keying on the address alone
+    is a silent-wrong-answer bug, because freeing a scale tensor lets the
+    allocator hand its address to the next one, which would inherit the cached
+    value. Keeping a reference makes that impossible.
+    """
+    if t is None:
+        return 1.0
+    if not isinstance(t, torch.Tensor):
+        return float(t)
+    hit = _SCALE_CACHE.get(t.data_ptr())
+    if hit is not None and hit[0] is t:
+        return hit[1]
+    value = float(t.reshape(()).item())
+    _SCALE_CACHE[t.data_ptr()] = (t, value)
+    return value
+
+
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
 
@@ -297,6 +321,28 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             # Mirrors FlashInferMLA's non-causal path.
             query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
             if query_len > 1:
+                # gfx950 can serve the block folded, reading the KV span once
+                # instead of once per query token. Falls through when the shape
+                # or dtype is not supported.
+                from vllm.models.kimi_k3.amd.ops.h40_draft_mla import (
+                    h40_draft_mla_decode,
+                )
+
+                if h40_draft_mla_decode(
+                    q,
+                    kv_c_and_k_pe_cache.squeeze(2),
+                    o,
+                    block_table,
+                    seq_lens,
+                    query_len,
+                    self.scale,
+                    _scalar(layer._q_scale),
+                    _scalar(layer._k_scale),
+                ):
+                    # The folded kernel does not produce an LSE; nothing on the
+                    # DSpark draft path consumes one.
+                    return o, None
+
                 block_table = block_table.repeat_interleave(query_len, dim=0)
                 seq_lens = seq_lens.repeat_interleave(query_len)
 

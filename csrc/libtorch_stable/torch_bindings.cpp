@@ -527,6 +527,17 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? norm_weight=None, float norm_eps=1e-5) -> ()");
 #endif
 
+#ifdef VLLM_ENABLE_KIMI_K3_H40_DRAFT_MLA
+  // Kimi-K3 DSpark draft MLA decode (gfx950).  The non-causal draft block stays
+  // folded, so the KV span is read once instead of once per query token.
+  ops.def(
+      "kimi_k3_h40_draft_mla_decode("
+      "Tensor q, Tensor kv_cache, Tensor block_table, Tensor seq_lens, "
+      "Tensor! partial_max, Tensor! partial_sum, Tensor! partial_acc, "
+      "Tensor! out, int query_len, int num_splits, float qk_scale_log2, "
+      "float output_scale) -> ()");
+#endif
+
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.def(
       "kimi_k3_attn_res("
@@ -784,6 +795,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
   ops.impl("fused_kda_decode", TORCH_BOX(&fused_kda_decode));
+#endif
+
+#ifdef VLLM_ENABLE_KIMI_K3_H40_DRAFT_MLA
+  ops.impl("kimi_k3_h40_draft_mla_decode",
+           TORCH_BOX(&kimi_k3_h40_draft_mla_decode));
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES

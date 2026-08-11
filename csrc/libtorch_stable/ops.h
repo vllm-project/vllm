@@ -380,6 +380,15 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor> q_fp8_out, double q_fp8_scale);
 
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
+void kimi_k3_h40_draft_mla_decode(
+    torch::stable::Tensor const& q, torch::stable::Tensor const& kv_cache,
+    torch::stable::Tensor const& block_table,
+    torch::stable::Tensor const& seq_lens,
+    torch::stable::Tensor& partial_max, torch::stable::Tensor& partial_sum,
+    torch::stable::Tensor& partial_acc, torch::stable::Tensor& out,
+    int64_t query_len, int64_t num_splits, double qk_scale_log2,
+    double output_scale);
+
 void fused_kda_decode(
     torch::stable::Tensor const& x, torch::stable::Tensor const& weight,
     std::optional<torch::stable::Tensor> bias,
