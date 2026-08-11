@@ -120,9 +120,12 @@ def _layer_providers(model) -> dict[str, str]:
     providers: dict[str, str] = {}
     for module in model.modules():
         name = getattr(module, "name", None)
-        if name in _COVERED_LAYERS and name not in providers:
-            if (prov := provider_of(module)) is not None:
-                providers[name] = prov
+        if (
+            name in _COVERED_LAYERS
+            and name not in providers
+            and (prov := provider_of(module)) is not None
+        ):
+            providers[name] = prov
     return providers
 
 
