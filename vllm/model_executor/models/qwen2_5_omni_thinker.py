@@ -354,45 +354,36 @@ class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
         if not isinstance(metadata, list) or any(item is None for item in metadata):
             return parsed
 
-        return QwenOmniVideoProcessorItems(parsed.data, metadata=metadata)
+        videos = list(zip(parsed.data, metadata))
+        return VideoProcessorItems(videos, metadata=metadata)
 
 
-class QwenOmniVideoProcessorItems(VideoProcessorItems):
-    """Video items that forward loader metadata to the HF processor."""
-
-    def get_processor_data(self) -> Mapping[str, object]:
-        from transformers.video_utils import VideoMetadata
-
-        assert isinstance(self.metadata, list)
-        videos = self.get_all()
-        metadata = [
-            VideoMetadata(
-                **{
-                    key: value
-                    for key, value in item.items()
-                    if key != "do_sample_frames"
-                }
-            )
-            for item in self.metadata
-        ]
-        return {"videos": videos, "video_metadata": metadata}
-
-
-def _presampled_videos_hf_kwargs(
+def _presampled_videos_hf_inputs(
     mm_data: Mapping[str, object],
     mm_kwargs: Mapping[str, object],
-) -> Mapping[str, object]:
+) -> tuple[Mapping[str, object], Mapping[str, object]]:
     """Prevent HF from re-sampling videos already sampled by vLLM."""
-    video_metadata: Any = mm_data.get("video_metadata")
-    if not video_metadata:
-        return mm_kwargs
+    videos: Any = mm_data.get("videos")
+    if (
+        not isinstance(videos, list)
+        or not videos
+        or any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[1], Mapping)
+            for item in videos
+        )
+    ):
+        return mm_data, mm_kwargs
 
+    mm_data = dict(mm_data)
+    mm_data["videos"] = [item[0] for item in videos]
     sampled_fps: list[float] = []
-    for metadata in video_metadata:
-        duration = getattr(metadata, "duration", None)
-        frame_indices = getattr(metadata, "frames_indices", None)
+    for _, metadata in videos:
+        duration = metadata.get("duration")
+        frame_indices = metadata.get("frames_indices")
         if not duration or not frame_indices:
-            return mm_kwargs
+            return mm_data, mm_kwargs
         sampled_fps.append(len(frame_indices) / float(duration))
 
     mm_kwargs = dict(mm_kwargs)
@@ -406,7 +397,7 @@ def _presampled_videos_hf_kwargs(
                 "by the Qwen Omni HF processor; using the first video's FPS"
             )
     mm_kwargs["videos_kwargs"] = videos_kwargs
-    return mm_kwargs
+    return mm_data, mm_kwargs
 
 
 def _get_second_per_grid_ts(
@@ -576,7 +567,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
-        mm_kwargs = _presampled_videos_hf_kwargs(mm_data, mm_kwargs)
+        mm_data, mm_kwargs = _presampled_videos_hf_inputs(mm_data, mm_kwargs)
 
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
         if audios:

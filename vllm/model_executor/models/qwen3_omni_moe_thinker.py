@@ -94,7 +94,7 @@ from .qwen2_5_omni_thinker import (
     Qwen2_5OmniThinkerMultiModalDataParser,
     Qwen2_5OmniThinkerMultiModalProcessor,
     _get_second_per_grid_ts,
-    _presampled_videos_hf_kwargs,
+    _presampled_videos_hf_inputs,
     check_interleaved_audio_video,
     merge_interleaved_embeddings,
 )
@@ -1207,7 +1207,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
-        mm_kwargs = _presampled_videos_hf_kwargs(mm_data, mm_kwargs)
+        mm_data, mm_kwargs = _presampled_videos_hf_inputs(mm_data, mm_kwargs)
 
         def pad_to_hop_length(x: np.ndarray, hop_length: int) -> np.ndarray:
             length = x.shape[-1]
