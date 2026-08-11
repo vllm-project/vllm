@@ -4,12 +4,10 @@
 from dataclasses import dataclass
 
 import pytest
-import torch
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
 from tests.utils import single_gpu_only
-from vllm import LLM
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.config import CompilationConfig
 
 from ...utils import compute_acceptance_len
 from ..utils import run_acceptance_length_eval
@@ -56,9 +54,11 @@ LAGUNA_DFLASH_NVFP4 = DFlashCorrectnessConfig(
 def test_dflash_reference_acceptance_lengths(
     monkeypatch: pytest.MonkeyPatch,
     use_mrv2: bool,
+    vllm_runner,
 ):
     run_acceptance_length_eval(
         monkeypatch,
+        vllm_runner,
         spec_config={
             "model": QWEN3_DFLASH.model,
             "trust_remote_code": True,
@@ -110,14 +110,16 @@ def test_dflash_correctness(
     monkeypatch: pytest.MonkeyPatch,
     config: DFlashCorrectnessConfig,
     use_mrv2: bool,
+    vllm_runner,
 ):
     """Guard GSM8K accuracy and batched acceptance length for DFlash models."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
     if config.disable_flashinfer_sampler:
         monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
-    spec_llm = LLM(
-        model=config.model,
+    with vllm_runner(
+        config.model,
+        block_size=None,
         trust_remote_code=True,
         speculative_config={
             "method": "dflash",
@@ -130,23 +132,30 @@ def test_dflash_correctness(
         gpu_memory_utilization=0.85,
         enforce_eager=config.enforce_eager,
         disable_log_stats=False,
-    )
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+    ) as spec_runner:
+        spec_llm = spec_runner.llm
+        results = evaluate_gsm8k_offline(
+            spec_llm,
+            num_questions=config.num_questions,
+            use_chat_completions=config.use_chat_completions,
+        )
+        accuracy = results["accuracy"]
+        acceptance_len = compute_acceptance_len(spec_llm.get_metrics())
+        context = (
+            f"DFlash target={config.model}, draft={config.draft_model}, MRV2={use_mrv2}"
+        )
+        print(
+            f"{context}: GSM8K accuracy={accuracy:.3f}, "
+            f"acceptance_len={acceptance_len:.2f}"
+        )
 
-    results = evaluate_gsm8k_offline(
-        spec_llm,
-        num_questions=config.num_questions,
-        use_chat_completions=config.use_chat_completions,
-    )
-    accuracy = results["accuracy"]
-    acceptance_len = compute_acceptance_len(spec_llm.get_metrics())
-    print(
-        f"{config.model}: GSM8K accuracy={accuracy:.3f}, "
-        f"acceptance_len={acceptance_len:.2f}"
-    )
-
-    assert accuracy >= config.expected_accuracy
-    assert acceptance_len >= config.expected_acceptance_len
-
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+        assert accuracy >= config.expected_accuracy, (
+            f"{context}: GSM8K accuracy {accuracy:.3f} is below "
+            f"{config.expected_accuracy:.3f}; acceptance_len={acceptance_len:.3f}"
+        )
+        assert acceptance_len >= config.expected_acceptance_len, (
+            f"{context}: acceptance_len {acceptance_len:.3f} is below "
+            f"{config.expected_acceptance_len:.3f}; accuracy={accuracy:.3f}"
+        )

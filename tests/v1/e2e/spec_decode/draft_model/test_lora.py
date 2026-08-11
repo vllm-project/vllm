@@ -8,11 +8,13 @@ This script contains:
 import pytest
 import torch
 
-from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm import SamplingParams
+from vllm.config import CompilationConfig
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+
+from ..utils import assert_request_outputs_match
 
 LORA_TEST_PROMPT_MAP: dict[str, str] = {}
 
@@ -36,7 +38,6 @@ Numbers should be represented as integers only.
 SEED = 42
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
 @pytest.mark.parametrize(
     "model_setup",
     [
@@ -49,9 +50,13 @@ SEED = 42
         )
     ],
 )
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
 def test_batch_inference_correctness(
     monkeypatch: pytest.MonkeyPatch,
     model_setup: tuple[str, str, str, str, int],
+    vllm_runner,
 ):
     """
     Compare the outputs of a LLM with only Lora and a LLM with both SD and Lora.
@@ -60,10 +65,11 @@ def test_batch_inference_correctness(
     """
     with monkeypatch.context() as m:
         # Disable randomness
-        m.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        if current_platform.is_cuda():
+            m.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         set_random_seed(SEED)
-        torch.backends.cudnn.benchmark = False
-        torch.backends.cudnn.deterministic = True
+        m.setattr(torch.backends.cudnn, "benchmark", False)
+        m.setattr(torch.backends.cudnn, "deterministic", True)
 
         method, model_name, spec_model_name, lora_path, tp_size = model_setup
 
@@ -74,8 +80,9 @@ def test_batch_inference_correctness(
         )
 
         # without speculative decoding
-        ref_llm = LLM(
-            model=model_name,
+        with vllm_runner(
+            model_name,
+            block_size=None,
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
             max_model_len=2048,
@@ -84,18 +91,16 @@ def test_batch_inference_correctness(
             max_loras=1,
             max_cpu_loras=1,
             max_lora_rank=16,
-        )
-        try:
-            ref_outputs = ref_llm.generate(
+            enable_chunked_prefill=None,
+            compilation_config=CompilationConfig(),
+        ) as ref_runner:
+            ref_outputs = ref_runner.llm.generate(
                 prompts, sampling_params, lora_request=lora_request
             )
-        finally:
-            del ref_llm
-            torch.accelerator.empty_cache()
-            cleanup_dist_env_and_memory()
 
-        lora_spec_llm = LLM(
-            model=model_name,
+        with vllm_runner(
+            model_name,
+            block_size=None,
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
             speculative_config={
@@ -110,30 +115,22 @@ def test_batch_inference_correctness(
             max_loras=1,
             max_cpu_loras=1,
             max_lora_rank=16,
-        )
-        try:
-            lora_spec_outputs = lora_spec_llm.generate(
+            enable_chunked_prefill=None,
+            compilation_config=CompilationConfig(),
+        ) as spec_runner:
+            lora_spec_outputs = spec_runner.llm.generate(
                 prompts, sampling_params, lora_request=lora_request
             )
 
-            matches = 0
-            for ref_output, spec_output in zip(ref_outputs, lora_spec_outputs):
-                if ref_output.outputs[0].text == spec_output.outputs[0].text:
-                    matches += 1
-                else:
-                    print(f"ref_output: {ref_output.outputs[0].text}")
-                    print(f"spec_output: {spec_output.outputs[0].text}")
-
-            # Heuristic threshold: under greedy verification, the spec-decode
-            # output should equal the non-spec output (modulo FP noise from the
-            # target's verify-path matmul running at seqlen
-            # num_speculative_tokens+1 vs 1). 90% leaves slack for that noise.
-            threshold = int(0.90 * len(ref_outputs))
-            print(f"match ratio: {matches}/{len(ref_outputs)}")
-            assert matches > threshold, (
-                f"match ratio {matches}/{len(ref_outputs)} <= {threshold}"
-            )
-        finally:
-            del lora_spec_llm
-            torch.accelerator.empty_cache()
-            cleanup_dist_env_and_memory()
+        # Under greedy verification, the spec-decode output should equal the
+        # non-spec output (modulo FP noise from the target's verify-path matmul
+        # running at seqlen num_speculative_tokens+1 vs 1). 90% leaves slack.
+        assert_request_outputs_match(
+            ref_outputs,
+            lora_spec_outputs,
+            required_matches=int(0.90 * len(ref_outputs)) + 1,
+            context=(
+                f"LoRA + {method}: target={model_name}, draft={spec_model_name}, "
+                f"adapter={lora_path}"
+            ),
+        )

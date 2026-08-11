@@ -4,11 +4,9 @@
 from typing import Any
 
 import pytest
-import torch
-from tqdm import tqdm
 
-from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm import SamplingParams
+from vllm.config import CompilationConfig
 
 from ..utils import compute_acceptance_len
 
@@ -39,6 +37,7 @@ def load_and_process_dataset(data_name: str):
 
 def run_acceptance_length_eval(
     monkeypatch: pytest.MonkeyPatch,
+    vllm_runner,
     spec_config: dict[str, Any],
     expected_acceptance_lengths: dict[str, float],
     chat_template_kwargs: dict[str, Any],
@@ -52,54 +51,53 @@ def run_acceptance_length_eval(
     stays within tolerance of the reference figure for each dataset.
     """
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
-    spec_llm = LLM(**spec_config)
+    runner_config = spec_config.copy()
+    model = runner_config.pop("model")
+    runner_config.setdefault("block_size", None)
+    runner_config.setdefault("enable_chunked_prefill", None)
+    runner_config.setdefault("compilation_config", CompilationConfig())
+    with vllm_runner(model, **runner_config) as spec_runner:
+        spec_llm = spec_runner.llm
+        # MT-Bench has 80 prompts and HumanEval has 164; truncate GSM8K.
+        max_prompts_per_dataset = 200
 
-    max_prompts_per_dataset = 200  # mt-bench has 80, humaneval has 164, truncates gsm8k
+        tokenizer = spec_llm.get_tokenizer()
+        for dataset_name, expected_len in expected_acceptance_lengths.items():
+            dataset = load_and_process_dataset(dataset_name)
+            prev_metrics = None
+            acceptance_lengths = []
+            for i in range(min(max_prompts_per_dataset, len(dataset))):
+                user_content = dataset[i]["turns"][0]
+                prompt_text = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": user_content}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    **chat_template_kwargs,
+                )
 
-    tokenizer = spec_llm.get_tokenizer()
-    for dataset_name, expected_len in expected_acceptance_lengths.items():
-        dataset = load_and_process_dataset(dataset_name)
-        prev_metrics = None
-        acceptance_lengths = []
-        for i in tqdm(
-            range(min(max_prompts_per_dataset, len(dataset))),
-            desc=f"Processing {dataset_name}",
-        ):
-            user_content = dataset[i]["turns"][0]
-            prompt_text = tokenizer.apply_chat_template(
-                [{"role": "user", "content": user_content}],
-                tokenize=False,
-                add_generation_prompt=True,
-                **chat_template_kwargs,
+                # Greedy (temp=0) so acceptance length is deterministic and comparable
+                # across runs.
+                spec_llm.generate(
+                    [prompt_text],
+                    SamplingParams(temperature=0, max_tokens=2048),
+                    use_tqdm=False,
+                )
+                current_metrics = spec_llm.get_metrics()
+                acceptance_len = compute_acceptance_len(current_metrics, prev_metrics)
+                prev_metrics = current_metrics
+                acceptance_lengths.append(acceptance_len)
+
+            mean_acceptance_length = sum(acceptance_lengths) / len(acceptance_lengths)
+            # Fairly tight tolerance of 95% against the reference figures,
+            # watching for regressions. Can be relaxed if test is flaky but be sure to
+            # check for genuine issues such as #40727.
+            expected_len = expected_len * 0.95
+            print(
+                f"acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
+                f" (expected at least {expected_len:.2f})"
             )
 
-            # Greedy (temp=0) so acceptance length is deterministic and comparable
-            # across runs.
-            spec_llm.generate(
-                [prompt_text],
-                SamplingParams(temperature=0, max_tokens=2048),
-                use_tqdm=False,
+            assert mean_acceptance_length >= expected_len, (
+                f"acceptance_len for {dataset_name} is below expected threshold: "
+                f"{mean_acceptance_length:.2f} < {expected_len:.2f}"
             )
-            current_metrics = spec_llm.get_metrics()
-            acceptance_len = compute_acceptance_len(current_metrics, prev_metrics)
-            prev_metrics = current_metrics
-            acceptance_lengths.append(acceptance_len)
-
-        mean_acceptance_length = sum(acceptance_lengths) / len(acceptance_lengths)
-        # Fairly tight tolerance of 95% against the reference figures,
-        # watching for regressions. Can be relaxed if test is flaky but be sure to
-        # check for genuine issues such as #40727.
-        expected_len = expected_len * 0.95
-        print(
-            f"acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
-            f" (expected at least {expected_len:.2f})"
-        )
-
-        assert mean_acceptance_length >= expected_len, (
-            f"acceptance_len for {dataset_name} is below expected threshold: "
-            f"{mean_acceptance_length:.2f} < {expected_len:.2f}"
-        )
-
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
