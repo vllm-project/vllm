@@ -74,22 +74,16 @@ def nvfp4_prequant_pack_and_alphas(
     *,
     intermediate_size: int,
 ):
-    """NVFP4 checkpoint params -> (PrequantizedMoEWeights, fc1_alpha, fc2_alpha).
+    """NVFP4 checkpoint params -> (MoEWeightPack, fc1_alpha, fc2_alpha).
 
-    Scale algebra (see mega_reference.py:_expert_reference): the kernel's fc1
-    accumulator is gemm(x_fp4*x_sf, w_fp4*w_sf) * fc1_alpha. Our activation
-    quant is fully dynamic (block sf carries the real magnitude,
-    input_norm_const=1), so the checkpoint's static ``input_scale`` drops out
-    and fc1_alpha reduces to the weight's per-tensor global: weight_scale_2.
-    Same for fc2 (the internal swiglu requant is dynamic, fc1_norm_const=1):
-    fc2_alpha = w2.weight_scale_2.
+    Activation quantization is fully dynamic, so the checkpoint's static
+    ``input_scale`` drops out and each GEMM's epilogue alpha reduces to the
+    weight's per-tensor ``weight_scale_2``.
 
-    fc1_alpha is ONE scalar per expert but gate (w1) and up (w3) carry their
-    own weight_scale_2. When they differ, the ratio is folded into the UP
-    half's e4m3 block scales — ONLY if the fold round-trips exactly
-    (apples-to-apples rule: a lossy rescale silently changes the model; see
-    todo_nvfp4_prequant_checkpoint.md). Power-of-two ratios (this checkpoint
-    is a cast from mxfp4's power-of-two scales) fold exactly.
+    fc1_alpha is one scalar per expert, but gate (w1) and up (w3) carry their
+    own ``weight_scale_2``. When they differ, the ratio is folded into the up
+    half's e4m3 block scales — only if the fold round-trips exactly, since a
+    lossy rescale would silently change the model.
     """
     from flashinfer.moe_ep import MoEWeightPack
 
@@ -110,10 +104,10 @@ def nvfp4_prequant_pack_and_alphas(
         folded_e4m3 = folded.to(torch.float8_e4m3fn)
         if not torch.equal(folded_e4m3.float(), folded):
             raise ValueError(
-                "nvfp4 prequant: gate/up weight_scale_2 ratio does not fold "
-                "exactly into e4m3 block scales; refusing the lossy rescale "
-                "(apples-to-apples rule — repackage the checkpoint with "
-                "merged gate/up quantization instead)."
+                "NVFP4 MoE cannot merge the gate and up weight_scale_2 values "
+                "because their ratio is not exactly representable in "
+                "float8_e4m3fn. Use a checkpoint quantized with a shared "
+                "gate/up weight_scale_2."
             )
         w13_scale = w13_scale.clone()
         w13_scale[:, inter:, :] = folded_e4m3
@@ -269,10 +263,6 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
             activation_clamp=self._activation_clamp,
             weights=weights,
         )
-        # Upstream (fi branch >= 888383f5): the layer releases the source
-        # MoEWeightPack after preprocess, and workspaces are pooled across
-        # same-geometry layers by core/kernel/workspace_pool.py — the old
-        # `_weights = None` and `_SHARED_WORKSPACE` workarounds are gone.
         del weights
         # Allocate (or attach to) the pooled workspace before first
         # forward so warmup/capture never hits the lazy path.
@@ -338,12 +328,9 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
             is_padding=is_padding,
         )
 
-        # Validated-once fast path (mirrors the microbench's cached-launch
-        # loop): MoEEpMegaLayer.forward() re-runs bootstrap/dist checks and
-        # input validation on every call, which costs real host time at
-        # 43 MoE layers x one call per engine step. After the first
-        # successful full forward the layer is immutable, so go straight
-        # to the kernel backend's stage_inputs + compute.
+        # Fast path: after the first successful full forward the layer is
+        # immutable, so skip MoEEpMegaLayer.forward()'s per-call validation
+        # and go straight to the kernel backend's stage_inputs + compute.
         alphas = self._epilogue_alphas
         fc1_alpha = alphas[0] if alphas is not None else None
         fc2_alpha = alphas[1] if alphas is not None else None
@@ -361,15 +348,10 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
             kernel.stage_inputs(t, workspace, quantize_input=True)
             if zero_copy:
                 # Zero-copy (cutedsl backends): consume the workspace [:n]
-                # view directly (valid under stream ordering until the next
-                # MoE layer's launch on the shared workspace — downstream
-                # ops are enqueued first).
+                # view directly — valid under stream ordering until the next
+                # MoE layer's launch on the shared workspace.
                 return kernel.compute(workspace, transformed, output=None)
-            # deep_gemm_mega: its compute() requires a real output tensor
-            # (arg0 of the pybind fp8_fp4_mega_moe) — output=None lands as
-            # None in the binding and TypeErrors (found 2026-07-19; the
-            # fast path had only been exercised on cutedsl backends since
-            # the zero-copy change).
+            # deep_gemm_mega's compute() requires a real output tensor.
             out = torch.empty(
                 num_tokens,
                 hidden_size,
