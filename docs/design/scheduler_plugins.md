@@ -2,565 +2,681 @@
 
 ## Status
 
-Phase 1 and Phase 2 are implemented on the development branch. The framework
-does not change the scheduler's ownership of batching, token budgets, KV cache
-allocation, or preemption safety.
+This document defines the target architecture. The current development branch
+contains an earlier scalar-callback prototype; it is not the compatibility or
+performance contract described here.
 
-Implemented:
+The framework is designed around two equal requirements:
 
-- built-in FCFS and priority QueueSort and Preemption plugins;
-- typed plugin profiles;
-- bounded candidate selection;
-- read-only scheduling cycle state;
-- Filter AND semantics;
-- weighted Score fusion;
-- deterministic QueueSort tie-breaking;
-- atomic selection and removal by request identity;
-- the existing no-extension deque and heap fast paths.
+- the built-in scheduler policies must retain their specialized performance;
+- out-of-tree plugins must be able to implement new queueing, filtering,
+  scoring, preemption, and stateful scheduling policies without replacing the
+  scheduler core.
 
-Not yet implemented:
-
-- dynamic QueueSort;
-- lazy scheduler feature providers;
-- local prefix-cache candidate information;
-- lifecycle extension points;
-- out-of-tree entry-point discovery;
-- budget hints and additional QoS extension points.
+Performance is part of the public contract. An abstraction that preserves
+behavior but changes a built-in operation from constant to linear time is not
+considered compatible.
 
 ## Motivation
 
-The V1 scheduler currently supports `fcfs` and `priority` policies directly in
-the scheduler core. Extending it with session affinity, prefix-cache locality,
-or SLA-aware ordering requires either modifying the core or replacing the
-entire scheduler through `scheduler_cls`.
+The V1 scheduler directly supports FCFS and priority policies. Adding session
+affinity, prefix-cache locality, tenant fairness, or SLA-aware ordering
+currently requires modifying the core or replacing the complete scheduler via
+`scheduler_cls`.
 
-Replacing the scheduler has a large compatibility surface. Most scheduling
-extensions only need to influence a few decisions while retaining the core
-scheduler's correctness model. The framework therefore provides one plugin
-registration system with multiple extension points, following the structure of
-the Kubernetes Scheduler Framework.
+Replacing the scheduler exposes a large and unstable compatibility surface.
+Most policies need to influence a bounded set of decisions while retaining the
+core scheduler's ownership of token budgets, KV allocation, batching, and
+request state transitions. The plugin framework therefore provides multiple
+extension points behind a compiled execution plan.
 
-The initial goals are:
+The goals are:
 
-- express the existing `fcfs` and `priority` policies as built-in plugins;
-- preserve their observable behavior and existing configuration;
-- support out-of-tree filtering, scoring, and preemption ranking;
-- enable session affinity and local prefix-cache locality;
-- leave room for SLA and QoS policies without exposing KV cache mutation;
-- keep the no-extension fast path equivalent to the current scheduler.
+- express FCFS and priority as built-in plugins without slowing their hot paths;
+- support out-of-tree QueueSort, Filter, Score, and PreemptionScore plugins;
+- support stateful policies through batched lifecycle events;
+- compute expensive scheduling features only when an enabled plugin requests
+  them;
+- bound plugin work independently of the total waiting-queue length;
+- make algorithmic complexity and scheduler CPU overhead testable contracts.
 
-This framework schedules requests within one V1 scheduler instance. Selecting
-an engine or data-parallel rank is a routing decision and is out of scope.
+The framework schedules requests within one V1 scheduler instance. Selecting
+an engine or data-parallel rank remains a routing decision.
 
 ## Non-goals
 
 - Replacing the V1 scheduler core.
-- Allowing plugins to allocate or free KV cache blocks.
+- Allowing plugins to allocate or free KV blocks.
 - Allowing plugins to construct `SchedulerOutput`.
 - Adding an RPC-based or external scheduler.
 - Invoking plugins for every generated token.
 - Providing cross-engine or cross-rank session affinity.
-- Making arbitrary scheduler internals a stable public API.
+- Exposing mutable scheduler collections as public APIs.
+- Treating arbitrary `Request` fields as stable plugin APIs.
 
-## Current behavior
+## Ownership boundary
 
-`SchedulerConfig.policy` accepts `fcfs` or `priority`. The selected policy
-currently controls three behaviors.
+The scheduler core owns mechanisms and enforces invariants:
 
-### Waiting queues
+- batching and token budgets;
+- KV and encoder-cache allocation;
+- scheduler-owned blockers and request state transitions;
+- LoRA and multimodal constraints;
+- validating plugin results;
+- applying queue mutations and preemption;
+- constructing `SchedulerOutput`.
 
-`fcfs` uses deques. New requests are appended, and preempted requests are
-prepended. `priority` uses heaps ordered by:
+Plugins own policy:
 
-```python
-(request.priority, request.arrival_time, request.request_id, id(request))
-```
+- the base waiting-queue discipline;
+- current-cycle eligibility;
+- admission ranking;
+- preemption-victim ranking;
+- policy-local incremental state.
 
-A lower priority value is scheduled first.
+Plugins operate on stable request handles and read-only feature views. They do
+not receive mutable queues, block pools, cache managers, or scheduler-owned
+`Request` objects as part of the public interface.
 
-### Waiting and skipped queue selection
+## Architecture
 
-The scheduler keeps separate `waiting` and `skipped_waiting` queues. Under
-`fcfs`, previously skipped requests are retried before the regular waiting
-queue. Under `priority`, the two queue heads are compared and the request with
-the higher priority is selected.
-
-### Preemption
-
-When KV allocation fails, `fcfs` preempts the last running request. `priority`
-preempts the running request with the largest `(priority, arrival_time)` key.
-
-All three behaviors must remain compatible when the policies become plugins.
-
-## Design overview
-
-There is one `SchedulerPlugin` type and one `SchedulerPluginManager`. A plugin
-may implement any subset of the framework's extension points.
+Plugin discovery and composition occur once during EngineCore initialization:
 
 ```text
-request admission
+configured profile
        |
        v
-   QueueSort
+plugin registry and descriptor validation
        |
        v
-candidate selection
+profile compiler -----> required feature set
        |
        v
-     Filter
+CompiledSchedulerPlan
        |
-       v
-      Score
-       |
-       v
-core feasibility and KV allocation
-       |
-       +---- allocation failure ----> PreemptionScore
-       |
-       v
-SchedulerOutput
+       +---- QueueDiscipline
+       +---- CandidatePipeline
+       +---- PreemptionPipeline
+       +---- subscribed lifecycle callbacks
 ```
 
-The scheduler core invokes extension points and applies their results. Plugins
-never receive mutable scheduler queues, block pools, or cache managers.
+The compiled plan contains direct references to initialized plugins, feature
+providers, reusable buffers, fused weights, and specialized operations. The
+hot path performs no entry-point discovery, dynamic imports, plugin-type
+inspection, or profile normalization.
 
-## Plugin contract
+Profiles containing only a matching built-in QueueSort and PreemptionScore are
+compiled to dedicated FCFS or priority plans. They do not execute the generic
+candidate pipeline.
 
-The public plugin object uses a small base class with no-op defaults. This
-allows one plugin to implement multiple extension points without requiring
-unrelated methods.
+## Public data model
+
+### Stable request handles
+
+The core assigns an opaque handle while a request is registered:
 
 ```python
-class SchedulerPlugin:
-    name: str
-
-    def queue_sort_key(self, request: Request) -> tuple:
-        raise NotImplementedError
-
-    def filter(
-        self,
-        request: Request,
-        state: SchedulingCycleState,
-    ) -> FilterResult:
-        return FilterResult.allow()
-
-    def score(
-        self,
-        request: Request,
-        state: SchedulingCycleState,
-    ) -> float:
-        return 0.0
-
-    def preemption_score(
-        self,
-        request: Request,
-        state: PreemptionCycleState,
-    ) -> float:
-        return 0.0
+RequestHandle = NewType("RequestHandle", int)
 ```
 
-Extension-point membership is explicit in configuration. The manager does not
-infer membership by checking whether a method was overridden.
+Handles allow queue disciplines to maintain indexes without retaining public
+references to mutable `Request` objects. A handle is valid only until the
+corresponding request finishes or is removed from the scheduler.
 
-Lifecycle callbacks may be added after the scheduling extension points are
-stable. They are not required for the first implementation. In particular, the
-framework must not introduce a callback on every decode step.
+### Columnar candidate batches
+
+Candidate information is exposed as a read-only, columnar view:
+
+```python
+class CandidateBatch(Protocol):
+    size: int
+    handles: ReadOnlyIntBuffer
+    queue_ranks: ReadOnlyIntBuffer
+
+    def feature(self, feature: SchedulerFeature) -> ReadOnlyBuffer: ...
+```
+
+The core owns and reuses the underlying storage. Implementations must not
+allocate one object or dictionary entry per candidate on every scheduling
+iteration. String and structured metadata may be exposed by indirect views
+when requested.
+
+The initial feature set includes:
+
+```python
+class SchedulerFeature(Enum):
+    PRIORITY = auto()
+    ARRIVAL_TIME = auto()
+    WAITING_TIME = auto()
+    QUEUE_POSITION = auto()
+    NUM_PROMPT_TOKENS = auto()
+    NUM_COMPUTED_TOKENS = auto()
+    LOCAL_CACHED_TOKENS = auto()
+    SESSION_ID = auto()
+    TENANT_ID = auto()
+    DEADLINE = auto()
+    NUM_PREEMPTIONS = auto()
+    RUNNING_TENANT_COUNTS = auto()
+```
+
+Adding a feature does not add an eagerly populated field to every cycle.
+
+### Cycle state
+
+Cycle state contains scalar, read-only values that are valid for one compiled
+candidate plan:
+
+```python
+@dataclass(slots=True, frozen=True)
+class SchedulingCycleState:
+    now: float
+    block_size: int
+    token_budget: int
+    encoder_budget: int
+    num_running_requests: int
+    cycle_id: int
+```
+
+Request-specific values live in `CandidateBatch`. Plugins must treat the
+snapshot as immutable. Core resource feasibility remains authoritative even
+when resources change after the snapshot is created.
+
+## Plugin descriptor and contract
+
+An entry point returns a descriptor rather than an unversioned class:
+
+```python
+@dataclass(frozen=True)
+class SchedulerPluginDescriptor:
+    name: str
+    api_version: int
+    plugin_version: str
+    extension_points: frozenset[ExtensionPoint]
+    required_features: frozenset[SchedulerFeature]
+    factory: Callable[..., SchedulerPlugin]
+    capabilities: PluginCapabilities
+```
+
+The descriptor permits validation without guessing which methods a plugin
+overrides. `PluginCapabilities` records batch support, native-buffer support,
+and lifecycle subscriptions.
+
+One plugin instance may participate in multiple explicitly configured
+extension points. When the same instance is reused, its constructor arguments
+must be identical at all extension points.
+
+Scalar adapters may be provided for development convenience, but the stable
+high-performance interfaces are batch-oriented. In-tree plugins must implement
+the batch interfaces or a built-in intrinsic.
 
 ## Extension points
 
 ### QueueSort
 
-QueueSort defines the base ordering and preemption reinsertion behavior. Exactly
-one QueueSort plugin is enabled in a scheduler profile.
-
-Multiple QueueSort plugins are not supported because independently defined
-ordering relations cannot be composed reliably.
-
-The framework owns the queues. A QueueSort plugin supplies ordering operations
-and cannot add, remove, or mutate requests itself. The initial internal
-contract includes:
+Exactly one QueueSort plugin is enabled. It creates a queue discipline that
+stores request handles and policy-owned index state:
 
 ```python
 class QueueSortPlugin(SchedulerPlugin):
-    def queue_sort_key(self, request: Request) -> tuple: ...
-
-    def select_queue(
+    def create_discipline(
         self,
-        waiting_head: Request | None,
-        skipped_head: Request | None,
-    ) -> WaitingQueue: ...
-
-    def preempted_request_position(self) -> QueuePosition: ...
+        context: PluginInitContext,
+    ) -> QueueDiscipline: ...
 ```
 
-`select_queue` receives only queue heads and returns an enum. The core performs
-the actual pop. `preempted_request_position` is also declarative; the core
-performs reinsertion.
+```python
+class QueueDiscipline(Protocol):
+    def add(
+        self,
+        handle: RequestHandle,
+        position: QueuePosition,
+    ) -> None: ...
 
-The concrete queue representation remains an internal optimization. Built-in
-FCFS can retain deque operations and built-in priority can retain heap
-operations, so migrating to plugins does not require a slower generic queue.
+    def remove(self, handle: RequestHandle) -> None: ...
+
+    def update(
+        self,
+        handle: RequestHandle,
+        changed: RequestFieldMask,
+    ) -> None: ...
+
+    def peek_candidates(
+        self,
+        scan_limit: int,
+        output: CandidateHandleBuffer,
+    ) -> int: ...
+```
+
+The core invokes mutations after validating the handle and request transition.
+The discipline owns ordering indexes but never mutates scheduler state.
+
+This interface permits dynamic QueueSort implementations such as deadline
+queues, tenant round-robin, deficit scheduling, and hierarchical fair queues.
+It also permits specialized internal structures:
+
+- FCFS uses constant-time deque operations and constant-time removal handles;
+- priority uses an indexed heap with logarithmic add, update, and removal;
+- candidate traversal is bounded and never materializes the full queue.
+
+Waiting and previously skipped requests may use separate discipline instances.
+QueueSort defines their merge order through a bounded candidate cursor rather
+than exposing either mutable queue.
 
 ### Filter
 
-Filter determines whether a waiting request may be considered in the current
-scheduling cycle.
+Filter determines current-cycle eligibility:
 
 ```python
-@dataclass(frozen=True)
-class FilterResult:
-    allowed: bool
-    reason: str | None = None
+class FilterPlugin(SchedulerPlugin):
+    required_features: frozenset[SchedulerFeature]
+
+    def filter_batch(
+        self,
+        candidates: CandidateBatch,
+        state: SchedulingCycleState,
+        allowed: MutableBitMask,
+        scratch: PluginScratch,
+    ) -> None: ...
 ```
 
-All enabled Filter plugins must allow a request. A rejection means "skip for
-this cycle", not "finish the request". The scheduler retains ownership of the
-request and ensures that it remains queued.
+`allowed` initially contains one bit for every candidate. Filter plugins run in
+configured order and may only clear bits, giving deterministic AND semantics.
+A rejection means "not eligible in this cycle", not "finish the request".
 
-Filter runs only after core-independent blockers, such as unavailable grammar
-or remote KV state, have been handled. Core feasibility checks involving LoRA,
-encoder capacity, the token budget, and KV allocation remain authoritative.
+Reasons are written only when debug tracing is enabled. Normal operation must
+not allocate `FilterResult` objects or reason strings per candidate.
+
+The framework may expose a scalar `filter()` adapter for simple external
+plugins. The adapter is a compatibility convenience and is not the performance
+reference implementation.
 
 ### Score
 
-Score ranks candidates that passed Filter. Multiple scores are combined using
-configured weights:
+Score ranks candidates that passed Filter:
 
 ```python
-total_score = sum(
-    plugin.score(request, state) * weight
-    for plugin, weight in score_plugins
-)
+class ScorePlugin(SchedulerPlugin):
+    required_features: frozenset[SchedulerFeature]
+
+    def score_batch(
+        self,
+        candidates: CandidateBatch,
+        state: SchedulingCycleState,
+        scores: MutableFloatBuffer,
+        scratch: PluginScratch,
+    ) -> None: ...
 ```
 
-Higher scores are preferred. QueueSort is the deterministic tie-breaker. Score
-results must be finite numbers; NaN and infinity are configuration or runtime
-errors rather than valid priorities.
+The compiled pipeline preallocates score and scratch buffers. Multiple scores
+are fused using configured finite weights:
 
-Score operates on a bounded candidate window. This makes plugin overhead
-independent of an unbounded waiting queue and limits how far a request can move
-ahead of the base QueueSort policy.
+```python
+total[i] += weight * plugin_score[i]
+```
+
+All outputs must be finite. Higher scores are preferred. QueueSort rank is the
+stable deterministic tie-breaker. Fusion and stable ranking happen once per
+candidate plan, not once per admitted request.
 
 ### PreemptionScore
 
-PreemptionScore ranks requests that the scheduler core has determined are safe
-preemption candidates. It does not execute preemption.
-
-Higher preemption scores mean that a request is a more desirable victim. The
-core remains responsible for:
-
-- constructing the candidate set;
-- restoring the token and encoder budgets;
-- freeing KV and encoder cache state;
-- resetting request state;
-- reinserting the request into the waiting queue.
-
-PreemptionScore is separate from Score because admission preference and
-preemption cost are not necessarily inverse relationships.
-
-## Cycle state
-
-Plugins receive a read-only view built for one scheduling cycle.
+PreemptionScore ranks the running requests that the core has declared safe to
+preempt:
 
 ```python
-@dataclass(frozen=True)
-class CandidateInfo:
-    queue_position: int
-    waiting_time: float
-    local_cached_tokens: int
-
-
-@dataclass(frozen=True)
-class SchedulingCycleState:
-    now: float
-    token_budget: int
-    encoder_budget: int
-    num_running_requests: int
-    candidates: Mapping[str, CandidateInfo]
+class PreemptionScorePlugin(SchedulerPlugin):
+    def score_preemption_batch(
+        self,
+        candidates: RunningCandidateBatch,
+        state: PreemptionCycleState,
+        scores: MutableFloatBuffer,
+        scratch: PluginScratch,
+    ) -> None: ...
 ```
 
-The initial state intentionally excludes `KVCacheManager`, request queues, and
-mutable scheduler collections.
+Multiple PreemptionScore plugins may be combined with finite weights. The core
+performs preemption, budget restoration, cache cleanup, state reset, and queue
+reinsertion.
 
-`local_cached_tokens` is computed by a side-effect-free core API. Probing cache
-locality must not allocate blocks, update LRU state, publish KV events, update
-hit metrics, or initiate remote KV transfers.
+Built-in FCFS is compiled to the intrinsic "last running request" operation and
+therefore remains constant time. It must not be implemented by scoring and
+scanning the complete running list.
 
-State is constructed lazily. If no enabled extension point needs candidate
-cache information, the scheduler does not perform cache probes.
+## Feature providers
 
-## Built-in plugins
+Plugins declare their required candidate and cycle features in their
+descriptors. The profile compiler takes the union and activates only the
+necessary providers:
 
-### FCFS
+```python
+class SchedulerFeatureProvider(Protocol):
+    provided_features: frozenset[SchedulerFeature]
 
-The `fcfs` built-in plugin implements QueueSort and PreemptionScore. Its queue
-operations preserve the existing deque behavior, including skipped-queue retry
-and preempted-request prepend behavior.
+    def populate(
+        self,
+        handles: ReadOnlyIntBuffer,
+        features: MutableFeatureTable,
+        context: FeatureProviderContext,
+    ) -> None: ...
+```
 
-Its PreemptionScore preserves selection of the last running request. It must
-use the running-list position supplied by the core rather than reconstructing
-the position from request timestamps.
+Providers operate in batches and share results across plugins. Expensive
+features may be populated lazily when the first enabled stage needs them.
 
-### Priority
+The local prefix-cache provider must use a side-effect-free API. Probing must
+not allocate blocks, change LRU state, emit cache events, update hit metrics,
+or initiate remote transfers.
 
-The `priority` built-in plugin implements QueueSort and PreemptionScore.
-QueueSort preserves `Request.__lt__` ordering. PreemptionScore preserves the
-current selection of the largest `(priority, arrival_time)` value.
+Feature providers are versioned separately from internal scheduler objects.
+This prevents the plugin API from growing into a frozen view of all scheduler
+internals.
 
-The initial migration deliberately retains the current difference between the
-queue tie-break key and preemption key. Changing that behavior is a separate
-policy change, not part of pluginization.
+## Candidate collection and selection
+
+Candidate work is bounded by two independent limits:
+
+```python
+candidate_window: int
+candidate_scan_limit: int
+```
+
+`candidate_window` is the maximum number of Filter-approved requests passed to
+Score. `candidate_scan_limit` is the maximum number of QueueSort-ordered
+requests inspected in one plan.
+
+The collection algorithm is:
+
+1. Traverse at most `candidate_scan_limit` handles in QueueSort order.
+2. Remove scheduler-owned blockers from consideration without exposing them to
+   plugins.
+3. Lazily populate features required by Filter.
+4. Run the compiled Filter pipeline.
+5. Continue scanning past rejected candidates until `candidate_window`
+   candidates are accepted, the scan limit is reached, or the queue is
+   exhausted.
+6. Lazily populate additional Score features for accepted candidates.
+7. Run and fuse Score plugins once.
+8. Produce a stable ranked candidate plan.
+
+Filtered requests remain queued, but they do not permanently occupy every
+position in the scoring window. This prevents a rejected prefix from starving
+eligible requests behind it while keeping work bounded.
+
+The scheduler attempts ranked candidates in order. A candidate-local failure,
+such as an encoder or request-specific constraint, advances to the next
+candidate. A global exhaustion result, such as no usable KV capacity for any
+candidate, ends admission. The core defines and tests this classification.
+
+The plan is valid for one scheduling cycle. Static Filter and Score results are
+not recomputed after every admission. Plugins that require incremental cycle
+feedback declare that capability; the compiler then selects an incremental
+plan with explicit invalidation points.
+
+## Stateful plugins and lifecycle
+
+Stateful policies require scheduler feedback. Lifecycle callbacks are batched,
+explicitly subscribed, and limited to coarse events:
+
+```python
+class SchedulerPlugin:
+    def on_requests_added(self, events: RequestEventBatch) -> None: ...
+    def on_requests_finished(self, events: RequestEventBatch) -> None: ...
+    def on_requests_preempted(self, events: RequestEventBatch) -> None: ...
+    def on_cycle_completed(self, summary: CycleSummary) -> None: ...
+```
+
+The compiler creates direct callback lists for each event. Unsubscribed events
+have no plugin dispatch cost. There is no per-generated-token callback.
+
+Callbacks may update plugin-local state but cannot mutate scheduler-owned
+requests or resources. Their exceptions follow the same fail-closed behavior
+as scheduling extension points.
+
+These callbacks enable deficit round robin, tenant concurrency accounting,
+aging, and policies using admission or completion history.
 
 ## Registration and profiles
 
-In-tree plugins are registered in a built-in registry:
-
-```python
-BUILTIN_SCHEDULER_PLUGINS = {
-    "fcfs": FCFSSchedulerPlugin,
-    "priority": PrioritySchedulerPlugin,
-}
-```
-
-Out-of-tree plugins use a dedicated entry-point group:
+In-tree descriptors live in a built-in registry. Out-of-tree plugins use:
 
 ```toml
 [project.entry-points."vllm.scheduler_plugins"]
-session-affinity = "my_package.scheduler:SessionAffinityPlugin"
+session-affinity = "my_package.scheduler:get_scheduler_plugin"
 ```
 
-Scheduler plugins execute in the engine-core process. Discovery must not
-instantiate them in API-only or worker-only processes.
+Discovery occurs only in the EngineCore process. Only plugins named by the
+active profile are loaded and instantiated. Installing a package alone cannot
+change scheduling behavior.
 
-Only explicitly configured scheduler plugins are instantiated. Merely
-installing a package must not alter scheduling behavior.
+The loader validates:
 
-A profile selects plugins by extension point:
+- unique plugin names;
+- framework API version;
+- declared extension points;
+- required feature availability;
+- batch/native capabilities;
+- constructor configuration;
+- lifecycle subscriptions.
 
-```yaml
-queue_sort:
-  enabled:
-    - name: fcfs
+An example profile is:
 
-filter:
-  enabled:
-    - name: tenant-quota
-
-score:
-  enabled:
-    - name: session-affinity
-      weight: 100
-    - name: prefix-locality
-      weight: 1
-
-preemption_score:
-  enabled:
-    - name: fcfs
+```python
+SchedulerPluginProfile(
+    queue_sort=SchedulerPluginSpec(name="fcfs"),
+    filters=[
+        SchedulerPluginSpec(name="tenant-quota"),
+    ],
+    scores=[
+        SchedulerPluginSpec(name="session-affinity", weight=100.0),
+        SchedulerPluginSpec(name="prefix-locality", weight=1.0),
+        SchedulerPluginSpec(name="aging", weight=0.1),
+    ],
+    preemption_scores=[
+        SchedulerPluginSpec(name="priority", weight=1.0),
+        SchedulerPluginSpec(name="recompute-cost", weight=-0.5),
+    ],
+    candidate_window=32,
+    candidate_scan_limit=256,
+)
 ```
 
-The Python configuration should use typed dataclasses rather than accepting an
-unvalidated dictionary. The YAML form above only illustrates the structure.
+Profile execution order is explicit. Duplicate use of a stateful plugin name
+refers to the same instance only when its arguments are identical.
 
 ## Backward compatibility
 
-`SchedulerConfig.policy` and the existing CLI option remain supported.
+`SchedulerConfig.policy` continues to accept `fcfs` and `priority`.
 
-```python
-policy="fcfs"
+Without an explicit profile:
+
+- `policy="fcfs"` compiles to `BuiltinFCFSPlan`;
+- `policy="priority"` compiles to `BuiltinPriorityPlan`.
+
+Compatibility requirements are:
+
+1. Existing queue, skipped-request, reinsertion, and preemption behavior is
+   unchanged.
+2. The default FCFS admission path continues to use deque head operations.
+3. The default FCFS preemption path continues to select the final running
+   request in constant time.
+4. The default priority path continues to use the existing `Request.__lt__`
+   ordering and heap operations.
+5. `scheduler_cls` remains the whole-scheduler escape hatch.
+6. AsyncScheduler uses the same compiled plan and plugin instances initialized
+   by Scheduler.
+7. An explicit QueueSort and a conflicting legacy policy fail validation.
+
+## Specialized fast paths
+
+The profile compiler selects a concrete plan once:
+
+```text
+BuiltinFCFSPlan
+BuiltinPriorityPlan
+FilteredPlan
+ScoredPlan
+FilteredScoredPlan
+DynamicQueuePlan
+IncrementalPlan
 ```
 
-is normalized to the built-in profile:
+Scheduler stores direct bound operations from the compiled plan. It does not
+branch on extension-point presence for every candidate.
 
-```yaml
-queue_sort:
-  enabled:
-    - name: fcfs
-preemption_score:
-  enabled:
-    - name: fcfs
+The two built-in plans perform no candidate-buffer construction, feature
+population, Filter dispatch, Score fusion, or generic preemption scan. Plugin
+objects may exist for configuration and introspection without appearing in the
+hot call graph.
+
+## Complexity contract
+
+Let:
+
+- `N` be the total waiting-queue length;
+- `S` be `candidate_scan_limit`;
+- `W` be `candidate_window`;
+- `F` be the number of Filter plugins;
+- `P` be the number of Score plugins;
+- `K` be the number of requests admitted in the cycle.
+
+The generic candidate pipeline targets:
+
+```text
+candidate traversal       O(S)
+Filter execution          O(S * F)
+Score execution           O(W * P)
+stable ranking            O(W log W)
+FCFS selected removal     O(1)
+indexed-heap removal      O(log N)
 ```
 
-Likewise, `policy="priority"` enables the priority plugin at both extension
-points.
+The complete cycle target is:
 
-The compatibility rules are:
-
-1. If no explicit scheduler plugin profile is supplied, `policy` selects the
-   equivalent built-in profile.
-2. An explicit QueueSort plugin and a non-default `policy` cannot both be
-   specified. Configuration validation fails with a clear error.
-3. `scheduler_cls` remains supported as the whole-scheduler escape hatch.
-   Scheduler plugins configure the built-in scheduler and do not wrap an
-   arbitrary custom `scheduler_cls` in the first version.
-4. The default remains FCFS.
-5. Existing priority values and their lower-is-higher meaning do not change.
-6. AsyncScheduler inherits the same initialized plugin manager from Scheduler.
-
-## Default fast path
-
-Pluginization must not require candidate scanning on the default path.
-
-When the profile contains only a built-in QueueSort and its matching built-in
-PreemptionScore, the manager selects specialized operations equivalent to the
-current branches:
-
-```python
-request_queue = self._select_waiting_queue_for_scheduling()
-request = request_queue.peek_request()
+```text
+O(S * F + W * P + W log W + K log N)
 ```
 
-Candidate windows, cycle state, cache probes, filter calls, and score fusion are
-enabled only when the corresponding extension points contain additional
-plugins.
-
-The built-in policy objects are created once at scheduler initialization. No
-entry-point discovery or dynamic import occurs in `schedule()`.
-
-## Candidate selection
-
-With Filter or Score plugins enabled, the framework performs these steps:
-
-1. Ask QueueSort for up to `candidate_window` candidates without removing them.
-2. Remove candidates blocked by scheduler-owned request state.
-3. Lazily build the requested candidate information.
-4. Run Filter plugins in configured order.
-5. Run and combine Score plugins.
-6. Select the highest score, breaking ties with QueueSort order.
-7. Ask the owning queue to remove the selected request.
-8. Continue through the existing core scheduling path.
-
-Selection returns the request and its owning queue without mutating either
-queue:
-
-```python
-@dataclass(frozen=True)
-class CandidateSelection:
-    request: Request
-    queue: WaitingQueue
-```
-
-The scheduler core removes that exact request only after it reaches an existing
-skip or admission transition. This avoids a dynamic selection changing between
-peek and pop and keeps queue mutation out of plugins.
-
-If every candidate is filtered, the scheduler leaves them queued and stops
-admission for the cycle. Filtered candidates must not be repeatedly moved
-between `waiting` and `skipped_waiting` merely because a plugin rejected them.
-
-The first version should require a positive, explicitly configured candidate
-window whenever Filter or Score plugins are enabled.
+It must not contain `O(K * S * P)` rescoring or `O(K * N)` arbitrary-removal
+behavior. Default FCFS admission is `O(K)` and default FCFS victim selection is
+`O(1)`.
 
 ## Failure behavior
 
-Plugin loading and initialization failures abort scheduler startup.
+Plugin discovery, API-version mismatch, configuration, and initialization
+failures abort scheduler startup.
 
-Runtime exceptions, invalid return types, and non-finite scores abort the
-scheduling cycle and surface as engine errors. Silently ignoring a broken
-policy would make scheduler behavior unpredictable and could violate SLA or
-isolation expectations.
+Runtime exceptions, invalid buffer writes, invalid indexes, and non-finite
+scores abort the scheduling cycle and surface as engine errors. Silently
+ignoring a failed policy could violate fairness or isolation guarantees.
 
-Filter reasons and plugin names should be exposed through debug logging and
-future scheduling metrics, but high-cardinality request or session identifiers
-must not become metric labels.
+Plugin names and bounded diagnostic reasons may be exposed in debug logging.
+High-cardinality request, tenant, or session identifiers must not become metric
+labels.
 
-## Session affinity and prefix locality
+## Security
 
-A session-affinity plugin is a Score plugin. A request receives affinity only
-when it has a typed `session_id` and a real local cache hit:
+Scheduler plugins execute trusted native or Python code in the EngineCore
+process and have the same trust implications as a custom scheduler. Plugins are
+opt-in and must participate in `VLLM_PLUGINS` allowlisting where applicable.
 
-```python
-class SessionAffinityPlugin(SchedulerPlugin):
-    name = "session-affinity"
+Read-only views prevent accidental mutation through the supported API; they are
+not a sandbox against malicious Python code.
 
-    def score(self, request, state):
-        if request.session_id is None:
-            return 0.0
-        return float(
-            state.candidates[request.request_id].local_cached_tokens
-        )
-```
+## Performance requirements
 
-This avoids treating a session identifier as proof of locality. Candidate
-windows bound reordering, and a later aging plugin can reduce starvation risk.
+Performance is evaluated against the commit immediately preceding the plugin
+migration on identical hardware and configuration. Initial acceptance targets
+are:
 
-A generic prefix-locality plugin can score `local_cached_tokens` without
-requiring `session_id`.
+| Scenario | Maximum scheduler CPU regression |
+| --- | ---: |
+| Built-in FCFS, no extension plugins | 1% |
+| Built-in priority, no extension plugins | 2% |
+| One batch Score, window 32 | 10 microseconds per candidate plan |
+| Three batch Scores, window 64 | 30 microseconds per candidate plan |
 
-## SLA and QoS
+The absolute microsecond targets may be revised using published baseline data,
+but the no-extension limits and bounded scaling requirements are mandatory.
 
-The first framework version supports SLA and QoS ordering through Filter and
-Score, for example tenant concurrency limits and deadline urgency.
+Increasing the waiting queue from 1,000 to 100,000 requests must not materially
+increase generic plugin execution time when `S` and `W` are unchanged. Selected
+candidate removal must not scan or rebuild the complete queue.
 
-Resource reservation and token-budget modification are intentionally deferred.
-They require a separate extension point whose result is validated and clamped
-by the scheduler core. They must not be approximated by exposing mutable budget
-objects to plugins.
+Benchmarks report at least:
 
-## Security and compatibility
-
-Scheduler plugins execute trusted Python code in the engine-core process. They
-have the same trust implications as a custom scheduler class even though their
-API surface is narrower. Plugins are opt-in and should be included in
-`VLLM_PLUGINS` allowlisting behavior where applicable.
-
-The documented plugin interfaces should be versioned before being declared
-stable. Internal request fields not present in the interface documentation are
-not part of the compatibility guarantee.
+- scheduler wall and CPU time;
+- cycles and admitted requests per second;
+- candidate collection, feature, Filter, Score, and ranking time;
+- request and token throughput;
+- TTFT and TPOT percentiles;
+- prefix-cache hit rate for locality policies.
 
 ## Implementation plan
 
-### Phase 1: behavior-preserving policy migration
+### Phase 0: baseline and guards
 
-- Add the plugin interface, manager, extension-point enums, and built-in
-  registry.
-- Implement FCFS and priority built-in plugins.
-- Normalize `SchedulerConfig.policy` into a built-in plugin profile.
-- Replace policy conditionals in queue creation, queue-head selection, and
-  preemption victim ranking with manager calls.
-- Keep the specialized deque and heap fast paths.
-- Run the existing scheduler and priority test suites unchanged.
+- Add scheduler and queue microbenchmarks.
+- Record FCFS and priority baselines.
+- Add complexity regression tests that detect full-queue iteration and rebuilds.
 
-### Phase 2: Filter and Score
+### Phase 1: descriptors and compiled built-in plans
 
-- Add typed profile configuration and explicit candidate-window validation.
-- Add non-mutating candidate iteration and removal to RequestQueue.
-- Add lazy `SchedulingCycleState` construction.
-- Implement Filter AND semantics and weighted Score fusion.
-- Add deterministic ordering, invalid-result, and starvation-bound tests.
+- Add versioned plugin descriptors and selected entry-point discovery.
+- Compile profiles during Scheduler initialization.
+- Implement intrinsic `BuiltinFCFSPlan` and `BuiltinPriorityPlan`.
+- Preserve existing tests without changing expected scheduling results.
 
-### Phase 3: locality
+### Phase 2: queue disciplines
 
-- Add the side-effect-free local cache probe.
-- Add in-tree reference session-affinity and prefix-locality plugins.
-- Measure scheduler CPU overhead and token-level prefix-cache hit rate.
+- Add stable request handles.
+- Implement an indexed FCFS discipline and indexed priority heap.
+- Add bounded, non-materializing candidate cursors.
+- Guarantee constant or logarithmic selected removal.
 
-### Phase 4: QoS
+### Phase 3: batch Filter and Score
 
-- Add request metadata required by accepted QoS use cases.
-- Evaluate a core-clamped token-budget hint extension point.
-- Evaluate preemption scoring with asynchronous and pipeline scheduling.
+- Add reusable candidate and scratch buffers.
+- Add independent scan and scoring limits.
+- Add feature dependency compilation and lazy providers.
+- Compile batch Filter, weighted Score fusion, and stable ranking.
+- Continue after candidate-local feasibility failures.
+
+### Phase 4: preemption and lifecycle
+
+- Add composable batch PreemptionScore.
+- Add batched, subscribed lifecycle events.
+- Add explicit incremental-plan invalidation capabilities.
+
+### Phase 5: locality and QoS
+
+- Add the side-effect-free local-cache feature provider.
+- Add reference session-affinity, prefix-locality, aging, tenant-fairness, and
+  deadline plugins.
+- Publish workload-specific throughput, latency, fairness, and cache-hit data.
 
 ## Test plan
 
-Behavior compatibility is the first implementation's primary contract.
-
-- Run all existing scheduler tests without changing expected results.
-- Verify FCFS waiting, skipped, prepend, and preemption order.
-- Verify priority waiting, skipped, tie-break, and preemption order.
-- Verify synchronous and asynchronous schedulers use the same profile.
-- Verify an empty extension profile takes the specialized fast path.
-- Verify one QueueSort plugin is required and multiple QueueSort plugins fail
-  validation.
-- Verify multiple Filter plugins use AND semantics.
-- Verify multiple weighted Score plugins compose deterministically.
+- Run all existing scheduler tests unchanged for built-in profiles.
+- Verify FCFS and priority queue, skipped, reinsertion, and preemption behavior.
+- Verify built-in plans do not construct candidate buffers or dispatch plugin
+  callbacks.
+- Verify arbitrary FCFS and priority removals meet their complexity contracts.
+- Verify Filter AND semantics and configured execution order.
+- Verify rejected prefixes do not starve eligible candidates behind them.
+- Verify scan and scoring limits independently bound work.
+- Verify weighted Score and PreemptionScore fusion is deterministic.
 - Verify zero scores preserve QueueSort order.
-- Verify filtered requests remain queued.
-- Verify plugins cannot access mutable queues or KV cache managers.
-- Verify cache probing has no allocation, LRU, event, metric, or remote-transfer
-  side effects.
-- Benchmark scheduler CPU time with no plugins, one Score plugin, and several
-  Score plugins across representative queue lengths.
+- Verify candidate-local failures advance to the next ranked candidate.
+- Verify global exhaustion stops admission.
+- Verify only requested features are populated and shared across plugins.
+- Verify local-cache probing has no allocation, LRU, event, metric, or remote
+  transfer side effects.
+- Verify lifecycle events are batched and sent only to subscribers.
+- Verify entry points are loaded only in EngineCore and only when configured.
+- Verify API-version, capability, duplicate-name, and invalid-result failures.
+- Benchmark no-plugin and representative Filter/Score compositions across
+  queue lengths and candidate limits.
 
-Model evaluations are not required for the behavior-preserving migration. The
-locality phase must report workload-specific cache-hit, throughput, TTFT, and
-latency results because it changes request ordering and serving behavior.
+Model evaluations are not required for the behavior-preserving built-in
+migration. Any policy that changes request ordering must report workload-
+specific throughput, TTFT, TPOT, fairness, and cache-hit results.

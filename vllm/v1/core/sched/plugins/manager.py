@@ -89,6 +89,9 @@ class SchedulerPluginManager:
         )
         self.plugins = tuple(plugin for plugin, _ in self._plugins_by_name.values())
         self.candidate_window = self.profile.candidate_window
+        self.candidate_scan_limit = self.profile.candidate_scan_limit or (
+            self.candidate_window * 8
+        )
         self.has_candidate_plugins = bool(self.filter_plugins or self.score_plugins)
 
     def _get_or_create_plugin(self, spec: SchedulerPluginSpec) -> SchedulerPlugin:
@@ -161,7 +164,7 @@ class SchedulerPluginManager:
 
         now = time.time() if now is None else now
         ordered = self.queue_sort_plugin.order_candidates(
-            waiting, skipped, self.candidate_window
+            waiting, skipped, self.candidate_scan_limit
         )
         if not ordered:
             return None
@@ -187,6 +190,7 @@ class SchedulerPluginManager:
 
         best: CandidateSelection | None = None
         best_score = -math.inf
+        num_allowed = 0
         for selection in ordered:
             request = selection.request
             if any(
@@ -194,6 +198,7 @@ class SchedulerPluginManager:
                 for plugin in self.filter_plugins
             ):
                 continue
+            num_allowed += 1
             score = sum(
                 plugin.score(request, state) * weight
                 for plugin, weight in self.score_plugins
@@ -206,6 +211,8 @@ class SchedulerPluginManager:
             if best is None or score > best_score:
                 best = selection
                 best_score = score
+            if num_allowed == self.candidate_window:
+                break
         return best
 
     def select_preemption_victim(

@@ -2655,6 +2655,55 @@ def test_scheduler_plugin_candidate_window_bounds_reordering(
     assert selection.request is requests[1]
 
 
+@pytest.mark.skip_global_cleanup
+def test_scheduler_plugin_scan_limit_advances_past_filtered_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        BUILTIN_SCHEDULER_PLUGINS,
+        _RejectRequestPlugin.name,
+        _RejectRequestPlugin,
+    )
+    requests = create_requests(num_requests=3)
+    profile = SchedulerPluginProfile(
+        filters=[
+            SchedulerPluginSpec(
+                name=_RejectRequestPlugin.name,
+                args={"request_id": requests[0].request_id},
+            )
+        ],
+        candidate_window=1,
+        candidate_scan_limit=3,
+    )
+    manager = SchedulerPluginManager("fcfs", profile)
+    waiting = manager.create_request_queue()
+    skipped = manager.create_request_queue()
+    for request in requests:
+        waiting.add_request(request)
+
+    selection = manager.select_candidate(
+        waiting,
+        skipped,
+        block_size=16,
+        token_budget=128,
+        encoder_budget=0,
+        num_running_requests=0,
+    )
+
+    assert selection is not None
+    assert selection.request is requests[1]
+
+
+@pytest.mark.skip_global_cleanup
+def test_scheduler_plugin_scan_limit_must_cover_candidate_window():
+    with pytest.raises(ValueError, match="candidate_scan_limit"):
+        SchedulerPluginProfile(
+            scores=[SchedulerPluginSpec(name="test-priority-score")],
+            candidate_window=2,
+            candidate_scan_limit=1,
+        )
+
+
 @pytest.mark.parametrize("policy", ["fcfs", "priority"])
 @pytest.mark.skip_global_cleanup
 def test_scheduler_plugin_candidate_window_avoids_full_queue_materialization(

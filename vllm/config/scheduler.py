@@ -60,13 +60,28 @@ class SchedulerPluginProfile:
     """Plugin enabled at the Preemption extension point."""
 
     candidate_window: int = Field(default=0, ge=0)
-    """Maximum QueueSort-ordered candidates evaluated by Filter and Score."""
+    """Maximum Filter-approved candidates evaluated by Score."""
+
+    candidate_scan_limit: int = Field(default=0, ge=0)
+    """Maximum QueueSort-ordered candidates inspected per selection.
+
+    A zero value lets the scheduler derive a bounded scan limit from
+    ``candidate_window``.
+    """
 
     def __post_init__(self) -> None:
         if (self.filters or self.scores) and self.candidate_window == 0:
             raise ValueError(
                 "scheduler plugin candidate_window must be positive when "
                 "Filter or Score plugins are enabled"
+            )
+        if (
+            self.candidate_scan_limit
+            and self.candidate_scan_limit < self.candidate_window
+        ):
+            raise ValueError(
+                "scheduler plugin candidate_scan_limit must be greater than "
+                "or equal to candidate_window"
             )
 
 
