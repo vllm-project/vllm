@@ -113,6 +113,49 @@ def test_mamba_align_split_partial_tail_schedule():
     assert split(self=mock, request=req2, num_new_tokens=1000) == 512
 
 
+def test_mamba_align_split_skips_partial_tail_when_resumed_mid_block():
+    """A request resuming mid-block must not stop at the partial-tail hash
+    boundary: that boundary is off the block grid, so the chunk would end with
+    the SSM state at a second unaligned position instead of re-aligning.
+
+    Production config that hit this (Kimi-K3): block=1536, hash=128,
+    prompt=25297, external prefix hit at 24960 (= 16*1536 + 384, off grid).
+    The block-boundary stop 26112 is past `last_cache_position` (24576) so it
+    is suppressed, 24576 is behind the resume point, and the tail boundary
+    25216 was left as the only stop -- cutting prefill 640 tokens off the grid.
+    """
+    block_size = 1536
+    hash_block_size = 128
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        max_num_scheduled_tokens=32768,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=8192),
+        use_eagle=False,
+        hash_block_size=hash_block_size,
+        dcp_world_size=1,
+        scheduler_block_size=block_size,
+        mamba_partial_cache_hit=True,
+    )
+    split = Scheduler._mamba_block_aligned_split
+
+    req = make_request("0", [0] * 25297, hash_block_size, sha256)
+    # Resumed off the block grid: the fresh tail runs in one chunk.
+    req.num_computed_tokens = 0
+    assert (
+        split(
+            self=mock,
+            request=req,
+            num_new_tokens=337,
+            num_external_computed_tokens=24960,
+        )
+        == 337
+    )
+
+    # A block-aligned start still registers the partial tail (24576 -> 25216).
+    req.num_computed_tokens = 24576
+    assert split(self=mock, request=req, num_new_tokens=721) == 640
+
+
 def test_mamba_align_split_when_block_exceeds_scheduling_budget():
     """Sub-block chunks make progress only when no step can fit a full block."""
     block_size = 11392

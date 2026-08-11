@@ -407,10 +407,13 @@ class Scheduler(SchedulerInterface):
             next_block_boundary if start % block_size != 0 else 0,
             # Never run past the last cacheable block boundary mid-chunk.
             last_cache_position,
-            # Fine-grained hits: the prompt's partial-tail entry can only be
-            # registered by a chunk ending exactly at its last hash boundary.
+            # Register the partial tail only from an aligned start; otherwise
+            # this stop would strand the SSM state off the block grid.
             tail_boundary
-            if last_cache_position < tail_boundary < request.num_prompt_tokens
+            if (
+                start % block_size == 0
+                and last_cache_position < tail_boundary < request.num_prompt_tokens
+            )
             else 0,
             # Marconi shared-prefix junction, block-floored (a sub-block
             # junction's state is not separately cacheable): cache its state
