@@ -105,6 +105,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     mlp_speculator="MLPSpeculatorConfig",
+    maple="MapleConfig",
     medusa="MedusaConfig",
     mellum="MellumConfig",
     midashenglm="MiDashengLMConfig",
@@ -156,6 +157,13 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "internvl_chat": {"has_no_defaults_at_init": True},
     "Llama_Nemotron_Nano_VL": {"attn_implementation": "eager"},
     "NVLM_D": {"has_no_defaults_at_init": True},
+}
+
+# Architectures whose checkpoints keep `model_type` only on the config class and
+# never serialize it into `config.json`, leaving `AutoConfig` nothing to
+# dispatch on.
+_ARCH_TO_MODEL_TYPE: dict[str, str] = {
+    "MapleForCausalLM": "maple",
 }
 
 
@@ -260,11 +268,11 @@ class HFConfigParser(ConfigParserBase):
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
         if model_type is None:
-            model_type = (
-                "speculators"
-                if config_dict.get("speculators_config") is not None
-                else model_type
-            )
+            if config_dict.get("speculators_config") is not None:
+                model_type = "speculators"
+            else:
+                architecture = next(iter(config_dict.get("architectures") or ()), "")
+                model_type = _ARCH_TO_MODEL_TYPE.get(architecture)
         # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
         if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
             if isinstance(hf_overrides, dict) and "model_type" in hf_overrides:
@@ -284,7 +292,12 @@ class HFConfigParser(ConfigParserBase):
         if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
             _patch_hf_transformers_allowed_layer_types(extra_layer_types)
 
-        if model_type in _SPECULATIVE_DECODING_CONFIGS:
+        # A `model_type` recovered from `architectures` is not on disk, so
+        # AutoConfig cannot dispatch on it and would fall back to the
+        # checkpoint's remote code; build the registered class directly.
+        if model_type in _SPECULATIVE_DECODING_CONFIGS or (
+            model_type in _CONFIG_REGISTRY and "model_type" not in config_dict
+        ):
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
                 model,

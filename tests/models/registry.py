@@ -407,6 +407,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         },
     ),
     "FalconMambaForCausalLM": _HfExamplesInfo("tiiuae/falcon-mamba-7b-instruct"),
+    "MapleForCausalLM": _HfExamplesInfo("deepgrove/maple-preview"),
     "MiniCPMForCausalLM": _HfExamplesInfo(
         "openbmb/MiniCPM-2B-sft-bf16", trust_remote_code=True
     ),
