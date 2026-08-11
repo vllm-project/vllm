@@ -9,7 +9,8 @@ return early, so the warmup is a no-op except where it's needed.
 """
 
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from typing import Any
 
 import torch
 
@@ -65,11 +66,9 @@ def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
     for module in model.modules():
         if module.__class__.__name__ != "DeepseekV4DecoderLayer":
             continue
-        if all(
+        has_mhc_parameters = all(
             hasattr(module, attr)
             for attr in (
-                "hc_pre",
-                "hc_post",
                 "hc_attn_fn",
                 "hc_attn_scale",
                 "hc_attn_base",
@@ -77,7 +76,14 @@ def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
                 "hc_ffn_scale",
                 "hc_ffn_base",
             )
-        ):
+        )
+        has_custom_ops = all(
+            callable(getattr(module, attr, None)) for attr in ("hc_pre", "hc_post")
+        )
+        has_nvidia_tilelang_ops = all(
+            hasattr(module, attr) for attr in ("attn_norm", "ffn_norm")
+        )
+        if has_mhc_parameters and (has_custom_ops or has_nvidia_tilelang_ops):
             return module
     return None
 
@@ -92,6 +98,67 @@ def _find_deepseek_v4_model(model: torch.nn.Module) -> torch.nn.Module | None:
         ):
             return module
     return None
+
+
+def _get_tilelang_mhc_ops() -> tuple[Callable[..., Any], ...]:
+    # Import lazily so non-NVIDIA platforms keep using their registered
+    # CustomOps without importing the NVIDIA TileLang implementation.
+    from vllm.model_executor.kernels.mhc.tilelang import (
+        hc_head_fused_kernel_tilelang,
+        mhc_fused_post_pre_tilelang,
+        mhc_post_tilelang,
+        mhc_pre_tilelang,
+    )
+
+    return (
+        mhc_pre_tilelang,
+        mhc_fused_post_pre_tilelang,
+        mhc_post_tilelang,
+        hc_head_fused_kernel_tilelang,
+    )
+
+
+def _warmup_nvidia_layer_mhc(
+    layer: torch.nn.Module,
+    residual: torch.Tensor,
+    token_sizes: list[int],
+) -> None:
+    mhc_pre, mhc_fused_post_pre, mhc_post, _ = _get_tilelang_mhc_ops()
+
+    for size in token_sizes:
+        residual_slice = residual[:size]
+        post_mix, res_mix, layer_input = mhc_pre(
+            residual_slice,
+            layer.hc_attn_fn,
+            layer.hc_attn_scale,
+            layer.hc_attn_base,
+            layer.rms_norm_eps,
+            layer.hc_eps,
+            layer.hc_eps,
+            layer.hc_post_alpha,
+            layer.hc_sinkhorn_iters,
+            norm_weight=layer.attn_norm.weight.data,
+            norm_eps=layer.attn_norm.variance_epsilon,
+        )
+        residual_cur, post_mix, res_mix, layer_input = mhc_fused_post_pre(
+            layer_input,
+            residual_slice,
+            post_mix,
+            res_mix,
+            layer.hc_ffn_fn,
+            layer.hc_ffn_scale,
+            layer.hc_ffn_base,
+            layer.rms_norm_eps,
+            layer.hc_eps,
+            layer.hc_eps,
+            layer.hc_post_alpha,
+            layer.hc_sinkhorn_iters,
+            n_splits=1,
+            tile_n=1,
+            norm_weight=layer.ffn_norm.weight.data,
+            norm_eps=layer.ffn_norm.variance_epsilon,
+        )
+        mhc_post(layer_input, residual_cur, post_mix, res_mix)
 
 
 def _warmup_layer_mhc(
@@ -110,33 +177,36 @@ def _warmup_layer_mhc(
         device=device,
     )
 
+    hc_pre = getattr(layer, "hc_pre", None)
+    hc_post = getattr(layer, "hc_post", None)
+    if not callable(hc_pre) or not callable(hc_post):
+        _warmup_nvidia_layer_mhc(layer, residual, token_sizes)
+        return
+
     for size in token_sizes:
         residual_slice = residual[:size]
         for fn, scale, base in (
             (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
             (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base),
         ):
-            layer_input, post_mix, comb_mix = layer.hc_pre(
+            layer_input, post_mix, comb_mix = hc_pre(
                 residual_slice,
                 fn,
                 scale,
                 base,
             )
-            layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
+            hc_post(layer_input, residual_slice, post_mix, comb_mix)
 
 
 def _warmup_hc_head(
     model: torch.nn.Module,
     token_sizes: list[int],
 ) -> None:
-    # Upstream a8887c208 ("[DSV4] aiter mhc support (ROCm)") refactored
-    # ``hc_head`` from a free function into the ``HCHeadOp`` CustomOp
-    # instance attached to the model as ``hc_head_op``. We call through
-    # that instance so the warmup exercises the same dispatched
-    # implementation as the inference path.
     hc_head_op = getattr(model, "hc_head_op", None)
     if hc_head_op is None:
-        return
+        # The NVIDIA implementation calls the TileLang function directly,
+        # while the AMD and XPU implementations attach an HCHeadOp.
+        _, _, _, hc_head_op = _get_tilelang_mhc_ops()
 
     max_tokens = max(token_sizes)
     hidden_size = int(model.config.hidden_size)
