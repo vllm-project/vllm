@@ -420,25 +420,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         # (L, N, P) -> (N, P, L)
         replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
 
-        # `_compute_prefill_context` hands the gathered context latent straight to
-        # `kv_b_proj`. With a plain fp8 cache the gather leaves it fp8, so
-        # `kv_b_proj` has to take an fp8 input; check that here rather than
-        # casting per chunk (the generic impl casts instead). fp8_ds_mla is
-        # exempt: it up-converts into a bf16 workspace.
-        if (
-            is_quantized_kv_cache(self.kv_cache_dtype)
-            and self.kv_cache_dtype != "fp8_ds_mla"
-        ):
-            assert _get_kv_b_proj_input_dtype(self.kv_b_proj, use_fp8_prefill=True) in (
-                None,
-                current_platform.fp8_dtype(),
-            ), (
-                "Kimi-K3 with a plain fp8 KV cache needs a kv_b_proj that "
-                "consumes the fp8 gathered latent directly; this checkpoint's "
-                "kv_b_proj wants "
-                f"{_get_kv_b_proj_input_dtype(self.kv_b_proj, use_fp8_prefill=True)}."
-            )
-
         quant_method = (
             self.quant_config.get_quant_method(self, prefix=self.layer_name)
             if self.quant_config
@@ -737,11 +718,12 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         the strided ``kv_b_proj`` output in place and writing a contiguous key, so
         only the gather and ``kv_b_proj`` remain.
 
-        The impl's two input casts are gone as well: ``q`` already carries
-        ``prefill.q_data_type`` because the new-token epilogue quantized it, and
-        the gathered latent goes into ``kv_b_proj`` in whatever layout the gather
-        left it -- ``process_weights_after_loading`` checks once that
-        ``kv_b_proj`` accepts it, and its output is bf16 either way.
+        The impl's query cast is gone as well: ``q`` already carries
+        ``prefill.q_data_type`` because the new-token epilogue quantized it. The
+        gathered latent still gets the impl's cast to whatever ``kv_b_proj``
+        consumes -- free (a no-op ``.to``) for a checkpoint whose ``kv_b_proj``
+        takes the fp8 latent directly, and required for a bf16 one, which is
+        what a stock K3 checkpoint carries. Its output is bf16 either way.
 
         The gathered ``k_pe`` is likewise used as-is (fp8 for a plain fp8 cache)
         and needs no RoPE: it was rotated on the way in.
@@ -768,6 +750,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         fp8_prefill = q.dtype == current_platform.fp8_dtype()
         workspace = chunked_context.workspace
         kv_cache = self._attn_read_kv_cache()
+        kv_b_proj_input_dtype = _get_kv_b_proj_input_dtype(self.kv_b_proj, fp8_prefill)
 
         def run_chunk(
             chunk, out: torch.Tensor | None = None
@@ -775,6 +758,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self._gather_context_latent(chunk, kv_cache, prefill, fp8_prefill)
             gathered = workspace[: chunk.num_context_tokens]
             kv_c_normed = gathered[..., : self.kv_lora_rank]
+            if kv_b_proj_input_dtype is not None:
+                kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim
             )

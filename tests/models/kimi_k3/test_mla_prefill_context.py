@@ -86,10 +86,15 @@ class _RecordingPrefillBackend:
 class _KVBProj(torch.nn.Module):
     """Stand-in for the layer's ``kv_b_proj`` (returns an (out, bias) tuple).
 
-    With a plain fp8 cache the gathered latent arrives fp8 and K3 feeds it in
-    without a cast, so ``kv_b_proj`` must consume it directly -- mimicked here by
-    an fp8 weight whose apply dequantizes, like the fp8 linear methods. Either
-    weight dtype produces a bf16 output.
+    Enforces the same input contract as the real linear methods, because that is
+    what decides whether the gathered latent needs a cast:
+
+    * an fp8 weight consumes the fp8 latent directly and dequantizes internally,
+      so it takes fp8 or bf16;
+    * a bf16 weight -- what a stock K3 checkpoint carries -- is a plain
+      ``F.linear`` and rejects anything but bf16, exactly as torch does.
+
+    Either weight dtype produces a bf16 output.
     """
 
     def __init__(self, device: torch.device, weight_dtype: torch.dtype) -> None:
@@ -106,6 +111,11 @@ class _KVBProj(torch.nn.Module):
         self.register_buffer("weight", weight.to(weight_dtype))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, None]:
+        if self.weight.dtype == torch.bfloat16 and x.dtype != torch.bfloat16:
+            raise RuntimeError(
+                "a bfloat16 kv_b_proj cannot consume the gathered latent as "
+                f"{x.dtype}; it must be cast first"
+            )
         return torch.nn.functional.linear(
             x.to(torch.bfloat16), self.weight.to(torch.bfloat16)
         ), None
@@ -190,10 +200,19 @@ def _build_prefill_metadata(
 
 @pytest.mark.parametrize("honors_out", [False, True], ids=["copy_out", "writes_out"])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize(
+    "kv_b_proj_quantized", [True, False], ids=["fp8_kv_b_proj", "bf16_kv_b_proj"]
+)
 @torch.inference_mode()
 def test_fused_context_matches_generic_impl(
-    kv_cache_dtype: str, honors_out: bool
+    kv_b_proj_quantized: bool, kv_cache_dtype: str, honors_out: bool
 ) -> None:
+    """Cache dtype and ``kv_b_proj`` dtype vary independently.
+
+    A stock K3 checkpoint pairs a bf16 ``kv_b_proj`` with an fp8 cache, so the
+    fused loop cannot assume the gathered latent is already in the dtype
+    ``kv_b_proj`` accepts.
+    """
     torch.manual_seed(0)
     device = torch.device("cuda")
     fp8 = current_platform.fp8_dtype()
@@ -203,7 +222,9 @@ def test_fused_context_matches_generic_impl(
     q_data_type = fp8 if quantized else torch.bfloat16
     workspace_dtype = q_data_type
 
-    kv_b_proj = _KVBProj(device, weight_dtype=q_data_type)
+    kv_b_proj = _KVBProj(
+        device, weight_dtype=fp8 if kv_b_proj_quantized else torch.bfloat16
+    )
     k_scale = torch.ones(1, dtype=torch.float32, device=device)
 
     backend_fused = _RecordingPrefillBackend(honors_out=honors_out)
