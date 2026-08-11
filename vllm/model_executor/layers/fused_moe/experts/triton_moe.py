@@ -132,17 +132,24 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and current_platform.has_device_capability((7, 5))
         ) or current_platform.is_rocm()
 
+        # XPU reaches the same Triton kernel, but only the per-token activation
+        # scheme: its quantization step is a Triton kernel
+        # (per_token_quant_int8), whereas the per-tensor schemes call
+        # ops.scaled_int8_quant, which has no XPU implementation.
+        device_supports_per_token_int8 = (
+            device_supports_int8 or current_platform.is_xpu()
+        )
+
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
-        if device_supports_int8:
+        if device_supports_per_token_int8:
             # Activations are consumed as float and quantized to int8
             # dynamically inside the kernel, so only dynamic-activation int8
             # schemes are supported (static-activation int8 is not).
-            supported += [
-                # per-channel weight + dynamic per-token activation
-                (kInt8StaticChannelSym, kInt8DynamicTokenSym),
-                # per-tensor weight + dynamic per-tensor activation
-                (kInt8StaticTensorSym, kInt8DynamicTensorSym),
-            ]
+            # per-channel weight + dynamic per-token activation
+            supported.append((kInt8StaticChannelSym, kInt8DynamicTokenSym))
+        if device_supports_int8:
+            # per-tensor weight + dynamic per-tensor activation
+            supported.append((kInt8StaticTensorSym, kInt8DynamicTensorSym))
         if current_platform.supports_fp8():
             supported += [
                 (kFp8Static128BlockSym, kFp8Dynamic128Sym),
