@@ -972,7 +972,9 @@ RUN --mount=type=cache,id=uv-v027-ubuntu2204,target=/opt/uv/cache \
             && uv pip install --system -r requirements/dev.txt \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
         fi \
-        && python3 -c "from arctic_inference.suffix_decoding import _C"; \
+        && if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+            python3 -c "from arctic_inference.suffix_decoding import _C"; \
+        fi; \
     fi
 
 # install development dependencies (for testing)
