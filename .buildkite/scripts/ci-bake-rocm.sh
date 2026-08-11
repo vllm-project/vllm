@@ -302,6 +302,8 @@ validate_ci_build_context_source() {
     local mode=""
     local stage=""
     local path=""
+    local worktree_diff_status=0
+    local staged_diff_status=0
     local index_modes_file="${SCRIPT_TMP_DIR}/git-index-modes"
     local info_attributes=""
 
@@ -319,15 +321,46 @@ validate_ci_build_context_source() {
         return 1
     fi
     ROCM_BUILD_CONTEXT_COMMIT="${context_commit}"
-    if ! git -C "${source_root}" diff \
-        --quiet --no-ext-diff --ignore-submodules=none --; then
+    # Shared AMD workspaces may present tracked files with inflated executable
+    # bits. Context modes come from the pinned Git tree, so ignore only that
+    # filesystem drift while continuing to reject content changes.
+    git -C "${source_root}" -c core.fileMode=false diff \
+        --quiet --no-ext-diff --ignore-submodules=none -- \
+        || worktree_diff_status=$?
+    if (( worktree_diff_status != 0 )); then
+        if (( worktree_diff_status > 1 )); then
+            printf 'Failed to inspect tracked CI worktree changes (git diff exited %s)\n' \
+                "${worktree_diff_status}" >&2
+            return 1
+        fi
         echo "Tracked worktree changes cannot be omitted from the CI Docker context" \
             >&2
+        echo "Tracked worktree diff (first 50 entries):" >&2
+        git -C "${source_root}" -c core.fileMode=false diff \
+            --no-ext-diff --ignore-submodules=none --name-status -- \
+            | sed -n '1,50p' >&2 || true
+        git -C "${source_root}" -c core.fileMode=false diff \
+            --no-ext-diff --ignore-submodules=none --summary -- \
+            | sed -n '1,50p' >&2 || true
         return 1
     fi
-    if ! git -C "${source_root}" diff --cached \
-        --quiet --no-ext-diff --ignore-submodules=none HEAD --; then
+    git -C "${source_root}" diff --cached \
+        --quiet --no-ext-diff --ignore-submodules=none HEAD -- \
+        || staged_diff_status=$?
+    if (( staged_diff_status != 0 )); then
+        if (( staged_diff_status > 1 )); then
+            printf 'Failed to inspect staged CI changes (git diff exited %s)\n' \
+                "${staged_diff_status}" >&2
+            return 1
+        fi
         echo "Staged changes cannot be omitted from the CI Docker context" >&2
+        echo "Staged diff (first 50 entries):" >&2
+        git -C "${source_root}" diff --cached \
+            --no-ext-diff --ignore-submodules=none --name-status HEAD -- \
+            | sed -n '1,50p' >&2 || true
+        git -C "${source_root}" diff --cached \
+            --no-ext-diff --ignore-submodules=none --summary HEAD -- \
+            | sed -n '1,50p' >&2 || true
         return 1
     fi
     # Untracked and ignored worker outputs are intentionally absent: the
