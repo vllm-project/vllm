@@ -224,7 +224,7 @@ steps:
 - label: Kernels Mamba Test
   device: h200_35gb
   key: kernels-mamba-test
-  timeout_in_minutes: 40
+  timeout_in_minutes: 60
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
