@@ -933,6 +933,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"4.6V": "zai-org/GLM-4.6V-Flash"},
     ),
     "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V"),
+    "Glm5vForConditionalGeneration": _HfExamplesInfo(
+        "baseten/GLM-5.2-Vision-NVFP4",
+        trust_remote_code=True,
+    ),
     "GlmOcrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-OCR",
         min_transformers_version="5.1.0",

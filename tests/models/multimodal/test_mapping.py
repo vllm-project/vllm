@@ -16,6 +16,54 @@ from vllm.transformers_utils.config import try_get_safetensors_metadata
 from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 
+def test_glm5v_checkpoint_weights_mapper():
+    from vllm.model_executor.models.glm5v import Glm5vForConditionalGeneration
+
+    mapper = Glm5vForConditionalGeneration.hf_to_vllm_mapper
+
+    assert mapper.apply_list(
+        [
+            "model.embed_tokens.weight",
+            "model.layers.0.self_attn.q_a_proj.weight",
+            "lm_head.weight",
+            "vision_tower.encoder.layers.0.attn.qkv.weight",
+            "mm_projector.linear_2.weight",
+        ]
+    ) == [
+        "language_model.model.embed_tokens.weight",
+        "language_model.model.layers.0.self_attn.q_a_proj.weight",
+        "language_model.lm_head.weight",
+        "vision_tower.encoder.layers.0.attn.qkv.weight",
+        "mm_projector.linear_2.weight",
+    ]
+
+
+def test_glm5v_quantization_exclusions_use_mapped_prefixes():
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+    from vllm.model_executor.models.glm5v import Glm5vForConditionalGeneration
+
+    quant_config = ModelOptNvFp4Config(
+        exclude_modules=["model.layers.0*", "model.layers.1.self_attn*"]
+    )
+    Glm5vForConditionalGeneration.__new__(Glm5vForConditionalGeneration, quant_config)
+
+    assert quant_config.is_layer_excluded("language_model.model.layers.0.mlp")
+    assert quant_config.is_layer_excluded(
+        "language_model.model.layers.1.self_attn.q_a_proj"
+    )
+    assert not quant_config.is_layer_excluded(
+        "language_model.model.layers.1.mlp.experts"
+    )
+
+
+def test_glm5v_image_placeholder():
+    from vllm.model_executor.models.glm5v import Glm5vForConditionalGeneration
+
+    assert Glm5vForConditionalGeneration.get_placeholder_str("image", 0) == (
+        "<|begin_of_image|><|image|><|end_of_image|>"
+    )
+
+
 def test_cosmos3_new_checkpoint_weights_mapper():
     from vllm.model_executor.models.cosmos3 import Cosmos3ForConditionalGeneration
 

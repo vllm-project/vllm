@@ -10,12 +10,51 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
-from transformers import PretrainedConfig
+from transformers import GlmMoeDsaConfig, PretrainedConfig
 
 from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
 from vllm.transformers_utils.config import try_get_generation_config
+from vllm.transformers_utils.configs.glm5v import Glm5vConfig
+from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
+
+
+def test_glm5v_config_uses_glm_hidden_size_for_projector():
+    quantization_config = {
+        "quant_method": "modelopt",
+        "quant_algo": "NVFP4",
+    }
+    text_config = GlmMoeDsaConfig(
+        hidden_size=6144,
+        quantization_config=quantization_config,
+    )
+    vision_config = KimiK25VisionConfig(hidden_size=1152, mm_hidden_size=1152)
+
+    config = Glm5vConfig(
+        text_config=text_config,
+        vision_config=vision_config,
+        media_placeholder_token_id=154854,
+    )
+
+    assert config.hidden_size == 6144
+    assert config.vision_config.mm_hidden_size == 6144
+    assert config.media_placeholder_token_id == 154854
+    assert config.quantization_config == quantization_config
+
+
+def test_glm5v_config_preserves_nested_glm_dsa_dimensions():
+    config = Glm5vConfig(
+        text_config={
+            "qk_nope_head_dim": 192,
+            "qk_rope_head_dim": 64,
+            "index_topk_freq": 4,
+        }
+    )
+
+    assert config.text_config.qk_rope_head_dim == 64
+    assert config.text_config.qk_head_dim == 256
+    assert config.text_config.index_topk_freq == 4
 
 
 def test_get_llama3_eos_token():

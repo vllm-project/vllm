@@ -1393,6 +1393,7 @@ class SpecDecodeBaseProposer:
                     target_model.config.vision_config.image_token_id
                 )
             elif self.get_model_name(target_model) in (
+                "Glm5vForConditionalGeneration",
                 "KimiK25ForConditionalGeneration",
                 "KimiK3ForConditionalGeneration",
             ):

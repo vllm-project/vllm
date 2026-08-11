@@ -114,7 +114,11 @@ def can_initialize(
                 "(see #41376)"
             )
 
-    if model_arch in ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]:
+    if model_arch in [
+        "DeepseekV32ForCausalLM",
+        "Glm5vForConditionalGeneration",
+        "GlmMoeDsaForCausalLM",
+    ]:
         from vllm.platforms import current_platform
 
         capability = current_platform.get_device_capability()
