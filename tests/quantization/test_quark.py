@@ -1174,6 +1174,7 @@ def test_quant_method_dispatch_instantiation(case, monkeypatch, default_vllm_con
             "select_fp8_moe_backend",
             "select_int8_moe_backend",
             "select_mxfp4_moe_backend",
+            "select_gpt_oss_mxfp4_moe_backend",
             "backend_to_kernel_cls",
             "select_nvfp4_moe_backend",
         ):
