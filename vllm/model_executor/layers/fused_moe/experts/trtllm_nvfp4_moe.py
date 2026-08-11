@@ -13,13 +13,13 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    fi_moe_largest_bucket,
-    trtllm_moe_pack_topk_ids_weights,
-)
+from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
     has_flashinfer_situ_activation,
@@ -363,14 +363,11 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
-
-        # Pack topk ids and weights into format expected by the kernel.
-        packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         # Invoke kernel.
         flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
-            topk_ids=packed_tensor,
+            topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
             hidden_states=hidden_states,
             hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
@@ -518,7 +515,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
         assert self._supports_activation(activation)
@@ -543,8 +540,13 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
+        num_tokens = hidden_states.shape[0]
+        # The runner divides by the token count on the host, so an idle rank's
+        # dummy 0-token forward has to keep the finalized (empty) form.
+        defer = self.moe_config.use_deferred_moe_finalize and num_tokens > 0
+
         routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=hidden_states.shape[0],
+            num_tokens=num_tokens,
             device=hidden_states.device,
         )
         # Invoke kernel.
@@ -578,13 +580,21 @@ class TrtLlmNvFp4ExpertsMonolithic(
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
-            do_finalize=True,
+            do_finalize=not defer,
             activation_type=activation_to_flashinfer_int(activation),
             per_token_scale=per_token_scale,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
-        )[0]
-        self._maybe_dispatch_routing_replay(
-            routing_replay_out, num_tokens=hidden_states.shape[0]
         )
-        return result
+        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
+        if defer:
+            # flashinfer returns a flat permute map; the protocol wants
+            # [num_tokens, top_k] so consumers can read top_k from its shape.
+            return UnfinalizedMoEOutput(
+                gemm2_permuted=result[0],
+                expert_weights=result[1],
+                expanded_idx_to_permuted_idx=result[2]
+                .to(torch.int32)
+                .view(num_tokens, self.topk),
+            )
+        return result[0]
