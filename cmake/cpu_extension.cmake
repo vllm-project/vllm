@@ -475,6 +475,12 @@ if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
         ${VLLM_EXT_SRC})
 endif()
 
+if (POWER10_FOUND OR POWER11_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_fused_moe_int8.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if(USE_ONEDNN)
     set(VLLM_EXT_SRC
         "csrc/cpu/dnnl_kernels.cpp"

@@ -624,8 +624,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
 #endif  // #if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT) &&
         // !defined(__APPLE__))
-#if defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
-    !defined(__APPLE__)
+#if (defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
+     !defined(__APPLE__)) || \
+    defined(__powerpc64__)
   ops.def(
       "prepack_moe_weight_int8(Tensor weight, Tensor(a1!) packed_weight, "
       "str isa) -> ()");
@@ -636,8 +637,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, bool "
       "skip_weighted, str act, str isa) -> ()");
   ops.impl("cpu_fused_moe_int8", torch::kCPU, &cpu_fused_moe_int8);
-#endif  // #if defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) &&
-        // !defined(__APPLE__)
+#endif  // ARM_I8MM+BF16 or __powerpc64__
   ops.def(
       "mla_decode_kvcache("
       "   Tensor! out, Tensor query, Tensor kv_cache,"

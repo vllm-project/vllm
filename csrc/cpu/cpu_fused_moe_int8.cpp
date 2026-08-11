@@ -26,10 +26,23 @@
   #define NEON_DISPATCH(SCALAR_TYPE, ...) case cpu_utils::ISA::NEON:
 #endif
 
+#if defined(__powerpc64__)
+  #include "cpu/micro_gemm/cpu_micro_gemm_int8_vsx.hpp"
+  #define VSX_DISPATCH(SCALAR_TYPE, ...)                                    \
+    case cpu_utils::ISA::VSX: {                                             \
+      using gemm_t =                                                        \
+          cpu_micro_gemm::MicroGemmINT8<cpu_utils::ISA::VSX, SCALAR_TYPE>; \
+      return __VA_ARGS__();                                                 \
+    }
+#else
+  #define VSX_DISPATCH(SCALAR_TYPE, ...) case cpu_utils::ISA::VSX:
+#endif
+
 #define CPU_INT8_ISA_DISPATCH_IMPL(ISA_TYPE, SCALAR_TYPE, ...) \
   [&] {                                                        \
     switch (ISA_TYPE) {                                        \
       NEON_DISPATCH(SCALAR_TYPE, __VA_ARGS__)                  \
+      VSX_DISPATCH(SCALAR_TYPE, __VA_ARGS__)                   \
       default: {                                               \
         TORCH_CHECK(false, "Invalid CPU ISA type.");           \
       }                                                        \
