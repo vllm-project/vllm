@@ -732,8 +732,18 @@ def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
 
     VllmConfig._set_cudagraph_sizes(config)
 
-    # 24 requests * 17 tokens, the widest decode batch inside the 512 budget.
-    assert compilation_config.max_cudagraph_capture_size == 408
+    # The platform ceiling is still clamped by the token budget.
+    default_max_graph_size = (
+        1024 if current_platform.is_device_capability_family(100) else 512
+    )
+    expected_size_ceiling = max(
+        default_max_graph_size,
+        min(32, default_max_graph_size) * 17,
+    )
+    assert compilation_config.max_cudagraph_capture_size == min(
+        512,
+        min(32 * 17 * 2, expected_size_ceiling),
+    )
     assert 544 not in compilation_config.cudagraph_capture_sizes
 
 
