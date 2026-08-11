@@ -234,8 +234,8 @@ def test_fused_gdn_decode_post_conv_mtp_ratio8(
     state_dtype: torch.dtype,
     norm_dtype: torch.dtype,
 ) -> None:
-    if torch.cuda.get_device_capability()[0] != 10:
-        pytest.skip("fused GDN decode MTP requires SM100")
+    if torch.cuda.get_device_capability() < (8, 0):
+        pytest.skip("fused GDN decode MTP requires compute capability 8.0+")
     if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
         pytest.skip("fused GDN decode MTP op is not built")
 

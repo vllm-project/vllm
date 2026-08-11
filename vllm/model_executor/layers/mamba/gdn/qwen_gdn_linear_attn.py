@@ -512,12 +512,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             or vllm_config.model_config.dtype != torch.bfloat16
             or conv_state_dtype != torch.bfloat16
             or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
-            or not current_platform.is_device_capability_family(100)
+            or not current_platform.has_device_capability(80)
         ):
             raise ValueError(
                 f"{self.gdn_decode_kernel} requires a BF16 Qwen3.5 model "
                 "with K=V=128, SiLU gating, BF16 convolution cache, BF16 "
-                "or FP32 recurrent state, and an SM100 GPU"
+                "or FP32 recurrent state, and a GPU with compute "
+                "capability 8.0+"
             )
 
         op_name = "fused_gdn_decode_post_conv_mtp"

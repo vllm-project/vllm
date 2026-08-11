@@ -532,6 +532,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor state_indices, Tensor! state, Tensor! out, "
       "float? lower_bound=None, Tensor? output_gate=None, "
       "Tensor? norm_weight=None, float norm_eps=1e-5) -> ()");
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_GDN_DECODE
   ops.def(
       "fused_gdn_decode_post_conv_mtp("
       "Tensor mixed_qkv, Tensor a, Tensor b, Tensor A_log, Tensor dt_bias, "
@@ -801,6 +804,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
   ops.impl("fused_kda_decode", TORCH_BOX(&fused_kda_decode));
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_GDN_DECODE
   ops.impl("fused_gdn_decode_post_conv_mtp",
            TORCH_BOX(&fused_gdn_decode_post_conv_mtp));
 #endif
