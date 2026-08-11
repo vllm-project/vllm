@@ -5,8 +5,9 @@
 import gc
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import dataclass
 from datetime import timedelta
 from types import NoneType
 from typing import TYPE_CHECKING, Any
@@ -19,7 +20,11 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
-from vllm.device_allocator import get_mem_allocator_instance
+from vllm.device_allocator import (
+    get_diagnostic_mem_allocator_instance,
+    get_discard_mem_allocator_instance,
+    get_mem_allocator_instance,
+)
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -61,6 +66,10 @@ from vllm.profiler.wrapper import (
     TorchProfilerWrapper,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.snapshot.resources import (
+    SnapshotResourcePolicy,
+    decode_snapshot_resource_policy,
+)
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
@@ -139,6 +148,21 @@ class AsyncIntermediateTensors(IntermediateTensors):
         return object.__getattribute__(self, name)
 
 
+@dataclass
+class _CheckpointPrepareState:
+    resource_policy: SnapshotResourcePolicy
+    buffers_saved: bool = False
+    communicator_prepare_started: bool = False
+    communicator_prepare_failed: bool = False
+    allocator_prepare_started: bool = False
+    allocator_prepare_failed: bool = False
+    allocator_restored: bool = False
+    weights_reloaded: bool = False
+    buffers_restored: bool = False
+    kv_cache_restored: bool = False
+    communicator_restored: bool = False
+
+
 class Worker(WorkerBase):
     def __init__(
         self,
@@ -169,6 +193,7 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
+        self._checkpoint_prepare_state: _CheckpointPrepareState | None = None
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -206,15 +231,7 @@ class Worker(WorkerBase):
 
         # Save the buffers before level 2 sleep
         if level == 2:
-            model = self.model_runner.model
-            self._sleep_saved_buffers = {
-                name: buffer.cpu().clone() for name, buffer in model.named_buffers()
-            }
-            draft = self.get_draft_model()
-            if draft is not None:
-                self._sleep_saved_draft_buffers = {
-                    name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
-                }
+            self._save_sleep_buffers()
 
         self._get_sleep_mode_backend().suspend(level)
 
@@ -240,14 +257,35 @@ class Worker(WorkerBase):
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
-        if wake_weights and len(self._sleep_saved_buffers):
+        if wake_weights:
+            self._restore_sleep_buffers()
+
+        if tags is None or "kv_cache" in tags:
+            self.model_runner.post_kv_cache_wake_up()
+
+    def _save_sleep_buffers(self) -> None:
+        model = self.model_runner.model
+        saved_buffers = {
+            name: buffer.cpu().clone() for name, buffer in model.named_buffers()
+        }
+        draft = self.get_draft_model()
+        saved_draft_buffers = {}
+        if draft is not None:
+            saved_draft_buffers = {
+                name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
+            }
+        self._sleep_saved_buffers = saved_buffers
+        self._sleep_saved_draft_buffers = saved_draft_buffers
+
+    def _restore_sleep_buffers(self) -> None:
+        if self._sleep_saved_buffers:
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        if wake_weights and len(self._sleep_saved_draft_buffers):
+        if self._sleep_saved_draft_buffers:
             draft = self.get_draft_model()
             if draft is not None:
                 for name, buffer in draft.named_buffers():
@@ -255,14 +293,263 @@ class Worker(WorkerBase):
                         buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
             self._sleep_saved_draft_buffers = {}
 
-        if tags is None or "kv_cache" in tags:
+    def _validate_checkpoint_weight_reload(self) -> None:
+        from vllm.model_executor.model_loader import get_model_loader
+
+        if self.get_draft_model() is not None:
+            raise NotImplementedError(
+                "l2_prepared does not support speculative draft models"
+            )
+        if self.vllm_config.lora_config is not None and self.list_loras():
+            raise NotImplementedError(
+                "l2_prepared does not support active LoRA adapters"
+            )
+        if self.weight_transfer_engine is not None:
+            raise NotImplementedError(
+                "l2_prepared does not support online weight updates"
+            )
+        model_loader = get_model_loader(self.model_runner.load_config)
+        if not hasattr(model_loader, "get_all_weights"):
+            raise NotImplementedError(
+                "l2_prepared requires a model loader with get_all_weights"
+            )
+
+    @staticmethod
+    def _empty_checkpoint_host_cache() -> None:
+        try:
+            torch._C._host_emptyCache()
+        except AttributeError:
+            logger.warning(
+                "torch._C._host_emptyCache() only available in PyTorch >=2.5"
+            )
+
+    @staticmethod
+    def _checkpoint_host_backup_bytes() -> int | None:
+        try:
+            diagnostics = (
+                get_diagnostic_mem_allocator_instance().allocation_diagnostics()
+            )
+            tags = diagnostics.get("tags")
+            weights = tags.get("weights") if isinstance(tags, dict) else None
+            host_backup_bytes = (
+                weights.get("host_backup_bytes") if isinstance(weights, dict) else None
+            )
+            return host_backup_bytes if isinstance(host_backup_bytes, int) else None
+        except Exception:
+            logger.warning(
+                "Failed to collect checkpoint allocator diagnostics", exc_info=True
+            )
+            return None
+
+    def checkpoint_prepare(
+        self, resource_policy: Mapping[str, object]
+    ) -> dict[str, float]:
+        if self._checkpoint_prepare_state is not None:
+            raise RuntimeError("checkpoint resources are already prepared")
+        policy = decode_snapshot_resource_policy(resource_policy)
+        from vllm.v1.executor import Executor
+        from vllm.v1.executor.uniproc_executor import UniProcExecutor
+
+        executor_class = Executor.get_class(self.vllm_config)
+        if not issubclass(executor_class, UniProcExecutor):
+            raise RuntimeError("checkpoint workers require UniProcExecutor")
+        if policy.weights == "discard":
+            self._validate_checkpoint_weight_reload()
+        allocator = None
+        discard_allocator = None
+        if policy.weights == "host_backup":
+            allocator = get_mem_allocator_instance()
+        elif policy.requires_allocator:
+            discard_allocator = get_discard_mem_allocator_instance()
+        state = _CheckpointPrepareState(policy)
+        self._checkpoint_prepare_state = state
+        started = time.monotonic()
+        timings: dict[str, float] = {}
+        discard_tags: list[str] = []
+        try:
+            if policy.weights == "discard":
+                phase_started = time.monotonic()
+                self._save_sleep_buffers()
+                state.buffers_saved = True
+                timings["buffer_save_seconds"] = time.monotonic() - phase_started
+                discard_tags.append("weights")
+            if policy.kv == "discard":
+                discard_tags.append("kv_cache")
+            phase_started = time.monotonic()
+            state.communicator_prepare_started = True
+            try:
+                checkpoint_prepare_distributed_state()
+            except BaseException:
+                state.communicator_prepare_failed = True
+                raise
+            timings["communicator_prepare_seconds"] = time.monotonic() - phase_started
+            if policy.weights == "host_backup":
+                phase_started = time.monotonic()
+                state.allocator_prepare_started = True
+                assert allocator is not None
+                try:
+                    allocator.sleep(offload_tags=("weights",))
+                except BaseException:
+                    state.allocator_prepare_failed = True
+                    raise
+                timings["host_backup_seconds"] = time.monotonic() - phase_started
+                host_backup_bytes = self._checkpoint_host_backup_bytes()
+                if host_backup_bytes is not None:
+                    timings["host_backup_bytes"] = float(host_backup_bytes)
+            elif discard_tags:
+                phase_started = time.monotonic()
+                state.allocator_prepare_started = True
+                assert discard_allocator is not None
+                try:
+                    discard_allocator.discard(tuple(discard_tags))
+                except BaseException:
+                    state.allocator_prepare_failed = True
+                    raise
+                timings["discard_seconds"] = time.monotonic() - phase_started
+        except BaseException as exc:
+            rollback_errors = self._rollback_checkpoint_prepare(state)
+            if rollback_errors:
+                raise RuntimeError(
+                    f"{exc}; checkpoint prepare rollback failed: "
+                    + "; ".join(rollback_errors)
+                ) from exc
+            raise
+        timings["total_seconds"] = time.monotonic() - started
+        return timings
+
+    def _rollback_checkpoint_prepare(self, state: _CheckpointPrepareState) -> list[str]:
+        errors: list[str] = []
+        policy = state.resource_policy
+        if not state.allocator_prepare_started:
+            state.allocator_restored = True
+        elif not state.allocator_restored:
+            try:
+                allocator = get_mem_allocator_instance()
+                if policy.weights == "host_backup":
+                    allocator.wake_up()
+                    self._empty_checkpoint_host_cache()
+                else:
+                    wake_tags = []
+                    if policy.weights == "discard":
+                        wake_tags.append("weights")
+                    if policy.kv == "discard":
+                        wake_tags.append("kv_cache")
+                    allocator.wake_up(wake_tags)
+                state.allocator_restored = True
+            except BaseException as exc:
+                errors.append(f"allocator restore: {exc}")
+
+        weights_ready = policy.weights != "discard"
+        if state.allocator_restored and state.allocator_prepare_started:
+            if policy.weights == "discard" and not state.weights_reloaded:
+                try:
+                    self.reload_weights()
+                    state.weights_reloaded = True
+                except BaseException as exc:
+                    errors.append(f"weight reload: {exc}")
+            weights_ready = policy.weights != "discard" or state.weights_reloaded
+            if state.buffers_saved and weights_ready and not state.buffers_restored:
+                try:
+                    self._restore_sleep_buffers()
+                    state.buffers_restored = True
+                except BaseException as exc:
+                    errors.append(f"buffer restore: {exc}")
+            buffers_ready = not state.buffers_saved or state.buffers_restored
+            if (
+                policy.kv == "discard"
+                and weights_ready
+                and buffers_ready
+                and not state.kv_cache_restored
+            ):
+                try:
+                    self.model_runner.post_kv_cache_wake_up()
+                    state.kv_cache_restored = True
+                except BaseException as exc:
+                    errors.append(f"KV cache restore hook: {exc}")
+        elif state.buffers_saved and not state.buffers_restored:
+            self._sleep_saved_buffers = {}
+            self._sleep_saved_draft_buffers = {}
+            state.buffers_restored = True
+
+        if state.communicator_prepare_started and not state.communicator_restored:
+            try:
+                checkpoint_restore_distributed_state()
+                state.communicator_restored = True
+            except BaseException as exc:
+                errors.append(f"communicator restore: {exc}")
+
+        if state.allocator_prepare_failed:
+            errors.append("allocator prepare state is indeterminate")
+        if state.communicator_prepare_failed:
+            errors.append("communicator prepare state is indeterminate")
+        if not errors:
+            self._checkpoint_prepare_state = None
+        return errors
+
+    def checkpoint_abort(self) -> dict[str, float]:
+        started = time.monotonic()
+        state = self._checkpoint_prepare_state
+        if state is None:
+            return {"total_seconds": time.monotonic() - started}
+        errors = self._rollback_checkpoint_prepare(state)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        return {"total_seconds": time.monotonic() - started}
+
+    def checkpoint_restore(
+        self, resource_policy: Mapping[str, object]
+    ) -> dict[str, float]:
+        state = self._checkpoint_prepare_state
+        if state is None:
+            raise RuntimeError("checkpoint resources were not prepared")
+        policy = decode_snapshot_resource_policy(resource_policy)
+        if policy != state.resource_policy:
+            raise RuntimeError("checkpoint resource policy changed after prepare")
+        started = time.monotonic()
+        timings: dict[str, float] = {}
+        if policy.weights == "host_backup":
+            phase_started = time.monotonic()
+            allocator = get_mem_allocator_instance()
+            allocator.wake_up()
+            self._empty_checkpoint_host_cache()
+            state.allocator_restored = True
+            timings["host_restore_seconds"] = time.monotonic() - phase_started
+        else:
+            wake_tags = []
+            if policy.weights == "discard":
+                wake_tags.append("weights")
+            if policy.kv == "discard":
+                wake_tags.append("kv_cache")
+            phase_started = time.monotonic()
+            if wake_tags:
+                get_mem_allocator_instance().wake_up(wake_tags)
+            state.allocator_restored = True
+            timings["va_remap_seconds"] = time.monotonic() - phase_started
+        phase_started = time.monotonic()
+        if policy.weights == "discard":
+            self.reload_weights()
+            state.weights_reloaded = True
+        timings["reload_weights_seconds"] = time.monotonic() - phase_started
+        phase_started = time.monotonic()
+        if policy.weights == "discard":
+            self._restore_sleep_buffers()
+            state.buffers_restored = True
+        timings["buffer_restore_seconds"] = time.monotonic() - phase_started
+        phase_started = time.monotonic()
+        if policy.kv == "discard":
             self.model_runner.post_kv_cache_wake_up()
-
-    def checkpoint_prepare(self) -> None:
-        checkpoint_prepare_distributed_state()
-
-    def checkpoint_restore(self) -> None:
+            state.kv_cache_restored = True
+        timings["kv_hook_seconds"] = time.monotonic() - phase_started
+        phase_started = time.monotonic()
         checkpoint_restore_distributed_state()
+        state.communicator_restored = True
+        timings["communicator_restore_seconds"] = time.monotonic() - phase_started
+        self._checkpoint_prepare_state = None
+        timings["total_seconds"] = time.monotonic() - started
+        return timings
+
+    def allocator_diagnostics(self) -> dict[str, object]:
+        return get_diagnostic_mem_allocator_instance().allocation_diagnostics()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
