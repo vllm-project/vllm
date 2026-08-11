@@ -1,9 +1,15 @@
 #ifndef VLLM_NUMA_DISABLED
   #include <numa.h>
+  #include <numaif.h>
   #include <unistd.h>
+  #include <cerrno>
+  #include <cstring>
   #include <string>
   #include <sched.h>
 #endif
+#include <algorithm>
+
+#include "cpu/moe_numa_shard.hpp"
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
   #include <unistd.h>
   #include <sys/syscall.h>
@@ -147,3 +153,114 @@ void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// NUMA sharding for the CPU MoE experts. See csrc/cpu/moe_numa_shard.hpp for
+// why the split lives where it does and what the kernel expects of it.
+// ---------------------------------------------------------------------------
+
+namespace vllm_cpu_moe_numa {
+int& shard_count() {
+  static int shards = 1;
+  return shards;
+}
+}  // namespace vllm_cpu_moe_numa
+
+int64_t cpu_moe_numa_shards() { return vllm_cpu_moe_numa::shard_count(); }
+
+#ifdef VLLM_NUMA_DISABLED
+void set_cpu_moe_numa_shards(int64_t shards) {}
+
+void place_moe_expert_weight(at::Tensor& weight, int64_t block_size) {}
+#else
+void set_cpu_moe_numa_shards(int64_t shards) {
+  TORCH_CHECK(shards >= 1, "shard count must be >= 1, got ", shards);
+  if (shards > 1) {
+    TORCH_CHECK(numa_available() != -1,
+                "NUMA sharding was requested but libnuma reports no NUMA "
+                "support on this machine.");
+    TORCH_CHECK(shards <= numa_num_configured_nodes(), "asked for ", shards,
+                " MoE shards but the machine has ", numa_num_configured_nodes(),
+                " NUMA nodes.");
+  }
+  vllm_cpu_moe_numa::shard_count() = static_cast<int>(shards);
+}
+
+// Move the pages of one expert weight so that each shard's rows sit on the node
+// that will compute them.
+//
+// `weight` is [E, rows, ...] with `rows` the parallel axis of the GEMM that
+// reads it -- 2N for w1, K for w2 -- already in the kernel's packed layout. The
+// split has to be the *same* one the kernel makes at run time, so both go
+// through moe_numa_block_split on the block count rather than on the rows.
+//
+// MPOL_MF_MOVE is what makes this work after the weights are filled: without it
+// mbind only affects future faults and an already-populated tensor would not
+// move. Failures are reported and not fatal -- a weight that did not move is
+// slow, not wrong.
+void place_moe_expert_weight(at::Tensor& weight, int64_t block_size) {
+  const int shards = vllm_cpu_moe_numa::shard_count();
+  if (shards <= 1 || numa_available() == -1) {
+    return;
+  }
+  TORCH_CHECK(weight.is_contiguous(), "expert weight must be contiguous");
+  TORCH_CHECK(weight.dim() >= 2, "expert weight must be at least 2-D");
+
+  const int64_t experts = weight.size(0);
+  const int64_t rows = weight.size(1);
+  const int64_t row_bytes = weight.nbytes() / (experts * rows);
+  const int64_t blocks = (rows + block_size - 1) / block_size;
+  if (blocks < shards) {
+    return;
+  }
+
+  const long page = sysconf(_SC_PAGESIZE);
+  char* base = static_cast<char*>(weight.data_ptr());
+  int failures = 0;
+
+  for (int64_t e = 0; e < experts; ++e) {
+    char* expert = base + e * rows * row_bytes;
+    for (int shard = 0; shard < shards; ++shard) {
+      int b0 = 0, b1 = 0;
+      vllm_cpu_moe_numa::moe_numa_block_split(static_cast<int>(blocks), shards,
+                                              shard, &b0, &b1);
+      const int64_t r0 = std::min<int64_t>(int64_t(b0) * block_size, rows);
+      const int64_t r1 = std::min<int64_t>(int64_t(b1) * block_size, rows);
+      if (r1 <= r0) {
+        continue;
+      }
+      // mbind needs a page-aligned start; round the slice inward so a slice
+      // never claims a page that belongs to its neighbour. The few rows in the
+      // partial pages at each edge stay wherever they were, which costs at most
+      // one page per boundary per expert.
+      char* lo = expert + r0 * row_bytes;
+      char* hi = expert + r1 * row_bytes;
+      char* aligned_lo = reinterpret_cast<char*>(
+          (reinterpret_cast<uintptr_t>(lo) + page - 1) & ~uintptr_t(page - 1));
+      char* aligned_hi = reinterpret_cast<char*>(
+          reinterpret_cast<uintptr_t>(hi) & ~uintptr_t(page - 1));
+      if (aligned_hi <= aligned_lo) {
+        continue;
+      }
+      bitmask* mask = numa_allocate_nodemask();
+      if (mask == nullptr) {
+        ++failures;
+        continue;
+      }
+      numa_bitmask_clearall(mask);
+      numa_bitmask_setbit(mask, shard);
+      if (mbind(aligned_lo, aligned_hi - aligned_lo, MPOL_BIND, mask->maskp,
+                mask->size + 1, MPOL_MF_MOVE) != 0) {
+        ++failures;
+      }
+      numa_free_nodemask(mask);
+    }
+  }
+  if (failures > 0) {
+    TORCH_WARN("place_moe_expert_weight: ", failures,
+               " mbind calls failed; those pages stay where they were and the "
+               "shard that owns them will read across nodes. errno: ",
+               std::strerror(errno));
+  }
+}
+#endif
