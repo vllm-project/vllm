@@ -33,6 +33,7 @@ class _NvidiaDecoderLayer(torch.nn.Module):
         )
         self.hc_attn_scale = torch.nn.Parameter(torch.empty(3), requires_grad=False)
         self.hc_attn_base = torch.nn.Parameter(torch.empty(mix_hc), requires_grad=False)
+        self.hc_attn_fn_broadcast = None
         self.hc_ffn_fn = torch.nn.Parameter(
             torch.empty(mix_hc, hc_dim), requires_grad=False
         )
@@ -114,8 +115,13 @@ def test_find_first_mhc_layer_keeps_custom_op_implementation():
 
 def test_warmup_nvidia_layer_uses_forward_tilelang_ops(monkeypatch):
     layer = _NvidiaDecoderLayer()
+    layer.hc_attn_fn_broadcast = torch.empty(
+        (2 + layer.hc_mult) * layer.hc_mult,
+        layer.hidden_size,
+    )
     call_order = []
     pre_calls = []
+    broadcast_calls = []
     fused_calls = []
     post_calls = []
 
@@ -125,6 +131,23 @@ def test_warmup_nvidia_layer_uses_forward_tilelang_ops(monkeypatch):
         residual = args[0]
         num_tokens = residual.shape[0]
         return (
+            torch.empty(num_tokens, layer.hc_mult, 1),
+            torch.empty(num_tokens, layer.hc_mult, layer.hc_mult),
+            torch.empty(num_tokens, layer.hidden_size, dtype=torch.bfloat16),
+        )
+
+    def mhc_pre_broadcast(*args, **kwargs):
+        call_order.append("broadcast")
+        broadcast_calls.append((args, kwargs))
+        residual = args[0]
+        num_tokens = residual.shape[0]
+        return (
+            torch.empty(
+                num_tokens,
+                layer.hc_mult,
+                layer.hidden_size,
+                dtype=torch.bfloat16,
+            ),
             torch.empty(num_tokens, layer.hc_mult, 1),
             torch.empty(num_tokens, layer.hc_mult, layer.hc_mult),
             torch.empty(num_tokens, layer.hidden_size, dtype=torch.bfloat16),
@@ -150,13 +173,33 @@ def test_warmup_nvidia_layer_uses_forward_tilelang_ops(monkeypatch):
     monkeypatch.setattr(
         mhc_warmup,
         "_get_tilelang_mhc_ops",
-        lambda: (mhc_pre, mhc_fused_post_pre, mhc_post, lambda *args: None),
+        lambda: (
+            mhc_pre,
+            mhc_pre_broadcast,
+            mhc_fused_post_pre,
+            mhc_post,
+            lambda *args: None,
+        ),
         raising=False,
     )
 
     mhc_warmup._warmup_layer_mhc(layer, [1, 3])
 
-    assert call_order == ["pre", "fused", "post"] * 2
+    assert call_order == ["broadcast"] * 2 + ["pre", "fused", "post"] * 2
+    assert [call[0][0].shape for call in broadcast_calls] == [(1, 4), (3, 4)]
+    assert all(call[0][1] is layer.hc_attn_fn for call in broadcast_calls)
+    assert all(
+        call[1]["fn_broadcast"] is layer.hc_attn_fn_broadcast
+        for call in broadcast_calls
+    )
+    assert all(
+        call[1]["norm_weight"].data_ptr() == layer.attn_norm.weight.data_ptr()
+        for call in broadcast_calls
+    )
+    assert all(
+        call[1]["norm_eps"] == layer.attn_norm.variance_epsilon
+        for call in broadcast_calls
+    )
     assert [call[0][0].shape[0] for call in pre_calls] == [1, 3]
     assert all(call[0][1] is layer.hc_attn_fn for call in pre_calls)
     assert all(
@@ -237,7 +280,7 @@ def test_warmup_nvidia_hc_head_uses_forward_tilelang_op(monkeypatch):
     monkeypatch.setattr(
         mhc_warmup,
         "_get_tilelang_mhc_ops",
-        lambda: (None, None, None, hc_head),
+        lambda: (None, None, None, None, hc_head),
         raising=False,
     )
 

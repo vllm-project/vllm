@@ -107,11 +107,13 @@ def _get_tilelang_mhc_ops() -> tuple[Callable[..., Any], ...]:
         hc_head_fused_kernel_tilelang,
         mhc_fused_post_pre_tilelang,
         mhc_post_tilelang,
+        mhc_pre_broadcast_tilelang,
         mhc_pre_tilelang,
     )
 
     return (
         mhc_pre_tilelang,
+        mhc_pre_broadcast_tilelang,
         mhc_fused_post_pre_tilelang,
         mhc_post_tilelang,
         hc_head_fused_kernel_tilelang,
@@ -123,7 +125,33 @@ def _warmup_nvidia_layer_mhc(
     residual: torch.Tensor,
     token_sizes: list[int],
 ) -> None:
-    mhc_pre, mhc_fused_post_pre, mhc_post, _ = _get_tilelang_mhc_ops()
+    mhc_pre, mhc_pre_broadcast, mhc_fused_post_pre, mhc_post, _ = (
+        _get_tilelang_mhc_ops()
+    )
+
+    fn_broadcast = getattr(layer, "hc_attn_fn_broadcast", None)
+    if fn_broadcast is not None:
+        broadcast_residual = torch.zeros(
+            residual.shape[0],
+            residual.shape[2],
+            dtype=residual.dtype,
+            device=residual.device,
+        )
+        for size in token_sizes:
+            mhc_pre_broadcast(
+                broadcast_residual[:size],
+                layer.hc_attn_fn,
+                layer.hc_attn_scale,
+                layer.hc_attn_base,
+                layer.rms_norm_eps,
+                layer.hc_eps,
+                layer.hc_eps,
+                layer.hc_post_alpha,
+                layer.hc_sinkhorn_iters,
+                norm_weight=layer.attn_norm.weight.data,
+                norm_eps=layer.attn_norm.variance_epsilon,
+                fn_broadcast=fn_broadcast,
+            )
 
     for size in token_sizes:
         residual_slice = residual[:size]
@@ -206,7 +234,7 @@ def _warmup_hc_head(
     if hc_head_op is None:
         # The NVIDIA implementation calls the TileLang function directly,
         # while the AMD and XPU implementations attach an HCHeadOp.
-        _, _, _, hc_head_op = _get_tilelang_mhc_ops()
+        _, _, _, _, hc_head_op = _get_tilelang_mhc_ops()
 
     max_tokens = max(token_sizes)
     hidden_size = int(model.config.hidden_size)
