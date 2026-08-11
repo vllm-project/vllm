@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 import io
 from collections.abc import Iterable
 
@@ -23,11 +24,15 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
+)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_fp8_supported,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -84,6 +89,96 @@ def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
         getattr(config, "target_hidden_size", None) or config.hidden_size
     )
     return target_hidden_size * num_features_to_use
+
+
+class ContextKVStrategy(str, enum.Enum):
+    """DFlash context-KV projection strategy (quantized-drafter support).
+
+    ``precompute_and_store_context_kv`` projects the target hidden states to
+    K/V with every drafter layer. For unquantized drafters this is a single
+    fused GEMM over the raw K/V rows. Quantized drafters cannot feed their
+    packed weights to a bare ``F.linear`` (see #51581); we pick a strategy
+    from the layers' ``quant_method`` metadata before ever touching ``.weight``
+    and build the fused buffers lazily after ``process_weights_after_loading``.
+
+    - FUSED:          all layers unquantized -> slice raw weights + one F.linear
+    - SCALED_MM:      simple FP8 (non-Marlin) on a cutlass-fp8 platform -> keep
+                      the quantized weights + per-column scales + one fused
+                      W8A8 GEMM (fusion and quantization both preserved)
+    - FUSED_DEQUANT:  simple FP8 but no quantized-GEMM primitive -> dequant to
+                      the compute dtype + one fused F.linear (fusion preserved)
+    - PER_LAYER:      grouped-int4/NVFP4/MXFP4/Marlin/unknown -> per-layer
+                      ``quant_method.apply`` (correct for every scheme, keeps
+                      the per-layer quantization)
+    """
+
+    FUSED = "fused"
+    SCALED_MM = "scaled_mm"
+    FUSED_DEQUANT = "dequant"
+    PER_LAYER = "per_layer"
+
+
+# Schemes whose scale can be folded into a per-output-column vector
+# (per-tensor / per-channel). Grouped(int4)/block(NVFP4/MXFP4)/Marlin scales
+# cannot be folded and must go through the per-layer path.
+_SIMPLE_FUSABLE_QUANT_METHODS = (
+    "Fp8LinearMethod",
+    "Fp8PerTensorOnlineLinearMethod",
+)
+
+
+def _is_simple_fusable(proj: nn.Module) -> bool:
+    """Simple FP8 per-tensor/per-channel (non-Marlin, non-block)."""
+    method = getattr(proj, "quant_method", None)
+    if method is None or isinstance(method, UnquantizedLinearMethod):
+        return True
+    if type(method).__name__ not in _SIMPLE_FUSABLE_QUANT_METHODS:
+        return False
+    return not getattr(method, "use_marlin", False) and not getattr(
+        method, "block_quant", False
+    )
+
+
+def _decide_context_kv_strategy(
+    projections: Iterable[nn.Module],
+) -> ContextKVStrategy:
+    """Pick the context-KV projection strategy.
+
+    Never touches ``.weight``, so packed/GPTQ/AWQ layers are safe to inspect.
+    """
+    projections = list(projections)
+    methods = [getattr(p, "quant_method", None) for p in projections]
+
+    # Unquantized: original fast path (zero change).
+    if all(m is None or isinstance(m, UnquantizedLinearMethod) for m in methods):
+        return ContextKVStrategy.FUSED
+
+    # Simple FP8: prefer a fused quantized GEMM; fall back to a fused dequant.
+    if all(_is_simple_fusable(p) for p in projections):
+        if cutlass_fp8_supported():
+            return ContextKVStrategy.SCALED_MM
+        return ContextKVStrategy.FUSED_DEQUANT
+
+    # Grouped/block/Marlin/mixed/unknown: per-layer quantized GEMMs.
+    return ContextKVStrategy.PER_LAYER
+
+
+def _kv_scale_vector(proj: nn.Module, q_size: int, kv_size: int) -> torch.Tensor:
+    """Per-output-row scale of the K/V rows of a quantized QKV projection
+    (``[2 * kv_size]``).
+
+    - per-tensor (1 or 3 scales): broadcast over the K/V rows
+    - per-channel: slice the K/V rows
+    """
+    s = getattr(proj, "weight_scale", None)
+    if s is None:
+        return torch.ones(2 * kv_size, device=proj.weight.device)
+    s = s.reshape(-1)
+    if s.numel() == 1:
+        return s[0].expand(2 * kv_size)
+    if s.numel() == 3:  # per-shard per-tensor scales: [q, k, v]
+        return torch.cat([s[1].expand(kv_size), s[2].expand(kv_size)])
+    return s[q_size:]  # per-channel: K/V rows
 
 
 def _resolve_layer_attention(
@@ -369,6 +464,10 @@ class DFlashQwen3Model(nn.Module):
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
+        # Compute dtype for the fused-KV path (dequant / scaled_mm).
+        self.compute_dtype = getattr(
+            vllm_config.model_config, "dtype", torch.bfloat16
+        )
 
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))
@@ -447,25 +546,54 @@ class DFlashQwen3Model(nn.Module):
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
-        # KV projection weights: [num_layers * 2 * kv_size, hidden_size].
-        # Dequantize quantized qkv weights to the activation dtype (the
-        # canonical helper returns the weights in [out, in] layout) so the
-        # fused ``F.linear`` in ``_project_context_kv`` works for quantized
-        # drafters.  The buffers are built lazily on first use (after
-        # ``process_weights_after_loading``), so quantized weights are in
-        # their final layout and every quant scheme is supported.
-        kv_weights = [
-            get_and_maybe_dequant_weights(
-                a.qkv_proj, out_dtype=torch.bfloat16
-            )[a.q_size:]
-            for a in layers_attn
-        ]
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0)
-        if has_bias:
-            kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-            self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
-        else:
-            self._fused_kv_bias = None
+        projections = [a.qkv_proj for a in layers_attn]
+        self._kv_strategy = _decide_context_kv_strategy(projections)
+        self._fused_kv_bias: torch.Tensor | None = None
+
+        if self._kv_strategy == ContextKVStrategy.FUSED:
+            # Unquantized: original fused fast path (zero change).
+            kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+            self._fused_kv_weight = torch.cat(kv_weights, dim=0)
+            if has_bias:
+                self._fused_kv_bias = torch.cat(
+                    [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
+                )
+        elif self._kv_strategy == ContextKVStrategy.FUSED_DEQUANT:
+            # Dequant to the compute dtype, keep the fused F.linear. The buffers
+            # are built lazily on first use (after ``process_weights_after_loading``),
+            # so quantized weights are in their final layout.
+            kv_weights = [
+                get_and_maybe_dequant_weights(p, out_dtype=self.compute_dtype)[
+                    a.q_size :
+                ]
+                for p, a in zip(projections, layers_attn)
+            ]
+            self._fused_kv_weight = torch.cat(kv_weights, dim=0)
+            if has_bias:
+                self._fused_kv_bias = torch.cat(
+                    [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
+                )
+        elif self._kv_strategy == ContextKVStrategy.SCALED_MM:
+            # Keep the quantized weights. After ``process_weights_after_loading``
+            # the cutlass-fp8 path stores the weight in [K, N] layout, so slice
+            # the K/V output COLUMNS and concatenate along N -> one fused W8A8 GEMM.
+            self._fused_kv_weight = torch.cat(
+                [p.weight[:, a.q_size :] for p, a in zip(projections, layers_attn)],
+                dim=1,
+            )
+            self._fused_kv_scale = torch.cat(
+                [
+                    _kv_scale_vector(p, a.q_size, a.kv_size)
+                    for p, a in zip(projections, layers_attn)
+                ],
+                dim=0,
+            ).unsqueeze(0)  # [1, L * 2 * kv_size] per-column
+            if has_bias:
+                self._fused_kv_bias = torch.cat(
+                    [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
+                )
+        else:  # PER_LAYER
+            self._kv_projections = [(a.qkv_proj, a.q_size) for a in layers_attn]
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
         # tensor so the per-layer K-norm runs as a single grouped kernel.
@@ -524,7 +652,7 @@ class DFlashQwen3Model(nn.Module):
         num_kv_heads: int,
         head_dim: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # --- Fused KV projection (one GEMM for all layers) ---
+        # --- KV projection (one fused GEMM for all layers when possible) ---
         normed_context_states = torch.empty_like(context_states)
         ops.rms_norm(
             normed_context_states,
@@ -532,9 +660,16 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
-        all_kv_flat = F.linear(
-            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-        )
+
+        if self._kv_strategy == ContextKVStrategy.SCALED_MM:
+            all_kv_flat = self._project_context_kv_scaled(normed_context_states)
+        elif self._kv_strategy == ContextKVStrategy.PER_LAYER:
+            all_kv_flat = self._project_context_kv_per_layer(normed_context_states)
+        else:  # FUSED / FUSED_DEQUANT
+            all_kv_flat = F.linear(
+                normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+            )
+
         # Single contiguous copy that separates K/V and transposes to
         # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
         # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
@@ -546,6 +681,43 @@ class DFlashQwen3Model(nn.Module):
         all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
         all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
         return all_k, all_v
+
+    def _project_context_kv_scaled(self, normed: torch.Tensor) -> torch.Tensor:
+        """Fused W8A8 projection: dynamic FP8 activation + one cutlass_scaled_mm.
+
+        Weight is stored in [K, N] (cutlass layout); ``_fused_kv_scale`` is the
+        per-output-column (K/V row) scale vector."""
+        x_q, scale_a = ops.scaled_fp8_quant(
+            normed, scale=None, use_per_token_if_dynamic=True
+        )
+        out_dtype = (
+            normed.dtype
+            if normed.dtype in (torch.bfloat16, torch.float16)
+            else torch.bfloat16
+        )
+        return ops.cutlass_scaled_mm(
+            x_q,
+            self._fused_kv_weight,
+            scale_a,
+            self._fused_kv_scale,
+            out_dtype,
+            self._fused_kv_bias,
+        )
+
+    def _project_context_kv_per_layer(self, normed: torch.Tensor) -> torch.Tensor:
+        """Per-layer quantized projection; output layout matches the fused path
+        (``[num_ctx, L * 2 * kv_size]``).
+
+        Q rows are projected and discarded (packed kernels cannot compute only
+        the K/V rows); each layer's bias is applied in its module.
+        """
+        outs = []
+        for proj, q_size in self._kv_projections:
+            out, bias = proj(normed)
+            if bias is not None:
+                out = out + bias
+            outs.append(out[..., q_size:])
+        return torch.cat(outs, dim=-1)
 
     def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---

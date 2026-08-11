@@ -19,9 +19,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_and_maybe_dequant_weights,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -34,7 +31,11 @@ from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle
 from vllm.multimodal.inputs import NestedTensors
 
 from .laguna import LagunaDecoderLayer
-from .qwen3_dflash import DFlashQwen3Model
+from .qwen3_dflash import (
+    ContextKVStrategy,
+    DFlashQwen3Model,
+    _decide_context_kv_strategy,
+)
 from .utils import (
     AutoWeightsLoader,
     get_draft_quant_config,
@@ -158,27 +159,26 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         layers_attn: list[nn.Module],
         has_bias: bool,
     ) -> None:
-        # KV projection weights: [num_layers, 2 * kv_size, hidden_size].
-        # Dequantize quantized qkv weights to the activation dtype (the
-        # canonical helper returns the weights in [out, in] layout) so the
-        # fused ``torch.bmm`` in ``_project_context_kv`` works for quantized
-        # drafters.  The buffers are built lazily on first use (after
-        # ``process_weights_after_loading``), so quantized weights are in
-        # their final layout and every quant scheme is supported.
-        self._kv_weights = torch.stack(
-            [
-                get_and_maybe_dequant_weights(
-                    a.qkv_proj, out_dtype=torch.bfloat16
-                )[a.q_size :]
-                for a in layers_attn
-            ],
-            dim=0,
-        ).contiguous()
-        if has_bias:
-            self._kv_biases: torch.Tensor | None = torch.stack(
-                [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
+        # Two tiers: FUSED (all unquantized -> stacked bmm) or PER_LAYER
+        # (any quantized scheme -> per-layer quantized projection).
+        self._fuse_context_kv = (
+            _decide_context_kv_strategy(
+                (a.qkv_proj for a in layers_attn)
+            )
+            == ContextKVStrategy.FUSED
+        )
+        if self._fuse_context_kv:
+            self._kv_weights = torch.stack(
+                [a.qkv_proj.weight[a.q_size :] for a in layers_attn], dim=0
             ).contiguous()
+            if has_bias:
+                self._kv_biases: torch.Tensor | None = torch.stack(
+                    [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
+                ).contiguous()
+            else:
+                self._kv_biases = None
         else:
+            self._kv_projections = [(a.qkv_proj, a.q_size) for a in layers_attn]
             self._kv_biases = None
         self._input_layernorm_weights = torch.stack(
             [layer.input_layernorm.weight.data for layer in self.layers], dim=0
@@ -206,12 +206,22 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
             self._input_layernorm_weights,
             self._rms_norm_eps,
         )
-        all_kv_flat = torch.bmm(
-            normed_context_states,
-            self._kv_weights.transpose(1, 2),
-        )
-        if self._kv_biases is not None:
-            all_kv_flat += self._kv_biases[:, None, :]
+        if self._fuse_context_kv:
+            all_kv_flat = torch.bmm(
+                normed_context_states,
+                self._kv_weights.transpose(1, 2),
+            )
+            if self._kv_biases is not None:
+                all_kv_flat += self._kv_biases[:, None, :]
+        else:
+            # Per-layer quantized projection; each layer uses its own normed input.
+            per_layer = []
+            for i, (proj, q_size) in enumerate(self._kv_projections):
+                out, bias = proj(normed_context_states[i])
+                if bias is not None:
+                    out = out + bias
+                per_layer.append(out[..., q_size:])
+            all_kv_flat = torch.stack(per_layer, dim=0)
         all_kv = (
             all_kv_flat.view(num_layers, num_ctx, 2, num_kv_heads, head_dim)
             .permute(2, 0, 1, 3, 4)
