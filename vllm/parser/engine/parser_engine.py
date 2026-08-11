@@ -179,6 +179,14 @@ class ParserEngine(Parser):
     def reasoning_ended(self) -> bool:
         return self._reasoning_ended
 
+    def set_reasoning_consumer_attached(self, attached: bool) -> None:
+        """Declare whether another parser consumes the reasoning segment.
+
+        When nothing does, the engine surfaces the reasoning end delimiter as
+        content instead of absorbing it as a stray duplicate.
+        """
+        self._engine.reasoning_consumer_attached = attached
+
     def initialize_streaming(
         self,
         initial_state: ParserState | None = None,

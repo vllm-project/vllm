@@ -7,10 +7,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.parser.engine.conftest import make_mock_tokenizer
+from tests.parser.engine.conftest import make_mock_tokenizer, make_unpaired_tool_parser
 from tests.parser.engine.streaming_helpers import (
     collect_content,
     collect_function_name,
+    collect_parse_deltas,
     collect_tool_arguments,
     simulate_tool_streaming,
 )
@@ -18,7 +19,15 @@ from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
-from vllm.parser.gemma4 import Gemma4Parser
+from vllm.parser.engine.registered_adapters import Gemma4ParserToolAdapter
+from vllm.parser.gemma4 import (
+    CHANNEL_END,
+    CHANNEL_START,
+    STRING_DELIM,
+    TOOL_CALL_END,
+    TOOL_CALL_START,
+    Gemma4Parser,
+)
 
 # ── Special token IDs (arbitrary but consistent) ─────────────────────
 CHANNEL_START_ID = 50  # <|channel>
@@ -1616,3 +1625,67 @@ class TestCommaInStringValueRegression:
         assert result.tools_called is True
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args["destination"] == "456 Oakwood Avenue, Rivermist, 83214"
+
+
+class TestUnpairedToolParserKeepsStrayCloserAbsorbed:
+    """``<channel|>`` closes any channel, not only the thought channel.
+
+    Gemma4 emits a bare closer after returning to CONTENT, so its
+    ``(CONTENT, THINK_END)`` rule absorbs rather than surfaces it. Opting in
+    to ``surface_reasoning_end_when_unconsumed`` would leak the token as
+    visible content whenever no reasoning parser is attached.
+    """
+
+    @pytest.fixture
+    def unpaired_parser(self):
+        vocab = {
+            CHANNEL_START: CHANNEL_START_ID,
+            CHANNEL_END: CHANNEL_END_ID,
+            TOOL_CALL_START: TOOL_CALL_START_ID,
+            TOOL_CALL_END: TOOL_CALL_END_ID,
+            STRING_DELIM: QUOTED_ID,
+        }
+        return make_unpaired_tool_parser(
+            Gemma4ParserToolAdapter, make_mock_tokenizer(vocab)
+        )
+
+    def test_streaming_stray_closer_after_tool_call_is_not_content(
+        self, unpaired_parser, mock_request
+    ):
+        _, content = collect_parse_deltas(
+            unpaired_parser,
+            mock_request,
+            [
+                CHANNEL_START,
+                "thought\nChecking the weather.",
+                CHANNEL_END,
+                TOOL_CALL_START,
+                "call:get_weather{city:",
+                STRING_DELIM,
+                "SF",
+                STRING_DELIM,
+                "}",
+                TOOL_CALL_END,
+                CHANNEL_END,
+                "The weather is sunny.",
+            ],
+        )
+
+        assert content == "The weather is sunny."
+
+    def test_non_streaming_stray_closer_mid_content_is_not_content(
+        self, unpaired_parser, mock_request
+    ):
+        text = (
+            f"{CHANNEL_START}thought\nChecking.{CHANNEL_END}"
+            f"Visible{CHANNEL_END}more"
+            f"{TOOL_CALL_START}call:get_weather"
+            f"{{city:{STRING_DELIM}SF{STRING_DELIM}}}{TOOL_CALL_END}"
+        )
+
+        _, content, tools = unpaired_parser.parse(
+            text, mock_request, enable_auto_tools=True
+        )
+
+        assert content == "Visiblemore"
+        assert [t.name for t in tools] == ["get_weather"]

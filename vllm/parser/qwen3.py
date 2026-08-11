@@ -135,6 +135,7 @@ def qwen3_config(
             (ParserState.CONTENT, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (),
+                surface_reasoning_end_when_unconsumed=True,
             ),
             # Tool call directly from reasoning (implicit end)
             (ParserState.REASONING, "TOOL_START"): Transition(

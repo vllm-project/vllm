@@ -15,11 +15,19 @@ from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
     collect_content,
     collect_function_name,
+    collect_parse_deltas,
     collect_tool_arguments,
     simulate_tool_streaming,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.parser_engine import ParserEngine
+from vllm.parser.engine.registered_adapters import (
+    Qwen3ParserReasoningAdapter,
+    Qwen3ParserToolAdapter,
+)
 from vllm.parser.qwen3 import (
+    THINK_END,
+    THINK_START,
     TOOL_CALL_END,
     TOOL_CALL_START,
     qwen3_config,
@@ -1175,3 +1183,118 @@ class TestNestedSchemaCoercion:
         assert questions[0]["question"] == "Pick a color"
         assert questions[0]["multiSelect"] is False
         assert questions[0]["answer"] is None
+
+
+REASONING_TEXT = "work it out: 17*23"
+ANSWER_TEXT = "the answer is 391"
+GENERATION = f"{REASONING_TEXT}{THINK_END}{ANSWER_TEXT}"
+
+
+@pytest.fixture
+def reasoning_tokenizer():
+    return make_mock_tokenizer(
+        {
+            THINK_START: 100,
+            THINK_END: 101,
+            TOOL_CALL_START: 102,
+            TOOL_CALL_END: 103,
+        }
+    )
+
+
+def make_delegating_parser(tokenizer, *, paired: bool) -> DelegatingParser:
+    """Build the parser ``ParserManager`` composes for the given CLI flags.
+
+    ``paired`` mirrors passing ``--reasoning-parser`` alongside
+    ``--tool-call-parser``; omitting it leaves the tool parser unpaired.
+    """
+
+    class _Parser(DelegatingParser):
+        tool_parser_cls = Qwen3ParserToolAdapter
+        reasoning_parser_cls = Qwen3ParserReasoningAdapter if paired else None
+
+    return _Parser(tokenizer)
+
+
+class TestReasoningEndWithoutReasoningParser:
+    """A tool parser with no reasoning parser must not eat the only THINK_END.
+
+    Configs absorb a stray reasoning end so it cannot leak as text once a
+    reasoning parser has consumed the real one. Unpaired, nothing else can
+    surface it, so absorbing silently fuses reasoning into content and strips
+    the client's only boundary marker.
+    """
+
+    def test_unpaired_non_streaming_keeps_reasoning_end_in_content(
+        self, reasoning_tokenizer, mock_request
+    ):
+        # A plain chat request carrying no tools, as in the bug report.
+        mock_request.tool_choice = "none"
+        parser = make_delegating_parser(reasoning_tokenizer, paired=False)
+
+        reasoning, content, _ = parser.parse(
+            GENERATION, mock_request, enable_auto_tools=True
+        )
+
+        assert reasoning is None
+        assert content == GENERATION
+
+    def test_unpaired_streaming_keeps_reasoning_end_in_content(
+        self, reasoning_tokenizer, mock_request
+    ):
+        parser = make_delegating_parser(reasoning_tokenizer, paired=False)
+
+        _, content = collect_parse_deltas(
+            parser, mock_request, [REASONING_TEXT, THINK_END, ANSWER_TEXT]
+        )
+
+        assert content == GENERATION
+
+    def test_unpaired_keeps_reasoning_end_alongside_a_tool_call(
+        self, reasoning_tokenizer, mock_request
+    ):
+        """Restoring the delimiter must not disturb a following tool call."""
+        generation = (
+            f"{GENERATION}<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Paris</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        parser = make_delegating_parser(reasoning_tokenizer, paired=False)
+
+        _, content, tool_calls = parser.parse(
+            generation, mock_request, enable_auto_tools=True
+        )
+
+        assert THINK_END in content
+        assert [call.name for call in tool_calls] == ["get_weather"]
+        assert json.loads(tool_calls[0].arguments) == {"city": "Paris"}
+
+    def test_paired_non_streaming_still_splits_reasoning(
+        self, reasoning_tokenizer, mock_request
+    ):
+        mock_request.tool_choice = "none"
+        parser = make_delegating_parser(reasoning_tokenizer, paired=True)
+
+        reasoning, content, _ = parser.parse(
+            GENERATION, mock_request, enable_auto_tools=True
+        )
+
+        assert reasoning == REASONING_TEXT
+        assert content == ANSWER_TEXT
+
+    def test_paired_still_absorbs_a_second_reasoning_end(
+        self, reasoning_tokenizer, mock_request
+    ):
+        """Guards the absorb rule's original purpose."""
+        mock_request.tool_choice = "none"
+        parser = make_delegating_parser(reasoning_tokenizer, paired=True)
+
+        reasoning, content, _ = parser.parse(
+            f"{GENERATION}{THINK_END}tail", mock_request, enable_auto_tools=True
+        )
+
+        assert reasoning == REASONING_TEXT
+        assert THINK_END not in content
+        assert content == f"{ANSWER_TEXT}tail"
