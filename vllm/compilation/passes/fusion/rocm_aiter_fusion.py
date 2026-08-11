@@ -1212,8 +1212,8 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "mla_dual_rms_norm_fusion_pass")
 
+        # Scalars are matched exactly; every in-tree producer emits group_size=128.
         for epsilon in [1e-5, 1e-6]:
             self.register(MLADualRMSNormPattern(epsilon))
             self.register(MLADualRMSPerTokenQuantPattern(epsilon))
-            for group_size in [128, 64]:
-                self.register(MLADualRMSGroupQuantPattern(epsilon, group_size))
+            self.register(MLADualRMSGroupQuantPattern(epsilon))
