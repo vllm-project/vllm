@@ -251,12 +251,34 @@ class HFConfigParser(ConfigParserBase):
         kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
         trust_remote_code |= kwargs.get("trust_remote_code", False)
         kwargs = without_trust_remote_code(kwargs)
-        config_dict, _ = PretrainedConfig.get_config_dict(
+        config_dict, kwargs = PretrainedConfig.get_config_dict(
             model,
             revision=revision,
             code_revision=code_revision,
             **kwargs,
         )
+
+        # FIX: final_logit_softcapping must be a float or None to pass msgspec
+        # validation during v1 RPC, but some models provide an int (e.g. 30).
+        if (
+            "final_logit_softcapping" in config_dict
+            and config_dict["final_logit_softcapping"] is not None
+        ):
+            val = float(config_dict["final_logit_softcapping"])
+            config_dict["final_logit_softcapping"] = val
+            kwargs["final_logit_softcapping"] = val
+
+        if (
+            "text_config" in config_dict
+            and "final_logit_softcapping" in config_dict["text_config"]
+            and config_dict["text_config"]["final_logit_softcapping"] is not None
+        ):
+            val = float(config_dict["text_config"]["final_logit_softcapping"])
+            config_dict["text_config"]["final_logit_softcapping"] = val
+            # For kwargs, we need to pass the whole text_config dictionary
+            # to override what's read from JSON
+            kwargs["text_config"] = config_dict["text_config"]
+
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
         if model_type is None:

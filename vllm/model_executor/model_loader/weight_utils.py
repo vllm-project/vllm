@@ -1228,12 +1228,19 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
             # reshape to match before copying
             param.data.copy_(loaded_weight.view(param.shape))
         else:
-            assert param.size() == loaded_weight.size(), (
-                f"Attempted to load weight ({loaded_weight.size()}) "
-                f"into parameter ({param.size()})"
-            )
-
-            param.data.copy_(loaded_weight)
+            if (
+                param.size() != loaded_weight.size()
+                and param.dim() == 1
+                and loaded_weight.dim() == 1
+            ):
+                min_len = min(param.size(0), loaded_weight.size(0))
+                param.data[:min_len].copy_(loaded_weight[:min_len])
+            else:
+                assert param.size() == loaded_weight.size(), (
+                    f"Attempted to load weight ({loaded_weight.size()}) "
+                    f"into parameter ({param.size()})"
+                )
+                param.data.copy_(loaded_weight)
     except Exception:
         # NOTE: This exception is added for the purpose of setting breakpoint to
         # debug weight loading issues.

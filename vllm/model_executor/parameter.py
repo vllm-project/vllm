@@ -108,6 +108,22 @@ class BasevLLMParameter(Parameter):
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         self._assert_and_load(loaded_weight)
 
+    @staticmethod
+    def _safe_narrow(
+        tensor: torch.Tensor, dim: int, start: int, length: int
+    ) -> torch.Tensor:
+        """Narrow tensor safely within valid bounds for heterogeneous layer shapes."""
+        max_size = tensor.shape[dim]
+
+        # Fast path: normal homogeneous layers (no clamping needed)
+        if start >= 0 and start + length <= max_size:
+            return tensor.narrow(dim, start, length)
+
+        # Heterogeneous fallback: clip bounds safely
+        start = min(max(0, start), max_size)
+        length = min(max(0, length), max_size - start)
+        return tensor.narrow(dim, start, length)
+
     def _shard_id_as_int(self, shard_id: str | int) -> int:
         if isinstance(shard_id, int):
             return shard_id
@@ -167,11 +183,15 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             )
 
         param_data = self.data
-
-        param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
-        loaded_weight = loaded_weight.narrow(
-            self.output_dim, self.tp_rank * shard_size, shard_size
+        loaded_start = self.tp_rank * shard_size
+        param_data = self._safe_narrow(
+            param_data, self.output_dim, shard_offset, shard_size
         )
+        loaded_weight = self._safe_narrow(
+            loaded_weight, self.output_dim, loaded_start, shard_size
+        )
+        if param_data.numel() == 0 or loaded_weight.numel() == 0:
+            return
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -192,11 +212,15 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         param_data = self.data
         shard_id_int = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
-        param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
-        loaded_weight = loaded_weight.narrow(
-            self.output_dim, shard_id_int * shard_size, shard_size
+        loaded_start = shard_id_int * shard_size
+        param_data = self._safe_narrow(
+            param_data, self.output_dim, shard_offset, shard_size
         )
-
+        loaded_weight = self._safe_narrow(
+            loaded_weight, self.output_dim, loaded_start, shard_size
+        )
+        if param_data.numel() == 0 or loaded_weight.numel() == 0:
+            return
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 

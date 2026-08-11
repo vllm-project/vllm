@@ -28,6 +28,26 @@ class ModelArchConfigConvertorBase:
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
 
+    def _safe_getattr(self, attr: str, default=0):
+        """getattr that handles AmbiguousGlobalPerLayerAttributeError.
+
+        For heterogeneous models, the new transformers library raises
+        AmbiguousGlobalPerLayerAttributeError — which is NOT a subclass
+        of AttributeError — when accessing per-layer attributes globally.
+        Python's getattr() does not catch it. Fall back to first layer config.
+        """
+        try:
+            val = getattr(self.hf_text_config, attr, default)
+            return val if val is not None else default
+        except Exception:
+            plc = getattr(self.hf_text_config, "per_layer_config", None)
+            if plc:
+                try:
+                    return getattr(plc[0], attr, default)
+                except Exception:
+                    pass
+            return default
+
     def get_per_layer_hf_configs(
         self,
     ) -> list[tuple[PretrainedConfig, PretrainedConfig]] | None:
@@ -66,16 +86,16 @@ class ModelArchConfigConvertorBase:
         return getattr(self.hf_config, "architectures", None) or []
 
     def get_num_hidden_layers(self) -> int:
-        return getattr(self.hf_text_config, "num_hidden_layers", 0)
+        return self._safe_getattr("num_hidden_layers", 0)
 
     def get_total_num_attention_heads(self) -> int:
-        return getattr(self.hf_text_config, "num_attention_heads", 0)
+        return self._safe_getattr("num_attention_heads", 0)
 
     def get_vocab_size(self) -> int:
-        return getattr(self.hf_text_config, "vocab_size", 0)
+        return self._safe_getattr("vocab_size", 0)
 
     def get_hidden_size(self) -> int:
-        return getattr(self.hf_text_config, "hidden_size", 0)
+        return self._safe_getattr("hidden_size", 0)
 
     def get_head_size(self) -> int:
         if self.is_deepseek_mla():
@@ -93,12 +113,12 @@ class ModelArchConfigConvertorBase:
         # NOTE: Some config classes may set head_dim=None or materialize a missing
         # head_dim as 0 (for example, DeepseekVLV2TextConfig).
         if (
-            head_dim := getattr(self.hf_text_config, "head_dim", None)
+            head_dim := self._safe_getattr("head_dim", None)
         ) is not None and head_dim > 0:
             return head_dim
 
         # NOTE: Some models (such as PLaMo2.1) use `hidden_size_per_head`
-        if getattr(self.hf_text_config, "hidden_size_per_head", None) is not None:
+        if self._safe_getattr("hidden_size_per_head", None) is not None:
             return self.hf_text_config.hidden_size_per_head
 
         if (total_num_attention_heads := self.get_total_num_attention_heads()) == 0:
@@ -153,8 +173,14 @@ class ModelArchConfigConvertorBase:
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
         default_factory = self.get_total_num_attention_heads
-        return getattr_iter(
-            self.hf_text_config, attributes, default_factory=default_factory
+        for attr in attributes:
+            val = self._safe_getattr(attr, None)
+            if val is not None:
+                return val
+        return (
+            default_factory()
+            if default_factory is not None
+            else getattr(self.hf_text_config, "num_attention_heads", 0)
         )
 
     def get_num_experts_from_block_configs(self) -> int:
@@ -328,7 +354,7 @@ class ModelArchConfigConvertorBase:
         ):
             # check is deepseek_v4 model
             if hasattr(self.hf_text_config, "compress_ratios"):
-                return getattr(self.hf_text_config, "head_dim", None) is not None
+                return self._safe_getattr("head_dim", None) is not None
             else:
                 return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         elif self.hf_text_config.model_type == "eagle":
@@ -671,7 +697,7 @@ class Gemma4MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         )
 
     def get_num_hidden_layers(self) -> int:
-        return getattr(self.hf_text_config, "num_hidden_layers", 0)
+        return self._safe_getattr("num_hidden_layers", 0)
 
 
 class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
