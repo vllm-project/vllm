@@ -494,9 +494,12 @@ def test_dcp_chunk_workspace_alignment_covers_interleave():
     config.cache_config.block_size = 32
     config.parallel_config.decode_context_parallel_size = 8
     config.parallel_config.cp_kv_cache_interleave_size = 8
-    config.scheduler_config.max_num_seqs = 3
 
-    assert align_mla_chunked_context_workspace_size(config, 100) == 192
+    # Alignment is lcm(block_size, dcp_size * interleave_size) = 64, and the
+    # workspace only has to hold a single aligned chunk step, independent of
+    # max_num_seqs.
+    assert align_mla_chunked_context_workspace_size(config, 100) == 128
+    assert align_mla_chunked_context_workspace_size(config, 8) == 64
 
 
 def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):

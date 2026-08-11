@@ -1705,11 +1705,7 @@ def align_mla_chunked_context_workspace_size(
             parallel_config.decode_context_parallel_size
             * parallel_config.cp_kv_cache_interleave_size,
         )
-    workspace_size = max(
-        workspace_size,
-        vllm_config.scheduler_config.max_num_seqs * alignment,
-    )
-    return round_up(workspace_size, alignment)
+    return round_up(max(workspace_size, alignment), alignment)
 
 
 def build_mla_chunked_context_metadata(

@@ -196,10 +196,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             64 * 1024,
             scheduler_config.max_num_seqs * topk_tokens,
         )
-        workspace_size = max(
-            workspace_size,
-            scheduler_config.max_num_seqs * cache_config.block_size,
-        )
+        workspace_size = max(workspace_size, cache_config.block_size)
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
             return align_mla_chunked_context_workspace_size(vllm_config, workspace_size)
         return workspace_size
