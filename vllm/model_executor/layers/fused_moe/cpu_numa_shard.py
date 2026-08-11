@@ -169,3 +169,41 @@ def place_expert_weights(*weights: torch.Tensor) -> None:
         if weight is None or weight.device.type != "cpu":
             continue
         torch.ops._C.place_moe_expert_weight(weight, BLOCK_N)
+
+
+def configure_and_place(model: torch.nn.Module) -> int:
+    """Set the shard count and move the MoE expert weights to match it.
+
+    Called once, after the model is loaded: by then the threads are bound and
+    the weights are resident, which are the two things the decision depends on.
+    Doing it here rather than in each quantization method's
+    ``process_weights_after_loading`` is deliberate -- the MXFP4 and FP8 CPU
+    paths do not route through the experts' post-load hook at all, so hooking
+    per-method would silently miss them.
+
+    Returns the shard count, which is 1 when nothing was sharded.
+    """
+    shards = configure()
+    if shards <= 1:
+        return shards
+
+    placed = 0
+    for _, module in model.named_modules():
+        w13 = getattr(module, "w13_weight", None)
+        w2 = getattr(module, "w2_weight", None)
+        if w13 is None or w2 is None:
+            continue
+        # Only the weights, not their scales. The scales are a 16th of the bytes
+        # for MXFP4, and their row axis does not line up with the block split on
+        # the FP8 block-quantized path (`scale_offset_per_block` divides by the
+        # group size there), so placing them would need a second rule to get a
+        # few percent of the traffic.
+        place_expert_weights(w13.data, w2.data)
+        placed += 1
+
+    logger.info(
+        "Placed the expert weights of %d MoE layer(s) across %d NUMA nodes.",
+        placed,
+        shards,
+    )
+    return shards
