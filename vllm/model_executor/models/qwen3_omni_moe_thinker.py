@@ -437,7 +437,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         # Compute chunk information
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
-        chunk_lengths = torch.tensor(
+        chunk_lengths = async_tensor_h2d(
             [self.n_window * 2] * chunk_num.sum(),
             dtype=torch.long,
             device=feature_lens.device,
