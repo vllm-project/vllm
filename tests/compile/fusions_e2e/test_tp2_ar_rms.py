@@ -219,9 +219,9 @@ def test_tp2_ar_rms_fusions(
 
     matches = matches_fn(n_layers)
     if model_impl == "transformers":
-        # TODO(BadrBasowid): Match the vLLM backend's fusion count once the
-        # separate residual add and RMSNorm operations are fused.
-        matches = matches._replace(aiter_ar_rms_fusion=1)
+        # Transformers add+RMSNorm canonicalization exposes every generic
+        # AR+RMS fusion site, including the final norm.
+        matches = matches._replace(aiter_ar_rms_fusion=matches.ar_rms_fusion)
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
