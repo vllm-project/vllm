@@ -44,7 +44,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
@@ -73,6 +73,7 @@ from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -133,7 +134,6 @@ class HYV3MoEFused(nn.Module):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
         if self.tp_size > config.num_experts:
@@ -152,10 +152,6 @@ class HYV3MoEFused(nn.Module):
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
         self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
@@ -183,7 +179,7 @@ class HYV3MoEFused(nn.Module):
         scoring_func = "sigmoid"
         e_score_correction_bias = self.expert_bias
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=self.n_routed_experts,
             top_k=top_k,
             hidden_size=config.hidden_size,
@@ -270,7 +266,7 @@ class HYV3Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             quant_config=quant_config,
-            bias=None,
+            bias=False,
             prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
@@ -648,21 +644,6 @@ class HYV3Model(nn.Module, MixtureOfExperts):
             loaded_params.add(name)
 
         return loaded_params
-
-
-def get_spec_layer_idx_from_weight_name(
-    config: PretrainedConfig, weight_name: str
-) -> int | None:
-    # HYV3MTP is enabled only when num_nextn_predict_layers is greater than 1
-    if (
-        hasattr(config, "num_nextn_predict_layers")
-        and config.num_nextn_predict_layers > 0
-    ):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}."):
-                return layer_idx + i
-    return None
 
 
 class HYV3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
