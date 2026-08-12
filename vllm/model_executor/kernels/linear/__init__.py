@@ -368,6 +368,7 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
         HummingInt8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [AiterInt8ScaledMMLinearKernel, TritonInt8ScaledMMLinearKernel],
+    PlatformEnum.XPU: [TritonInt8ScaledMMLinearKernel],
 }
 
 # in priority/performance order (when available)
@@ -425,6 +426,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum.XPU: [
         XPUFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
+        BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
 }
 
