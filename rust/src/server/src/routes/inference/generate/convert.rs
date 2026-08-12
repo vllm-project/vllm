@@ -4,10 +4,11 @@
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 
-use super::types::GenerateRequest;
+use super::types::{GenerateRequest, GenerateSamplingParams};
 use super::validate;
 use crate::error::ApiError;
 use crate::lora::LoraModelResolution;
+use crate::routes::openai::utils::types::StringOrArray;
 use crate::utils::{ResolvedRequestContext, merge_ec_transfer_params, merge_kv_transfer_params};
 
 /// Lowered generate request plus the response request ID.
@@ -54,9 +55,19 @@ pub(super) fn prepare_generate_request(
             .as_ref()
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
-    let include_logprobs = request.sampling_params.logprobs.is_some();
-    let include_prompt_logprobs = request.sampling_params.prompt_logprobs.is_some();
-    let mut sampling_params = request.sampling_params;
+    let include_logprobs = request.sampling_params.sampling.logprobs.is_some();
+    let include_prompt_logprobs = request.sampling_params.sampling.prompt_logprobs.is_some();
+
+    let GenerateSamplingParams {
+        sampling: mut sampling_params,
+        stop,
+        include_stop_str_in_output,
+        skip_special_tokens,
+        // Only gates `stop` (checked while validating); the Rust frontend
+        // always runs the shared detokenizer.
+        detokenize: _,
+    } = request.sampling_params;
+
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
         request.kv_transfer_params.as_ref(),
@@ -65,14 +76,20 @@ pub(super) fn prepare_generate_request(
         sampling_params.vllm_xargs,
         request.ec_transfer_params.as_ref(),
     );
+    let min_tokens = sampling_params.min_tokens.unwrap_or(0);
 
     let text_request = TextRequest {
         request_id: ctx.request_id.clone(),
         prompt: Prompt::TokenIds(request.token_ids),
         mm_features,
         sampling_params,
-        decode_options: TextDecodeOptions::default(),
-        intermediate: false,
+        decode_options: TextDecodeOptions {
+            skip_special_tokens,
+            include_stop_str_in_output,
+            stop_strings: stop.map(StringOrArray::into_vec),
+            min_tokens,
+        },
+        intermediate: stream,
         priority: request.priority,
         cache_salt: request.cache_salt,
         add_special_tokens: false,
@@ -161,6 +178,139 @@ mod tests {
                 .and_then(|mut xargs| xargs.remove("kv_transfer_params")),
             Some(json!({"connector": "x"}))
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_lowers_decode_options() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "sampling_params": {
+                "stop": ["END", "STOP"],
+                "include_stop_str_in_output": true,
+                "skip_special_tokens": false,
+                "min_tokens": 4
+            }
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            None,
+        )
+        .expect("prepare");
+
+        let decode_options = prepared.text_request.decode_options;
+        assert_eq!(
+            decode_options.stop_strings,
+            Some(vec!["END".to_string(), "STOP".to_string()])
+        );
+        assert!(decode_options.include_stop_str_in_output);
+        assert!(!decode_options.skip_special_tokens);
+        assert_eq!(decode_options.min_tokens, 4);
+    }
+
+    #[test]
+    fn prepare_generate_request_normalizes_scalar_stop() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "sampling_params": {"stop": "END"}
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            None,
+        )
+        .expect("prepare");
+
+        assert_eq!(
+            prepared.text_request.decode_options.stop_strings,
+            Some(vec!["END".to_string()])
+        );
+    }
+
+    #[test]
+    fn prepare_generate_request_defaults_decode_options_like_python() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "sampling_params": {}
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            None,
+        )
+        .expect("prepare");
+
+        let decode_options = prepared.text_request.decode_options;
+        assert_eq!(decode_options.stop_strings, None);
+        assert!(!decode_options.include_stop_str_in_output);
+        assert!(decode_options.skip_special_tokens);
+        assert_eq!(decode_options.min_tokens, 0);
+    }
+
+    #[test]
+    fn prepare_generate_request_keeps_integer_logit_bias_keys() {
+        // `logit_bias` has integer keys, which serde's `flatten` buffering
+        // cannot deserialize; the sampling params are split by hand instead.
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "sampling_params": {"logit_bias": {"123": 1.5}, "stop": ["END"]}
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            None,
+        )
+        .expect("prepare");
+
+        assert_eq!(
+            prepared
+                .text_request
+                .sampling_params
+                .logit_bias
+                .and_then(|bias| bias.get(&123).copied()),
+            Some(1.5)
+        );
+    }
+
+    #[test]
+    fn prepare_generate_request_streams_incrementally() {
+        // Streaming responses need intermediate decoded events; a non-stream
+        // request only observes the terminal one.
+        for (stream, intermediate) in [(true, true), (false, false)] {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "token_ids": [11, 22],
+                "stream": stream,
+                "sampling_params": {}
+            }))
+            .expect("parse request");
+
+            let prepared = prepare_generate_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare");
+
+            assert_eq!(prepared.text_request.intermediate, intermediate);
+        }
     }
 
     #[test]

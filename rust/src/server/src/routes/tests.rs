@@ -5807,6 +5807,103 @@ async fn non_stream_completions_stop_string_excluded_from_output() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn non_stream_generate_stop_string_truncates_token_ids() {
+    // The engine emits "say world"; the stop string "wor" ends the request and
+    // the token IDs stop at the token that completed the match. Note this is a
+    // shared `vllm-text` behavior: Python leaves the post-match tail in the
+    // token IDs, so it would return all of "say world" here.
+    let output_specs = vec![
+        (bytes_to_token_ids(b"say"), None),
+        (
+            bytes_to_token_ids(b" world"),
+            Some(EngineCoreFinishReason::Length),
+        ),
+    ];
+    let (app, engine_task) = test_app_with_stream_output_specs(output_specs).await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "token_ids": [11, 22],
+                        "stream": false,
+                        "sampling_params": {"stop": ["wor"]}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(
+        json["choices"][0]["token_ids"],
+        json!(bytes_to_token_ids(b"say wor"))
+    );
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_generate_without_stop_returns_every_token_id() {
+    // Without stop strings the route stays on the raw token stream, so every
+    // generated token ID is returned unchanged.
+    let output_specs = vec![
+        (bytes_to_token_ids(b"say"), None),
+        (
+            bytes_to_token_ids(b" world"),
+            Some(EngineCoreFinishReason::Length),
+        ),
+    ];
+    let (app, engine_task) = test_app_with_stream_output_specs(output_specs).await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "token_ids": [11, 22],
+                        "stream": false,
+                        "sampling_params": {"detokenize": false}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(
+        json["choices"][0]["token_ids"],
+        json!(bytes_to_token_ids(b"say world"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_completions_stop_string_included_in_output() {
     // Same tokens but include_stop_str_in_output=true includes the stop string in
     // the output.

@@ -17,9 +17,11 @@ use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
 use crate::routes::inference::generate::{
-    GenerateRequest, validate_request_compat as validate_generate_request,
+    GenerateRequest, GenerateSamplingParams, validate_request_compat as validate_generate_request,
 };
-use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
+use crate::routes::openai::utils::types::{
+    ListModelsResponse, ModelObject, StreamOptions, StringOrArray,
+};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
@@ -86,7 +88,13 @@ fn lower_render_request(
         request_id: Some(text_request.request_id),
         model: Some(model),
         token_ids,
-        sampling_params: text_request.sampling_params,
+        sampling_params: GenerateSamplingParams {
+            stop: text_request.decode_options.stop_strings.map(StringOrArray::Array),
+            include_stop_str_in_output: text_request.decode_options.include_stop_str_in_output,
+            skip_special_tokens: text_request.decode_options.skip_special_tokens,
+            detokenize: true,
+            sampling: text_request.sampling_params,
+        },
         stream,
         stream_options,
         cache_salt: text_request.cache_salt,
