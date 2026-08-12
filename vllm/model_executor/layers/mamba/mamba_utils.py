@@ -311,7 +311,12 @@ class MambaStateShapeCalculator:
         head_dim: int,
         tp_world_size: int,
         spec_query_len: int,
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+    ]:
         """Append KDA correction and packed key/gate record shapes."""
         local_num_heads = divide(num_heads, tp_world_size)
         return (
