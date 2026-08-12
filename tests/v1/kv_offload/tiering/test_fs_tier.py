@@ -443,10 +443,8 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
         tier.shutdown()
 
 
-def test_wait_idle_blocks_until_tasks_complete(monkeypatch):
+def test_wait_idle_blocks_until_tasks_complete():
     """wait_idle must not return while a task is still in flight."""
-
-    import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
 
     # Make batch_store_block blocking
     gate = threading.Event()
@@ -454,7 +452,6 @@ def test_wait_idle_blocks_until_tasks_complete(monkeypatch):
     def blocking_batch_store_block(*args, **kwargs):
         gate.wait(timeout=5.0)
 
-    monkeypatch.setattr(mgr_mod, "batch_store_block", blocking_batch_store_block)
     # dummy task
     task = Task(path="unused", offset=0)
 
@@ -463,7 +460,7 @@ def test_wait_idle_blocks_until_tasks_complete(monkeypatch):
         job_id=1,
         n_tasks=1,
         tasks=[task],
-        make_batch_fn=lambda batch: mgr_mod.batch_store_block,
+        make_batch_fn=lambda batch: blocking_batch_store_block,
     )
 
     waiter = threading.Thread(target=pool.wait_idle)
