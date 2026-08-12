@@ -10,6 +10,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     _merge_multimodal_embeddings,
     get_spec_layer_idx_from_weight_name,
+    skip_spec_layers,
 )
 from vllm.platforms import current_platform
 
@@ -46,6 +47,27 @@ def test_get_spec_layer_idx_without_mtp_layers():
         )
         is None
     )
+
+
+@pytest.mark.cpu_test
+def test_skip_spec_layers_for_supported_prefixes():
+    config = SimpleNamespace(
+        num_hidden_layers=16,
+        num_nextn_predict_layers=1,
+    )
+    weights = [
+        ("model.layers.15.input_layernorm.weight", torch.empty(0)),
+        ("model.layers.16.input_layernorm.weight", torch.empty(0)),
+        ("layers.16.input_layernorm.weight", torch.empty(0)),
+        (
+            "model.language_model.layers.16.input_layernorm.weight",
+            torch.empty(0),
+        ),
+    ]
+
+    remaining = list(skip_spec_layers(weights, config))
+
+    assert [name for name, _ in remaining] == ["model.layers.15.input_layernorm.weight"]
 
 
 class ModuleWithBatchNorm(torch.nn.Module):
