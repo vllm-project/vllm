@@ -17,8 +17,8 @@ from vllm.outputs import (
     PoolingOutput,
     PoolingRequestOutput,
     RequestOutput,
+    SamplingMask,
 )
-from vllm.sampling_mask import SamplingMask
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (

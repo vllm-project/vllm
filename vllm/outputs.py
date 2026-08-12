@@ -13,10 +13,20 @@ from typing_extensions import TypeVar
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.sampling_mask import SamplingMask
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class SamplingMask:
+    """Per-token sampling support sets aligned with completion token IDs.
+
+    Each inner list contains the vocabulary token IDs that survived
+    top-k / top-p / min-p filtering for the corresponding generated token.
+    """
+
+    token_ids: list[list[int]]
 
 
 @dataclass

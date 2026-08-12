@@ -346,7 +346,7 @@ class ModelRunnerOutput:
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
 
-    # ``None`` when ``enable_return_sampling_mask`` is off.
+    # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
     @staticmethod
