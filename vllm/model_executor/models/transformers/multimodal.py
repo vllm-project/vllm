@@ -537,23 +537,13 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
             )
 
         if split_sizes:
-            image_token_ids = getattr(hf_processor, "image_token_ids", None)
-            if image_token_ids is None:
-                # Transformers <5.10.0
-                image_token_ids = [hf_processor.image_token_id]
-            image_token_ids = torch.tensor(
-                [i for i in image_token_ids if i is not None]
-            )
-
-            chunked_mm_positions = torch.split(mm_positions, split_sizes)
-            chunked_mm_tokens = torch.split(prompt_tensor[is_image], split_sizes)
+            # Positions hold only image tokens, so there is nothing to mask out
             ranges = [
                 PlaceholderRange(
                     offset=positions[0].item(),
                     length=positions.shape[0],
-                    is_embed=torch.isin(mm_tokens, image_token_ids),
                 )
-                for positions, mm_tokens in zip(chunked_mm_positions, chunked_mm_tokens)
+                for positions in torch.split(mm_positions, split_sizes)
             ]
             mm_placeholders = {"image": ranges}
 
