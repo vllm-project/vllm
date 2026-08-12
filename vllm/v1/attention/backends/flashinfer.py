@@ -922,8 +922,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         supports_spec_as_decode = (
             self.flashinfer_trtllm_api_decode_kernel
             == FlashInferDecodeKernel.TRTLLM_GEN
-            or self.use_dedicated_xqa
-        )
+            and not self.is_kvcache_fp8_k_nvfp4_v
+        ) or self.use_dedicated_xqa
         self._init_reorder_batch_threshold(
             1,
             supports_spec_as_decode=supports_spec_as_decode,
