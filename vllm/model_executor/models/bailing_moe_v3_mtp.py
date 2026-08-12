@@ -31,6 +31,7 @@ from vllm.model_executor.models.bailing_moe_v3 import (
     BailingMoeV3MoE,
     _configure_ling_fp8_quant_config,
     _maybe_pad_block_fp8_shared_expert_checkpoint_tensor,
+    _normalize_mxfp4_expert_param_name,
 )
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
@@ -391,6 +392,9 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
                     if weight_name not in name:
                         continue
                     mapped_name = name.replace(weight_name, param_name)
+                    mapped_name = _normalize_mxfp4_expert_param_name(
+                        self.quant_config, mapped_name
+                    )
                     if load_param(mapped_name, loaded_weight, (expert_id, shard_id)):
                         loaded = True
                         break

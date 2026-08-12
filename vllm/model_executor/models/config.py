@@ -371,6 +371,26 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
                 quant_config["quant_method"] = "mxfp4"
 
 
+class BailingMoeV3ForCausalLMConfig(VerifyAndUpdateConfig):
+    """Map Ling3's mixed FP8/MXFP4 metadata to the existing FP8 config."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        for cfg in (
+            model_config.hf_config,
+            model_config.hf_text_config,
+            model_config.model_arch_config,
+        ):
+            quant_config = getattr(cfg, "quantization_config", None)
+            if not (
+                isinstance(quant_config, dict)
+                and quant_config.get("quant_method") == "fp8"
+                and quant_config.get("routed_experts_quant_method") == "mxfp4"
+            ):
+                continue
+            quant_config["store_dtype"] = "mxfp4"
+
+
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -893,6 +913,8 @@ class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
+    "BailingMoeV3ForCausalLM": BailingMoeV3ForCausalLMConfig,
+    "BailingMoeV3MTPModel": BailingMoeV3ForCausalLMConfig,
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,

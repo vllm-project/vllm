@@ -219,6 +219,19 @@ def _configure_ling_fp8_quant_config(
         quant_config.ignored_layers_match_mode = "suffix"
 
 
+def _normalize_mxfp4_expert_param_name(
+    quant_config: QuantizationConfig | None,
+    name: str,
+) -> str:
+    if (
+        isinstance(quant_config, Fp8Config)
+        and quant_config.store_dtype == "mxfp4"
+        and name.endswith("_weight_scale_inv")
+    ):
+        return name.removesuffix("_inv")
+    return name
+
+
 def _is_fp8_module_excluded(
     quant_config: QuantizationConfig | None,
     prefix: str,
@@ -1487,6 +1500,9 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 for param_name, weight_name, expert_id, shard_id in expert_mappings:
                     if weight_name in name:
                         mapped = name.replace(weight_name, param_name)
+                        mapped = _normalize_mxfp4_expert_param_name(
+                            self.quant_config, mapped
+                        )
                         load_param(mapped, weight, (expert_id, shard_id))
                         break
                 continue
