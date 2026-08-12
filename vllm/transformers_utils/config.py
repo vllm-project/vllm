@@ -1072,6 +1072,7 @@ def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
     revision: str | None = None,
+    code_revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
     hf_token: bool | str | None = None,
 ) -> GenerationConfig | None:
@@ -1087,6 +1088,7 @@ def try_get_generation_config(
                 model,
                 trust_remote_code=trust_remote_code,
                 revision=revision,
+                code_revision=code_revision,
                 config_format=config_format,
                 token=hf_token,
             )

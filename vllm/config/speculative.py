@@ -122,7 +122,7 @@ class SpeculativeConfig:
     attention_backend: AttentionBackendEnum | None = None
     """Attention backend to use for the draft model. When `None`, the backend is
     automatically selected. Useful when the drafter requires a different attention
-    backend (e.g. DFlash needs a non-causal-capable backend like FLASH_ATTN)."""
+    backend (e.g. DFlash needs a backend that supports non-causal attention)."""
     kv_cache_dtype: CacheDType | None = None
     """KV cache dtype for the draft model. When `None`, the draft inherits the
     target model's `--kv-cache-dtype`."""
@@ -544,8 +544,16 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
             )
-        if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
-            is_moe = hf_config.model_type == "qwen3_5_moe"
+        if hf_config.model_type in (
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+        ):
+            # Checkpoints that ship only the text config resolve to the
+            # `qwen3_5_text` / `qwen3_5_moe_text` model types and carry the
+            # same `mtp_num_hidden_layers` field as the multimodal ones.
+            is_moe = hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text")
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
             hf_config.update(
