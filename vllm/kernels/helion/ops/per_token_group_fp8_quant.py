@@ -27,6 +27,30 @@ from vllm.kernels.helion.register import register_kernel
 
 logger = init_logger(__name__)
 
+# H100 multi-shape schedule from pytorch/helion#3154.
+_SINGLE_CONFIGS = {
+    "nvidia_h100": helion.Config(
+        block_sizes=[8],
+        loop_orders=[[2, 1, 0]],
+        l2_groupings=[8],
+        range_unroll_factors=[0],
+        range_warp_specializes=[],
+        range_num_stages=[],
+        range_multi_buffers=[None],
+        range_flattens=[None],
+        load_eviction_policies=["first"],
+        num_warps=4,
+        num_stages=2,
+        indexing=[
+            "tensor_descriptor",
+            "tensor_descriptor",
+            "tensor_descriptor",
+        ],
+        atomic_indexing=[],
+        pid_type="flat",
+    )
+}
+
 
 def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all
@@ -185,6 +209,7 @@ def baseline(
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
     ),
+    single_configs=_SINGLE_CONFIGS,
 )  # type: ignore[misc]
 def per_token_group_fp8_quant(
     input: torch.Tensor,  # [num_tokens, hidden_size]

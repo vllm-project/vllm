@@ -185,6 +185,7 @@ if TYPE_CHECKING:
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_HELION_KERNELS: bool = True
+    VLLM_HELION_USE_SINGLE_CONFIG: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
@@ -1492,6 +1493,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use compatible Helion kernels in CUDA graphs when Helion is installed.
     "VLLM_USE_HELION_KERNELS": lambda: bool(
         int(os.getenv("VLLM_USE_HELION_KERNELS", "1"))
+    ),
+    # Use one multi-shape schedule per supported Helion kernel and platform.
+    "VLLM_HELION_USE_SINGLE_CONFIG": lambda: bool(
+        int(os.getenv("VLLM_HELION_USE_SINGLE_CONFIG", "0"))
     ),
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),

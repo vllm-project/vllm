@@ -61,6 +61,8 @@ from helion.autotuner.base_search import BaseAutotuner
 from helion.runtime.config import Config
 from helion.runtime.settings import default_autotuner_fn
 
+from vllm import envs
+
 # TODO(gmagogsfm): Remove CustomOp fallback path (_get_or_register_custom_op,
 # vllm_helion_lib, direct_register_custom_op) once vLLM requires PyTorch >= 2.11.
 # FIXME(gmagogsfm): Re-enable HOP path once performance regression is fixed.
@@ -81,6 +83,7 @@ logger = init_logger(__name__)
 vllm_helion_lib = Library("vllm_helion", "FRAGMENT")  # noqa
 
 ConfigPicker = Callable[[tuple[Any, ...], list[CaseKey]], CaseKey | None]
+SingleConfigs = dict[str, Config]
 
 
 def validate_helion_settings(
@@ -153,11 +156,13 @@ class ConfiguredHelionKernel:
         config_picker: ConfigPicker | None,
         raw_kernel_func: Callable,
         helion_settings: helion.Settings | None = None,
+        single_configs: SingleConfigs | None = None,
     ):
         self.op_name = op_name
         self.config_picker = config_picker
         self.raw_kernel_func = raw_kernel_func
         self.helion_settings = helion_settings
+        self.single_configs = single_configs or {}
         self._decorated_kernel = self._create_decorated_kernel()
 
     def __call__(self, *args, **kwargs):
@@ -231,6 +236,26 @@ class ConfiguredHelionKernel:
                 f"on platform '{self.platform}'"
             )
 
+        if not envs.VLLM_HELION_USE_SINGLE_CONFIG or not self.single_configs:
+            return
+
+        single_config = self.single_configs.get(self.platform)
+        if single_config is None:
+            logger.warning(
+                "No single config available for Helion kernel '%s' on "
+                "platform '%s'; using per-shape configs",
+                self.op_name,
+                self.platform,
+            )
+            return
+
+        self.configs = dict.fromkeys(self.configs, single_config)
+        logger.info(
+            "Using the single config for Helion kernel '%s' on platform '%s'",
+            self.op_name,
+            self.platform,
+        )
+
     def _create_decorated_kernel(self) -> Callable[..., Any]:
         self._load_platform_configs()
 
@@ -264,6 +289,7 @@ class HelionKernelWrapper:
         mutates_args: list[str] | None = None,
         helion_settings: helion.Settings | None = None,
         input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
+        single_configs: SingleConfigs | None = None,
     ):
         # Validate helion_settings doesn't conflict with our custom autotuner
         validate_helion_settings(helion_settings, op_name)
@@ -274,6 +300,7 @@ class HelionKernelWrapper:
         self.helion_settings = helion_settings
         self._config_picker = config_picker
         self._input_generator = input_generator
+        self._single_configs = single_configs
         self._mutates_args = mutates_args
         self._configured_kernel: ConfiguredHelionKernel | None = None
         # TODO(@gmagogsfm): Remove this disable flag once integrated with vLLM IR,
@@ -347,6 +374,7 @@ class HelionKernelWrapper:
                 config_picker=self._config_picker,
                 raw_kernel_func=self.raw_kernel_func,
                 helion_settings=self.helion_settings,
+                single_configs=self._single_configs,
             )
         return self._configured_kernel
 
@@ -408,6 +436,7 @@ def register_kernel(
     mutates_args: list[str] | None = None,
     helion_settings: helion.Settings | None = None,
     input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
+    single_configs: SingleConfigs | None = None,
 ) -> Callable[[Callable], HelionKernelWrapper]:
     """Register a Helion kernel with pre-tuned config selection.
 
@@ -435,6 +464,11 @@ def register_kernel(
                         "4096": (torch.randn(4096, device="cuda"), 0.5),
                         "8192": (torch.randn(8192, device="cuda"), 0.5),
                     }
+
+        single_configs: Optional mapping from platform name to a single
+            multi-shape config. When ``VLLM_HELION_USE_SINGLE_CONFIG=1``, the
+            platform config replaces every per-shape config value while the
+            original keys remain available to the config picker and cache.
     """
 
     def decorator(kernel_func: Callable) -> HelionKernelWrapper:
@@ -462,6 +496,7 @@ def register_kernel(
             mutates_args=mutates_args,
             helion_settings=helion_settings,
             input_generator=input_generator,
+            single_configs=single_configs,
         )
 
         _REGISTERED_KERNELS[final_op_name] = kernel_wrapper

@@ -33,6 +33,33 @@ from vllm.kernels.helion.register import register_kernel
 
 logger = init_logger(__name__)
 
+# H100 multi-shape schedule from pytorch/helion#3154.
+_SINGLE_CONFIGS = {
+    "nvidia_h100": helion.Config(
+        block_sizes=[8],
+        loop_orders=[[1, 0, 2]],
+        l2_groupings=[64],
+        range_unroll_factors=[0],
+        range_multi_buffers=[None],
+        range_flattens=[None],
+        load_eviction_policies=["first", "first"],
+        num_warps=4,
+        num_stages=6,
+        indexing=[
+            "tensor_descriptor",
+            "pointer",
+            "pointer",
+            "pointer",
+            # The scale_ub path adds one load/store operation.
+            "pointer",
+        ],
+        pid_type="flat",
+        atomic_indexing=[],
+        range_warp_specializes=[],
+        range_num_stages=[],
+    )
+}
+
 
 def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all input
@@ -198,6 +225,7 @@ def baseline(
         autotune_baseline_fn=baseline,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
     ),
+    single_configs=_SINGLE_CONFIGS,
 )  # type: ignore[misc]
 def silu_and_mul_per_block_quant(
     out: torch.Tensor,  # [num_tokens, intermediate_size]
