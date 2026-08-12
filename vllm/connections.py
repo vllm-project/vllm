@@ -100,17 +100,19 @@ def _check_content_length(
 
 
 def _append_chunk(
-    buffer: bytearray,
+    chunks: list[bytes],
     chunk: bytes,
+    received_bytes: int,
     max_bytes: int | None,
     media_download_limit: bool,
-) -> None:
+) -> int:
     if not chunk:
-        return
-    received_bytes = len(buffer) + len(chunk)
+        return received_bytes
+    received_bytes += len(chunk)
     if max_bytes is not None and received_bytes > max_bytes:
         _raise_size_exceeded(max_bytes, received_bytes, media_download_limit)
-    buffer.extend(chunk)
+    chunks.append(chunk)
+    return received_bytes
 
 
 def _read_response_bytes(response: requests.Response, max_bytes: int | None) -> bytes:
@@ -123,10 +125,13 @@ def _read_response_bytes(response: requests.Response, max_bytes: int | None) -> 
         max_bytes,
         media_download_limit,
     )
-    buffer = bytearray()
+    chunks: list[bytes] = []
+    received_bytes = 0
     for chunk in response.iter_content(_RESPONSE_READ_CHUNK_SIZE):
-        _append_chunk(buffer, chunk, max_bytes, media_download_limit)
-    return bytes(buffer)
+        received_bytes = _append_chunk(
+            chunks, chunk, received_bytes, max_bytes, media_download_limit
+        )
+    return b"".join(chunks)
 
 
 async def _async_read_response_bytes(
@@ -137,10 +142,13 @@ async def _async_read_response_bytes(
         return await response.read()
 
     _check_content_length(response.content_length, max_bytes, media_download_limit)
-    buffer = bytearray()
+    chunks: list[bytes] = []
+    received_bytes = 0
     async for chunk in response.content.iter_chunked(_RESPONSE_READ_CHUNK_SIZE):
-        _append_chunk(buffer, chunk, max_bytes, media_download_limit)
-    return bytes(buffer)
+        received_bytes = _append_chunk(
+            chunks, chunk, received_bytes, max_bytes, media_download_limit
+        )
+    return b"".join(chunks)
 
 
 def _is_retryable(exc: Exception) -> bool:
