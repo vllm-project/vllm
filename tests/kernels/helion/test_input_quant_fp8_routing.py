@@ -126,3 +126,34 @@ def test_forward_cuda_compiles_with_helion_enabled(monkeypatch):
 
     assert q.shape == x.shape
     assert q.dtype == torch.float8_e4m3fn
+
+
+def test_forward_hip_compile_keeps_group_quant_routable(monkeypatch):
+    """AITER may stay enabled for GEMM while compiled group quant remains native."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    import vllm.envs as envs
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+    monkeypatch.setattr(envs, "VLLM_USE_HELION_KERNELS", True)
+
+    def fail_aiter_group_quant(*args, **kwargs):
+        raise AssertionError("compiled group quant should remain Helion-routable")
+
+    monkeypatch.setattr(rocm_aiter_ops, "group_fp8_quant", fail_aiter_group_quant)
+
+    with set_current_vllm_config(VllmConfig()):
+        quant = QuantFP8(
+            static=False, group_shape=GroupShape(1, _GROUP_SIZE), use_ue8m0=False
+        )
+        quant.use_aiter = True
+        x = torch.randn(32, 4096, device="cuda", dtype=torch.bfloat16).contiguous()
+        compiled = torch.compile(quant.forward_hip, fullgraph=True)
+        q, s = compiled(x)
+
+    assert q.shape == x.shape
+    assert s.shape == (x.shape[0], x.shape[1] // _GROUP_SIZE)

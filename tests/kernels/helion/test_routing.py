@@ -12,10 +12,31 @@ from vllm.kernels.helion.routing import (
     _HELION_TO_NATIVE_OP,
     build_compiled_helion_op_map,
 )
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_helion
 
 if not has_helion():
     pytest.skip("Helion is not installed", allow_module_level=True)
+
+
+@pytest.mark.parametrize("name", list(_HELION_TO_NATIVE_OP))
+def test_rocm_uses_separate_kernel_body(name: str):
+    import_all_kernels()
+    kernel = get_registered_kernels()[name]
+    module_suffix = f"rocm.{name}" if current_platform.is_rocm() else name
+    assert kernel.raw_kernel_func.__module__.endswith(module_suffix)
+
+
+@pytest.mark.parametrize("name", list(_HELION_TO_NATIVE_OP))
+def test_rocm_uses_aiter_autotune_baseline(name: str):
+    import_all_kernels()
+    kernel = get_registered_kernels()[name]
+    baseline = kernel.helion_settings.autotune_baseline_fn
+    if current_platform.is_rocm():
+        assert baseline.__name__ == f"{name}_baseline_rocm"
+        assert baseline.__module__.endswith(f"rocm.{name}")
+    else:
+        assert baseline.__name__ == "baseline"
 
 
 def _mutation_signature(op: torch._ops.OpOverload) -> tuple[tuple[str, bool], ...]:
@@ -90,9 +111,15 @@ def test_compiled_route_uses_native_then_captures_helion(name: str):
 
     for index, schema_arg in enumerate(native_op._schema.arguments):
         if schema_arg.alias_info and schema_arg.alias_info.is_write:
-            torch.testing.assert_close(
-                captured_args[index].float(),
-                expected_args[index].float(),
-                rtol=0.1,
-                atol=0.1,
-            )
+            captured = captured_args[index]
+            expected = expected_args[index]
+            if expected.dtype == current_platform.fp8_dtype():
+                max_ulp = (
+                    captured.view(torch.uint8).to(torch.int16)
+                    - expected.view(torch.uint8).to(torch.int16)
+                ).abs().max()
+                assert max_ulp <= 1
+            else:
+                torch.testing.assert_close(
+                    captured.float(), expected.float(), rtol=0.1, atol=0.1
+                )

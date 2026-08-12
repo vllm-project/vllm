@@ -71,6 +71,7 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74b9": "AMD_Instinct_MI325X",  # MI325X VF
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
+    "0x75a0": "AMD_Instinct_MI350X",
     "0x744c": "AMD_Radeon_RX7900XTX",
     # RDNA 3.5 APUs (Strix Point / Strix Halo)
     "0x150e": "AMD_Radeon_890M",  # gfx1150, Strix Point

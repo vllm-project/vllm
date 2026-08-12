@@ -23,6 +23,10 @@ if not has_helion():
 import helion
 import helion.language as hl
 
+from vllm.kernels.helion.ops.rocm.per_token_group_fp8_quant import (
+    per_token_group_fp8_quant_baseline_rocm,
+    per_token_group_fp8_quant_rocm,
+)
 from vllm.kernels.helion.register import register_kernel
 
 logger = init_logger(__name__)
@@ -201,13 +205,21 @@ def baseline(
     output_q.copy_(y.view(num_tokens, hidden_size).to(output_q.dtype))
 
 
+autotune_baseline = (
+    per_token_group_fp8_quant_baseline_rocm
+    if current_platform.is_rocm()
+    else baseline
+)
+
+
 @register_kernel(
     mutates_args=["output_q", "output_s"],
     config_picker=pick_config,
+    rocm_kernel_func=per_token_group_fp8_quant_rocm,
     input_generator=generate_inputs,
     fake_impl=fake_impl,
     helion_settings=helion.Settings(
-        autotune_baseline_fn=baseline,
+        autotune_baseline_fn=autotune_baseline,
     ),
     single_configs=_SINGLE_CONFIGS,
 )  # type: ignore[misc]

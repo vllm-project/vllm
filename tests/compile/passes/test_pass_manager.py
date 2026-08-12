@@ -12,7 +12,9 @@ from vllm.compilation.passes.inductor_pass import (
 )
 from vllm.compilation.passes.pass_manager import PostGradPassManager
 from vllm.config import ModelConfig, VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.config.utils import Range
+from vllm.platforms import current_platform
 
 
 # dummy custom pass that doesn't inherit
@@ -81,3 +83,29 @@ def test_pass_manager_uuid(callable):
         pass_manager3.configure(config2)
         pass_manager3.add(callable)
         assert uuid1 != pass_manager3.uuid()
+
+
+def test_helion_rms_fusion_precedes_aiter_while_aiter_linear_stays_enabled():
+    from vllm import envs
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not (
+        current_platform.is_rocm()
+        and envs.VLLM_USE_HELION_KERNELS
+        and rocm_aiter_ops.is_enabled()
+    ):
+        pytest.skip("requires ROCm with both Helion and AITER enabled")
+
+    config = VllmConfig(model_config=ModelConfig(dtype=torch.bfloat16))
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+    config.compilation_config.pass_config.fuse_norm_quant = True
+
+    pass_manager = PostGradPassManager()
+    pass_manager.configure(config)
+    pass_names = [type(pass_).__name__ for pass_ in pass_manager.passes]
+
+    assert pass_names.index("RMSNormQuantFusionPass") < pass_names.index(
+        "RocmAiterRMSNormQuantFusionPass"
+    )
+    assert pass_manager.helion_routing is not None
+    assert rocm_aiter_ops.is_linear_fp8_enabled()

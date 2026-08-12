@@ -322,6 +322,11 @@ class HelionKernelWrapper:
                 self._disabled_reason,
             )
 
+    @property
+    def is_enabled(self) -> bool:
+        """Whether this kernel has a usable config on the current platform."""
+        return not self._disabled
+
     def __call__(self, *args, **kwargs):
         if self._disabled:
             raise RuntimeError(
@@ -432,6 +437,7 @@ def register_kernel(
     op_name: str | None = None,
     *,
     config_picker: ConfigPicker,
+    rocm_kernel_func: Callable | None = None,
     fake_impl: Callable | None = None,
     mutates_args: list[str] | None = None,
     helion_settings: helion.Settings | None = None,
@@ -453,6 +459,10 @@ def register_kernel(
                     best = min(config_keys, key=lambda k: abs(k["size"] - x.shape[0]))
                     return best
 
+        rocm_kernel_func: Optional ROCm-specific raw kernel implementation.
+            When provided, ROCm registers this function while other platforms
+            continue to register the decorated function.
+
         input_generator: Optional. Returns ``dict[str, tuple]`` where
             each key is a serialized config key and each value is a
             tuple of arguments to pass to the kernel.
@@ -473,6 +483,11 @@ def register_kernel(
 
     def decorator(kernel_func: Callable) -> HelionKernelWrapper:
         final_op_name = op_name if op_name else kernel_func.__name__
+        if rocm_kernel_func is not None:
+            from vllm.platforms import current_platform
+
+            if current_platform.is_rocm():
+                kernel_func = rocm_kernel_func
 
         if final_op_name in _REGISTERED_KERNELS:
             raise ValueError(
@@ -503,7 +518,7 @@ def register_kernel(
 
         logger.info(
             "Registered Helion kernel '%s' as HelionKernelWrapper",
-            kernel_func.__name__,
+            final_op_name,
         )
 
         return kernel_wrapper

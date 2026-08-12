@@ -22,6 +22,10 @@ from vllm.kernels.helion.ops.rms_norm_per_block_quant import (
     pick_config,
     rms_norm_per_block_quant,
 )
+from vllm.kernels.helion.ops.rocm.rms_norm_per_block_quant import (
+    rms_norm_per_block_quant_reference_rocm,
+)
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_helion
 from vllm.utils.torch_utils import set_random_seed
 
@@ -250,7 +254,12 @@ class TestRmsNormPerBlockQuantCorrectness:
 
         ops_scales = ref_scales.clone()
 
-        baseline(
+        reference = (
+            rms_norm_per_block_quant_reference_rocm
+            if current_platform.is_rocm()
+            else baseline
+        )
+        reference(
             ref_out,
             input,
             weight,

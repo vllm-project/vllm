@@ -29,6 +29,10 @@ if not has_helion():
 import helion
 import helion.language as hl
 
+from vllm.kernels.helion.ops.rocm.silu_and_mul_per_block_quant import (
+    silu_and_mul_per_block_quant_baseline_rocm,
+    silu_and_mul_per_block_quant_rocm,
+)
 from vllm.kernels.helion.register import register_kernel
 
 logger = init_logger(__name__)
@@ -87,14 +91,13 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
             device=input.device,
             dtype=scale_dtype,
         )
-        # scale_ub clamps the per-group amax of the SiLU-and-mul activation. Use
-        # a non-degenerate upper bound (midway between the mean and max of the
-        # activation magnitude) so clamping is partially active and the baseline
-        # comparison is meaningful. torch.mean(input) ~= 0 for the zero-mean
-        # input would collapse every scale to the floor and saturate the output.
-        # Mirrors tests/kernels/helion/test_silu_and_mul_per_block_quant.py.
-        act_abs = SiluAndMul.forward_native(input.to(torch.float32)).abs()
-        scale_ub = (0.5 * (act_abs.mean() + act_abs.amax())).to(scale_dtype)
+        if current_platform.is_rocm():
+            # AITER's fused activation/group-quant op does not support scale_ub.
+            scale_ub = None
+        else:
+            # Use a non-degenerate upper bound so clamping is partially active.
+            act_abs = SiluAndMul.forward_native(input.to(torch.float32)).abs()
+            scale_ub = (0.5 * (act_abs.mean() + act_abs.amax())).to(scale_dtype)
 
         config_key = CaseKey(
             {
@@ -216,13 +219,21 @@ def baseline(
     )
 
 
+autotune_baseline = (
+    silu_and_mul_per_block_quant_baseline_rocm
+    if current_platform.is_rocm()
+    else baseline
+)
+
+
 @register_kernel(
     mutates_args=["out", "scales"],
     config_picker=pick_config,
+    rocm_kernel_func=silu_and_mul_per_block_quant_rocm,
     input_generator=generate_inputs,
     fake_impl=fake_impl,
     helion_settings=helion.Settings(
-        autotune_baseline_fn=baseline,
+        autotune_baseline_fn=autotune_baseline,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
     ),
     single_configs=_SINGLE_CONFIGS,
