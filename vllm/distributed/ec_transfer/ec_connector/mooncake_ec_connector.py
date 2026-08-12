@@ -13,6 +13,9 @@ from __future__ import annotations
 import json
 import threading
 import time
+import uuid
+from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,6 +39,8 @@ from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
 
+_LEASE_TTL_SECONDS = 300
+
 _MOONCAKE_IMPORT_ERROR: ImportError | None
 try:
     from mooncake.engine import TransferEngine
@@ -56,6 +61,7 @@ class ECMooncakeLoadSpec:
     shape: tuple[int, ...]
     dtype: str
     producer_zmq: str
+    lease_id: str
 
 
 @dataclass
@@ -68,6 +74,12 @@ class ECMooncakeConnectorMetadata(ECConnectorMetadata):
         self.loads.append(spec)
 
 
+@dataclass
+class _RegisteredTensor:
+    tensor: torch.Tensor
+    in_flight: int = 0
+
+
 class ECMooncakeRegistryServer:
     """Lightweight HTTP registry on the producer for remote has_cache_item / info."""
 
@@ -75,6 +87,7 @@ class ECMooncakeRegistryServer:
         self.host = host
         self.port = port
         self._entries: dict[str, dict[str, Any]] = {}
+        self._leases: dict[str, dict[str, float]] = {}
         self._lock = threading.Lock()
         self.app = FastAPI()
         self._register_routes()
@@ -86,9 +99,13 @@ class ECMooncakeRegistryServer:
         async def ec_info(mm_hash: str) -> dict[str, Any]:
             with self._lock:
                 data = self._entries.get(mm_hash)
-            if data is None:
-                raise HTTPException(status_code=404, detail="unknown mm_hash")
-            return data
+                if data is None:
+                    raise HTTPException(status_code=404, detail="unknown mm_hash")
+                lease_id = uuid.uuid4().hex
+                self._leases.setdefault(mm_hash, {})[lease_id] = (
+                    time.monotonic() + _LEASE_TTL_SECONDS
+                )
+                return {**data, "lease_id": lease_id}
 
     def start(self) -> None:
         if self.server_thread is not None:
@@ -116,9 +133,31 @@ class ECMooncakeRegistryServer:
         with self._lock:
             self._entries[mm_hash] = payload
 
-    def unpublish(self, mm_hash: str) -> None:
+    def unpublish(self, mm_hash: str) -> dict[str, Any] | None:
         with self._lock:
-            self._entries.pop(mm_hash, None)
+            self._leases.pop(mm_hash, None)
+            return self._entries.pop(mm_hash, None)
+
+    def unpublish_if_unleased(self, mm_hash: str) -> tuple[bool, dict[str, Any] | None]:
+        with self._lock:
+            leases = self._leases.get(mm_hash, {})
+            now = time.monotonic()
+            leases = {lease: expiry for lease, expiry in leases.items() if expiry > now}
+            if leases:
+                self._leases[mm_hash] = leases
+                return False, None
+            self._leases.pop(mm_hash, None)
+            return True, self._entries.pop(mm_hash, None)
+
+    def consume_lease(self, mm_hash: str, lease_id: str) -> bool:
+        with self._lock:
+            leases = self._leases.get(mm_hash)
+            if leases is None:
+                return False
+            expiry = leases.pop(lease_id, 0)
+            if not leases:
+                self._leases.pop(mm_hash, None)
+            return expiry > time.monotonic()
 
 
 class ECMooncakeConnector(ECConnectorBase):
@@ -161,6 +200,9 @@ class ECMooncakeConnector(ECConnectorBase):
         self._protocol: str = self._extra.get("mooncake_protocol", "rdma")
         self._remote_registry_url: str | None = self._extra.get("remote_registry_url")
         self._registry_http_port: int = int(self._extra.get("registry_http_port", 9018))
+        self._registered_capacity = int(self._ec_cfg.ec_buffer_size)
+        if self._registered_capacity <= 0:
+            raise ValueError("ECMooncakeConnector requires ec_buffer_size > 0.")
         self._model_config = vllm_config.model_config
         self._metadata_fields_cache: dict[str, set[str]] = {}
 
@@ -175,9 +217,13 @@ class ECMooncakeConnector(ECConnectorBase):
         self._zmq_listen_addr: str | None = None
         self._zmq_thread: threading.Thread | None = None
         self._zmq_ctx: zmq.Context | None = None
-        self._tensor_by_hash: dict[str, torch.Tensor] = {}
+        self._zmq_stop = threading.Event()
+        self._tensor_by_hash: OrderedDict[str, _RegisteredTensor] = OrderedDict()
+        self._registered_bytes = 0
+        self._pending_unregister: dict[int, torch.Tensor] = {}
         self._tensor_lock = threading.Lock()
         self._producer_services_started = False
+        self._shutdown = False
 
         if (
             role == ECConnectorRole.SCHEDULER
@@ -203,6 +249,56 @@ class ECMooncakeConnector(ECConnectorBase):
             )
         return self._engine
 
+    def _unregister_memory(self, tensor: torch.Tensor) -> bool:
+        assert self._engine is not None
+        ret = self._engine.unregister_memory(tensor.data_ptr())
+        if ret != 0:
+            logger.error(
+                "Mooncake EC memory unregistration failed for address %d: %d",
+                tensor.data_ptr(),
+                ret,
+            )
+            self._pending_unregister[tensor.data_ptr()] = tensor
+            return False
+        self._pending_unregister.pop(tensor.data_ptr(), None)
+        return True
+
+    def _release_tensor_locked(self, mm_hash: str) -> bool:
+        entry = self._tensor_by_hash.get(mm_hash)
+        if entry is None:
+            return True
+        if entry.in_flight:
+            return False
+        payload = None
+        if self._registry is not None:
+            released, payload = self._registry.unpublish_if_unleased(mm_hash)
+            if not released:
+                return False
+        if not self._unregister_memory(entry.tensor):
+            if self._registry is not None and payload is not None:
+                self._registry.publish(mm_hash, payload)
+            return False
+        self._tensor_by_hash.pop(mm_hash)
+        self._registered_bytes -= entry.tensor.nbytes
+        return True
+
+    def _make_registration_space_locked(self, nbytes: int) -> None:
+        if nbytes > self._registered_capacity:
+            raise RuntimeError(
+                f"Encoder cache tensor ({nbytes} bytes) exceeds ec_buffer_size "
+                f"({self._registered_capacity} bytes)."
+            )
+        while self._registered_bytes + nbytes > self._registered_capacity:
+            evicted = False
+            for mm_hash, entry in list(self._tensor_by_hash.items()):
+                if not entry.in_flight and self._release_tensor_locked(mm_hash):
+                    evicted = True
+                    break
+            if not evicted:
+                raise RuntimeError(
+                    "ECMooncakeConnector has no evictable registered memory."
+                )
+
     def _start_producer_zmq_listener(self) -> None:
         if self._zmq_thread is not None:
             return
@@ -210,50 +306,73 @@ class ECMooncakeConnector(ECConnectorBase):
         def loop() -> None:
             assert self._zmq_ctx is not None
             sock = self._zmq_ctx.socket(zmq.REP)
+            sock.setsockopt(zmq.RCVTIMEO, 100)
             port = sock.bind_to_random_port(f"tcp://{self._hostname}")
             self._zmq_listen_addr = f"tcp://{self._hostname}:{port}"
             logger.info("EC Mooncake pull listener at %s", self._zmq_listen_addr)
             eng = self._ensure_engine()
-            while True:
-                try:
-                    raw = sock.recv()
-                except zmq.ContextTerminated:
-                    break
-                try:
-                    req = json.loads(raw.decode("utf-8"))
-                    if req.get("op") != "pull":
-                        sock.send_json({"ok": False, "err": "unknown op"})
-                        continue
-                    mm_hash = req["mm_hash"]
-                    dst_session = req["dst_session"]
-                    dst_ptr = int(req["dst_ptr"])
-                    nbytes = int(req["nbytes"])
-                    with self._tensor_lock:
-                        tensor = self._tensor_by_hash.get(mm_hash)
-                    if tensor is None:
-                        sock.send_json({"ok": False, "err": "unknown mm_hash"})
-                        continue
-                    src_ptr = tensor.data_ptr()
-                    if tensor.nbytes != nbytes:
-                        sock.send_json({"ok": False, "err": "size mismatch"})
-                        continue
-                    ret = eng.batch_transfer_sync_write(
-                        dst_session, [src_ptr], [dst_ptr], [nbytes]
-                    )
-                    if (
-                        ret == 0
-                        and envs.VLLM_MOONCAKE_SYNC_AFTER_TRANSFER
-                        and torch.accelerator.is_available()
-                        and tensor.is_cuda
-                    ):
-                        torch.accelerator.synchronize()
-                    sock.send_json({"ok": ret == 0, "mooncake_ret": int(ret)})
-                except Exception as e:
-                    logger.exception("EC Mooncake pull handler error: %s", e)
+            try:
+                while True:
                     try:
-                        sock.send_json({"ok": False, "err": str(e)})
-                    except zmq.ZMQError:
+                        raw = sock.recv()
+                    except zmq.Again:
+                        if self._zmq_stop.is_set():
+                            break
+                        continue
+                    except zmq.ContextTerminated:
                         break
+                    try:
+                        req = json.loads(raw.decode("utf-8"))
+                        if req.get("op") != "pull":
+                            sock.send_json({"ok": False, "err": "unknown op"})
+                            continue
+                        mm_hash = req["mm_hash"]
+                        dst_session = req["dst_session"]
+                        dst_ptr = int(req["dst_ptr"])
+                        nbytes = int(req["nbytes"])
+                        lease_id = str(req["lease_id"])
+                        with self._tensor_lock:
+                            entry = self._tensor_by_hash.get(mm_hash)
+                            if (
+                                entry is not None
+                                and self._registry is not None
+                                and self._registry.consume_lease(mm_hash, lease_id)
+                            ):
+                                entry.in_flight += 1
+                                self._tensor_by_hash.move_to_end(mm_hash)
+                            else:
+                                entry = None
+                        if entry is None:
+                            sock.send_json({"ok": False, "err": "invalid lease"})
+                            continue
+                        try:
+                            tensor = entry.tensor
+                            src_ptr = tensor.data_ptr()
+                            if tensor.nbytes != nbytes:
+                                sock.send_json({"ok": False, "err": "size mismatch"})
+                                continue
+                            ret = eng.batch_transfer_sync_write(
+                                dst_session, [src_ptr], [dst_ptr], [nbytes]
+                            )
+                            if (
+                                ret == 0
+                                and envs.VLLM_MOONCAKE_SYNC_AFTER_TRANSFER
+                                and torch.accelerator.is_available()
+                                and tensor.is_cuda
+                            ):
+                                torch.accelerator.synchronize()
+                        finally:
+                            with self._tensor_lock:
+                                entry.in_flight -= 1
+                        sock.send_json({"ok": ret == 0, "mooncake_ret": int(ret)})
+                    except Exception as e:
+                        logger.exception("EC Mooncake pull handler error: %s", e)
+                        try:
+                            sock.send_json({"ok": False, "err": str(e)})
+                        except zmq.ZMQError:
+                            break
+            finally:
+                sock.close(linger=0)
 
         self._zmq_ctx = zmq.Context()
         self._zmq_thread = threading.Thread(
@@ -303,27 +422,34 @@ class ECMooncakeConnector(ECConnectorBase):
                 raise RuntimeError(
                     "Mooncake EC batch_register_memory failed on consumer."
                 )
-            pull = {
-                "op": "pull",
-                "mm_hash": spec.mm_hash,
-                "dst_session": f"{self._hostname}:{eng.get_rpc_port()}",
-                "dst_ptr": t.data_ptr(),
-                "nbytes": t.nbytes,
-            }
-            ctx = zmq.Context()
-            sock = ctx.socket(zmq.REQ)
-            sock.setsockopt(zmq.RCVTIMEO, 120_000)
-            sock.connect(spec.producer_zmq)
             try:
-                sock.send_json(pull)
-                resp = sock.recv_json()
+                pull = {
+                    "op": "pull",
+                    "mm_hash": spec.mm_hash,
+                    "dst_session": f"{self._hostname}:{eng.get_rpc_port()}",
+                    "dst_ptr": t.data_ptr(),
+                    "nbytes": t.nbytes,
+                    "lease_id": spec.lease_id,
+                }
+                ctx = zmq.Context()
+                sock = ctx.socket(zmq.REQ)
+                sock.setsockopt(zmq.RCVTIMEO, 120_000)
+                sock.connect(spec.producer_zmq)
+                try:
+                    sock.send_json(pull)
+                    resp = sock.recv_json()
+                finally:
+                    sock.close(linger=0)
+                    ctx.term()
+                if not resp.get("ok"):
+                    raise RuntimeError(f"EC Mooncake pull failed: {resp}")
+                if envs.VLLM_MOONCAKE_SYNC_AFTER_TRANSFER and device.type == "cuda":
+                    torch.accelerator.synchronize()
             finally:
-                sock.close(linger=0)
-                ctx.term()
-            if not resp.get("ok"):
-                raise RuntimeError(f"EC Mooncake pull failed: {resp}")
-            if envs.VLLM_MOONCAKE_SYNC_AFTER_TRANSFER and device.type == "cuda":
-                torch.accelerator.synchronize()
+                if not self._unregister_memory(t):
+                    logger.warning(
+                        "Keeping EC tensor alive after Mooncake unregistration failure"
+                    )
             encoder_cache[spec.mm_hash] = t
             logger.debug("Loaded EC tensor for mm_hash=%s via Mooncake", spec.mm_hash)
 
@@ -335,12 +461,6 @@ class ECMooncakeConnector(ECConnectorBase):
         self._ensure_producer_services()
         tensor = encoder_cache[mm_hash]
         eng = self._ensure_engine()
-        ret = eng.batch_register_memory([tensor.data_ptr()], [tensor.nbytes])
-        if ret != 0:
-            raise RuntimeError("Mooncake EC batch_register_memory failed on producer.")
-        with self._tensor_lock:
-            self._tensor_by_hash[mm_hash] = tensor
-
         dtype_str = str(tensor.dtype).split(".")[-1]
         payload = {
             "nbytes": tensor.nbytes,
@@ -348,8 +468,20 @@ class ECMooncakeConnector(ECConnectorBase):
             "dtype": dtype_str,
             "producer_zmq": self._zmq_listen_addr,
         }
-        if self._registry is not None:
-            self._registry.publish(mm_hash, payload)
+        with self._tensor_lock:
+            if mm_hash in self._tensor_by_hash:
+                self._tensor_by_hash.move_to_end(mm_hash)
+                return
+            self._make_registration_space_locked(tensor.nbytes)
+            ret = eng.batch_register_memory([tensor.data_ptr()], [tensor.nbytes])
+            if ret != 0:
+                raise RuntimeError(
+                    "Mooncake EC batch_register_memory failed on producer."
+                )
+            self._tensor_by_hash[mm_hash] = _RegisteredTensor(tensor)
+            self._registered_bytes += tensor.nbytes
+            if self._registry is not None:
+                self._registry.publish(mm_hash, payload)
         logger.debug("Published EC tensor mm_hash=%s to registry", mm_hash)
 
     def has_cache_item(self, identifier: str) -> bool:
@@ -377,6 +509,7 @@ class ECMooncakeConnector(ECConnectorBase):
             shape=tuple(int(x) for x in data["shape"]),
             dtype=str(data["dtype"]),
             producer_zmq=str(zmq_addr),
+            lease_id=str(data["lease_id"]),
         )
         return True
 
@@ -404,6 +537,7 @@ class ECMooncakeConnector(ECConnectorBase):
                     shape=spec.shape,
                     dtype=spec.dtype,
                     producer_zmq=spec.producer_zmq,
+                    lease_id=spec.lease_id,
                 )
             )
             self._pending_specs.pop(mm_hash, None)
@@ -451,11 +585,39 @@ class ECMooncakeConnector(ECConnectorBase):
             return False, None
         return False, {"ec_items": items}
 
+    def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
+        if self._registry is not None:
+            self._registry.shutdown()
+        self._zmq_stop.set()
+        if self._zmq_thread is not None:
+            self._zmq_thread.join()
+        if self._zmq_ctx is not None:
+            self._zmq_ctx.term()
+
+        if self._engine is not None:
+            with self._tensor_lock:
+                addresses = [
+                    entry.tensor.data_ptr() for entry in self._tensor_by_hash.values()
+                ]
+                addresses.extend(self._pending_unregister)
+                unregistered = True
+                if addresses:
+                    ret = self._engine.batch_unregister_memory(
+                        list(dict.fromkeys(addresses))
+                    )
+                    if ret != 0:
+                        unregistered = False
+                        logger.error(
+                            "Mooncake EC batch memory unregistration failed: %d", ret
+                        )
+                if unregistered:
+                    self._tensor_by_hash.clear()
+                    self._pending_unregister.clear()
+                    self._registered_bytes = 0
+
     def __del__(self) -> None:
-        try:
-            if self._registry is not None:
-                self._registry.shutdown()
-            if self._zmq_ctx is not None:
-                self._zmq_ctx.term()
-        except Exception:
-            pass
+        with suppress(Exception):
+            self.shutdown()

@@ -31,7 +31,10 @@ pytest_plugins = ("tests.v1.ec_connector.unit.test_ec_example_connector",)
 
 class CopyingFakeTransferEngine:
     def __init__(self, *args, **kwargs):
-        pass
+        self.registered: set[int] = set()
+        self.register_calls: list[list[int]] = []
+        self.unregister_calls: list[int] = []
+        self.batch_unregister_calls: list[list[int]] = []
 
     def initialize(self, local_hostname, metadata_server, protocol, device_name) -> int:
         return 0
@@ -47,6 +50,21 @@ class CopyingFakeTransferEngine:
         return 0
 
     def batch_register_memory(self, buffer_addresses, capacities) -> int:
+        addresses = [int(addr) for addr in buffer_addresses]
+        self.register_calls.append(addresses)
+        self.registered.update(addresses)
+        return 0
+
+    def unregister_memory(self, buffer_address) -> int:
+        address = int(buffer_address)
+        self.unregister_calls.append(address)
+        self.registered.discard(address)
+        return 0
+
+    def batch_unregister_memory(self, buffer_addresses) -> int:
+        addresses = [int(addr) for addr in buffer_addresses]
+        self.batch_unregister_calls.append(addresses)
+        self.registered.difference_update(addresses)
         return 0
 
 
@@ -68,6 +86,7 @@ def mock_vllm_config_producer():
     config.ec_transfer_config.is_ec_producer = True
     config.ec_transfer_config.is_ec_consumer = False
     config.ec_transfer_config.ec_buffer_device = "cuda"
+    config.ec_transfer_config.ec_buffer_size = 1e9
     config.ec_transfer_config.ec_connector_extra_config = {
         "mooncake_protocol": "tcp",
         "registry_http_port": 19018,
@@ -85,6 +104,7 @@ def mock_vllm_config_consumer():
     config.ec_transfer_config.is_ec_producer = False
     config.ec_transfer_config.is_ec_consumer = True
     config.ec_transfer_config.ec_buffer_device = "cuda"
+    config.ec_transfer_config.ec_buffer_size = 1e9
     config.ec_transfer_config.ec_connector_extra_config = {
         "mooncake_protocol": "tcp",
         "remote_registry_url": "http://127.0.0.1:19018",
@@ -130,7 +150,10 @@ class TestECMooncakeRegistryServer:
             registry.publish("hash_a", payload)
             r = httpx.get(f"http://127.0.0.1:{port}/ec/info/hash_a", timeout=2.0)
             assert r.status_code == 200
-            assert r.json() == payload
+            data = r.json()
+            lease_id = data.pop("lease_id")
+            assert data == payload
+            assert registry.consume_lease("hash_a", lease_id)
             r404 = httpx.get(f"http://127.0.0.1:{port}/ec/info/missing", timeout=2.0)
             assert r404.status_code == 404
         finally:
@@ -246,6 +269,7 @@ class TestECMooncakeSchedulerMetadata:
                 shape=(2, 4),
                 dtype="float32",
                 producer_zmq="tcp://127.0.0.1:1",
+                lease_id="lease",
             )
             scheduler._mm_datas_need_loads[mm_hash] = 100
             meta = scheduler.build_connector_meta(Mock(spec=SchedulerOutput))
@@ -333,6 +357,7 @@ class TestECMooncakeWorkerTransfer:
             consumer_cfg.ec_transfer_config.is_ec_producer = False
             consumer_cfg.ec_transfer_config.is_ec_consumer = True
             consumer_cfg.ec_transfer_config.ec_buffer_device = "cpu"
+            consumer_cfg.ec_transfer_config.ec_buffer_size = 1e9
             consumer_cfg.ec_transfer_config.ec_connector_extra_config = {
                 "mooncake_protocol": "tcp",
             }
@@ -344,6 +369,7 @@ class TestECMooncakeWorkerTransfer:
                 shape=tuple(int(x) for x in data["shape"]),
                 dtype=str(data["dtype"]),
                 producer_zmq=str(data["producer_zmq"]),
+                lease_id=str(data["lease_id"]),
             )
             meta = ECMooncakeConnectorMetadata()
             meta.add_load(spec)
@@ -352,6 +378,124 @@ class TestECMooncakeWorkerTransfer:
             consumer.start_load_caches(loaded)
             assert mm_hash in loaded
             assert torch.allclose(loaded[mm_hash].cpu(), source.cpu())
+            consumer_engine = consumer._engine
+            assert isinstance(consumer_engine, CopyingFakeTransferEngine)
+            assert consumer_engine.registered == set()
+            assert consumer_engine.unregister_calls == [loaded[mm_hash].data_ptr()]
+            producer.shutdown()
+            consumer.shutdown()
+
+    def test_producer_evicts_lru_registration_at_capacity(
+        self, mock_vllm_config_producer
+    ):
+        port = _find_free_port()
+        mock_vllm_config_producer.ec_transfer_config.ec_buffer_device = "cpu"
+        mock_vllm_config_producer.ec_transfer_config.ec_buffer_size = 32
+        mock_vllm_config_producer.ec_transfer_config.ec_connector_extra_config[
+            "registry_http_port"
+        ] = port
+        first = torch.randn(8)
+        second = torch.randn(8)
+
+        with patch_ec_mooncake_deps():
+            producer = ECMooncakeConnector(
+                mock_vllm_config_producer, ECConnectorRole.WORKER
+            )
+            try:
+                producer.save_caches({"first": first}, "first")
+                producer.save_caches({"second": second}, "second")
+
+                engine = producer._engine
+                assert isinstance(engine, CopyingFakeTransferEngine)
+                assert list(producer._tensor_by_hash) == ["second"]
+                assert producer._registered_bytes == second.nbytes
+                assert first.data_ptr() in engine.unregister_calls
+                assert second.data_ptr() in engine.registered
+
+                base_url = f"http://127.0.0.1:{port}/ec/info"
+                assert httpx.get(f"{base_url}/first").status_code == 404
+                assert httpx.get(f"{base_url}/second").status_code == 200
+            finally:
+                producer.shutdown()
+
+    def test_producer_does_not_evict_in_flight_registration(
+        self, mock_vllm_config_producer
+    ):
+        port = _find_free_port()
+        mock_vllm_config_producer.ec_transfer_config.ec_buffer_device = "cpu"
+        mock_vllm_config_producer.ec_transfer_config.ec_buffer_size = 32
+        mock_vllm_config_producer.ec_transfer_config.ec_connector_extra_config[
+            "registry_http_port"
+        ] = port
+        first = torch.randn(8)
+        second = torch.randn(8)
+
+        with patch_ec_mooncake_deps():
+            producer = ECMooncakeConnector(
+                mock_vllm_config_producer, ECConnectorRole.WORKER
+            )
+            try:
+                producer.save_caches({"first": first}, "first")
+                producer._tensor_by_hash["first"].in_flight = 1
+                with pytest.raises(RuntimeError, match="no evictable"):
+                    producer.save_caches({"second": second}, "second")
+                assert list(producer._tensor_by_hash) == ["first"]
+            finally:
+                producer._tensor_by_hash["first"].in_flight = 0
+                producer.shutdown()
+
+    def test_producer_does_not_evict_leased_registration(
+        self, mock_vllm_config_producer
+    ):
+        port = _find_free_port()
+        mock_vllm_config_producer.ec_transfer_config.ec_buffer_device = "cpu"
+        mock_vllm_config_producer.ec_transfer_config.ec_buffer_size = 32
+        mock_vllm_config_producer.ec_transfer_config.ec_connector_extra_config[
+            "registry_http_port"
+        ] = port
+        first = torch.randn(8)
+        second = torch.randn(8)
+
+        with patch_ec_mooncake_deps():
+            producer = ECMooncakeConnector(
+                mock_vllm_config_producer, ECConnectorRole.WORKER
+            )
+            try:
+                producer.save_caches({"first": first}, "first")
+                response = httpx.get(f"http://127.0.0.1:{port}/ec/info/first").json()
+
+                with pytest.raises(RuntimeError, match="no evictable"):
+                    producer.save_caches({"second": second}, "second")
+
+                assert producer._registry is not None
+                assert producer._registry.consume_lease("first", response["lease_id"])
+                producer.save_caches({"second": second}, "second")
+                assert list(producer._tensor_by_hash) == ["second"]
+            finally:
+                producer.shutdown()
+
+    def test_shutdown_unregisters_all_producer_tensors(self, mock_vllm_config_producer):
+        port = _find_free_port()
+        mock_vllm_config_producer.ec_transfer_config.ec_buffer_device = "cpu"
+        mock_vllm_config_producer.ec_transfer_config.ec_connector_extra_config[
+            "registry_http_port"
+        ] = port
+        tensor = torch.randn(8)
+
+        with patch_ec_mooncake_deps():
+            producer = ECMooncakeConnector(
+                mock_vllm_config_producer, ECConnectorRole.WORKER
+            )
+            producer.save_caches({"hash": tensor}, "hash")
+            engine = producer._engine
+            assert isinstance(engine, CopyingFakeTransferEngine)
+
+            producer.shutdown()
+
+            assert engine.batch_unregister_calls == [[tensor.data_ptr()]]
+            assert engine.registered == set()
+            assert producer._tensor_by_hash == {}
+            assert producer._registered_bytes == 0
 
     def test_producer_scheduler_has_cache_item_false(
         self, mock_vllm_config_producer, mock_request_with_3_mm

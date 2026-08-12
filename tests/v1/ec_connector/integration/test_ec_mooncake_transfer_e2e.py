@@ -8,10 +8,11 @@ tensor via Mooncake TransferEngine + ZMQ.
 Requires: 2+ CUDA GPUs, mooncake-transfer-engine, pyzmq, httpx, fastapi, uvicorn.
 
 Protocol: ``mooncake_protocol`` defaults to ``tcp`` in mocks unless you set
-``MOONCAKE_EC_PROTOCOL=rdma`` (matches ``ec_connector_extra_config.mooncake_protocol``).
+``MOONCAKE_EC_PROTOCOL=rdma`` (matches the connector protocol configuration).
 Example RDMA run::
 
-    MOONCAKE_EC_PROTOCOL=rdma PYTHONPATH=. python tests/v1/ec_connector/integration/test_ec_mooncake_transfer_e2e.py
+    MOONCAKE_EC_PROTOCOL=rdma PYTHONPATH=. python \
+        tests/v1/ec_connector/integration/test_ec_mooncake_transfer_e2e.py
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import time
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -61,6 +63,7 @@ def _mock_vllm_producer(registry_port: int) -> Mock:
     cfg.ec_transfer_config.is_ec_producer = True
     cfg.ec_transfer_config.is_ec_consumer = False
     cfg.ec_transfer_config.ec_buffer_device = "cuda"
+    cfg.ec_transfer_config.ec_buffer_size = 1e9
     cfg.ec_transfer_config.ec_connector_extra_config = {
         "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "tcp"),
         "registry_http_port": registry_port,
@@ -77,6 +80,7 @@ def _mock_vllm_consumer() -> Mock:
     cfg.ec_transfer_config.is_ec_producer = False
     cfg.ec_transfer_config.is_ec_consumer = True
     cfg.ec_transfer_config.ec_buffer_device = "cuda"
+    cfg.ec_transfer_config.ec_buffer_size = 1e9
     cfg.ec_transfer_config.ec_connector_extra_config = {
         "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "tcp"),
         "remote_registry_url": "http://unused-on-worker",
@@ -87,12 +91,11 @@ def _mock_vllm_consumer() -> Mock:
 def _producer_entry(
     mm_hash: str,
     registry_port: int,
-    ready: mp.Queue,
-    done: mp.Event,
-    barrier: mp.Barrier,
+    ready: Any,
+    done: Any,
+    barrier: Any,
 ) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    torch.cuda.init()
     cfg = _mock_vllm_producer(registry_port)
     conn = ECMooncakeConnector(cfg, ECConnectorRole.WORKER)
     torch.manual_seed(12345)
@@ -108,11 +111,10 @@ def _producer_entry(
 def _consumer_entry(
     mm_hash: str,
     registry_url: str,
-    barrier: mp.Barrier,
-    result_queue: mp.Queue,
+    barrier: Any,
+    result_queue: Any,
 ) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-    torch.cuda.init()
     barrier.wait(timeout=120)
     import httpx
 
@@ -136,6 +138,7 @@ def _consumer_entry(
         shape=tuple(int(x) for x in data["shape"]),
         dtype=str(data["dtype"]),
         producer_zmq=str(data["producer_zmq"]),
+        lease_id=str(data["lease_id"]),
     )
     meta = ECMooncakeConnectorMetadata()
     meta.add_load(spec)
@@ -159,7 +162,7 @@ def _consumer_entry(
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2,
+    torch.accelerator.device_count() < 2,
     reason="Requires at least 2 CUDA devices",
 )
 def test_ec_mooncake_two_process_transfer():
@@ -198,7 +201,7 @@ def test_ec_mooncake_two_process_transfer():
 
 
 def _main() -> None:
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         raise SystemExit("Need at least 2 CUDA devices for this e2e test.")
     test_ec_mooncake_two_process_transfer()
     print("ECMooncake two-process transfer e2e: PASSED")
