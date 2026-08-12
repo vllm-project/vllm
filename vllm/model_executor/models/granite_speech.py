@@ -110,24 +110,6 @@ class GraniteSpeechAudioInputs(TensorSchema):
 
 
 class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
-    def get_hf_processor(self, **kwargs: object):
-        trusted_processor = self.ctx.get_hf_processor()
-        trusted_window_size = int(
-            trusted_processor.audio_processor.projector_window_size
-        )
-
-        if "projector_window_size" in kwargs:
-            requested_window_size = int(kwargs["projector_window_size"])
-            if requested_window_size <= 0:
-                raise ValueError("`projector_window_size` must be greater than zero.")
-            if requested_window_size > trusted_window_size:
-                raise ValueError(
-                    "Request `projector_window_size` may not exceed the "
-                    "configured Granite Speech limit."
-                )
-
-        return self.ctx.get_hf_processor(**kwargs)
-
     def get_data_parser(self):
         feature_extractor = self.get_hf_processor().audio_processor
 

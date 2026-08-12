@@ -12,7 +12,6 @@ from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing.context import InputProcessingContext
 from vllm.multimodal.processing.processor import (
-    BaseMultiModalProcessor,
     PlaceholderFeaturesInfo,
     PromptIndexTargets,
     PromptInsertion,
@@ -1007,40 +1006,6 @@ class DummyProcessor:
         return dict(a=a, c=c)
 
 
-class _LegacyCallContext:
-    def __init__(self) -> None:
-        self.calls: list[tuple[object, dict[str, object], dict[str, object]]] = []
-
-    def call_hf_processor(
-        self,
-        hf_processor: object,
-        data: dict[str, object],
-        kwargs: dict[str, object],
-    ) -> dict[str, list[list[int]]]:
-        self.calls.append((hf_processor, data, kwargs))
-        return {"input_ids": [[1]]}
-
-
-class _LegacyCallInfo:
-    def __init__(self, ctx: _LegacyCallContext) -> None:
-        self.ctx = ctx
-        self.hf_processor = object()
-
-    def get_hf_processor(self, **kwargs: object) -> object:
-        del kwargs
-        return self.hf_processor
-
-
-class _DefaultCallProcessor(BaseMultiModalProcessor):
-    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
-        del hf_inputs, hf_processor_mm_kwargs
-        return {}
-
-    def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
-        del mm_items, hf_processor_mm_kwargs, out_mm_kwargs
-        return []
-
-
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy
 @pytest.mark.parametrize(
     ("config_kwargs", "inference_kwargs", "expected_kwargs"),
@@ -1101,49 +1066,6 @@ def test_hf_processor_call_kwargs(
 
     result = ctx.call_hf_processor(processor, {}, inference_kwargs)
     assert result == expected_kwargs
-
-
-@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy
-def test_hf_processor_call_kwargs_can_skip_mm_config_merge(model_id):
-    ctx = InputProcessingContext(
-        model_config=ModelConfig(
-            model_id,
-            mm_processor_kwargs={"a": 1, "c": 1},
-        ),
-        tokenizer=None,
-    )
-
-    processor = ctx.get_hf_processor(DummyProcessor)  # type: ignore[arg-type]
-
-    assert ctx.call_hf_processor(processor, {}, {"a": 2}) == {"a": 2, "c": 1}
-    assert ctx.call_hf_processor(
-        processor,
-        {},
-        {"a": 2},
-        merge_mm_kwargs=False,
-    ) == {"a": 2, "c": 0}
-
-
-def test_default_hf_processor_call_keeps_legacy_context_signature():
-    ctx = _LegacyCallContext()
-    processor = object.__new__(_DefaultCallProcessor)
-    processor.info = _LegacyCallInfo(ctx)
-
-    result = processor._call_hf_processor(
-        prompt="prompt",
-        mm_data={"image": "data"},
-        mm_kwargs={"a": 1},
-        tok_kwargs={"b": 2},
-    )
-
-    assert result == {"input_ids": [[1]]}
-    assert ctx.calls == [
-        (
-            processor.info.hf_processor,
-            {"text": "prompt", "image": "data"},
-            {"a": 1, "b": 2},
-        )
-    ]
 
 
 def test_apply_matches_no_match_exits_quickly():

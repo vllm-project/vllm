@@ -265,7 +265,6 @@ class InputProcessingContext:
         *,
         num_tries: int = 1,
         max_tries: int = 5,
-        merge_mm_kwargs: bool = True,
     ) -> BatchFeature:
         """
         Call `hf_processor` on the prompt `data`
@@ -273,9 +272,7 @@ class InputProcessingContext:
         """
         assert callable(hf_processor)
 
-        merged_kwargs = (
-            self.get_merged_mm_kwargs(kwargs) if merge_mm_kwargs else dict(kwargs)
-        )
+        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,

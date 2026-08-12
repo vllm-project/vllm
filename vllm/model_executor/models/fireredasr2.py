@@ -181,20 +181,6 @@ class FireRedASR2ProcessingInfo(BaseProcessingInfo):
         return {"audio": 1}
 
     def get_feature_extractor(self, **kwargs: object) -> FireRedASR2FeatureExtractor:
-        trusted_processor = self.get_hf_processor()
-        trusted_feature_extractor = trusted_processor.feature_extractor  # type: ignore
-        assert isinstance(trusted_feature_extractor, FireRedASR2FeatureExtractor)
-
-        if "max_length" in kwargs:
-            requested_max_length = int(kwargs["max_length"])
-            if requested_max_length <= 0:
-                raise ValueError("`max_length` must be greater than zero.")
-            if requested_max_length > int(trusted_feature_extractor.max_length):
-                raise ValueError(
-                    "Request `max_length` may not exceed the configured "
-                    "FireRedASR2 feature-extractor limit."
-                )
-
         hf_processor = self.get_hf_processor(**kwargs)
         feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, FireRedASR2FeatureExtractor)

@@ -3,7 +3,6 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from numbers import Integral
 from typing import Annotated, cast
 
 import torch
@@ -700,41 +699,6 @@ class FunASRProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
-
-    @staticmethod
-    def _get_lfr_m(frontend_conf: Mapping[str, object]) -> int:
-        lfr_m = frontend_conf.get("lfr_m", 1)
-        if not isinstance(lfr_m, Integral) or isinstance(lfr_m, bool) or lfr_m <= 0:
-            raise ValueError("FunASR `frontend_conf.lfr_m` must be a positive integer.")
-        return int(lfr_m)
-
-    def _validate_frontend_conf_overrides(
-        self,
-        mm_kwargs: Mapping[str, object],
-    ) -> None:
-        frontend_conf = mm_kwargs.get("frontend_conf")
-        if frontend_conf is None:
-            return
-        if not isinstance(frontend_conf, Mapping):
-            raise ValueError("FunASR `frontend_conf` override must be a mapping.")
-        if "lfr_m" not in frontend_conf:
-            return
-
-        configured_processor = self.ctx.get_hf_processor()
-        configured_feature_extractor = configured_processor.feature_extractor
-        assert isinstance(configured_feature_extractor, FunASRFeatureExtractor)
-
-        configured_lfr_m = self._get_lfr_m(configured_feature_extractor.frontend_conf)
-        requested_lfr_m = self._get_lfr_m(frontend_conf)
-        if requested_lfr_m > configured_lfr_m:
-            raise ValueError(
-                "FunASR request `frontend_conf.lfr_m` may not exceed "
-                "the configured frontend value."
-            )
-
-    def get_hf_processor(self, **kwargs: object):
-        self._validate_frontend_conf_overrides(kwargs)
-        return self.ctx.get_hf_processor(**kwargs)
 
     def get_feature_extractor(self, **kwargs: object) -> FunASRFeatureExtractor:
         hf_processor = self.get_hf_processor(**kwargs)

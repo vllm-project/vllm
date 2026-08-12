@@ -113,32 +113,6 @@ except (ImportError, ModuleNotFoundError):
 
 logger = init_logger(__name__)
 
-WHISPER_FEATURE_EXTRACTOR_GEOMETRY_KEYS = (
-    "feature_size",
-    "sampling_rate",
-    "hop_length",
-    "chunk_length",
-    "n_fft",
-)
-
-
-def validate_whisper_feature_extractor_overrides(
-    request_kwargs: Mapping[str, object],
-    trusted_feature_extractor: WhisperFeatureExtractor,
-) -> None:
-    for name in WHISPER_FEATURE_EXTRACTOR_GEOMETRY_KEYS:
-        if name not in request_kwargs:
-            continue
-
-        trusted_value = getattr(trusted_feature_extractor, name)
-        request_value = request_kwargs[name]
-        if request_value != trusted_value:
-            raise ValueError(
-                f"Request-level `{name}` cannot override the configured "
-                f"Whisper feature extractor value of {trusted_value!r}, "
-                f"got {request_value!r}."
-            )
-
 
 def unpad_and_flat_audio_features(
     input_audio_features: torch.Tensor,
@@ -378,27 +352,10 @@ class Qwen2_5OmniThinkerProcessingInfo(
         return self.ctx.get_hf_config(Qwen2_5OmniConfig).thinker_config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5OmniProcessor:
-        request_kwargs = dict(kwargs)
-        use_fast = request_kwargs.pop("use_fast", True)
-        if any(
-            name in request_kwargs for name in WHISPER_FEATURE_EXTRACTOR_GEOMETRY_KEYS
-        ):
-            trusted_processor = self.ctx.get_hf_processor(
-                Qwen2_5OmniProcessor,
-                use_fast=True,
-            )
-            trusted_feature_extractor = (
-                trusted_processor.feature_extractor  # type: ignore
-            )
-            assert isinstance(trusted_feature_extractor, WhisperFeatureExtractor)
-            validate_whisper_feature_extractor_overrides(
-                request_kwargs,
-                trusted_feature_extractor,
-            )
         return self.ctx.get_hf_processor(
             Qwen2_5OmniProcessor,
-            use_fast=use_fast,
-            **request_kwargs,
+            use_fast=kwargs.pop("use_fast", True),
+            **kwargs,
         )
 
     def get_feature_extractor(self, **kwargs: object):
