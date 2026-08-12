@@ -405,8 +405,6 @@ class ComputeSlotMappingKernel(VllmJitKernel["ComputeSlotMappingKernel.CompileKe
         cp_kv_cache_interleave_size: int
         block_table_stride: int
         block_size: int
-        pad_id: int
-        triton_block_size: int
 
     @staticmethod
     @triton.jit(do_not_specialize=["num_tokens", "max_num_tokens"])
@@ -494,30 +492,10 @@ class ComputeSlotMappingKernel(VllmJitKernel["ComputeSlotMappingKernel.CompileKe
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
             block_table_stride=triton_scalar_specialization_rep(block_table_stride),
             block_size=triton_scalar_specialization_rep(block_size),
-            pad_id=PAD_SLOT_ID,
-            triton_block_size=self.triton_block_size,
         )
 
-    def get_warmup_keys(
-        self,
-        *,
-        kv_cache_block_size: int,
-        blocks_per_kv_block: int,
-        total_cp_world_size: int,
-        total_cp_rank: int,
-        cp_kv_cache_interleave_size: int,
-        block_table_stride: int,
-        block_size: int,
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            kv_cache_block_size=kv_cache_block_size,
-            blocks_per_kv_block=blocks_per_kv_block,
-            total_cp_world_size=total_cp_world_size,
-            total_cp_rank=total_cp_rank,
-            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
-            block_table_stride=block_table_stride,
-            block_size=block_size,
-        )
+    def get_warmup_keys(self, **dispatch_kwargs: int) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(**dispatch_kwargs)
 
     def compile(self, compile_key: CompileKey) -> None:
         warmup = getattr(self.kernel, "warmup", None)
@@ -538,8 +516,8 @@ class ComputeSlotMappingKernel(VllmJitKernel["ComputeSlotMappingKernel.CompileKe
             TOTAL_CP_WORLD_SIZE=compile_key.total_cp_world_size,
             TOTAL_CP_RANK=compile_key.total_cp_rank,
             CP_KV_CACHE_INTERLEAVE_SIZE=compile_key.cp_kv_cache_interleave_size,
-            PAD_ID=compile_key.pad_id,
-            BLOCK_SIZE=compile_key.triton_block_size,
+            PAD_ID=PAD_SLOT_ID,
+            BLOCK_SIZE=self.triton_block_size,
             grid=(2,),
         )
 

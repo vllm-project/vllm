@@ -46,8 +46,6 @@ def test_compute_slot_mapping_warmup_matches_runtime_specializations(
         cp_kv_cache_interleave_size=1,
         block_table_stride=16,
         block_size=block_size_rep,
-        pad_id=-1,
-        triton_block_size=1024,
     )
 
     assert kernel.dispatch(**kwargs) == expected
