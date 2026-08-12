@@ -76,7 +76,12 @@ else
   done
 
   echo "--- :docker: Setting up buildx"
-  docker buildx create --name vllm-cpu-builder --driver docker-container --use || true
+  # network=host so the isolated docker-container builder can still reach the
+  # EC2 instance metadata service for sccache's S3 credentials; recreate on
+  # every run in case a stale builder without this driver-opt already exists
+  # on a warm CI host.
+  docker buildx rm vllm-cpu-builder >/dev/null 2>&1 || true
+  docker buildx create --name vllm-cpu-builder --driver docker-container --driver-opt network=host --use
   docker buildx inspect --bootstrap
 
   # build and push
