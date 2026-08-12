@@ -2009,10 +2009,11 @@ class GPUModelRunner(
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
+        int,
     ]:
         """
         Returns:
-            tuple[logits_indices, spec_decode_metadata]
+            tuple[logits_indices, spec_decode_metadata, max_num_sampled_tokens]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -2255,10 +2256,20 @@ class GPUModelRunner(
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
+            # Copy one row at a time. mrope_positions is allocated as
+            # [3, max_num_tokens + 1] with a dummy trailing column to keep it
+            # non-contiguous for torch.compile, so cpu[:, :N] is a strided view.
+            # copy_() cannot express a strided source as a single
+            # cudaMemcpyAsync, so it first gathers into a contiguous *pageable*
+            # temporary, and a pageable H2D ignores non_blocking=True and
+            # synchronizes the stream before the transfer starts. Each row is
+            # contiguous within the pinned allocation, so per-row copies stay on
+            # the pinned path and are genuinely asynchronous.
+            for row in range(self.mrope_positions.gpu.shape[0]):
+                self.mrope_positions.gpu[row, :total_num_scheduled_tokens].copy_(
+                    self.mrope_positions.cpu[row, :total_num_scheduled_tokens],
+                    non_blocking=True,
+                )
         elif self.uses_xdrope_dim > 0:
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
             self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
@@ -2324,6 +2335,7 @@ class GPUModelRunner(
         return (
             logits_indices,
             spec_decode_metadata,
+            int(num_sampled_tokens.max()),
         )
 
     def _build_attention_metadata(
@@ -2335,6 +2347,7 @@ class GPUModelRunner(
         num_reqs_padded: int | None = None,
         ubatch_slices: UBatchSlices | None = None,
         logits_indices: torch.Tensor | None = None,
+        max_num_sampled_tokens: int | None = None,
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
@@ -2509,6 +2522,7 @@ class GPUModelRunner(
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
+            cm_base.max_logits_per_req = max_num_sampled_tokens
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
                 logits_indices
             )
@@ -4341,9 +4355,8 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            logits_indices, spec_decode_metadata = self._prepare_inputs(
-                scheduler_output,
-                num_scheduled_tokens_np,
+            logits_indices, spec_decode_metadata, max_num_sampled_tokens = (
+                self._prepare_inputs(scheduler_output, num_scheduled_tokens_np)
             )
 
             cascade_attn_prefix_lens = None
@@ -4481,6 +4494,7 @@ class GPUModelRunner(
                     max_query_len=max_num_scheduled_tokens,
                     ubatch_slices=ubatch_slices_attn,
                     logits_indices=logits_indices,
+                    max_num_sampled_tokens=max_num_sampled_tokens,
                     use_spec_decode=use_spec_decode,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
@@ -6420,6 +6434,21 @@ class GPUModelRunner(
                 logits,
                 dummy_metadata,
             )
+            # All-greedy is a separate Triton specialization from the
+            # mixed-sampling path above. Compile and exercise it before serving.
+            all_greedy_metadata = replace(
+                dummy_metadata,
+                temperature=None,
+                all_greedy=True,
+                all_random=False,
+            )
+            self.rejection_sampler(
+                dummy_spec_decode_metadata,
+                draft_probs,
+                logits,
+                all_greedy_metadata,
+            )
+            torch.accelerator.synchronize()
         return sampler_output
 
     def _dummy_pooler_run_task(
@@ -6615,16 +6644,26 @@ class GPUModelRunner(
     @staticmethod
     @contextmanager
     def _freeze_gc():
+        gc_was_enabled = gc.isenabled()
         gc.collect()
         should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
         if should_freeze:
             gc.freeze()
+            # A Triton kernel finalized during stream capture unloads its
+            # module and invalidates the captured graph.
+            gc.disable()
         try:
             yield
         finally:
             if should_freeze:
-                gc.unfreeze()
-                gc.collect()
+                try:
+                    gc.unfreeze()
+                    gc.collect()
+                finally:
+                    if gc_was_enabled:
+                        gc.enable()
+                    else:
+                        gc.disable()
 
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
