@@ -175,11 +175,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     if [ "$USE_SCCACHE" = "1" ]; then \
         export RUSTC_WRAPPER=sccache; \
         if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
-        export SCCACHE_ERROR_LOG=/tmp/sccache_log.txt SCCACHE_LOG=debug; \
         sccache --show-stats; \
     fi && \
     bash build_rust.sh && \
-    if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; cat /tmp/sccache_log.txt || true; fi
+    if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
 ######################### BUILD IMAGE #########################
 FROM base-arch AS vllm-build
@@ -228,11 +227,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
-        export SCCACHE_ERROR_LOG=/tmp/sccache_log.txt SCCACHE_LOG=debug; \
         sccache --show-stats; \
     fi && \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 && \
-    if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; cat /tmp/sccache_log.txt || true; fi
+    if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
 ######################### TRITON-CPU BUILD IMAGE #########################
 FROM base-arch AS vllm-triton-cpu-build
@@ -262,11 +260,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         if [ "$USE_SCCACHE" = "1" ]; then \
             if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
             export TRITON_APPEND_CMAKE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache"; \
-            export SCCACHE_ERROR_LOG=/tmp/sccache_log.txt SCCACHE_LOG=debug; \
             sccache --show-stats; \
         fi; \
         uv build --wheel --out-dir=../dist; \
-        if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; cat /tmp/sccache_log.txt || true; fi; \
+        if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi; \
     fi
 
 ######################### TEST DEPS #########################
