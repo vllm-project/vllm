@@ -192,9 +192,9 @@ def test_has_device_capability_comparisons(monkeypatch):
         NvmlCudaPlatform.get_device_capability.cache_clear()
 
 
-def _stub_nvml_uuids(monkeypatch,
-                     uuids: dict[int, str],
-                     mig_uuids: dict[int, list[str]] | None = None):
+def _stub_nvml_uuids(
+    monkeypatch, uuids: dict[int, str], mig_uuids: dict[int, list[str]] | None = None
+):
     """Stub NVML to report the given physical-index -> UUID map.
 
     ``nvmlDeviceGetHandleByUUID`` only matches exact, full UUIDs (mirroring
@@ -245,12 +245,17 @@ def _stub_nvml_uuids(monkeypatch,
     monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByUUID", handle_by_uuid)
     monkeypatch.setattr(pynvml, "nvmlDeviceGetIndex", index_of)
     monkeypatch.setattr(pynvml, "nvmlDeviceGetUUID", uuid_of)
-    monkeypatch.setattr(pynvml, "nvmlDeviceGetMaxMigDeviceCount",
-                        lambda h: len(mig_uuids.get(index_of(h), [])))
-    monkeypatch.setattr(pynvml, "nvmlDeviceGetMigDeviceHandleByIndex",
-                        mig_handle_by_index)
-    monkeypatch.setattr(pynvml, "nvmlDeviceGetDeviceHandleFromMigDeviceHandle",
-                        parent_handle_of)
+    monkeypatch.setattr(
+        pynvml,
+        "nvmlDeviceGetMaxMigDeviceCount",
+        lambda h: len(mig_uuids.get(index_of(h), [])),
+    )
+    monkeypatch.setattr(
+        pynvml, "nvmlDeviceGetMigDeviceHandleByIndex", mig_handle_by_index
+    )
+    monkeypatch.setattr(
+        pynvml, "nvmlDeviceGetDeviceHandleFromMigDeviceHandle", parent_handle_of
+    )
 
 
 def test_device_control_id_short_uuid_prefix(monkeypatch):
@@ -266,16 +271,17 @@ def test_device_control_id_short_uuid_prefix(monkeypatch):
     _stub_nvml_uuids(monkeypatch, uuids)
 
     # Short prefix resolves to the correct physical index.
-    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
-        "GPU-95a445f6") == 1
-    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
-        "GPU-af7b61d8") == 0
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-95a445f6") == 1
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-af7b61d8") == 0
     # Short prefix without the leading "GPU-".
-    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
-        "95a445f6") == 1
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("95a445f6") == 1
     # Exact full UUID still works.
-    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
-        "GPU-af7b61d8-21af-baea-6a19-42a1f9f7c3cb") == 0
+    assert (
+        NvmlCudaPlatform.device_control_id_to_physical_device_id(
+            "GPU-af7b61d8-21af-baea-6a19-42a1f9f7c3cb"
+        )
+        == 0
+    )
     # Integer IDs still work.
     assert NvmlCudaPlatform.device_control_id_to_physical_device_id("0") == 0
     assert NvmlCudaPlatform.device_control_id_to_physical_device_id("1") == 1
@@ -294,23 +300,26 @@ def test_device_control_id_mig_uuid(monkeypatch):
             1: "GPU-95a445f6-69ca-10b5-3201-e1cf693804b2",
         },
         mig_uuids={
-            1: ["MIG-4c60d78c-506f-5593-938d-a136eaa1fa52",
-                "MIG-aa11bb22-cc33-4455-6677-8899aabbccdd"],
+            1: [
+                "MIG-4c60d78c-506f-5593-938d-a136eaa1fa52",
+                "MIG-aa11bb22-cc33-4455-6677-8899aabbccdd",
+            ],
         },
     )
 
     # Exact MIG UUID resolves to its parent GPU's physical index.
-    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
-        "MIG-4c60d78c-506f-5593-938d-a136eaa1fa52") == 1
+    assert (
+        NvmlCudaPlatform.device_control_id_to_physical_device_id(
+            "MIG-4c60d78c-506f-5593-938d-a136eaa1fa52"
+        )
+        == 1
+    )
     # Short MIG prefix.
-    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
-        "MIG-aa11bb22") == 1
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("MIG-aa11bb22") == 1
     # Short MIG prefix without the leading "MIG-".
-    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
-        "4c60d78c") == 1
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("4c60d78c") == 1
     # GPU UUIDs still resolve.
-    assert NvmlCudaPlatform.device_control_id_to_physical_device_id(
-        "GPU-95a445f6") == 1
+    assert NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-95a445f6") == 1
 
 
 def test_device_control_id_short_uuid_no_match(monkeypatch):
@@ -318,9 +327,12 @@ def test_device_control_id_short_uuid_no_match(monkeypatch):
     error rather than silently mapping to an unrelated device."""
     from vllm.platforms.cuda import NvmlCudaPlatform, pynvml
 
-    _stub_nvml_uuids(monkeypatch, {
-        0: "GPU-af7b61d8-21af-baea-6a19-42a1f9f7c3cb",
-    })
+    _stub_nvml_uuids(
+        monkeypatch,
+        {
+            0: "GPU-af7b61d8-21af-baea-6a19-42a1f9f7c3cb",
+        },
+    )
     with pytest.raises(pynvml.NVMLError_NotFound):
         NvmlCudaPlatform.device_control_id_to_physical_device_id("GPU-zzzz")
 

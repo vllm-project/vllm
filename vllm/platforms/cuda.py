@@ -744,16 +744,18 @@ class NvmlCudaPlatform(CudaPlatformBase):
                     # MIG instances share the parent GPU's physical index.
                     try:
                         for mig_idx in range(
-                                pynvml.nvmlDeviceGetMaxMigDeviceCount(handle)):
-                            mig_handle = (
-                                pynvml.nvmlDeviceGetMigDeviceHandleByIndex(
-                                    handle, mig_idx))
+                            pynvml.nvmlDeviceGetMaxMigDeviceCount(handle)
+                        ):
+                            mig_handle = pynvml.nvmlDeviceGetMigDeviceHandleByIndex(
+                                handle, mig_idx
+                            )
                             mig_uuid = pynvml.nvmlDeviceGetUUID(mig_handle)
                             if mig_uuid.removeprefix("MIG-").startswith(prefix):
                                 parent = (
-                                    pynvml
-                                    .nvmlDeviceGetDeviceHandleFromMigDeviceHandle(
-                                        mig_handle))
+                                    pynvml.nvmlDeviceGetDeviceHandleFromMigDeviceHandle(
+                                        mig_handle
+                                    )
+                                )
                                 return pynvml.nvmlDeviceGetIndex(parent)
                     except pynvml.NVMLError:
                         # No MIG instances on this device (or MIG disabled).
