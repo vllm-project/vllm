@@ -8,7 +8,6 @@ Owns transports and a single bidirectional P2PSession per remote peer.
 
 from __future__ import annotations
 
-import os
 import time
 import uuid
 from collections.abc import Iterable, Sequence
@@ -19,7 +18,7 @@ from typing_extensions import override
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED
+from vllm.v1.core.kv_cache_utils import resolve_none_hash_seed
 from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadKey,
@@ -255,7 +254,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # no KV crosses the wire. The effective seed is advertised and verified
         # against each peer during the handshake, so a mismatch is rejected
         # loudly instead of degrading silently.
-        self._hash_seed = os.getenv("PYTHONHASHSEED", DEFAULT_NONE_HASH_SEED)
+        self._hash_seed = resolve_none_hash_seed()
         if host is None:
             host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
         if port is None:

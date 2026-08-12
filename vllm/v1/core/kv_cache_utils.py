@@ -100,11 +100,20 @@ NONE_HASH: BlockHash
 DEFAULT_NONE_HASH_SEED = "vllm-none-hash"
 
 
+def resolve_none_hash_seed() -> str:
+    """Resolve the effective NONE_HASH seed.
+
+    Returns PYTHONHASHSEED if set, otherwise the fixed default. All sites that
+    must agree on NONE_HASH (e.g. the P2P tier handshake) resolve the seed
+    through this helper so the resolution rule stays in lockstep.
+    """
+    return os.getenv("PYTHONHASHSEED", DEFAULT_NONE_HASH_SEED)
+
+
 def init_none_hash(hash_fn: Callable[[Any], bytes]):
     global NONE_HASH
 
-    hash_seed = os.getenv("PYTHONHASHSEED", DEFAULT_NONE_HASH_SEED)
-    NONE_HASH = BlockHash(hash_fn(hash_seed))
+    NONE_HASH = BlockHash(hash_fn(resolve_none_hash_seed()))
 
 
 @dataclass(slots=True)
