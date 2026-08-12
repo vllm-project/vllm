@@ -5,22 +5,17 @@ from unittest.mock import patch
 import pytest
 
 from vllm.assets.image import ImageAsset
-from vllm.config import ModelConfig
 from vllm.model_executor.models.transformers.multimodal import (
-    MultiModalProcessor,
     OffsetsMultiModalProcessor,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
+
+from .transformers_backend import PROCESSOR_CLASSES, create_processor, offsets_only
 
 
+@pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
-def test_multimodal_processor(model_id):
-    model_config = ModelConfig(
-        model=model_id,
-        model_impl="transformers",
-    )
-
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+def test_multimodal_processor(model_id, processor_cls):
+    mm_processor = create_processor(model_id, processor_cls)
 
     image_pil = ImageAsset("cherry_blossom").pil_image
     mm_data = {"image": image_pil}
@@ -62,10 +57,9 @@ def test_multimodal_processor(model_id):
     )
 
 
-def _process_two_images(separator: str):
+def _process_two_images(processor_cls, separator: str):
     model_id = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
-    model_config = ModelConfig(model=model_id, model_impl="transformers")
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    mm_processor = create_processor(model_id, processor_cls)
 
     image = ImageAsset("cherry_blossom").pil_image
     prompt = (
@@ -80,29 +74,30 @@ def _process_two_images(separator: str):
     )
 
 
-def test_image_multiple_inputs():
+@pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
+def test_image_multiple_inputs(processor_cls):
     """Multiple images per prompt are each detected as a separate placeholder
     and multi-modal item by the Transformers modelling backend."""
-    result = _process_two_images(separator="\n and ")
+    result = _process_two_images(processor_cls, separator="\n and ")
 
     assert len(result["mm_placeholders"]["image"]) == 2
     assert len(result["mm_kwargs"]["image"]) == 2
 
 
-def test_image_adjacent_inputs():
+@pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
+def test_image_adjacent_inputs(processor_cls):
     """Adjacent images stay separate placeholders rather than merging into one."""
-    result = _process_two_images(separator="")
+    result = _process_two_images(processor_cls, separator="")
 
     assert len(result["mm_placeholders"]["image"]) == 2
     assert len(result["mm_kwargs"]["image"]) == 2
 
 
-def test_batch_padding_removed_from_image_items():
+@pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
+def test_batch_padding_removed_from_image_items(processor_cls):
     """Emu3 pads every image up to the largest in the batch, which would leave an
     item's data dependent on what it was processed with and so uncacheable."""
-    model_id = "BAAI/Emu3-Chat-hf"
-    model_config = ModelConfig(model=model_id, model_impl="transformers")
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    mm_processor = create_processor("BAAI/Emu3-Chat-hf", processor_cls)
     image_token = mm_processor.info.get_hf_processor().image_token
 
     images = [
@@ -127,13 +122,8 @@ def test_batch_padding_removed_from_image_items():
     assert len(shapes) == 2
 
 
-def test_non_embedding_tokens_excluded_from_placeholders():
-    """Gemma3 wraps each image in text that carries no embeddings, which must be
-    inside the placeholder range but masked out of it."""
-    model_id = "google/gemma-3-4b-it"
-    model_config = ModelConfig(model=model_id, model_impl="transformers")
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
-
+def _process_one_gemma3_image(processor_cls):
+    mm_processor = create_processor("google/gemma-3-4b-it", processor_cls)
     hf_processor = mm_processor.info.get_hf_processor()
     result = mm_processor(
         prompt=f"{hf_processor.boi_token} What is this?",
@@ -142,22 +132,26 @@ def test_non_embedding_tokens_excluded_from_placeholders():
         ),
         hf_processor_mm_kwargs={},
     )
+    return hf_processor, result
+
+
+@offsets_only
+def test_non_embedding_tokens_excluded_from_placeholders():
+    """Gemma3 wraps each image in text that carries no embeddings, which must be
+    inside the placeholder range but masked out of it."""
+    _, result = _process_one_gemma3_image(OffsetsMultiModalProcessor)
 
     (placeholder,) = result["mm_placeholders"]["image"]
     assert placeholder.is_embed is not None
     assert 0 < int(placeholder.is_embed.sum()) < placeholder.length
 
 
-@pytest.mark.skipif(
-    MultiModalProcessor is not OffsetsMultiModalProcessor,
-    reason="Replacement offsets are only used from transformers 5.15.0 onwards",
-)
+@offsets_only
 def test_missing_replacement_offsets_names_the_processor():
     """A processor that reports no replacement offsets cannot be served, which must
     be said plainly rather than surfacing later as a field config mismatch."""
     model_id = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
-    model_config = ModelConfig(model=model_id, model_impl="transformers")
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    mm_processor = create_processor(model_id, OffsetsMultiModalProcessor)
     hf_processor_cls = type(mm_processor.info.get_hf_processor())
     hf_call = hf_processor_cls.__call__
 
@@ -179,11 +173,11 @@ def test_missing_replacement_offsets_names_the_processor():
         )
 
 
-def test_text_only_prompt():
+@pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
+def test_text_only_prompt(processor_cls):
     """An image model still accepts a prompt with no images."""
     model_id = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
-    model_config = ModelConfig(model=model_id, model_impl="transformers")
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    mm_processor = create_processor(model_id, processor_cls)
 
     result = mm_processor(
         prompt="<|im_start|>user Hello!<|im_end|><|im_start|>assistant\n",
