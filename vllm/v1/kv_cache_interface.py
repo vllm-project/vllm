@@ -8,7 +8,7 @@ from collections import Counter
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
 from typing_extensions import Self
@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+_SpecT = TypeVar("_SpecT", bound="KVCacheSpec")
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +45,7 @@ class KVQuantMode(IntEnum):
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
     INT4_PER_TOKEN_HEAD = 4  # packed 2×int4/byte, RHT + asymmetric zp
     NVFP4 = 5  # packed fp4 data + fp8 block scales
+    TURBOQUANT = 6  # Hadamard-rotated Lloyd-Max quant, packed K+V per slot
 
     @property
     def is_per_token_head(self) -> bool:
@@ -58,6 +61,11 @@ class KVQuantMode(IntEnum):
         """True for NVFP4 packed quantization mode."""
         return self == KVQuantMode.NVFP4
 
+    @property
+    def is_turboquant(self) -> bool:
+        """True for turboquant quantization mode."""
+        return self == KVQuantMode.TURBOQUANT
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
@@ -67,8 +75,10 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
         return KVQuantMode.FP8_PER_TOKEN_HEAD
-    if kv_cache_dtype == "nvfp4":
+    if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
+    if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
+        return KVQuantMode.TURBOQUANT
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE
@@ -76,6 +86,18 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
+
+
+def replace_as(spec: KVCacheSpec, target_cls: type[_SpecT], **changes) -> _SpecT:
+    """``dataclasses.replace``, but rebuilding *spec* as *target_cls*
+      e.g. ``SlidingWindowSpec`` -> ``FullAttentionSpec``
+
+    Every field of *spec* must exist on *target_cls*; fields only *target_cls* has keep
+    their default values.
+    """
+    kwargs = {f.name: getattr(spec, f.name) for f in fields(spec) if f.init}
+    kwargs.update(changes)
+    return target_cls(**kwargs)
 
 
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
@@ -846,6 +868,20 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             for spec in self.kv_cache_specs.values()
         )
         return max_num_pages * self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        # Metadata builders are constructed from the per-layer spec, so the base
+        # cdiv(max_len, block_size) would drop its DCP sharding and size the
+        # block table wider than those builders expect.
+        widths = {
+            spec.max_num_blocks_per_req(vllm_config, max_len)
+            for spec in self.kv_cache_specs.values()
+        }
+        assert len(widths) == 1, (
+            "All layers in the same KV cache group must need the same number "
+            f"of block table entries, got {sorted(widths)}."
+        )
+        return next(iter(widths))
 
     @classmethod
     def is_uniform_type(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:

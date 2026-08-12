@@ -95,6 +95,7 @@ enforces decode-size limits to prevent out-of-memory denial of service:
 | `VLLM_MAX_IMAGE_PIXELS` | `178956970` (~179M pixels) | Maximum decoded image size in pixels. Images exceeding this are rejected before raster memory is allocated. Default matches PIL's built-in 2x decompression-bomb threshold (~680 MB for RGB). |
 | `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum filesize in MB for a single audio file. |
 | `VLLM_MAX_AUDIO_DECODE_DURATION_S` | `600` | Maximum decoded audio duration in seconds. Prevents compressed audio from expanding into gigabytes of float32 PCM. |
+| `VLLM_MAX_AUDIO_DECODE_BYTES` | `268435456` (256 MiB) | Maximum float32 PCM bytes that audio decoding may allocate. Guards against sample-rate forgery where an inflated header sample rate bypasses the duration guard while the actual frame count causes a multi-GiB allocation. |
 
 Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
@@ -396,7 +397,7 @@ FIPS compliance depends on many factors, so a vLLM deployment is not automatical
 
 Operators running vLLM on FIPS-enabled hosts should select FIPS-approved algorithms via the following knobs:
 
-- **Multimodal input hashing** — `VLLM_MM_HASHER_ALGORITHM` defaults to `blake3`, which is not FIPS-approved. Set it to `sha256` or `sha512` in FIPS-enabled environments.
+- **Multimodal input hashing** — `--mm-hasher-algorithm` (config field `mm_hasher_algorithm`) defaults to `blake3`, which is not FIPS-approved. Set it to `sha256` or `sha512` in FIPS-enabled environments.
 - **Prefix-cache hashing** — set `--prefix-caching-hash-algo` (config field `prefix_caching_hash_algo`) to `sha256` or `sha256_cbor`. The `xxhash` and `xxhash_cbor` options are not FIPS-approved.
 - **TLS ciphers** — use `--ssl-ciphers` to restrict the API server's TLS handshake to FIPS-approved cipher suites that match your environment's policy.
 
@@ -408,7 +409,13 @@ vLLM uses MD5 in a few places to derive non-security cache keys (for example, co
 
 Some dependencies expose hash implementations that are not FIPS-approved. vLLM only invokes them when the corresponding algorithm is selected, but operators with strict cryptographic controls may want to ensure the code paths are not exercised — and, where policy requires, that the packages themselves are absent:
 
-- `blake3` — currently listed in `requirements/common.txt`, so a standard install pulls it in. It is imported lazily and only used when `VLLM_MM_HASHER_ALGORITHM=blake3` (the default). Setting `VLLM_MM_HASHER_ALGORITHM` to `sha256` or `sha512` is sufficient to keep the non-FIPS code path dormant. If your policy additionally forbids the package being present, uninstall it after `pip install` (`pip uninstall blake3`); vLLM will continue to function as long as `VLLM_MM_HASHER_ALGORITHM` is set to a non-blake3 value.
+- `blake3` — currently listed in `requirements/common.txt`, so a standard
+  install pulls it in. It is imported lazily and only used when
+  `mm_hasher_algorithm=blake3` (the default). Setting
+  `--mm-hasher-algorithm sha256` or `--mm-hasher-algorithm sha512` is sufficient
+  to keep the non-FIPS code path dormant. If your policy additionally forbids
+  the package being present, uninstall it after installation; vLLM will
+  continue to function as long as a non-blake3 algorithm is selected.
 - `xxhash` — a true optional dependency (not in `requirements/common.txt`). It is only imported when an `xxhash`-based prefix-cache algorithm is selected. Leave it uninstalled and select a `sha256`-based prefix-cache algorithm.
 
 ### Beyond hashing: other FIPS considerations

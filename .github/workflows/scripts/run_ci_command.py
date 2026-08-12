@@ -3,15 +3,25 @@
 
 import json
 import os
+import random
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 COMMAND_RUN_CI = "/ci run"
+COMMAND_RUN_CI_ALL = "/ci run all"
+COMMAND_RUN_CI_NIGHTLY = "/ci run nightly"
 COMMAND_RETRY_FAILED = "/ci retry"
+COMMAND_CANCEL_CI = "/ci cancel"
+RUN_CI_COMMAND_ENV = {
+    COMMAND_RUN_CI: {},
+    COMMAND_RUN_CI_ALL: {"RUN_ALL": "1"},
+    COMMAND_RUN_CI_NIGHTLY: {"RUN_ALL": "1", "NIGHTLY": "1"},
+}
 CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
@@ -26,6 +36,7 @@ ACTIVE_BUILD_STATES = {
     "waiting_failed",
 }
 RETRY_STATES = "failed,timed_out,expired"
+CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 SETUP_STEP_KEYS = {
     "ensure-ci-base-amd",
     "pre-commit",
@@ -39,7 +50,22 @@ class ApiError(RuntimeError):
         self.status = status
 
 
+def rate_limit_jitter() -> float:
+    return random.uniform(1, 5)
+
+
 class HttpTransport:
+    def __init__(
+        self,
+        *,
+        max_retries: int = 3,
+        jitter: Callable[[], float] = rate_limit_jitter,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.max_retries = max_retries
+        self.jitter = jitter
+        self.sleep = sleep
+
     def request(
         self,
         url: str,
@@ -55,18 +81,33 @@ class HttpTransport:
             headers=dict(headers or {}),
             method=method,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                response_body = response.read().decode()
-        except urllib.error.HTTPError as error:
-            response_body = error.read().decode()
-            message = self._error_message(response_body, error.reason)
-            raise ApiError(
-                error.code,
-                f"API returned {error.code}: {message}",
-            ) from error
-        except urllib.error.URLError as error:
-            raise ApiError(None, f"API request failed: {error.reason}") from error
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    response_body = response.read().decode()
+                break
+            except urllib.error.HTTPError as error:
+                response_body = error.read().decode()
+                if error.code == 429 and attempt < self.max_retries:
+                    delay = self._rate_limit_delay(error, response_body)
+                    print(
+                        "API rate limit reached; "
+                        f"retry {attempt + 1}/{self.max_retries} "
+                        f"in {delay:g} seconds.",
+                        file=sys.stderr,
+                    )
+                    self.sleep(delay)
+                    continue
+                message = self._error_message(response_body, error.reason)
+                raise ApiError(
+                    error.code,
+                    f"API returned {error.code}: {message}",
+                ) from error
+            except urllib.error.URLError as error:
+                raise ApiError(
+                    None,
+                    f"API request failed: {error.reason}",
+                ) from error
 
         if not response_body:
             return None
@@ -82,6 +123,33 @@ class HttpTransport:
         except json.JSONDecodeError:
             return fallback
         return str(parsed.get("message", fallback))
+
+    def _rate_limit_delay(
+        self,
+        error: urllib.error.HTTPError,
+        response_body: str,
+    ) -> float:
+        try:
+            parsed = json.loads(response_body)
+        except json.JSONDecodeError:
+            parsed = {}
+
+        scope = parsed.get("scope")
+        reset_header = (
+            "RateLimit-User-Reset" if scope == "rest_user" else "RateLimit-Reset"
+        )
+        candidates = [
+            error.headers.get(reset_header),
+            parsed.get("reset"),
+        ]
+        for candidate in candidates:
+            try:
+                delay = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if delay >= 0:
+                return delay + self.jitter()
+        return 60 + self.jitter()
 
 
 class GitHubClient:
@@ -136,6 +204,13 @@ class GitHubClient:
 
     def get_pr(self, number: int) -> dict[str, Any]:
         return self._request(self._repo_path(f"/pulls/{number}"))
+
+    def list_pulls_for_commit(self, commit: str) -> list[dict[str, Any]]:
+        commit = urllib.parse.quote(commit, safe="")
+        response = self._request(self._repo_path(f"/commits/{commit}/pulls"))
+        if not isinstance(response, list):
+            raise ApiError(None, "GitHub API returned an invalid pull request list.")
+        return response
 
     def get_permission(self, actor: str) -> str:
         username = urllib.parse.quote(actor, safe="")
@@ -262,7 +337,9 @@ class BuildkiteClient:
         self,
         commit: str | None,
         *,
+        branch: str | None = None,
         metadata: tuple[str, str] | None = None,
+        states: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
         query = [
             ("exclude_jobs", "true"),
@@ -271,9 +348,12 @@ class BuildkiteClient:
         ]
         if commit:
             query.append(("commit", commit))
+        if branch:
+            query.append(("branch", branch))
         if metadata:
             key, value = metadata
             query.append((f"meta_data[{key}]", value))
+        query.extend(("state[]", state) for state in states)
         response = self._request(query=query)
         if not isinstance(response, list):
             raise ApiError(None, "Buildkite API returned an invalid build list.")
@@ -293,6 +373,10 @@ class BuildkiteClient:
             method="PUT",
             path=f"/{number}/retry_failed_jobs",
         )
+
+    def cancel_build(self, build_number: int) -> dict[str, Any]:
+        number = urllib.parse.quote(str(build_number), safe="")
+        return self._request(method="PUT", path=f"/{number}/cancel")
 
     def list_failed_jobs(self, build_number: int) -> list[dict[str, Any]]:
         number = urllib.parse.quote(str(build_number), safe="")
@@ -324,7 +408,7 @@ class BuildkiteClient:
 
 
 def parse_command(body: str) -> str | None:
-    if body in {COMMAND_RUN_CI, COMMAND_RETRY_FAILED}:
+    if body in {*RUN_CI_COMMAND_ENV, COMMAND_RETRY_FAILED, COMMAND_CANCEL_CI}:
         return body
     return None
 
@@ -359,7 +443,7 @@ def authorize(
     if actor.casefold() != pr["user"]["login"].casefold():
         return (
             False,
-            "Only reviewers with write access can run CI before it is "
+            "Only reviewers with write access can use CI commands before CI is "
             "delegated to the PR author.",
         )
     if pr["draft"]:
@@ -427,21 +511,27 @@ def create_build_payload(
     *,
     actor: str,
     comment_id: int,
+    command: str = COMMAND_RUN_CI,
     pr: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if command not in RUN_CI_COMMAND_ENV:
+        raise ValueError(f"Unsupported run command: {command}")
+
+    env = {
+        "VLLM_CI_GITHUB_COMMENT_ID": str(comment_id),
+        "VLLM_CI_TRIGGERED_BY": actor,
+        **RUN_CI_COMMAND_ENV[command],
+    }
     return {
         "commit": pr["head"]["sha"],
         "branch": pr["head"]["ref"],
-        "message": f"PR #{pr['number']} {COMMAND_RUN_CI} by @{actor}",
+        "message": f"PR #{pr['number']} {command} by @{actor}",
         "pull_request_id": pr["number"],
         "pull_request_base_branch": pr["base"]["ref"],
         "pull_request_repository": pr["head"]["repo"]["clone_url"],
         "pull_request_labels": [label["name"] for label in pr["labels"]],
         "ignore_pipeline_branch_filters": True,
-        "env": {
-            "VLLM_CI_GITHUB_COMMENT_ID": str(comment_id),
-            "VLLM_CI_TRIGGERED_BY": actor,
-        },
+        "env": env,
         "meta_data": {
             "github-comment-id": str(comment_id),
             "github-pr-number": str(pr["number"]),
@@ -550,7 +640,6 @@ def notify_authorized(
         if (
             event.get("action") != "labeled"
             or event["label"]["name"] not in READY_LABELS
-            or has_trusted_approval(github, pr["number"], trusted_users)
         ):
             return
     elif "review" in event:
@@ -567,11 +656,51 @@ def notify_authorized(
     github.add_comment(
         pr["number"],
         (
-            f"✅ @{author}, CI is now available for this PR. Comment `/ci run` "
-            "to run full CI or `/ci retry` to retry failed jobs.\n\n"
+            f"✅ @{author}, CI is now available for this PR.\n\n"
+            "- `/ci run` starts a CI build.\n"
+            "- `/ci retry` retries failed jobs in the CI build for the current "
+            "PR head. If the current head has no CI build, it starts a new CI "
+            "build for the current head containing only jobs that failed in "
+            "the latest earlier CI build for this PR.\n"
+            "- `/ci cancel` cancels scheduled or running CI builds for this PR "
+            "branch.\n\n"
             f"{CI_AUTHORIZED_COMMENT_MARKER}"
         ),
     )
+
+
+def resolve_workflow_run_pr(
+    workflow_run: Mapping[str, Any],
+    github: GitHubClient,
+) -> dict[str, Any] | None:
+    head_sha = str(workflow_run.get("head_sha", ""))
+    if not head_sha:
+        return None
+
+    seen: set[int] = set()
+
+    def find_matching_pr(
+        candidates: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any] | None:
+        for candidate in candidates:
+            candidate_number = candidate.get("number")
+            if not isinstance(candidate_number, int) or candidate_number in seen:
+                continue
+            seen.add(candidate_number)
+            try:
+                pr = github.get_pr(candidate_number)
+            except ApiError as error:
+                if error.status == 404:
+                    continue
+                raise
+            if pr["state"] == "open" and pr["head"]["sha"] == head_sha:
+                return pr
+        return None
+
+    associated_pr = find_matching_pr(workflow_run.get("pull_requests") or [])
+    if associated_pr is not None:
+        return associated_pr
+    return find_matching_pr(github.list_pulls_for_commit(head_sha))
 
 
 def handle_run_ci(
@@ -579,6 +708,7 @@ def handle_run_ci(
     actor: str,
     buildkite: BuildkiteClient,
     comment_id: int,
+    command: str,
     github: GitHubClient,
     pr: Mapping[str, Any],
 ) -> str:
@@ -605,13 +735,15 @@ def handle_run_ci(
     current_pr = github.get_pr(pr["number"])
     if current_pr["state"] != "open" or current_pr["head"]["sha"] != pr["head"]["sha"]:
         return (
-            "The PR head changed while processing the command. Comment `/ci run` again."
+            "The PR head changed while processing the command. "
+            f"Comment `{command}` again."
         )
 
     build = buildkite.create_build(
         create_build_payload(
             actor=actor,
             comment_id=comment_id,
+            command=command,
             pr=current_pr,
         )
     )
@@ -718,6 +850,38 @@ def handle_retry_failed(
     )
 
 
+def handle_cancel_ci(
+    *,
+    buildkite: BuildkiteClient,
+    pr: Mapping[str, Any],
+) -> str:
+    branch = pr["head"]["ref"]
+    builds = buildkite.list_builds(
+        None,
+        branch=branch,
+        states=CANCELABLE_BUILD_STATES,
+    )
+    cancelable_builds = [
+        build
+        for build in builds
+        if build.get("branch") == branch
+        and is_build_for_pr(build, pr["number"])
+        and build.get("state") in CANCELABLE_BUILD_STATES
+    ]
+    if not cancelable_builds:
+        return f"No cancelable CI build is running for branch `{branch}`."
+
+    for build in cancelable_builds:
+        buildkite.cancel_build(build["number"])
+
+    links = ", ".join(
+        f"[#{build['number']}]({build['web_url']})" for build in cancelable_builds
+    )
+    count = len(cancelable_builds)
+    noun = "build" if count == 1 else "builds"
+    return f"Requested cancellation of {count} CI {noun} for `{branch}`: {links}."
+
+
 def run(
     event: Mapping[str, Any],
     github: GitHubClient,
@@ -776,8 +940,17 @@ def run(
             return
 
         print(f"Authorized @{actor}: {reason}")
-        if command == COMMAND_RUN_CI:
+        if command in RUN_CI_COMMAND_ENV:
             message = handle_run_ci(
+                actor=actor,
+                buildkite=buildkite,
+                comment_id=comment_id,
+                command=command,
+                github=github,
+                pr=pr,
+            )
+        elif command == COMMAND_RETRY_FAILED:
+            message = handle_retry_failed(
                 actor=actor,
                 buildkite=buildkite,
                 comment_id=comment_id,
@@ -785,11 +958,8 @@ def run(
                 pr=pr,
             )
         else:
-            message = handle_retry_failed(
-                actor=actor,
+            message = handle_cancel_ci(
                 buildkite=buildkite,
-                comment_id=comment_id,
-                github=github,
                 pr=pr,
             )
         add_reaction_safely(github, comment_id, "rocket")
@@ -817,10 +987,10 @@ def main() -> None:
         )
         return
     if event_name == "workflow_run":
-        pull_requests = event["workflow_run"].get("pull_requests") or []
-        if not pull_requests:
+        pr = resolve_workflow_run_pr(event["workflow_run"], github)
+        if pr is None:
+            print("Could not resolve an open PR for the approval workflow run.")
             return
-        pr = github.get_pr(int(pull_requests[0]["number"]))
         notify_authorized(
             {
                 "action": "submitted",

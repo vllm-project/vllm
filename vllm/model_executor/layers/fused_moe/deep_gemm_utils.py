@@ -5,6 +5,8 @@ Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00b
 and updated to fit vllm needs and terminology.
 """
 
+import math
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -424,7 +426,7 @@ def ep_gather(
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
-    BLOCK_D = min(hidden_size, 1024)
+    BLOCK_D = math.gcd(hidden_size, 1024)
     assert hidden_size % BLOCK_D == 0
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
 

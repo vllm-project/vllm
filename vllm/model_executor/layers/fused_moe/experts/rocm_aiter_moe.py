@@ -5,7 +5,6 @@ from functools import lru_cache
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -241,7 +240,7 @@ def rocm_aiter_fused_experts(
     moe_config: FusedMoEConfig,
     activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
-    expert_map: torch.Tensor | None = None,
+    expert_mask: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
     a1q_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
@@ -271,8 +270,6 @@ def rocm_aiter_fused_experts(
     # All AITER Fused MoE kernels are expecting the following datatypes
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
-
-    expert_mask = expert_map if expert_map is not None else None
 
     # w8a8 per-channel quantization
     if (
@@ -376,11 +373,12 @@ def rocm_aiter_fused_experts(
 
         gate_mode = ""
         if activation == MoEActivation.SITU:
-            # a8w4 (AITER_SITUV2_A8W4=1) uses the gate/up-interleaved (_gui_)
-            # fp8 flydsl kernels; default a16w4 SiTU stays separated.
+            # a8w4 (VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1) uses the gate/up-
+            # interleaved (_gui_) fp8 flydsl kernels; default a16w4 SiTU stays
+            # separated.
             gate_mode = (
                 GateMode.INTERLEAVE.value
-                if envs.AITER_SITUV2_A8W4
+                if rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
                 else GateMode.SEPARATED.value
             )
         elif quant_config.use_mxfp4_w4a16:
@@ -420,6 +418,8 @@ def rocm_aiter_fused_experts(
 
 
 class AiterExperts(mk.FusedMoEExpertsModular):
+    consumes_expert_mask = True
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         # When paired with MoRI, the prepare/finalize handles FP8
@@ -472,11 +472,10 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         ]
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
-        # CK MXFP4 MoE kernels are only supported on gfx950.
         if weight_key == kMxfp4Static:
-            from vllm.platforms.rocm import on_gfx950
+            from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
-            if not on_gfx950():
+            if not on_gfx950() or on_gfx1250():
                 return False
         return True
 
@@ -551,7 +550,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             topk_ids=topk_ids,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=expert_map,
+            expert_mask=expert_map,
             quant_config=self.quant_config,
             moe_config=self.moe_config,
             a1q_scale=a1q_scale,
