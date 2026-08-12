@@ -759,7 +759,9 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                     "cannot locate the placeholder of each item. Its `__call__` has "
                     "to reach `ProcessorMixin.get_text_with_replacements` with one "
                     "replacement per item, which usually means implementing "
-                    "`replace_<modality>_token`. This has to be fixed in transformers."
+                    "`replace_<modality>_token`. Please report this to transformers "
+                    "so it can be fixed, and install `transformers<5.15.0` in the "
+                    "meantime to locate placeholders in the expanded prompt instead."
                 )
             return hf_inputs
 
@@ -791,9 +793,8 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         return hf_inputs
 
 
-# Every processor declaring a placeholder token implements the matching
-# `replace_<modality>_token` from this version on, so the offsets are always
-# populated for models this backend can serve
+# From this version on, a processor reporting no offsets is an error rather than a
+# fallback to searching the expanded prompt
 MultiModalProcessor = (
     LegacyMultiModalProcessor
     if Version(transformers.__version__) < Version("5.15.0")
