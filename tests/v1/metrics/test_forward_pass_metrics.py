@@ -37,8 +37,8 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 pytestmark = pytest.mark.skip_global_cleanup
 
 # Cross-repo golden payload mirrored by Dynamo's FPM contract test.
-_GOLDEN_FPM_V2 = {
-    "version": 2,
+_GOLDEN_FPM_V1 = {
+    "version": 1,
     "worker_id": "worker-0",
     "dp_rank": 2,
     "counter_id": 3,
@@ -149,7 +149,7 @@ def _make_scheduler_output(
     return output
 
 
-def test_forward_pass_metrics_v2_wire_contract():
+def test_forward_pass_metrics_v1_wire_contract():
     metrics = ForwardPassMetrics(
         worker_id="worker-0",
         dp_rank=2,
@@ -168,13 +168,13 @@ def test_forward_pass_metrics_v2_wire_contract():
     payload = encode_forward_pass_metrics(metrics)
     raw = msgspec.msgpack.decode(payload)
 
-    assert raw == _GOLDEN_FPM_V2
+    assert raw == _GOLDEN_FPM_V1
     assert decode_forward_pass_metrics(payload) == metrics
 
-    old_payload = encode_forward_pass_metrics(
-        msgspec.structs.replace(metrics, version=1)
+    unsupported_payload = encode_forward_pass_metrics(
+        msgspec.structs.replace(metrics, version=2)
     )
-    assert decode_forward_pass_metrics(old_payload) is None
+    assert decode_forward_pass_metrics(unsupported_payload) is None
 
 
 def test_timing_tuple_survives_model_output_ipc_codec():

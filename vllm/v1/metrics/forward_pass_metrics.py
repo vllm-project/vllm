@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-FPM_VERSION = 2
+FPM_VERSION = 1
 FPM_HEARTBEAT_INTERVAL_SECONDS = 1.0
 FPM_TIMING_SCOPE_EXECUTE_MODEL_CUDA = "execute_model_cuda"
 
