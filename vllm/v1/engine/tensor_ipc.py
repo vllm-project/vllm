@@ -147,9 +147,10 @@ class TensorIpcReceiver:
                 if tensor is not None:
                     if sender.current_message_id != message_id:
                         while tensors and (mid := next(iter(tensors))) < message_id:
-                            if sender.tensors.pop(mid):
+                            if stale := sender.tensors.pop(mid):
                                 logger.warning(
                                     "Discarding %d stale tensors from sender %s",
+                                    len(stale),
                                     sender_id,
                                 )
                         sender.current_message_id = message_id

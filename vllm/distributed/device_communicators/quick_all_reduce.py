@@ -173,10 +173,10 @@ class QuickAllReduce:
         regime_str = envs.VLLM_ROCM_QUICK_REDUCE_QUANTIZATION
         if regime_str not in QuickReduceRegime.__members__:
             logger.warning(
-                "Custom quick allreduce:",
-                f"Invalid quantization level: {regime_str}. "
-                "Supported levels: "
-                f"{list(QuickReduceRegime.__members__.keys())}",
+                "Custom quick allreduce: Invalid quantization level: %s. "
+                "Supported levels: %s",
+                regime_str,
+                list(QuickReduceRegime.__members__.keys()),
             )
             return
 
