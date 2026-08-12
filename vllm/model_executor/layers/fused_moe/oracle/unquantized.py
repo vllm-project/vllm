@@ -174,7 +174,10 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
         return backend
     raise ValueError(
         f"moe_backend='{runner_backend}' is not supported for unquantized MoE. "
-        f"Expected one of {list(mapping.keys())}."
+        f"Expected one of {list(mapping.keys())}. "
+        f"If '{runner_backend}' is meant for a quantized model and this is an "
+        f"unquantized draft model, set `moe_backend` inside "
+        f"`--speculative-config` instead, which applies to the drafter only."
     )
 
 
