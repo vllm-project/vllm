@@ -2000,6 +2000,13 @@ class DPEngineCoreProc(EngineCoreProc):
             tensor_queue=tensor_queue,
         )
 
+        if (
+            vllm_config.parallel_config.data_parallel_size > 1
+            and os.environ.get("VLLM_DP_DISABLE_BATCH_QUEUE", "1") != "0"
+        ):
+            self.batch_queue = None
+            self.step_fn = self.step
+
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
         parallel_config = vllm_config.parallel_config
@@ -2132,6 +2139,43 @@ class DPEngineCoreProc(EngineCoreProc):
             and self.step_counter % self.prefill_schedule_interval != 0
         )
 
+
+    def _has_pending_scheduler_work(self) -> bool:
+        if self.scheduler.has_unfinished_requests() or self.scheduler.has_requests():
+            return True
+        conn = self.scheduler.get_kv_connector()
+        sched = getattr(conn, "connector_scheduler", None) if conn else None
+        if sched is not None:
+            for name in (
+                "_reqs_need_send",
+                "_reqs_need_recv",
+                "_reqs_need_save",
+                "_pending_sent_acks",
+            ):
+                pending = getattr(sched, name, None)
+                if pending and len(pending) > 0:
+                    return True
+        return False
+
+    def _idle_during_active_wave(self) -> bool:
+        pc = self.vllm_config.parallel_config
+        return (
+            pc.data_parallel_size > 1
+            and self.engines_running
+            and not self.scheduler.has_requests()
+            and not self._has_pending_scheduler_work()
+            and not self.scheduler.has_unfinished_requests()
+        )
+
+    def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+        # Headless decode ranks have no kv_transfer_config; post dummy from step()
+        # so the worker enters coordinate_batch_across_dp during an active wave.
+        if self._idle_during_active_wave():
+            self.execute_dummy_batch()
+            return {}, False
+        return super().step()
+
+
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
@@ -2159,21 +2203,21 @@ class DPEngineCoreProc(EngineCoreProc):
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
-            if not executed:
-                if not local_unfinished_reqs and not self.engines_running:
-                    # All engines are idle.
-                    continue
-
-                # Execute a dummy pass when no ready requests ran, unless the
-                # engine is sleeping.
-                elif not self.model_executor.is_sleeping:
-                    with self.capture_iteration_details(None) as iteration_details:
-                        self.execute_dummy_batch()
-                    if iteration_details is not None and not self.has_coordinator:
-                        stats = self._make_iteration_details_stats(iteration_details)
-                        self.output_queue.put_nowait(
-                            (0, EngineCoreOutputs(scheduler_stats=stats))
-                        )
+            if not executed and not self.model_executor.is_sleeping:
+                pending = self._has_pending_scheduler_work()
+                if not self.batch_queue:
+                    if self._idle_during_active_wave() and not pending:
+                        pass
+                    elif pending:
+                        time.sleep(0.01)
+                    else:
+                        with self.capture_iteration_details(None) as iteration_details:
+                            self.execute_dummy_batch()
+                        if iteration_details is not None and not self.has_coordinator:
+                            stats = self._make_iteration_details_stats(iteration_details)
+                            self.output_queue.put_nowait(
+                                (0, EngineCoreOutputs(scheduler_stats=stats))
+                            )
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(
