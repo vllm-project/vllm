@@ -91,6 +91,7 @@ def _arch_tuned_configs() -> tuple[
         )
     return {}, {}
 
+
 class LLBf16Gemm:
     @dataclass(frozen=True, slots=True)
     class CompileKey:
