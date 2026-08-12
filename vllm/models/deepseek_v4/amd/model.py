@@ -56,6 +56,11 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.deepseek_v4.amd.mega_moe_experts import (
+    DeepseekV4MegaMoEExperts,
+    finalize_mega_moe_layers,
+    make_deepseek_v4_mega_expert_params_mapping,
+)
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -211,6 +216,31 @@ class DeepseekV4MoE(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.prefix = prefix
+        self.use_mega_moe = vllm_config.kernel_config.moe_backend == "flydsl_mega_moe"
+        if self.use_mega_moe:
+            if not vllm_config.parallel_config.enable_expert_parallel:
+                raise NotImplementedError(
+                    "DeepSeek V4 FlyDSL mega MoE requires expert parallel. "
+                    "Enable it with --enable-expert-parallel, or pick a "
+                    "different moe backend."
+                )
+            if getattr(config, "expert_dtype", "fp4") != "fp4":
+                raise NotImplementedError(
+                    "DeepSeek V4 FlyDSL mega MoE only supports fp4 experts; "
+                    f"got expert_dtype={config.expert_dtype!r}."
+                )
+            if self.tp_size != 1:
+                # The shared expert is built with reduce_results=False because
+                # FusedMoEFactory normally owns the all-reduce. On the mega path
+                # that layer is bypassed, so under TP>1 the shared expert's
+                # partial sums would never be reduced. DSv4 runs DP-attention +
+                # EP with TP=1, so reject rather than silently produce wrong
+                # numerics.
+                raise NotImplementedError(
+                    "DeepSeek V4 FlyDSL mega MoE requires tensor-parallel "
+                    f"size 1, got {self.tp_size}. Use data parallel with "
+                    "expert parallel instead."
+                )
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.hidden_size = config.hidden_size
@@ -279,6 +309,10 @@ class DeepseekV4MoE(nn.Module):
         self.experts_start_idx = self.tp_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
 
+        if self.use_mega_moe:
+            self._init_mega_moe_experts(vllm_config, config, prefix)
+            return
+
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             n_shared_experts=(
@@ -300,11 +334,76 @@ class DeepseekV4MoE(nn.Module):
             router_logits_dtype=torch.float32,
         )
 
+    def _init_mega_moe_experts(self, vllm_config, config, prefix: str) -> None:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        ep_group = get_ep_group()
+        self.ep_size = ep_group.world_size
+        self.ep_rank = ep_group.rank_in_group
+        assert config.n_routed_experts % self.ep_size == 0, (
+            f"n_routed_experts={config.n_routed_experts} must be divisible "
+            f"by ep_size={self.ep_size}"
+        )
+        self.n_local_experts = config.n_routed_experts // self.ep_size
+        self.experts_start_idx = self.ep_rank * self.n_local_experts
+        self.experts_end_idx = self.experts_start_idx + self.n_local_experts
+
+        self.experts = DeepseekV4MegaMoEExperts(
+            vllm_config,
+            num_experts=config.n_routed_experts,
+            num_local_experts=self.n_local_experts,
+            experts_start_idx=self.experts_start_idx,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            swiglu_limit=self.swiglu_limit,
+            prefix=f"{prefix}.experts",
+        )
+
+    def _forward_mega_moe(
+        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+            fused_topk_bias,
+        )
+
+        org_shape = hidden_states.shape
+        router_logits, _ = self.gate(hidden_states)
+        topk_weights, topk_ids = fused_topk_bias(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=(
+                self.gate.e_score_correction_bias.data
+                if self.gate.e_score_correction_bias is not None
+                else None
+            ),
+            topk=self.n_activated_experts,
+            renormalize=self.renormalize,
+            indices_type=self.hash_indices_dtype,
+            input_tokens=input_ids,
+            hash_indices_table=self.gate.tid2eid,
+            routed_scaling_factor=self.routed_scaling_factor,
+        )
+        final_hidden_states = self.experts(hidden_states, topk_weights, topk_ids)
+        if self.shared_experts is not None:
+            final_hidden_states = final_hidden_states + self.shared_experts(
+                hidden_states
+            )
+        return final_hidden_states.view(org_shape)
+
+    def finalize_mega_moe_weights(self) -> None:
+        if self.use_mega_moe:
+            self.experts.finalize_weights()
+
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
         if self.gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
+
+        if self.use_mega_moe:
+            return self._forward_mega_moe(hidden_states, input_ids)
 
         org_shape = hidden_states.shape
         final_hidden_states = self.experts(
@@ -867,6 +966,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        first_layer = next(iter(islice(self.layers, self.start_layer, self.end_layer)))
+        if getattr(first_layer.ffn, "use_mega_moe", False):
+            return make_deepseek_v4_mega_expert_params_mapping(
+                self.config.n_routed_experts
+            )
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         # When fusing shared experts, include the appended slots
@@ -1008,7 +1112,11 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        finalize_mega_moe_layers(
+            islice(self.model.layers, self.model.start_layer, self.model.end_layer)
+        )
+        return loaded_params
 
     def process_weights_after_loading(self) -> None:
         # After per-layer quant finalize, so we preshuffle the final fp8 weights.
