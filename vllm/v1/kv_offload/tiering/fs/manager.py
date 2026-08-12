@@ -18,8 +18,8 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 import functools
 import json
 import os
-from queue import SimpleQueue
 from collections.abc import Callable, Iterable
+from queue import SimpleQueue
 from typing import TYPE_CHECKING, ClassVar
 
 try:
