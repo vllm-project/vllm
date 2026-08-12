@@ -78,8 +78,8 @@ def get_offloading_event_group_spec(
 @dataclass(slots=True)
 class _OffloadEventMetadata:
     """BlockStored payload snapshot for one OffloadKey, captured while the
-    Request is available and kept until the matching eviction event. ``medium``
-    and ``ownership`` are forwarded from the OffloadingEvent."""
+    Request is available and kept until the final matching removal event.
+    ``medium`` and ``ownership`` are forwarded from the OffloadingEvent."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -92,6 +92,7 @@ class _OffloadEventMetadata:
     extra_keys: tuple[tuple[Any, ...] | None, ...] | None
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
+    active_residencies: set[tuple[Medium, str | None]]
 
 
 class OffloadingEventsTracker:
@@ -100,8 +101,8 @@ class OffloadingEventsTracker:
     The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
     :meth:`record_lookup` for ready primary-tier hits while the ``Request`` is
     available. Deferred and missing lookups add no state. Under the connector's
-    supported success-only transfer model, entries follow primary allocations
-    until CPU removal translation or :meth:`reset`.
+    supported success-only transfer model, entries remain until the final
+    observed residency removal or :meth:`reset`.
     """
 
     def __init__(self, config: OffloadingKVEventsConfig):
@@ -110,7 +111,7 @@ class OffloadingEventsTracker:
             config.enable_kv_cache_events and config.self_describing_kv_events
         )
 
-        # OffloadKey -> payload snapshot, kept until CPU removal or reset.
+        # OffloadKey -> payload snapshot, kept until final removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
 
     def record_store(
@@ -312,6 +313,7 @@ class OffloadingEventsTracker:
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
+            active_residencies={(Medium.CPU, None)},
         )
 
     def _placeholder_stored(
@@ -358,6 +360,7 @@ class OffloadingEventsTracker:
                 )
                 continue
 
+            meta.active_residencies.add((event.medium, event.ownership))
             yield BlockStored(
                 block_hashes=list(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
@@ -389,12 +392,15 @@ class OffloadingEventsTracker:
         locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
         for key in event.keys:
-            meta = self._pending_event_metadata.pop(key, None)
+            meta = self._pending_event_metadata.get(key)
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
                 )
+                meta.active_residencies.discard((event.medium, event.ownership))
+                if not meta.active_residencies:
+                    self._pending_event_metadata.pop(key)
             else:
                 if self.self_describing_enabled:
                     logger.warning_once(

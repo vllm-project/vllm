@@ -534,19 +534,21 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     ]
 
 
-def test_secondary_stored_event_does_not_mutate_cpu_metadata():
+def test_secondary_event_lifecycle_preserves_cpu_metadata():
     tracker, _, _, key = _lookup_chunk()
-    expected_metadata = dict(tracker._pending_event_metadata)
-
-    stored = list(
+    metadata = tracker._pending_event_metadata[key]
+    events = list(
         tracker.take_events(
-            [_stored_event([key], Medium.STORAGE, ownership="custom")]
+            [
+                _stored_event([key], Medium.STORAGE, ownership="custom"),
+                _removed_event([key], Medium.STORAGE, ownership="custom"),
+            ]
         )
     )
 
-    assert stored[0].token_ids == [1, 2, 3, 4]
-    assert stored[0].ownership == "custom"
-    assert tracker._pending_event_metadata == expected_metadata
+    assert events[0].token_ids == [1, 2, 3, 4]
+    assert [event.ownership for event in events] == ["custom", "custom"]
+    assert tracker._pending_event_metadata[key] is metadata
 
 
 def test_take_events_groups_removed_hashes_by_kv_group():
@@ -558,12 +560,9 @@ def test_take_events_groups_removed_hashes_by_kv_group():
     key0 = _record_chunks(tracker, req0, group0_config, num_chunks=1)[0]
     key1 = _record_chunks(tracker, req1, group1_config, num_chunks=1)[0]
 
-    removed = list(
-        tracker.take_events([_removed_event([key0, key1], ownership="custom")])
-    )
+    removed = list(tracker.take_events([_removed_event([key0, key1])]))
 
     assert len(removed) == 2
-    assert {event.ownership for event in removed} == {"custom"}
     by_group = {event.group_idx: event.block_hashes for event in removed}
     assert by_group == {
         0: [_wire_hash(_hash(0)), _wire_hash(_hash(1))],
