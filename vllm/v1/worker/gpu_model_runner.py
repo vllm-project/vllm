@@ -1402,6 +1402,11 @@ class GPUModelRunner(
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_id in req_data.resumed_req_ids
+            if resumed_from_preemption and req_id in req_data.resumed_mm_features:
+                # Preemption may have uncovered mm items whose data was
+                # stripped at admission (strip_covered_mm_data); take the
+                # re-shipped features so scheduled encoder runs can execute.
+                req_state.mm_features = req_data.resumed_mm_features[req_id]
             num_output_tokens = req_data.num_output_tokens[i]
             req_index = self.input_batch.req_id_to_index.get(req_id)
 

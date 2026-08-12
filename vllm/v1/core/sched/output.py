@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -31,6 +31,24 @@ else:
     Request = object
 
 
+def strip_covered_mm_data(
+    mm_features: "list[MultiModalFeatureSpec]",
+    num_computed_tokens: int,
+) -> "list[MultiModalFeatureSpec]":
+    """Drop the tensor data of mm items whose placeholder span is fully inside
+    the prefix-cache-covered region: no encoder run can be scheduled for them,
+    so the workers never consume the data. The scheduler-side ``Request`` keeps
+    the full features; requests resumed from preemption re-ship any
+    newly-uncovered items via ``CachedRequestData.resumed_mm_features``."""
+    return [
+        f
+        if f.data is None
+        or f.mm_position.offset + f.mm_position.length > num_computed_tokens
+        else replace(f, data=None)
+        for f in mm_features
+    ]
+
+
 @dataclass
 class NewRequestData:
     req_id: str
@@ -57,7 +75,9 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            mm_features=request.mm_features,
+            mm_features=strip_covered_mm_data(
+                request.mm_features, request.num_computed_tokens
+            ),
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             block_ids=block_ids,
@@ -128,6 +148,12 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    # For requests resumed from preemption: the mm features to re-ship, since
+    # eviction may have uncovered items whose data was stripped at admission
+    # (see strip_covered_mm_data). Keyed by request id.
+    resumed_mm_features: "dict[str, list[MultiModalFeatureSpec]]" = field(
+        default_factory=dict
+    )
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
@@ -178,6 +204,7 @@ class CachedRequestData:
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
+            resumed_mm_features={},
         )
 
 
