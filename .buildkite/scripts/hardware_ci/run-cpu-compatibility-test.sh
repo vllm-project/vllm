@@ -1,10 +1,11 @@
 #!/bin/bash
 set -euox pipefail
 
-export VLLM_CPU_KVCACHE_SPACE=1 
+export VLLM_CPU_KVCACHE_SPACE=1
 export VLLM_CPU_CI_ENV=1
-# Reduce sub-processes for acceleration
-export TORCH_COMPILE_DISABLE=1 
+# Skip torch.compile via vLLM's --enforce-eager flag (passed below) instead of
+# TORCH_COMPILE_DISABLE=1, which torch 2.12 no longer treats as a silent no-op
+# when callers specify fullgraph=True.
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
 SDE_ARCHIVE="sde-external-10.7.0-2026-02-18-lin.tar.xz"
@@ -49,15 +50,15 @@ wait_for_pid_and_check_log() {
 }
 
 # Test Sky Lake (AVX512F)
-./sde/sde64 -skl -- python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --dtype bfloat16 > test_0.log 2>&1 &
+./sde/sde64 -skl -- python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --dtype bfloat16 --enforce-eager > test_0.log 2>&1 &
 PID_TEST_0=$!
 
 # Test Cascade Lake (AVX512F + VNNI)
-./sde/sde64 -clx -- python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --dtype bfloat16 > test_1.log 2>&1 &
+./sde/sde64 -clx -- python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --dtype bfloat16 --enforce-eager > test_1.log 2>&1 &
 PID_TEST_1=$!
 
 # Test Cooper Lake (AVX512F + VNNI + BF16)
-./sde/sde64 -cpx -- python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --dtype bfloat16 > test_2.log 2>&1 &
+./sde/sde64 -cpx -- python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --dtype bfloat16 --enforce-eager > test_2.log 2>&1 &
 PID_TEST_2=$!
 
 wait_for_pid_and_check_log $PID_TEST_0 test_0.log

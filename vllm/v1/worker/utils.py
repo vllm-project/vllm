@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -29,24 +29,38 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
 
 
-@triton.jit
+def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
+    if not any(num_nans_in_logits.values()):
+        return
+
+    corrupted_requests = {
+        req_id: num_nans
+        for req_id, num_nans in num_nans_in_logits.items()
+        if num_nans > 0
+    }
+    raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
+
+
+@triton.jit(do_not_specialize=["n_blocks"])
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
+    seg_block_strides_ptr,
+    seg_page_sizes_ptr,
     block_ids_ptr,
     n_blocks,
     N_SEGS: tl.constexpr,
-    PAGE_SIZE_EL: tl.constexpr,
+    MAX_CHUNKS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Zero KV cache blocks across all segments in a single launch.
@@ -56,25 +70,34 @@ def _zero_kv_blocks_kernel(
     buffer.  For backends where K/V is outermost (block_dim=1) there are
     two segments per buffer (one for K, one for V).
 
+    Segments may have different block strides and page sizes (e.g. packed
+    KV views or models with multiple KV cache groups like MLA + DSA
+    indexer). Each segment's block stride determines where a logical block
+    begins, while its page size determines how many elements are cleared.
+
     seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
     allowing segments to live in different CUDA allocations.
 
     Programs are mapped as (block_index, seg_index, chunk_index).
     """
     pid = tl.program_id(0)
-    chunks = PAGE_SIZE_EL // BLOCK_SIZE
-    work_per_block = N_SEGS * chunks
+    work_per_block = N_SEGS * MAX_CHUNKS
     block_index = pid // work_per_block
     if block_index >= n_blocks:
         return
     remainder = pid % work_per_block
-    seg_index = remainder // chunks
-    chunk_index = remainder % chunks
+    seg_index = remainder // MAX_CHUNKS
+    chunk_index = remainder % MAX_CHUNKS
+    block_stride_el = tl.load(seg_block_strides_ptr + seg_index)
+    page_size_el = tl.load(seg_page_sizes_ptr + seg_index)
+    if chunk_index >= page_size_el // BLOCK_SIZE:
+        return
     block_id = tl.load(block_ids_ptr + block_index)
     seg_addr = tl.load(seg_addrs_ptr + seg_index)
     ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
     offset = (
-        block_id.to(tl.int64) * PAGE_SIZE_EL + chunk_index.to(tl.int64) * BLOCK_SIZE
+        block_id.to(tl.int64) * block_stride_el.to(tl.int64)
+        + chunk_index.to(tl.int64) * BLOCK_SIZE
     )
     cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
     tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
@@ -91,13 +114,11 @@ class KVBlockZeroer:
     def __init__(
         self,
         device: torch.device,
-        pin_memory: bool,
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[int],
         cache_dtype: str,
         static_forward_context: dict[str, Any],
         runner_only_attn_layers: set[str] | None = None,
-        max_concurrency: int = 1,
     ) -> None:
         """Precompute the absolute-address table for the Triton zeroing kernel.
 
@@ -106,35 +127,31 @@ class KVBlockZeroer:
 
         Block IDs from the scheduler reference logical blocks whose size
         may differ from the kernel block size (virtual block splitting).
-        PAGE_SIZE_EL accounts for this ratio so that
-        ``block_id * PAGE_SIZE_EL`` lands at the correct offset.
+        Each virtual block is represented as an independent segment so its
+        physical block stride and zeroed page span remain independent.
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
         self.device = device
-        self.pin_memory = pin_memory
-        if max_concurrency < 1:
-            raise ValueError("max_concurrency must be at least 1")
-        self.max_concurrency = max_concurrency
-        self._meta: tuple[torch.Tensor, int, int, int] | None = None
-        self._id_cap: int = 0
-        self._ids_pinned: list[torch.Tensor] = []
-        self._ids_gpu: list[torch.Tensor] = []
-        self._id_buffer_index = 0
+        self._meta: (
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int] | None
+        ) = None
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
-        page_size_el: int | None = None
+        seg_block_strides: list[int] = []
+        seg_page_sizes: list[int] = []
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
-            if not isinstance(spec, FullAttentionSpec):
+            if not isinstance(spec, AttentionSpec):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+            assert spec.block_size % kernel_bs == 0
             ratio = spec.block_size // kernel_bs
             block_dim = group.backend.get_kv_cache_block_dim(
                 kernel_bs,
@@ -155,88 +172,81 @@ class KVBlockZeroer:
                 seen_ptrs.add(dp)
 
                 el = kv.element_size()
-                cur_bytes = kv.stride(block_dim) * el
-                assert cur_bytes % 4 == 0
-                kernel_block_el = cur_bytes // 4
-                cur_page_el = kernel_block_el * ratio
-                if page_size_el is None:
-                    page_size_el = cur_page_el
-                else:
-                    assert page_size_el == cur_page_el, (
-                        f"Non-uniform page sizes: {page_size_el} vs {cur_page_el}"
-                    )
-
-                block_stride_bytes = cur_bytes
+                block_stride_bytes = kv.stride(block_dim) * el
+                assert block_stride_bytes % 4 == 0
+                assert kv.shape[block_dim] % ratio == 0
                 outer_dims = [
                     d
                     for d in range(block_dim)
                     if kv.stride(d) * el > block_stride_bytes
                 ]
                 outer_strides = [kv.stride(d) * el for d in outer_dims]
+                inner_dims = [
+                    d for d in range(kv.ndim) if d != block_dim and d not in outer_dims
+                ]
+                kernel_page_bytes = el + sum(
+                    (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
+                )
+                assert kernel_page_bytes % 4 == 0
+                logical_block_stride_bytes = block_stride_bytes * ratio
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
                     off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
-                    seg_addrs.append(dp + off_bytes)
+                    assert (dp + off_bytes) % 4 == 0
+                    for virtual_index in range(ratio):
+                        seg_addrs.append(
+                            dp + off_bytes + virtual_index * block_stride_bytes
+                        )
+                        seg_block_strides.append(logical_block_stride_bytes // 4)
+                        seg_page_sizes.append(kernel_page_bytes // 4)
 
-        if not seg_addrs or page_size_el is None:
+        if not seg_addrs:
             self._meta = None
             return
 
-        blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
-        self._id_cap = 8192
-        self._allocate_id_buffers()
+        max_page_size_el = max(seg_page_sizes)
+        blk_size = min(
+            min(largest_power_of_2_divisor(ps) for ps in seg_page_sizes),
+            1024,
+        )
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
-            page_size_el,
+            torch.tensor(seg_block_strides, dtype=torch.int64, device=self.device),
+            torch.tensor(seg_page_sizes, dtype=torch.int64, device=self.device),
+            max_page_size_el // blk_size,
             blk_size,
             len(seg_addrs),
         )
-
-    def _allocate_id_buffers(self) -> None:
-        self._ids_pinned = [
-            torch.empty(
-                self._id_cap,
-                dtype=torch.int64,
-                pin_memory=self.pin_memory,
-            )
-            for _ in range(self.max_concurrency)
-        ]
-        self._ids_gpu = [
-            torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
-            for _ in range(self.max_concurrency)
-        ]
-        self._id_buffer_index = 0
 
     def zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the KV cache memory for the given block IDs."""
         if not block_ids or self._meta is None:
             return
-        seg_addrs, page_size_el, blk_size, n_segs = self._meta
+        (
+            seg_addrs,
+            seg_block_strides,
+            seg_page_sizes,
+            max_chunks,
+            blk_size,
+            n_segs,
+        ) = self._meta
         n_blocks = len(block_ids)
-        if n_blocks > self._id_cap:
-            # The old pinned buffers may still be the source of an in-flight
-            # nonblocking copy. Growing is rare, so we don't mind the sync overhead
-            torch.accelerator.synchronize()
-            self._id_cap = n_blocks * 2
-            self._allocate_id_buffers()
-
-        # The H2D copy is nonblocking, so its pinned source must not be mutated
-        # while this batch is in flight. Rotate through as many buffers as concurrent
-        # in-flight batches, to avoid collisions.
-        buffer_index = self._id_buffer_index
-        self._id_buffer_index = (buffer_index + 1) % self.max_concurrency
-        ids_pinned = self._ids_pinned[buffer_index]
-        ids_pinned[:n_blocks].numpy()[:] = block_ids
-        idx = self._ids_gpu[buffer_index][:n_blocks]
-        idx.copy_(ids_pinned[:n_blocks], non_blocking=True)
-        grid = (n_blocks * n_segs * (page_size_el // blk_size),)
+        idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
+        grid = (n_blocks * n_segs * max_chunks,)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
+            seg_block_strides,
+            seg_page_sizes,
             idx,
             n_blocks,
             N_SEGS=n_segs,
-            PAGE_SIZE_EL=page_size_el,
+            MAX_CHUNKS=max_chunks,
             BLOCK_SIZE=blk_size,
         )
+
+    def warmup(self, num_kv_blocks: int) -> None:
+        """JIT-compile the zeroing kernel before the first real request."""
+        if num_kv_blocks > 0:
+            self.zero_block_ids([0])
 
 
 @dataclass
@@ -264,12 +274,22 @@ class AttentionGroup:
             if kernel_block_size is not None
             else self.kv_cache_spec
         )
+        builder_cls = self.backend.get_builder_cls()
+        builder_kwargs = {}
+        if builder_cls.requires_block_table_width:
+            max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
+                vllm_config, vllm_config.model_config.max_model_len
+            )
+            builder_kwargs["block_table_width"] = get_block_table_width(
+                max_num_blocks, self.kv_cache_spec.block_size, kernel_block_size
+            )
         self.metadata_builders = [
-            self.backend.get_builder_cls()(
+            builder_cls(
                 kv_cache_spec_builder,
                 self.layer_names,
                 vllm_config,
                 device,
+                **builder_kwargs,
             )
             for _ in range(num_metadata_builders)
         ]
@@ -277,6 +297,17 @@ class AttentionGroup:
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
+
+    @property
+    def supports_draft_decode_metadata_update(self) -> bool:
+        return self.get_metadata_builder().supports_draft_decode_metadata_update
+
+    def update_draft_decode_metadata(
+        self,
+        attn_metadata: Mapping[str, Any],
+    ) -> None:
+        metadata = attn_metadata[self.layer_names[0]]
+        self.get_metadata_builder().update_draft_decode_metadata(metadata)
 
 
 def select_common_block_size(
@@ -580,6 +611,24 @@ def copy_kv_cache_blocks_inplace(
         blocks[dst_indices] = blocks[src_indices]
 
 
+def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> bool:
+    """Whether every request in the batch has the same query length.
+
+    Shape test only; use ``get_uniform_decode_token_count`` to classify a
+    scheduled batch, since a prompt chunk can have a decode batch's shape.
+    """
+    return num_reqs > 0 and num_tokens == max_query_len * num_reqs
+
+
+def get_uniform_decode_token_count(
+    num_reqs: int, num_tokens: int, max_query_len: int, has_prefill: bool
+) -> int | None:
+    """Per-request token count of a uniform decode batch, or None."""
+    if not has_prefill and is_uniform_query_len(num_reqs, num_tokens, max_query_len):
+        return max_query_len
+    return None
+
+
 def is_residual_scattered_for_sp(
     vllm_config: VllmConfig, num_input_tokens: int
 ) -> bool:
@@ -607,3 +656,20 @@ def is_residual_scattered_for_sp(
     assert num_input_tokens % tp == 0
 
     return True
+
+
+@dataclass
+class EncoderTimingStats:
+    """Per-request timing statistics for encoder forward pass."""
+
+    encoder_forward_secs: float = 0.0
+    """Time spent in vision encoder forward pass (seconds)."""
+
+    num_encoder_calls: int = 0
+    """Number of times encoder was called for this request."""
+
+    def to_dict(self) -> dict[str, float | int]:
+        return {
+            "encoder_forward_secs": self.encoder_forward_secs,
+            "num_encoder_calls": self.num_encoder_calls,
+        }

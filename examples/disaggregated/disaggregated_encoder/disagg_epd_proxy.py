@@ -21,13 +21,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import io
+import json
 import logging
 import os
 import random
+import time
 import uuid
 from collections.abc import AsyncIterator
 
 import aiohttp
+import pybase64 as base64
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -53,6 +58,89 @@ decode_session: aiohttp.ClientSession | None = None
 
 MM_TYPES = {"image_url", "audio_url", "input_audio"}
 
+# Diagnostic switch: forward the original request to the decoder so the
+# only difference from the rewrite path is the rewrite itself.
+NO_REWRITE = False
+
+
+# Grid metadata reported by the encoder instance, keyed by item index.
+# Empty when the encoder did not report any (then nothing is rewritten).
+def content_uuid(item: dict) -> str:
+    """Cache key for a multimodal item, derived from its content.
+
+    Must be content-derived, not request-derived: the EC cache is keyed by this
+    value, so a per-request key (a request id, say) would make every request a
+    miss and throw away cross-request reuse of already-encoded media -- while
+    the unmodified path, which hashes the content, would keep it. That asymmetry
+    silently biases any comparison between the two.
+    """
+    url = (item.get("image_url") or item.get("audio_url") or {}).get("url") or ""
+    payload = url or json.dumps(item, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _b64_tensor(values: list) -> str:
+    import torch
+
+    buf = io.BytesIO()
+    grid = torch.tensor(values, dtype=torch.long)
+    # Downstream stacks per item, so hand over a flat (t, h, w).
+    torch.save(grid.reshape(-1)[:3], buf)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
+    """Replace each image item with a metadata-only reference for the decoder.
+
+    The decoder does not need the pixels: the encoder instance already produced
+    the embedding and published it through the EC connector under the same uuid.
+    Sending only the grid lets the decoder size the placeholder range without
+    re-running the image transform.
+
+    `item_meta` holds what the encoder reported for each item (its cache key and
+    the grid its processor actually produced), so the grid is never re-derived
+    here -- a second derivation could disagree with the encoder's.
+    """
+    rewritten = 0
+    idx = 0
+    new_messages = []
+    for msg in req_data.get("messages", []):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            new_messages.append(msg)
+            continue
+        new_content = []
+        for item in content:
+            if item.get("type") not in MM_TYPES:
+                new_content.append(item)
+                continue
+            meta = dict(item_meta.get(idx) or {})
+            idx += 1
+            item_uuid = meta.pop("mm_hash", None)
+            # Whatever keys the encoder reported are the metadata its model
+            # declared as needed to size the placeholder range; the proxy does
+            # not need to know their names.
+            metadata = {k: _b64_tensor(v) for k, v in meta.items()}
+            if not metadata or not item_uuid:
+                # The encoder reported no metadata (e.g. the item came from its
+                # processor cache); let the decoder process the media itself.
+                new_content.append(item)
+                continue
+            new_content.append(
+                {
+                    "type": "image_embeds",
+                    "image_embeds": metadata,
+                    "uuid": item_uuid,
+                }
+            )
+            rewritten += 1
+        new_messages.append({**msg, "content": new_content})
+
+    if not rewritten:
+        return req_data
+    logger.info("Rewrote %d image item(s) as metadata references", rewritten)
+    return {**req_data, "messages": new_messages}
+
 
 def extract_mm_items(request_data: dict) -> list[dict]:
     """
@@ -77,22 +165,29 @@ async def fanout_encoder_primer(
     orig_request: dict,
     e_urls: list[str],
     req_id: str,
-) -> None:
+) -> dict[int, dict]:
     """
     1. Build one request *per MM item* with all text removed.
     2. Send them concurrently to the encode cluster.
     3. Raise if any of them fails.
+
+    Returns, per item index, the metadata the encoder reported in
+    `ec_transfer_params`: its EC cache key and the grid its processor produced.
+    The proxy still supplies the uuid so both sides key the cache the same way;
+    the grid can only come from the encoder, which is the side that computed it.
     """
     logger.info("[%s] Processing multimodal items...", req_id)
 
     mm_items = extract_mm_items(orig_request)
     if not mm_items:
         logger.info("[%s] No multimodal items, skipping encoder", req_id)
-        return  # nothing to do
+        return {}  # nothing to do
 
     logger.info("[%s] got %d multimodal items...", req_id, len(mm_items))
 
     tasks = []
+    item_uuids: dict[int, str] = {}
+    item_meta: dict[int, dict] = {}
 
     # Round-robin over encode servers to distribute load a bit
     url_cycle = (e_urls[i % len(e_urls)] for i in range(len(mm_items)))
@@ -102,14 +197,27 @@ async def fanout_encoder_primer(
         child_req_id = f"{req_id}:{idx}:{uuid.uuid4().hex[:6]}"
         headers = {"x-request-id": child_req_id}
 
+        # With --no-rewrite the decoder still receives the raw image and derives
+        # the cache key by hashing it, so the encoder must do the same -- passing
+        # a uuid here would make the two disagree and silently defeat the EC
+        # transfer, leaving the decoder to encode the image itself.
+        item_uuid = None if NO_REWRITE else content_uuid(item)
+        if item_uuid is not None:
+            item_uuids[idx] = item_uuid
+
         encoder_req = {
             # You *may* need to keep additional fields
             "model": orig_request.get("model"),
             "messages": [
-                {"role": "user", "content": [item]},
+                {
+                    "role": "user",
+                    "content": [
+                        item if item_uuid is None else {**item, "uuid": item_uuid}
+                    ],
+                },
             ],
-            # Only need 1 token so the server actually runs the encoder path
-            "max_tokens": 1,
+            # No max_tokens cap: the encoder instance never samples, it finishes
+            # once the prompt is encoded and its embeddings are published.
             "stream": False,
         }
         tasks.append(
@@ -152,9 +260,21 @@ async def fanout_encoder_primer(
                 detail=f"Encoder request failed: {detail}",
             )
 
+        # The encoder reports each item's cache key and grid here.
+        try:
+            params = (await r.json()).get("ec_transfer_params") or {}
+            reported = params.get("ec_items") or []
+        except Exception:
+            logger.warning("[%s] Could not read encoder metadata #%d", req_id, idx)
+            reported = []
+        if reported and idx in item_uuids:
+            # One item per encoder request, so the first entry is this item's.
+            item_meta[idx] = {**reported[0], "mm_hash": item_uuids[idx]}
+
     logger.info(
         "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
     )
+    return item_meta
 
 
 async def maybe_prefill(
@@ -320,7 +440,11 @@ async def forward_non_stream(
 ) -> dict:
     try:
         # Step 1: Process through Encoder instance (if has MM input)
-        await fanout_encoder_primer(req_data, e_urls, req_id)
+        _t0 = time.perf_counter()
+        item_meta = await fanout_encoder_primer(req_data, e_urls, req_id)
+        _t1 = time.perf_counter()
+        req_data = req_data if NO_REWRITE else rewrite_for_decode(req_data, item_meta)
+        _t2 = time.perf_counter()
 
         # Step 2: Process through Prefill instance
         req_data = await maybe_prefill(req_data, p_url, req_id)
@@ -334,7 +458,17 @@ async def forward_non_stream(
             f"{d_url}/v1/chat/completions", json=req_data, headers=headers
         ) as resp:
             resp.raise_for_status()
-            return await resp.json()
+            out = await resp.json()
+            _t3 = time.perf_counter()
+            logger.info(
+                "STAGE %s encode=%.1f rewrite=%.1f decode=%.1f total=%.1f",
+                "no-rewrite" if NO_REWRITE else "rewrite",
+                (_t1 - _t0) * 1e3,
+                (_t2 - _t1) * 1e3,
+                (_t3 - _t2) * 1e3,
+                (_t3 - _t0) * 1e3,
+            )
+            return out
 
     except HTTPException:
         raise
@@ -348,7 +482,11 @@ async def forward_stream(
 ) -> AsyncIterator[str]:
     try:
         # Step 1: Process through Encoder instance (if has MM input)
-        await fanout_encoder_primer(req_data, e_urls, req_id)
+        _t0 = time.perf_counter()
+        item_meta = await fanout_encoder_primer(req_data, e_urls, req_id)
+        _t1 = time.perf_counter()
+        req_data = req_data if NO_REWRITE else rewrite_for_decode(req_data, item_meta)
+        _t2 = time.perf_counter()
 
         # Step 2: Process through Prefill instance
         req_data = await maybe_prefill(req_data, p_url, req_id)
@@ -358,6 +496,7 @@ async def forward_stream(
         headers = {"x-request-id": req_id}
 
         # Streaming response
+        _first = None
         async with decode_session.post(
             f"{d_url}/v1/chat/completions",
             json=req_data,
@@ -366,8 +505,19 @@ async def forward_stream(
             resp.raise_for_status()
             async for chunk in resp.content.iter_chunked(1024):
                 if chunk:
+                    if _first is None:
+                        _first = time.perf_counter()
                     yield chunk.decode("utf-8", errors="ignore")
+        _t3 = time.perf_counter()
 
+        logger.info(
+            "STAGE %s encode=%.1f rewrite=%.2f decode_ttfb=%.1f decode_total=%.1f",
+            "no-rewrite" if NO_REWRITE else "rewrite",
+            (_t1 - _t0) * 1e3,
+            (_t2 - _t1) * 1e3,
+            ((_first or _t3) - _t2) * 1e3,
+            (_t3 - _t2) * 1e3,
+        )
         logger.info("[%s] Streaming completed", req_id)
 
     except HTTPException:
@@ -554,6 +704,11 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
+        "--no-rewrite",
+        action="store_true",
+        help="Forward images to the decoder unchanged (for stage-timing A/B).",
+    )
+    parser.add_argument(
         "--encode-servers-urls",
         required=True,
         help='Comma-separated encode URLs ("http://e1:8001,http://e2:8001")',
@@ -573,6 +728,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    NO_REWRITE = args.no_rewrite
     app.state.e_urls = [
         u.strip() for u in args.encode_servers_urls.split(",") if u.strip()
     ]

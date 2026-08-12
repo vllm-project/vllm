@@ -99,6 +99,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import get_processor_cls_name_from_config
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -535,7 +536,8 @@ class Glm4vVisionEmbeddings(nn.Module):
         total_seq = h_coords.shape[0]
         device = pos_embed_weight.device
 
-        # Move coordinates to correct device
+        # Move coordinates to correct device. The only caller already hands
+        # these over pinned + non-blocking, so this is normally a no-op.
         h_coords, w_coords = h_coords.to(device), w_coords.to(device)
 
         # Handle empty sequence case
@@ -546,9 +548,9 @@ class Glm4vVisionEmbeddings(nn.Module):
         else:
             # Convert inputs to tensors if needed
             if isinstance(lengths, list):
-                lengths = torch.tensor(lengths, device=device, dtype=torch.long)
+                lengths = async_tensor_h2d(lengths, device=device, dtype=torch.long)
             if not isinstance(image_shapes, torch.Tensor):
-                image_shapes = torch.tensor(
+                image_shapes = async_tensor_h2d(
                     image_shapes, device=device, dtype=torch.long
                 )
 
@@ -816,10 +818,15 @@ class Glm4vVisionTransformer(nn.Module):
             )
 
             lengths = [h * w] * t
-            image_shapes = torch.tensor([[t, h, w]], device=device)
+            image_shapes = async_tensor_h2d(
+                [[t, h, w]], dtype=torch.long, device=device
+            )
 
-            h_coords_repeated = h_coords.repeat(t)
-            w_coords_repeated = w_coords.repeat(t)
+            # Build the coordinates on the host (cheap integer math) but move
+            # them across pinned + non-blocking, so the consumer's
+            # `.to(device)` below is a no-op rather than a blocking H2D.
+            h_coords_repeated = async_tensor_h2d(h_coords.repeat(t), device=device)
+            w_coords_repeated = async_tensor_h2d(w_coords.repeat(t), device=device)
 
             embeds = self.embeddings(
                 embeddings=torch.zeros(
@@ -1082,8 +1089,8 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             preprocessed_size = ImageSize(width=image_width, height=image_height)
 
         # NOTE: Frames are padded to be divisible by `temporal_patch_size`
-        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
-        padded_num_frames = num_frames + num_frames % temporal_patch_size
+        # https://github.com/huggingface/transformers/blob/v5.13.0/src/transformers/models/qwen2_vl/video_processing_qwen2_vl.py#L249-L252
+        padded_num_frames = num_frames + (-num_frames % temporal_patch_size)
 
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
@@ -1403,6 +1410,11 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         timestamps_list = full_second_idxs[::2]
         return list(timestamps_list)
 
+    def _get_video_frame_embed_token_id(self, hf_processor: object) -> int:
+        if isinstance(hf_processor, Glm4vProcessor) or TRANSFORMERS_WITH_GA:
+            return hf_processor.image_token_id
+        return hf_processor.video_token_id
+
     def _construct_video_placeholder(
         self,
         video_array: np.ndarray,
@@ -1440,13 +1452,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         num_tokens_per_frame = int(H * W) // merge_length
         placeholder = []
         placeholder.append(bov_token_id)
-        # Glm46VProcessor uses image_token_id for video frame embeddings;
-        # Glm4vProcessor uses video_token_id.
-        frame_embed_token_id = (
-            hf_processor.video_token_id
-            if isinstance(hf_processor, Glm4vProcessor) or not TRANSFORMERS_WITH_GA
-            else hf_processor.image_token_id
-        )
+        frame_embed_token_id = self._get_video_frame_embed_token_id(hf_processor)
         for frame_idx in frames_idx_token:
             placeholder.append(boi_token_id)
             placeholder.extend([frame_embed_token_id] * num_tokens_per_frame)
@@ -1604,11 +1610,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         processor = self.info.get_hf_processor(**mm_kwargs)
 
-        # Glm46VProcessor and GLMGA handle image/video placeholders together
-        # via the direct path. Only Glm4vProcessor (GLM-4.1V) needs the
-        # split-video path because it uses image_token_id as the video
-        # placeholder.  The direct path requires transformers >= 5.5.0
-        # (Glm46VProcessor / GlmgaVideoProcessor support).
         use_direct_path = (
             not isinstance(processor, Glm4vProcessor) and TRANSFORMERS_WITH_GA
         )
@@ -1630,6 +1631,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         ):
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
+            frame_embed_token_id = self.info._get_video_frame_embed_token_id(processor)
+            swap_video_frame_tokens = frame_embed_token_id == processor.image_token_id
             for item in mm_data.pop("videos", []):
                 video_array, metadata = item
 
@@ -1650,9 +1653,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     tok_kwargs=tok_kwargs,
                 )
                 input_ids = video_outputs.pop("input_ids")
-                input_ids[input_ids == processor.image_token_id] = (
-                    processor.video_token_id
-                )
+                if swap_video_frame_tokens:
+                    input_ids[input_ids == processor.image_token_id] = (
+                        processor.video_token_id
+                    )
                 video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
                 prompt = prompt.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
@@ -1668,6 +1672,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             )
         else:
             video_outputs = dict()
+            swap_video_frame_tokens = False
 
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
@@ -1675,6 +1680,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             mm_kwargs=mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
+        if swap_video_frame_tokens:
+            input_ids = processed_outputs["input_ids"]
+            input_ids[input_ids == processor.video_token_id] = processor.image_token_id
+            processed_outputs["input_ids"] = input_ids
         combined_outputs = dict(
             processed_outputs,
             **video_outputs,
@@ -1701,7 +1710,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         merge_length = image_processor.merge_size**2
 
-        def get_image_replacement_glm4v(item_idx: int):
+        def get_image_replacement(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
             grid_thw = out_item["image_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
@@ -1709,7 +1718,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             num_tokens = int(grid_thw.prod()) // merge_length
             return [hf_processor.image_token_id] * num_tokens
 
-        def get_video_replacement_glm4v(item_idx: int):
+        def get_video_replacement(item_idx: int):
             out_item = out_mm_kwargs["video"][item_idx]
             grid_thw = out_item["video_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
@@ -1720,39 +1729,19 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             )
             return PromptUpdateDetails.select_token_id(
                 placeholder,
-                embed_token_id=hf_processor.video_token_id,
+                embed_token_id=self.info._get_video_frame_embed_token_id(hf_processor),
             )
-
-        def get_video_replacement_glm46v(item_idx: int):
-            out_item = out_mm_kwargs["video"][item_idx]
-            grid_thw = out_item["video_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-
-            video, metadata = mm_items["video"][item_idx]
-            placeholder = self.info._construct_video_placeholder(
-                video, metadata, grid_thw
-            )
-            return PromptUpdateDetails.select_token_id(
-                placeholder,
-                embed_token_id=hf_processor.image_token_id,
-            )
-
-        is_glm46v = not isinstance(hf_processor, Glm4vProcessor)
 
         return [
             PromptReplacement(
                 modality="image",
                 target=hf_processor.image_token,
-                replacement=get_image_replacement_glm4v,
+                replacement=get_image_replacement,
             ),
             PromptReplacement(
                 modality="video",
                 target="<|begin_of_video|><|video|><|end_of_video|>",
-                replacement=(
-                    get_video_replacement_glm46v
-                    if is_glm46v and TRANSFORMERS_WITH_GA
-                    else get_video_replacement_glm4v
-                ),
+                replacement=get_video_replacement,
             ),
         ]
 
