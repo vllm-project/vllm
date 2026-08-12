@@ -37,6 +37,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+# DSparkConfidenceHead is upstream's (#47808). DSparkMarkovHead is NOT imported:
+# this fork flattened the Markov head into markov_w1/markov_w2, so the name has no
+# reference here and importing it would be a dead import asserting a structure we
+# do not have. maybe_prefix is likewise not imported -- our `prefix` already ends
+# in a dot, so maybe_prefix's f"{prefix}.{name}" would yield a double dot and a
+# layer name that silently misses quant-config lookups.
+from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead
 from vllm.model_executor.models.utils import get_draft_quant_config
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
@@ -692,6 +700,14 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     """DSpark draft model for fixed-block speculative decoding."""
 
     uses_query_start_loc_context_kv = True
+    # Full-vocab draft: draft ids are target ids, no remapping needed. Declared
+    # because DSparkSpeculator.load_draft_model reads it unconditionally, and an
+    # nn.Module without the attribute raises AttributeError from __getattr__
+    # rather than returning None -- which takes down draft-model load, i.e. every
+    # DSpark serve. The AMD sibling has always declared it (amd/dspark.py:294);
+    # this class did not, and nothing noticed until upstream #47808 restored the
+    # read.
+    draft_id_to_target_id = None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -747,6 +763,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             }
         )
 
+        # ours: self.norm is already assigned above in this flattened class, and
+        # `hidden_size` is our int()-guarded local. Upstream's side re-assigns
+        # self.norm -- a second RMSNorm built and dropped, plus a reordering of
+        # `norm` within named_parameters(). Its only real change here is a
+        # comment rewrap.
         hc_dim = self.hc_mult * hidden_size
         self.hc_head_fn = nn.Parameter(
             torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
@@ -786,14 +807,23 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             vllm_config,
             "dspark_markov_inplace_add",
         )
-        self.confidence_head = ReplicatedLinear(
-            hidden_size + markov_rank,
-            1,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}mtp.2.confidence_head.proj",
-            return_bias=False,
-        )
+        # A clean auto-merge stacked BOTH sides' heads here with no conflict
+        # markers: ours was constructed and then immediately overwritten by
+        # upstream's, and upstream's line called maybe_prefix, which nothing
+        # imports -- a NameError at draft-model construction that no marker
+        # pointed at. One head, upstream's type, our locals and our weight path.
+        # DSparkConfidenceHead builds ReplicatedLinear(..., prefix=<p>.proj)
+        # internally, so this reproduces our existing "mtp.2.confidence_head.proj"
+        # parameter name exactly. Locals, not config.*: markov_w1 is sized from
+        # getattr(config, "dspark_markov_rank", 256), so reading config directly
+        # would AttributeError on a checkpoint lacking the field and silently
+        # disagree with the markov width if it ever differed.
+        self.confidence_head: DSparkConfidenceHead | None = None
+        if getattr(config, "enable_confidence_head", True):
+            self.confidence_head = DSparkConfidenceHead(
+                hidden_size + markov_rank,
+                prefix=f"{prefix}mtp.2.confidence_head",
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -990,6 +1020,22 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             return markov_bias
         return base_logits + markov_bias
 
+    def compute_confidence(
+        self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-position acceptance probability for each drafted token.
+
+        Upstream's body, with ``self.model`` dropped: this class is flat and
+        holds the head directly. The concat, the float() cast and the squeeze all
+        live inside ``DSparkConfidenceHead.forward`` (qwen3_dspark.py:128), and
+        its ``proj`` is built with ``return_bias=False``, so nothing else is
+        needed here.
+        """
+        assert self.confidence_head is not None
+        return torch.sigmoid(self.confidence_head(head_hidden, markov_embed))
+
+    # --- Weight loading ----------------------------------------------------
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             ("gate_up_proj", "w1", 0),
@@ -1059,10 +1105,20 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                     return final_map[rest]
             return f"layers.{layer_idx}.{rest}"
 
+        # Our loop and our map_name closure. Upstream's params_dict/loaded_params/
+        # tp_* lines duplicate setup that already survives above, and its
+        # _remap_dspark_name returns "model."-prefixed paths that do not exist in
+        # this flattened class. What IS upstream's and must not be lost is the
+        # confidence-head tracking, ported onto our names.
+        loaded_confidence_head = False
         for original_name, loaded_weight in weights:
             name = map_name(original_name)
             if name is None:
                 continue
+            # upstream #47808. Substring, not startswith: correct for both
+            # "confidence_head.weight" and "confidence_head.proj.weight".
+            if "confidence_head." in name:
+                loaded_confidence_head = True
             if name.endswith(".scale"):
                 suffix = (
                     expert_scale_suffix
@@ -1138,6 +1194,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 raise ValueError(
                     f"DSpark layer mtp.{layer_idx} weights missing from checkpoint."
                 )
+        # upstream #47808: a checkpoint with no confidence head must leave the
+        # attribute None rather than a constructed-but-never-loaded module.
+        # __init__ builds it unconditionally and the layer guard above does not
+        # cover it, so without this the head keeps its torch.empty storage and
+        # adaptive verification would score drafts from uninitialized memory --
+        # no error, wrong draft budgets. Upstream writes self.model.confidence_head;
+        # this class is flat.
+        if self.confidence_head is not None and not loaded_confidence_head:
+            self.confidence_head = None
         self.finalize_mega_moe_weights()
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params

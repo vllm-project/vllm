@@ -687,6 +687,12 @@ def sparse_attn_indexer(
                 weights[:num_padded_tokens],
                 seq_lens,
                 decode_metadata.block_table,
+                # Ours. This is fp8_fp4_paged_mqa_topk_indices, our direct-topk
+                # path, which upstream does not have -- git aligned its argument
+                # tail against upstream's tail for fp8_fp4_paged_mqa_logits
+                # below. Upstream's new `indices=` kwarg belongs to THAT call and
+                # is applied there; taking this side alone would have dropped it,
+                # silently, because the kwarg defaults to None.
                 logits_width,
                 topk_indices,
             )
@@ -717,8 +723,13 @@ def sparse_attn_indexer(
                     seq_lens,
                     decode_metadata.block_table,
                     decode_metadata.schedule_metadata,
+                    # ours: the narrowed width, not the model's full window
                     max_model_len=logits_width,
                     clean_logits=False,
+                    # upstream #47808 -- landed in the conflict against our
+                    # topk_indices call above, so it has to be re-applied here,
+                    # on the call it actually belongs to
+                    indices=decode_metadata.indices,
                 )
             num_rows = logits.shape[0]
 

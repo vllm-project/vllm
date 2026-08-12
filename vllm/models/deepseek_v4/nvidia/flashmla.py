@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
@@ -26,6 +26,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.sparse_mla_env import (
     is_triton_sparse_mla_enabled,
     is_triton_sparse_mla_enabled_for_platform,
@@ -46,6 +47,10 @@ from vllm.v1.attention.backends.mla.sparse_mla_kernels import (
     fp8ds_paged_sparse_mla_attention_with_sink_multihead,
     matmul_sparse_mla_attention_with_sink,
     sparse_mla_decode_head_block_size,
+)
+from vllm.v1.attention.backends.mla.sparse_swa import (
+    DeepseekSparseSWABackend,
+    DeepseekSparseSWAMetadataBuilder,
 )
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
@@ -127,10 +132,23 @@ def _sparse_mla_prefill_gather_len_upper_bound(
     return max_query_chunk_tokens, max_gather_len
 
 
+class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    """SWA metadata for the FlashMLA decode path, which allows varlen decode."""
+
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+
+class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
+    @staticmethod
+    def get_builder_cls() -> type[DeepseekSparseSWAFlashMLAMetadataBuilder]:
+        return DeepseekSparseSWAFlashMLAMetadataBuilder
+
+
 class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     """FlashMLA sparse MLA attention layer for DeepSeek V4 (CUDA)."""
 
     backend_cls = DeepseekV4FlashMLABackend
+    swa_backend_cls = DeepseekSparseSWAFlashMLABackend
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
