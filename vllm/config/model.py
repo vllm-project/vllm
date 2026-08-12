@@ -1872,6 +1872,11 @@ class ModelConfig:
 
     @property
     def use_mla(self) -> bool:
+        # Bidirectional DeepSeek variants (is_causal=False, used by some
+        # embedding models) must use the non-MLA attention path, since the
+        # MLA kernels only support causal attention.
+        if not getattr(self.hf_text_config, "is_causal", True):
+            return False
         if envs.VLLM_MLA_DISABLE:
             return False
         if self.using_transformers_backend():

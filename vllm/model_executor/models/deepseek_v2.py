@@ -47,7 +47,11 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import Attention, RSWAAttention
+from vllm.model_executor.layers.attention import (
+    Attention,
+    EncoderOnlyAttention,
+    RSWAAttention,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -94,7 +98,7 @@ from vllm.model_executor.models.utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
@@ -544,7 +548,22 @@ class DeepseekV2Attention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
-        self.attn = Attention(
+        # DeepSeek is causal by default (decoder-only). Bidirectional
+        # (encoder-only) attention is used by embedding models derived from
+        # this architecture, which set `is_causal=False` on the HF config.
+        # This only applies on the non-MLA path, since the MLA kernels are
+        # causal-only; `ModelConfig.use_mla` already disables MLA for these
+        # models.
+        if getattr(config, "is_causal", True):
+            attn_type = AttentionType.DECODER
+        else:
+            attn_type = AttentionType.ENCODER_ONLY
+        attn_cls = (
+            EncoderOnlyAttention
+            if attn_type == AttentionType.ENCODER_ONLY
+            else Attention
+        )
+        self.attn = attn_cls(
             self.num_local_heads,
             self.qk_head_dim,
             self.scaling,
@@ -552,6 +571,7 @@ class DeepseekV2Attention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            attn_type=attn_type,
         )
 
     def forward(

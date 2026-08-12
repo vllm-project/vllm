@@ -587,6 +587,11 @@ _EMBEDDING_EXAMPLE_MODELS = {
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
     ),
     "BgeM3EmbeddingModel": _HfExamplesInfo("BAAI/bge-m3"),
+    "DeepseekV3BidirectionalModel": _HfExamplesInfo(
+        "ai-sage/Giga-Embeddings-instruct-10B-A1.8B-0826",
+        trust_remote_code=True,
+        hf_overrides={"model_type": "deepseek_v3", "auto_map": None},
+    ),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
