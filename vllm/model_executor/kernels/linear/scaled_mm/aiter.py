@@ -478,9 +478,12 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         )
 
         x_2d = x.view(-1, x.shape[-1])
-        # aiter's quant emits the shuffled column-major activation scale layout
-        # the bpreshuffle GEMM reads directly; a plain transpose is not enough.
-        A, As = rocm_aiter_ops.group_fp8_quant(x_2d, transpose_scale=True)
+        # The bpreshuffle GEMM reads the activation scale in column-major layout
+        # (stride (1, M)); its triton dispatch keys off `x_scale.stride(0) != 1`.
+        # aiter's quant leaves row-major strides, so re-materialize column-major
+        # here (mirrors SGLang's materialize_bpreshuffle_fp8_scale).
+        A, As = rocm_aiter_ops.group_fp8_quant(x_2d, transpose_scale=False)
+        As = As.t().contiguous().t()
         output = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
             A, params.weight, As, Bs, output_dtype=self.config.out_dtype
         )
