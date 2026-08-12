@@ -296,6 +296,31 @@ def test_non_finite_argument_rejected(default_tokenizer: TokenizerLike):
         json.loads(call.function.arguments)
 
 
+def test_streaming_healthy_call_logs_nothing(default_tokenizer: TokenizerLike):
+    """Calls here are not bracketed, so a function name whose "(" has not
+    arrived parses as a bare name and wraps into a list of one non-call.
+    That was treated as a failure, so every healthy tool call logged two
+    tracebacks on its way through a state it always passes through."""
+    from vllm.tool_parsers import olmo3_tool_parser as parser_module
+
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    model_output = f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}</function_calls>"
+
+    with patch.object(parser_module.logger, "exception") as logged_exception:
+        _, tool_calls = run_tool_extraction(
+            tool_parser,
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+    assert logged_exception.call_count == 0
+
+
 def test_streaming_mismatched_brackets_reported_once(
     default_tokenizer: TokenizerLike,
 ):

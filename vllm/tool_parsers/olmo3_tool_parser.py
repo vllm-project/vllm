@@ -195,9 +195,12 @@ class Olmo3PythonicToolParser(ToolParser):
             if not isinstance(parsed, ast.List) or not all(
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
-                raise UnexpectedAstError(
-                    "Tool output must be a sequence of newline-separated calls"
-                )
+                # Calls here are not bracketed, so a function name whose "("
+                # has not arrived yet is a bare name that parses on its own
+                # and wraps into a list of one non-call. That is an ordinary
+                # streaming state, not a failure: every healthy tool call
+                # passes through it.
+                return None
             tool_calls = salvage_tool_calls(parsed.elts)
             if not tool_calls:
                 # A partially arrived call routinely completes to a shape that
