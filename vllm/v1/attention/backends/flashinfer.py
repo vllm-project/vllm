@@ -919,14 +919,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             == FlashInferDecodeKernel.TRTLLM_GEN
             and not self.use_dcp
         )
-        supports_spec_as_decode = (
-            self.flashinfer_trtllm_api_decode_kernel
-            == FlashInferDecodeKernel.TRTLLM_GEN
-            and not self.is_kvcache_fp8_k_nvfp4_v
-        ) or self.use_dedicated_xqa
         self._init_reorder_batch_threshold(
             1,
-            supports_spec_as_decode=supports_spec_as_decode,
+            supports_spec_as_decode=self._supports_spec_as_decode(),
             # trtllm-gen decode receives no cp_rank/global-seq-len information,
             # so its end-aligned causal mask is wrong for q_len > 1 over the
             # DCP-interleaved local KV shard (spec token i misses up to
@@ -965,6 +960,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "sinks, please use trtllm on blackwell or flash attention on "
                 "earlier GPUs."
             )
+
         capability = current_platform.get_device_capability()
         arch = f"sm{capability.major}{capability.minor}" if capability else "unknown"
         decode_backend = (
@@ -996,6 +992,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     @property
     def kv_cache_layout(self) -> KVCacheLayout:
         return self.cache_config.get_resolved_kv_cache_layout()
+
+    def _supports_spec_as_decode(self) -> bool:
+        return (
+            self.flashinfer_trtllm_api_decode_kernel
+            == FlashInferDecodeKernel.TRTLLM_GEN
+            and not self.is_kvcache_fp8_k_nvfp4_v
+        ) or self.use_dedicated_xqa
 
     # Keep SM90 prefill/decode Q dtype selection in one place.
     def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
