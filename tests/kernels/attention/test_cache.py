@@ -1152,6 +1152,71 @@ def test_gather_and_maybe_dequant_cache_mla_with_seq_starts(
     torch.testing.assert_close(dst, expected)
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("use_seq_starts", [False, True])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_gather_and_maybe_dequant_cache_mla_large_uneven_sequences(
+    kv_cache_dtype,
+    use_seq_starts,
+    device,
+):
+    block_size = 64
+    entry_size = 576
+    num_blocks = 1024
+    dtype = torch.bfloat16
+    scale = torch.tensor(0.1, dtype=torch.float32, device=device)
+    src_cache = _create_mla_cache(
+        num_blocks, block_size, entry_size, dtype, kv_cache_dtype, device
+    )
+    _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
+
+    starts = torch.tensor([3, 17, 5], dtype=torch.int32, device=device)
+    seq_starts = starts if use_seq_starts else None
+    seq_lens = torch.tensor([17, 32_768, 71], dtype=torch.int32, device=device)
+    batch_size = seq_lens.shape[0]
+    total_tokens = seq_lens.sum().item()
+    cu_seq_lens = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    cu_seq_lens[1:] = seq_lens.cumsum(dim=0)
+    token_to_seq = torch.repeat_interleave(
+        torch.arange(batch_size, dtype=torch.int32, device=device), seq_lens
+    )
+    block_table = torch.stack(
+        [torch.randperm(num_blocks, device=device) for _ in range(batch_size)]
+    ).to(torch.int32)
+
+    if kv_cache_dtype == "fp8":
+        dequant_src_cache = torch.empty_like(src_cache, dtype=dtype)
+        ops.convert_fp8(dequant_src_cache, src_cache, scale.item())
+    else:
+        dequant_src_cache = src_cache
+    expected_batches = []
+    for req_id in range(batch_size):
+        start = starts[req_id].item() if use_seq_starts else 0
+        source_tokens = torch.arange(
+            start, start + seq_lens[req_id].item(), device=device
+        )
+        physical_blocks = block_table[req_id, source_tokens // block_size].long()
+        expected_batches.append(
+            dequant_src_cache[physical_blocks, source_tokens % block_size]
+        )
+    expected = torch.cat(expected_batches)
+    dst = torch.empty_like(expected)
+
+    ops.gather_and_maybe_dequant_cache(
+        src_cache,
+        dst,
+        block_table,
+        cu_seq_lens,
+        token_to_seq,
+        total_tokens,
+        kv_cache_dtype,
+        scale,
+        seq_starts,
+    )
+    torch.testing.assert_close(dst, expected)
+
+
 @pytest.mark.parametrize("kv_lora_rank", [512])
 @pytest.mark.parametrize("qk_rope_head_dim", [64])
 @pytest.mark.parametrize("block_size", [16])
@@ -1225,6 +1290,120 @@ def test_cp_gather_cache_mla(
     )
 
     ops.cp_gather_cache(src_cache, dst, block_table, cu_seq_lens, batch_size)
+    torch.testing.assert_close(dst, expected)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("unaligned", [False, True])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_cp_gather_cache_mla_with_seq_starts(
+    kv_cache_dtype,
+    unaligned,
+    device,
+):
+    block_size = 16
+    entry_size = 576
+    num_blocks = 128
+    src_storage = _create_mla_cache(
+        num_blocks,
+        block_size,
+        entry_size + int(unaligned),
+        torch.bfloat16,
+        kv_cache_dtype,
+        device,
+    )
+    src_cache = src_storage[..., 1:] if unaligned else src_storage
+    _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
+
+    seq_starts = torch.tensor([3, 17, 5, 31], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([0, 1, 63, 4], dtype=torch.int32, device=device)
+    batch_size = seq_lens.shape[0]
+    cu_seq_lens = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    cu_seq_lens[1:] = seq_lens.cumsum(dim=0)
+    block_table = torch.stack(
+        [torch.randperm(num_blocks, device=device) for _ in range(batch_size)]
+    ).to(torch.int32)
+
+    expected_rows = []
+    for req_id in range(batch_size):
+        start = seq_starts[req_id].item()
+        for source_token in range(start, start + seq_lens[req_id].item()):
+            block_id = block_table[req_id, source_token // block_size]
+            expected_rows.append(src_cache[block_id, source_token % block_size])
+    expected = torch.stack(expected_rows)
+    if unaligned:
+        dst_storage = torch.empty(
+            (expected.shape[0], entry_size + 1),
+            dtype=expected.dtype,
+            device=device,
+        )
+        dst = dst_storage[:, 1:]
+    else:
+        dst = torch.empty_like(expected)
+
+    ops.cp_gather_cache(
+        src_cache,
+        dst,
+        block_table,
+        cu_seq_lens,
+        batch_size,
+        seq_starts,
+    )
+    torch.testing.assert_close(dst, expected)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("use_seq_starts", [False, True])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_cp_gather_cache_mla_large_uneven_sequences(
+    kv_cache_dtype,
+    use_seq_starts,
+    device,
+):
+    block_size = 64
+    entry_size = 576
+    num_blocks = 1024
+    src_cache = _create_mla_cache(
+        num_blocks,
+        block_size,
+        entry_size,
+        torch.bfloat16,
+        kv_cache_dtype,
+        device,
+    )
+    _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
+
+    starts = torch.tensor([3, 17, 5], dtype=torch.int32, device=device)
+    seq_starts = starts if use_seq_starts else None
+    seq_lens = torch.tensor([17, 32_768, 71], dtype=torch.int32, device=device)
+    batch_size = seq_lens.shape[0]
+    cu_seq_lens = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    cu_seq_lens[1:] = seq_lens.cumsum(dim=0)
+    block_table = torch.stack(
+        [torch.randperm(num_blocks, device=device) for _ in range(batch_size)]
+    ).to(torch.int32)
+
+    expected_batches = []
+    for req_id in range(batch_size):
+        start = starts[req_id].item() if use_seq_starts else 0
+        source_tokens = torch.arange(
+            start, start + seq_lens[req_id].item(), device=device
+        )
+        physical_blocks = block_table[req_id, source_tokens // block_size].long()
+        expected_batches.append(src_cache[physical_blocks, source_tokens % block_size])
+    expected = torch.cat(expected_batches)
+    dst = torch.empty_like(expected)
+
+    ops.cp_gather_cache(
+        src_cache,
+        dst,
+        block_table,
+        cu_seq_lens,
+        batch_size,
+        seq_starts,
+    )
     torch.testing.assert_close(dst, expected)
 
 
