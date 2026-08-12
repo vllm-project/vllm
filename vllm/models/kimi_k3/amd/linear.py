@@ -592,12 +592,18 @@ class KimiDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        prefix_delta: torch.Tensor | None = None,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor
+    ]:
         if self.use_attn_residuals:
             assert residual is not None
-            return self.forward_attn_residual(positions, hidden_states, residual)
+            return self.forward_attn_residual(
+                positions, hidden_states, residual, prefix_delta
+            )
 
+        assert prefix_delta is None
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -617,7 +623,8 @@ class KimiDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         block_residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prefix_delta: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         prefix_sum = hidden_states
         hidden_states = _apply_attn_res(
             prefix_sum,
@@ -625,6 +632,7 @@ class KimiDecoderLayer(nn.Module):
             self.self_attention_res_proj,
             self.self_attention_res_norm,
             self.prev_valid_blocks,
+            delta=prefix_delta,
             output_norm=self.input_layernorm,
             block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
         )
@@ -654,8 +662,7 @@ class KimiDecoderLayer(nn.Module):
         )
 
         hidden_states = self.mlp(hidden_states)
-        prefix_sum = prefix_sum + hidden_states
-        return prefix_sum, block_residual
+        return prefix_sum, block_residual, hidden_states
 
 
 class KimiLinearModel(nn.Module, EagleModelMixin):
@@ -810,24 +817,28 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         if residual is not None:
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
+        prefix_delta = None
 
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(
+            hidden_states, residual, prefix_delta = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+                prefix_delta=prefix_delta,
             )
             if (layer_idx + 1) in self.aux_hidden_state_layers:
-                # AMD attn-res layer already returns prefix_sum + MLP delta as
-                # hidden_states; the override drops the block bank in residual.
                 self._maybe_add_hidden_state(
-                    aux_hidden_states, layer_idx + 1, hidden_states, residual
+                    aux_hidden_states,
+                    layer_idx + 1,
+                    hidden_states + prefix_delta,
+                    residual,
                 )
 
         if not get_pp_group().is_last_rank:
+            hidden_states = hidden_states + prefix_delta
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
@@ -838,6 +849,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             self.output_attn_res_proj,
             self.output_attn_res_norm,
             attn_res_block_num,
+            delta=prefix_delta,
         )
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
