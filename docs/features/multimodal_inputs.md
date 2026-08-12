@@ -1219,7 +1219,7 @@ vLLM decodes audio bytes into waveforms using a selectable decoding backend:
 Select the backend per server via `--media-io-kwargs`:
 
 ```bash
-vllm serve Qwen/Qwen2.5-Omni-7B \
+vllm serve mistralai/Voxtral-Mini-3B-2507 \
   --media-io-kwargs '{"audio": {"audio_backend": "soundfile"}}'
 ```
 
