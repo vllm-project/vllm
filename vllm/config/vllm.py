@@ -692,8 +692,13 @@ class VllmConfig:
         # "+6.6% draft acceptance" claim does NOT survive re-measurement: 2.772
         # V1 vs 2.710 V2, i.e. a tie -- it was measured while V2 was poisoned.)
         #
-        # V1 stays fully supported: VLLM_USE_V2_MODEL_RUNNER=0 forces it, and the
-        # env check above takes precedence over every rule here.
+        # VLLM_USE_V2_MODEL_RUNNER=0 still forces V1 -- the env check above takes
+        # precedence over every rule here -- but since #51768 that is no longer
+        # sufficient on its own: _validate_mrv1_piecewise_cudagraph rejects V1 +
+        # PIECEWISE for DeepSeek V4, and PIECEWISE is in the O2/O3 default
+        # (FULL_AND_PIECEWISE). Forcing V1 therefore also needs a cudagraph_mode
+        # without PIECEWISE, e.g. --compilation-config '{"cudagraph_mode":
+        # "FULL_DECODE_ONLY"}'.
         # See docs/sm120/experiments/2026-08-09-runner-arbitration-786582103a/.
         if (
             self.speculative_config is not None
