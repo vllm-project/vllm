@@ -1,0 +1,291 @@
+ARG BASE_IMAGE=ubuntu:22.04
+ARG PYTHON_VERSION=3.12
+ARG TORCH_VERSION=2.12.0+rocm7.14.0
+ARG TORCHVISION_VERSION=0.27.0+rocm7.14.0
+ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0
+ARG FA_BRANCH="0e60e394"
+ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
+ARG AITER_BRANCH="v0.1.19"
+ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+ARG MORI_BRANCH="f95cd5e0ca7b730f92f9ffdfb358484d6965d9f7" # TheRock compatible v1.1.0
+ARG MORI_REPO="https://github.com/ROCm/mori.git"
+
+
+# TheRock configuration
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL=https://repo.amd.com/rocm/whl-multi-arch/ # For pre-built GPU images, packages, etc.
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL=https://rocm.nightlies.amd.com/whl-multi-arch/ # For torch, triton, etc. wheels with latest fixes.
+ARG ROCM_SDK_VERSION=7.14.0
+
+# Build configuration
+ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
+ARG AITER_ROCM_ARCH="gfx942;gfx950"
+
+# Sccache configuration (only used in release pipeline)
+ARG USE_SCCACHE
+ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
+ARG SCCACHE_REGION_NAME=us-west-2
+ARG SCCACHE_S3_NO_CREDENTIALS=0
+
+FROM ${BASE_IMAGE} AS base
+
+ARG PYTORCH_ROCM_ARCH
+ENV PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}"
+ARG AITER_ROCM_ARCH
+ENV AITER_ROCM_ARCH="${AITER_ROCM_ARCH}"
+
+ARG SITE_PACKAGES
+ENV SITE_PACKAGES=${SITE_PACKAGES}
+ENV SDK_DEV="$SITE_PACKAGES/_rocm_sdk_devel" \
+    SDK_CORE="$SITE_PACKAGES/_rocm_sdk_core"
+ENV ROCM_PATH="$SDK_DEV" \
+    ROCM_HOME="$SDK_DEV" \
+    HIP_PATH="$SDK_DEV" \
+    HIP_CLANG_PATH="$SDK_DEV/lib/llvm/bin" \
+    HIP_DEVICE_LIB_PATH="$SDK_CORE/lib/llvm/amdgcn/bitcode"
+ENV LD_LIBRARY_PATH="$SDK_DEV/lib:$SDK_DEV/lib/rocm_sysdeps/lib:$SDK_CORE/lib:$SDK_CORE/lib/rocm_sysdeps/lib"
+ENV PATH="$SDK_DEV/bin:$SDK_DEV/lib/llvm/bin:$SDK_CORE/bin:$PATH"
+
+# Required for RCCL in ROCm7.1
+ENV HSA_NO_SCRATCH_RECLAIM=1
+
+ARG PYTHON_VERSION
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+
+RUN mkdir -p /app
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python and other dependencies
+RUN apt-get update -y \
+    && apt-get install -y software-properties-common build-essential git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config libdrm-dev libnuma-dev \
+    && for i in 1 2 3; do \
+        add-apt-repository -y ppa:deadsnakes/ppa && break || \
+        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+    done \
+    && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+       python${PYTHON_VERSION}-lib2to3 python-is-python3 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version
+
+RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
+RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
+
+# Install ROCm SDK via TheRock
+ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
+ARG ROCM_SDK_VERSION
+RUN pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
+    "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
+    && rocm-sdk init
+
+# Install PyTorch wheels (release primary, nightly as fallback)
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
+ARG TORCH_VERSION
+ARG TORCHAUDIO_VERSION
+ARG TORCHVISION_VERSION
+RUN pip install \
+    --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
+    --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
+    "torch==${TORCH_VERSION}" \
+    "torchaudio==${TORCHAUDIO_VERSION}" \
+    "torchvision==${TORCHVISION_VERSION}"
+RUN python3 -c "import torch; print(f'torch={torch.__version__}, hip={torch.version.hip}')"
+
+# Install the AMD-compiled device kernels corresponding to PYTORCH_ROCM_ARCH:
+
+# Possible values that can be in PYTORCH_ROCM_ARCH:
+#
+# gfx90a (MI210/250), gfx942 (MI300), gfx950 (MI350), gfx1100 (7900XTX),
+# gfx1101 (7800XT), gfx1200 (9070XT), gfx1201 (9070), gfx1150/1151 (Strix APU)
+
+# For each arch in PYTORCH_ROCM_ARCH, install the precompiled GPU code that
+# PyTorch needs to run on that specific chip.
+SHELL ["/bin/bash", "-c"]
+RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)" | sed 's/a[0-9]\{8\}$//') \
+    && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
+        echo "Installing device packages for ${arch}" \
+        && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
+            amd-torch-device-${arch}==${TORCH_VER} \
+            rocm-sdk-device-${arch}==${ROCM_SDK_VERSION}; \
+    done
+
+# Remove gfx90a xnack kpacks (ASAN artifacts that cause hipErrorInvalidImage on MI250)
+RUN rm -f "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack+.kpack" \
+         "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack-.kpack"
+
+RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install .
+ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi:$PYTHONPATH
+
+# TheRock runtime fixes
+RUN if [ -f "${SITE_PACKAGES}/rocm_sdk/__init__.py" ]; then \
+        sed -i 's/rtld_global: bool = True/rtld_global: bool = False/g' "${SITE_PACKAGES}/rocm_sdk/__init__.py"; \
+    fi \
+    && if [ -f "${SITE_PACKAGES}/_rocm_sdk_core/lib/librocm_smi64.so.1" ] \
+       && [ ! -e "${ROCM_PATH}/lib/librocm_smi64.so.7" ]; then \
+        ln -sfn "${SITE_PACKAGES}/_rocm_sdk_core/lib/librocm_smi64.so.1" "${ROCM_PATH}/lib/librocm_smi64.so.7"; \
+    fi \
+    && printf '%s\n%s\n' "${ROCM_PATH}/lib" "${SITE_PACKAGES}/_rocm_sdk_core/lib" > /etc/ld.so.conf.d/rocm-pip.conf \
+    && for f in ${SITE_PACKAGES}/_rocm_sdk_core/lib/libamdhip64.so*; do \
+        bn=$(basename "$f"); \
+        if [ -f "${ROCM_PATH}/lib/${bn}" ] && [ -f "$f" ] && [ ! -L "$f" ]; then \
+            rm -f "$f"; \
+            ln -sfn "${ROCM_PATH}/lib/${bn}" "$f"; \
+        fi; \
+    done \
+    && ldconfig
+
+# Install sccache if USE_SCCACHE is enabled (for release builds)
+ARG USE_SCCACHE
+ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME
+ARG SCCACHE_REGION_NAME
+ARG SCCACHE_S3_NO_CREDENTIALS
+RUN if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "Installing sccache..." \
+        && SCCACHE_ARCH="x86_64" \
+        && SCCACHE_VERSION="v0.8.1" \
+        && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+        && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+        && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+        && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && chmod +x /usr/bin/sccache \
+        && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
+        && sccache --version; \
+    fi
+
+# Setup sccache for HIP compilation via HIP_CLANG_PATH
+# This creates wrapper scripts in a separate directory and points HIP to use them
+# This avoids modifying the original ROCm binaries which can break detection
+# NOTE: HIP_CLANG_PATH is NOT set as ENV to avoid affecting downstream images (Dockerfile.rocm)
+# Instead, each build stage should export HIP_CLANG_PATH=/opt/sccache-wrappers if USE_SCCACHE=1
+RUN if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "Setting up sccache wrappers for HIP compilation..." \
+        && mkdir -p /opt/sccache-wrappers \
+        && printf '#!/bin/bash\nexec sccache %s/lib/llvm/bin/clang++ "$@"\n' "${ROCM_PATH}" > /opt/sccache-wrappers/clang++ \
+        && chmod +x /opt/sccache-wrappers/clang++ \
+        && printf '#!/bin/bash\nexec sccache %s/lib/llvm/bin/clang "$@"\n' "${ROCM_PATH}" > /opt/sccache-wrappers/clang \
+        && chmod +x /opt/sccache-wrappers/clang \
+        && echo "sccache wrappers created in /opt/sccache-wrappers"; \
+    fi
+
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
+ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
+ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
+ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
+
+
+###
+### MORI Build
+###
+FROM base AS build_mori
+ARG MORI_BRANCH
+ARG MORI_REPO
+RUN git clone ${MORI_REPO}
+RUN cd mori \
+    && git checkout ${MORI_BRANCH} \
+    && git submodule update --init --recursive \
+    && ln -sfn ${ROCM_PATH} /opt/rocm \
+    && mkdir -p /usr/lib64 && ln -sf /usr/lib/x86_64-linux-gnu/libc.so /usr/lib64/libc.so \
+    && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
+RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
+
+###
+### FlashAttention Build
+###
+FROM base AS build_fa
+ARG FA_BRANCH
+ARG FA_REPO
+ARG USE_SCCACHE
+RUN git clone ${FA_REPO}
+RUN cd flash-attention \
+    && git checkout ${FA_BRANCH} \
+    && git submodule update --init \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
+           && sccache --show-stats; \
+       fi \
+    && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
+
+
+###
+### AITER Build
+###
+FROM base AS build_aiter
+ARG AITER_BRANCH
+ARG AITER_REPO
+ARG USE_SCCACHE
+RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
+RUN cd aiter \
+    && git submodule update --init --recursive \
+    && pip install -r requirements.txt
+RUN pip install pyyaml && cd aiter \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
+           && sccache --show-stats; \
+       fi \
+    && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
+    && ls /app/aiter/dist/*.whl
+RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
+
+
+###
+### Final Build
+###
+
+# Wheel release stage - 
+# only includes dependencies used by wheel release pipeline
+FROM base AS debs_wheel_release
+RUN mkdir /app/debs
+RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+
+FROM base AS debs
+RUN mkdir /app/debs
+RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+
+FROM base AS final
+RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
+    pip install /install/*.whl
+
+ARG BASE_IMAGE
+ARG PYTHON_VERSION
+ARG ROCM_SDK_VERSION
+ARG TORCH_VERSION
+ARG TORCHAUDIO_VERSION
+ARG TORCHVISION_VERSION
+ARG PYTORCH_ROCM_ARCH
+ARG AITER_ROCM_ARCH
+ARG FA_BRANCH
+ARG FA_REPO
+ARG AITER_BRANCH
+ARG AITER_REPO
+RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
+    && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
+    && echo "ROCM_SDK_VERSION: ${ROCM_SDK_VERSION}" >> /app/versions.txt \
+    && echo "TORCH_VERSION: ${TORCH_VERSION}" >> /app/versions.txt \
+    && echo "TORCHAUDIO_VERSION: ${TORCHAUDIO_VERSION}" >> /app/versions.txt \
+    && echo "TORCHVISION_VERSION: ${TORCHVISION_VERSION}" >> /app/versions.txt \
+    && echo "PYTORCH_ROCM_ARCH: ${PYTORCH_ROCM_ARCH}" >> /app/versions.txt \
+    && echo "AITER_ROCM_ARCH: ${AITER_ROCM_ARCH}" >> /app/versions.txt \
+    && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
+    && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
+    && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
+    && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
+    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt
