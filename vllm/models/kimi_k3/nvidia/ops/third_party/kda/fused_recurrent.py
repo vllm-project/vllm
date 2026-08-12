@@ -185,6 +185,8 @@ def fused_recurrent_kda_fwd_kernel(
     eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     sequence_length = eos - bos
     if sequence_length == 0:
+        if launch_pdl:
+            tl.extra.cuda.gdc_launch_dependents()
         return
 
     o_k = tl.arange(0, BK)
@@ -197,12 +199,22 @@ def fused_recurrent_kda_fwd_kernel(
         initial_token = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
     else:
         initial_token = 0
-    state_index = tl.load(state_indices + i_n * stride_indices_seq + initial_token).to(
-        tl.int64
+    initial_token_in_row = (initial_token >= 0) & (
+        initial_token < stride_indices_seq
     )
+    state_index = tl.load(
+        state_indices + i_n * stride_indices_seq + initial_token,
+        mask=initial_token_in_row,
+        other=0,
+    ).to(tl.int64)
     p_out = out + bos * stride_out_token + i_h * V + o_v
     if state_index <= 0:
-        tl.store(p_out, tl.zeros([BV], dtype=tl.float32), mask=m_v)
+        zero = tl.zeros([BV], dtype=tl.float32).to(p_out.dtype.element_ty)
+        for _ in range(0, sequence_length):
+            tl.store(p_out, zero, mask=m_v)
+            p_out += stride_out_token
+        if launch_pdl:
+            tl.extra.cuda.gdc_launch_dependents()
         return
 
     p_state = (
