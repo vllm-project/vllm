@@ -210,6 +210,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
             dp_sync_state=dp_sync_state,
+            parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
