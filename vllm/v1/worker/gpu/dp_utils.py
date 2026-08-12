@@ -38,6 +38,32 @@ class DPSyncState:
     num_reqs: int
 
 
+class DPProfilerSync:
+    """Synchronize profiler start requests through the per-step DP all-reduce."""
+
+    def __init__(self) -> None:
+        self._pending = False
+        self.start_now = False
+
+    def request_start(self) -> None:
+        self._pending = True
+
+    def cancel(self) -> None:
+        self._pending = False
+        self.start_now = False
+
+    def observe(self, consensus: bool) -> None:
+        if consensus:
+            self.start_now = True
+
+    def consume_start(self) -> bool:
+        if self.start_now:
+            self.start_now = False
+            self._pending = False
+            return True
+        return False
+
+
 def sync_cudagraph_and_dp_padding(
     cudagraph_manager: CudaGraphManager | None,
     desired_batch_desc: BatchExecutionDescriptor,
@@ -48,6 +74,7 @@ def sync_cudagraph_and_dp_padding(
     dp_rank: int,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
+    profiler_sync: DPProfilerSync | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
@@ -56,13 +83,19 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(5, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(6, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     tensor[4][dp_rank] = num_reqs
+    tensor[5][dp_rank] = int(
+        profiler_sync is not None and profiler_sync._pending
+    )
     dist.all_reduce(tensor, group=group)
+
+    if profiler_sync is not None:
+        profiler_sync.observe(bool(tensor[5].any().item()))
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
@@ -152,6 +185,7 @@ def dispatch_cg_and_sync_dp(
     need_eager: bool = False,
     num_active_loras: int = 0,
     dp_sync: DPSyncState | None = None,
+    profiler_sync: DPProfilerSync | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
 
@@ -239,4 +273,5 @@ def dispatch_cg_and_sync_dp(
         dp_rank,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
+        profiler_sync=profiler_sync,
     )
