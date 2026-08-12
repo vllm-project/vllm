@@ -88,7 +88,6 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
-    get_uniform_token_count,
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
@@ -991,7 +990,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if dummy_run:
             # Dummy batches are uniform by construction.
-            return None, get_uniform_token_count(num_reqs, num_toks, max_query_len)
+            return None, get_uniform_decode_token_count(
+                num_reqs, num_toks, max_query_len, has_prefill=False
+            )
 
         # batch_idx -> req_id
         req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
