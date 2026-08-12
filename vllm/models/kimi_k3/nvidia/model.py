@@ -383,6 +383,9 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             if is_padding is not None:
                 is_padding = is_padding[:num_tokens]
 
+        if self.capture_fn is not None:
+            self.capture_fn(topk_ids)
+
         eplb_state = self.eplb_state
         if eplb_state.logical_to_physical_map is not None:
             assert eplb_state.expert_load_view is not None
