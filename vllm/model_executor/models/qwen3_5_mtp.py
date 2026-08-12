@@ -301,15 +301,29 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def remap_weight_names(weights):
+            # The draft's output head is `self.lm_head`, outside `self.model`.
+            # A checkpoint either ships a dedicated draft head (`mtp.lm_head.*`)
+            # or expects the draft to reuse the base model's top-level
+            # `lm_head.*`. Prefer the dedicated head; defer the base head so the
+            # choice does not depend on the order weights arrive in.
+            deferred_base_lm_head: list[tuple[str, torch.Tensor]] = []
+            seen_mtp_lm_head = False
             for name, weight in weights:
-                if name.startswith("mtp."):
+                if name.startswith("mtp.lm_head"):
+                    seen_mtp_lm_head = True
+                    name = name.replace("mtp.lm_head", "lm_head")
+                elif name.startswith("mtp."):
                     name = name.replace("mtp.", "model.")
-                elif any(key in name for key in ["embed_tokens", "lm_head"]):
-                    if "embed_tokens" in name:
-                        name = name.replace("language_model.", "")
+                elif "embed_tokens" in name:
+                    name = name.replace("language_model.", "")
+                elif "lm_head" in name:
+                    deferred_base_lm_head.append((name, weight))
+                    continue
                 else:
                     continue
                 yield name, weight
+            if not seen_mtp_lm_head:
+                yield from deferred_base_lm_head
 
         loader = AutoWeightsLoader(self)
         return loader.load_weights(remap_weight_names(weights))
