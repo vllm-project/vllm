@@ -151,28 +151,24 @@ def test_hash_non_contiguous_array():
     )
 
 
-def test_hash_image_exif_id_does_not_override_content():
-    image1 = Image.new("RGB", size=(10, 20), color=(255, 0, 0))
-    ImageDraw.Draw(image1).line([(0, 0), (9, 0)], fill=(0, 255, 0))
-    image2 = Image.new("RGB", size=(10, 20), color=(0, 0, 255))
-    ImageDraw.Draw(image2).line([(0, 0), (0, 19)], fill=(255, 255, 0))
-    exif_id = uuid.UUID("550e8400-e29b-41d4-a716-446655440000")
-    image1.getexif()[Image.ExifTags.Base.ImageID] = exif_id
-    image2.getexif()[Image.ExifTags.Base.ImageID] = exif_id
-
-    image1_bytes = BytesIO()
-    image1.save(image1_bytes, format="PNG")
-    image2_bytes = BytesIO()
-    image2.save(image2_bytes, format="PNG")
+def test_hash_image_exif_id():
+    # Test that EXIF ImageId tag can be used to store UUID
+    # and the hasher will use that instead of the image data.
+    image1 = image2 = Image.new("1", size=(10, 20))
+    id = uuid.uuid4()
+    image1.getexif()[Image.ExifTags.Base.ImageID] = id
+    image2 = Image.open(ASSETS_DIR / "image1.png")
+    image2.getexif()[Image.ExifTags.Base.ImageID] = "Not a UUID"
+    image2a = Image.open(ASSETS_DIR / "image1.png")
 
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs("blake3", image=image1) != hasher.hash_kwargs(
-        "blake3", image=image2
+    # first image has UUID in ImageID, so it should hash to that UUID
+    assert hasher.hash_kwargs("blake3", image=image1) == hasher.hash_kwargs(
+        "blake3", image=id.bytes
     )
-    assert hasher.hash_kwargs(
-        "blake3", image=MediaWithBytes(image1, image1_bytes.getvalue())
-    ) != hasher.hash_kwargs(
-        "blake3", image=MediaWithBytes(image2, image2_bytes.getvalue())
+    # second image has non-UUID in ImageID, so it should hash to the image data
+    assert hasher.hash_kwargs("blake3", image=image2) == hasher.hash_kwargs(
+        "blake3", image=image2a
     )
 
 
