@@ -107,14 +107,9 @@ def _ll_fp32w_router_shapes_from_model(
     for module in model.modules():
         if not isinstance(module, GateLinear):
             continue
-        weight = getattr(module, "weight", None)
-        if not isinstance(weight, torch.Tensor):
+        if not module.allow_ll_fp32w_gemm:
             continue
-        if weight.dim() != 2 or weight.dtype != torch.float32:
-            continue
-        if getattr(module, "out_dtype", None) != torch.float32:
-            continue
-        n, k = weight.shape
+        n, k = module.weight.shape
         shapes.add((int(k), int(n)))
     return tuple(sorted(shapes))
 
@@ -135,9 +130,6 @@ def _warmup_ll_fp32w_router_gemm(
 
     shapes = _ll_fp32w_router_shapes_from_model(model)
     if not shapes:
-        logger.info(
-            "Skipping ll_fp32w router GEMM warmup: no fp32 GateLinear shapes found."
-        )
         return
 
     logger.info(
