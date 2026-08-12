@@ -19,6 +19,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("strided_mixed_qkv", [False, True])
+@pytest.mark.parametrize("strided_gates", [False, True])
 @pytest.mark.parametrize(
     "batch,num_key_heads,num_value_heads,dtype,state_dtype",
     [
@@ -33,6 +34,7 @@ pytestmark = pytest.mark.skipif(
 def test_fused_recurrent_packed_decode_matches_reference(
     dtype: torch.dtype,
     strided_mixed_qkv: bool,
+    strided_gates: bool,
     batch: int,
     num_key_heads: int,
     num_value_heads: int,
@@ -62,8 +64,16 @@ def test_fused_recurrent_packed_decode_matches_reference(
             (B, qkv_dim), device=device, dtype=dtype, generator=generator
         )
 
-    a = torch.randn((B, HV), device=device, dtype=dtype, generator=generator)
-    b = torch.randn((B, HV), device=device, dtype=dtype, generator=generator)
+    if strided_gates:
+        gates = torch.randn(
+            (B, 4 * HV), device=device, dtype=dtype, generator=generator
+        )
+        b_global, a_global = gates.chunk(2, dim=-1)
+        b = b_global[:, :HV]
+        a = a_global[:, :HV]
+    else:
+        a = torch.randn((B, HV), device=device, dtype=dtype, generator=generator)
+        b = torch.randn((B, HV), device=device, dtype=dtype, generator=generator)
     A_log = torch.randn((HV,), device=device, dtype=dtype, generator=generator)
     dt_bias = torch.randn((HV,), device=device, dtype=dtype, generator=generator)
 

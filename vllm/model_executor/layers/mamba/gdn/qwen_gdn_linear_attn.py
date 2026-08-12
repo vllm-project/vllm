@@ -1235,10 +1235,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
+        # b and a stay strided views of the projection: the packed decode
+        # kernel reads them as they are, every other path makes them
+        # contiguous inside _forward_core.
         torch.ops.vllm.qwen_gdn_attention_core(
             mixed_qkv,
-            b.contiguous(),
-            a.contiguous(),
+            b,
+            a,
             core_attn_out,
             layer_name=_encode_layer_name(self.prefix),
         )
@@ -1605,6 +1608,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv: packed [q, k, v] projection (num_tokens, qkv_dim)
             b: beta gating vector                   (num_tokens, num_heads)
             a: alpha gating vector                  (num_tokens, num_heads)
+               (b and a may be views with a token stride; the packed decode
+               kernel reads them in place, the other paths copy them)
             core_attn_out: Pre-allocated output buffer for attention results.
 
         """
@@ -1633,6 +1638,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 core_attn_out=core_attn_out,
                 attn_metadata=attn_metadata,
             )
+        b = b.contiguous()
+        a = a.contiguous()
 
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
