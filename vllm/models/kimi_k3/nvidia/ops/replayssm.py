@@ -13,6 +13,25 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
 @triton.jit
+def _kda_gate(
+    raw_g,
+    dt_bias,
+    A,
+    lower_bound,
+    USE_LOWER_BOUND: tl.constexpr,
+):
+    gate_input = raw_g + dt_bias
+    if USE_LOWER_BOUND:
+        return lower_bound * tl.sigmoid(A * gate_input)
+    softplus_gate = tl.where(
+        gate_input > 20.0,
+        gate_input,
+        tl.log(1.0 + tl.exp(gate_input)),
+    )
+    return -A * softplus_gate
+
+
+@triton.jit
 def _kda_replay_step(
     state,
     k,
@@ -25,21 +44,18 @@ def _kda_replay_step(
     USE_LOWER_BOUND: tl.constexpr,
 ):
     normalized_k = k * tl.rsqrt(tl.sum(k * k) + 1e-6)
-    gate_input = raw_g + dt_bias
-    if USE_LOWER_BOUND:
-        gate = lower_bound * tl.sigmoid(A * gate_input)
-    else:
-        softplus_gate = tl.where(
-            gate_input > 20.0,
-            gate_input,
-            tl.log(1.0 + tl.exp(gate_input)),
-        )
-        gate = -A * softplus_gate
+    gate = _kda_gate(
+        raw_g,
+        dt_bias,
+        A,
+        lower_bound,
+        USE_LOWER_BOUND,
+    )
 
     state *= tl.exp(gate)[None, :]
-    delta_v = v - tl.sum(state * normalized_k[None, :], axis=1)
-    delta_v *= tl.sigmoid(raw_beta)
-    return state + delta_v[:, None] * normalized_k[None, :]
+    correction = v - tl.sum(state * normalized_k[None, :], axis=1)
+    correction *= tl.sigmoid(raw_beta)
+    return state + correction[:, None] * normalized_k[None, :], correction
 
 
 @triton.jit
@@ -52,7 +68,8 @@ def _kda_replayssm_verify_kernel(
     A_log_ptr,
     dt_bias_ptr,
     state_ptr,
-    replay_cache_ptr,
+    correction_cache_ptr,
+    kg_cache_ptr,
     out_ptr,
     query_start_loc_ptr,
     state_indices_ptr,
@@ -67,10 +84,14 @@ def _kda_replayssm_verify_kernel(
     stride_state_head,
     stride_state_v,
     stride_state_k,
-    stride_replay_cache_block,
-    stride_replay_cache_head,
-    stride_replay_cache_pos,
-    stride_replay_cache_dim,
+    stride_correction_block,
+    stride_correction_head,
+    stride_correction_pos,
+    stride_correction_dim,
+    stride_kg_block,
+    stride_kg_head,
+    stride_kg_pos,
+    stride_kg_dim,
     stride_out_token,
     stride_query_start_loc,
     stride_state_indices,
@@ -151,7 +172,7 @@ def _kda_replayssm_verify_kernel(
         dt_bias = tl.load(dt_bias_ptr + pid_h * K + offs_k, mask=mask_k, other=0.0).to(
             tl.float32
         )
-        updated_state = _kda_replay_step(
+        updated_state, correction = _kda_replay_step(
             state,
             k,
             v,
@@ -171,32 +192,33 @@ def _kda_replayssm_verify_kernel(
             mask=token_valid & mask_v,
         )
 
-        replay_ptr = (
-            replay_cache_ptr
-            + state_idx * stride_replay_cache_block
-            + pid_h * stride_replay_cache_head
-            + token_offset * stride_replay_cache_pos
+        correction_ptr = (
+            correction_cache_ptr
+            + state_idx * stride_correction_block
+            + pid_h * stride_correction_head
+            + token_offset * stride_correction_pos
         )
         tl.store(
-            replay_ptr + (K + offs_v) * stride_replay_cache_dim,
-            v,
+            correction_ptr + offs_v * stride_correction_dim,
+            correction,
             mask=token_valid & mask_v,
         )
         if pid_v == 0:
+            kg_ptr = (
+                kg_cache_ptr
+                + state_idx * stride_kg_block
+                + pid_h * stride_kg_head
+                + token_offset * stride_kg_pos
+            )
             tl.store(
-                replay_ptr + offs_k * stride_replay_cache_dim,
+                kg_ptr + offs_k * stride_kg_dim,
                 k,
                 mask=token_valid & mask_k,
             )
             tl.store(
-                replay_ptr + (K + V + offs_k) * stride_replay_cache_dim,
+                kg_ptr + (K + offs_k) * stride_kg_dim,
                 raw_g,
                 mask=token_valid & mask_k,
-            )
-            tl.store(
-                replay_ptr + (2 * K + V) * stride_replay_cache_dim,
-                raw_beta,
-                mask=token_valid,
             )
 
 
@@ -377,9 +399,12 @@ def _commit_kda_state_kernel(
     state_ref_ptr,
     state_base_addrs_ptr,
     state_block_strides_ptr,
-    replay_cache_ref_ptr,
-    replay_cache_base_addrs_ptr,
-    replay_cache_block_strides_ptr,
+    correction_cache_ref_ptr,
+    correction_cache_base_addrs_ptr,
+    correction_cache_block_strides_ptr,
+    kg_cache_ref_ptr,
+    kg_cache_base_addrs_ptr,
+    kg_cache_block_strides_ptr,
     A_log_ptr,
     dt_bias_ptr,
     state_indices_ptr,
@@ -392,9 +417,12 @@ def _commit_kda_state_kernel(
     stride_state_head,
     stride_state_v,
     stride_state_k,
-    stride_replay_cache_head,
-    stride_replay_cache_pos,
-    stride_replay_cache_dim,
+    stride_correction_cache_head,
+    stride_correction_cache_pos,
+    stride_correction_cache_dim,
+    stride_kg_cache_head,
+    stride_kg_cache_pos,
+    stride_kg_cache_dim,
     stride_A_layer,
     stride_A_head,
     stride_dt_bias_layer,
@@ -406,7 +434,6 @@ def _commit_kda_state_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     NUM_HEADS: tl.constexpr,
-    SPEC_QUERY_LEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
 ):
@@ -438,13 +465,22 @@ def _commit_kda_state_kernel(
         state_ptr + source_state_idx * state_block_stride + pid_h * stride_state_head
     )
 
-    replay_cache_base_addr = tl.load(replay_cache_base_addrs_ptr + pid_l)
-    replay_cache_block_stride = tl.load(replay_cache_block_strides_ptr + pid_l)
-    replay_cache_ptr = replay_cache_base_addr.to(
-        tl.pointer_type(replay_cache_ref_ptr.dtype.element_ty)
+    correction_cache_base_addr = tl.load(correction_cache_base_addrs_ptr + pid_l)
+    correction_cache_block_stride = tl.load(correction_cache_block_strides_ptr + pid_l)
+    correction_cache_ptr = correction_cache_base_addr.to(
+        tl.pointer_type(correction_cache_ref_ptr.dtype.element_ty)
     )
-    replay_cache_ptr += (
-        source_state_idx * replay_cache_block_stride + pid_h * stride_replay_cache_head
+    correction_cache_ptr += (
+        source_state_idx * correction_cache_block_stride
+        + pid_h * stride_correction_cache_head
+    )
+    kg_cache_base_addr = tl.load(kg_cache_base_addrs_ptr + pid_l)
+    kg_cache_block_stride = tl.load(kg_cache_block_strides_ptr + pid_l)
+    kg_cache_ptr = kg_cache_base_addr.to(
+        tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty)
+    )
+    kg_cache_ptr += (
+        source_state_idx * kg_cache_block_stride + pid_h * stride_kg_cache_head
     )
 
     offs_k = tl.arange(0, BK)
@@ -457,74 +493,83 @@ def _commit_kda_state_kernel(
         + offs_v[:, None] * stride_state_v
         + offs_k[None, :] * stride_state_k
     )
-    state = tl.load(state_ptrs, mask=mask_state, other=0.0).to(tl.float32)
+    initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0).to(tl.float32)
     A = tl.exp(
         tl.load(A_log_ptr + pid_l * stride_A_layer + pid_h * stride_A_head).to(
             tl.float32
         )
     )
 
-    for token_offset in tl.static_range(SPEC_QUERY_LEN):
-        token_valid = token_offset < commit_len
-        replay_ptr = replay_cache_ptr + token_offset * stride_replay_cache_pos
-        k = tl.load(
-            replay_ptr + offs_k * stride_replay_cache_dim,
-            mask=token_valid & mask_k,
-            other=0.0,
-        ).to(tl.float32)
-        v = tl.load(
-            replay_ptr + (K + offs_v) * stride_replay_cache_dim,
-            mask=token_valid & mask_v,
-            other=0.0,
-        ).to(tl.float32)
-        raw_g = tl.load(
-            replay_ptr + (K + V + offs_k) * stride_replay_cache_dim,
-            mask=token_valid & mask_k,
-            other=0.0,
-        ).to(tl.float32)
-        raw_beta = tl.load(
-            replay_ptr + (2 * K + V) * stride_replay_cache_dim,
-            mask=token_valid,
-            other=0.0,
-        ).to(tl.float32)
+    dt_bias = tl.load(
+        dt_bias_ptr
+        + pid_l * stride_dt_bias_layer
+        + pid_h * stride_dt_bias_head
+        + offs_k * stride_dt_bias_dim,
+        mask=mask_k,
+        other=0.0,
+    ).to(tl.float32)
+    final_decay = tl.full([BK], 1.0, tl.float32)
+    final_correction = tl.zeros([BV, BK], tl.float32)
+    boundary_decay = tl.full([BK], 1.0, tl.float32)
+    boundary_correction = tl.zeros([BV, BK], tl.float32)
 
-        dt_bias = tl.load(
-            dt_bias_ptr
-            + pid_l * stride_dt_bias_layer
-            + pid_h * stride_dt_bias_head
-            + offs_k * stride_dt_bias_dim,
+    for reverse_offset in range(commit_len):
+        token_offset = commit_len - reverse_offset - 1
+        correction_ptr = (
+            correction_cache_ptr + token_offset * stride_correction_cache_pos
+        )
+        kg_ptr = kg_cache_ptr + token_offset * stride_kg_cache_pos
+        k = tl.load(
+            kg_ptr + offs_k * stride_kg_cache_dim,
             mask=mask_k,
             other=0.0,
         ).to(tl.float32)
-        updated_state = _kda_replay_step(
-            state,
-            k,
-            v,
+        correction = tl.load(
+            correction_ptr + offs_v * stride_correction_cache_dim,
+            mask=mask_v,
+            other=0.0,
+        ).to(tl.float32)
+        raw_g = tl.load(
+            kg_ptr + (K + offs_k) * stride_kg_cache_dim,
+            mask=mask_k,
+            other=0.0,
+        ).to(tl.float32)
+        normalized_k = k * tl.rsqrt(tl.sum(k * k) + 1e-6)
+        gate = _kda_gate(
             raw_g,
-            raw_beta,
             dt_bias,
             A,
             lower_bound,
             USE_LOWER_BOUND,
         )
-        state = tl.where(token_valid, updated_state, state)
-
+        update = correction[:, None] * normalized_k[None, :]
+        decay = tl.exp(gate)
+        final_correction += update * final_decay[None, :]
+        final_decay *= decay
         if ALIGN_MODE:
-            boundary_ptrs = (
-                state_ptr
-                + boundary_state_idx * state_block_stride
-                + pid_h * stride_state_head
-                + offs_v[:, None] * stride_state_v
-                + offs_k[None, :] * stride_state_k
+            before_boundary = token_offset < boundary_replay_count
+            boundary_correction += tl.where(
+                before_boundary,
+                update * boundary_decay[None, :],
+                0.0,
             )
-            tl.store(
-                boundary_ptrs,
-                state,
-                mask=mask_state
-                & token_valid
-                & (token_offset + 1 == boundary_replay_count)
-                & (boundary_state_idx > null_block_id),
-            )
+            boundary_decay *= tl.where(before_boundary, decay, 1.0)
+
+    state = initial_state * final_decay[None, :] + final_correction
+    if ALIGN_MODE:
+        boundary_ptrs = (
+            state_ptr
+            + boundary_state_idx * state_block_stride
+            + pid_h * stride_state_head
+            + offs_v[:, None] * stride_state_v
+            + offs_k[None, :] * stride_state_k
+        )
+        boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
+        tl.store(
+            boundary_ptrs,
+            boundary_state,
+            mask=mask_state & (boundary_state_idx > null_block_id),
+        )
 
     final_ptrs = (
         state_ptr
@@ -546,7 +591,8 @@ def kda_replayssm_spec_decode(
     dt_bias: torch.Tensor,
     lower_bound: float | None,
     checkpoint_state: torch.Tensor,
-    replay_cache: torch.Tensor,
+    correction_cache: torch.Tensor,
+    kg_cache: torch.Tensor,
     query_start_loc: torch.Tensor,
     state_indices: torch.Tensor,
     spec_query_len: int,
@@ -572,16 +618,25 @@ def kda_replayssm_spec_decode(
         key_dim,
     ):
         raise ValueError("KDA ReplaySSM checkpoint shape is incompatible")
-    expected_replay_shape = (
+    expected_correction_shape = (
         num_blocks,
         num_heads,
         spec_query_len,
-        2 * key_dim + value_dim + 1,
+        value_dim,
     )
-    if replay_cache.shape != expected_replay_shape:
+    if correction_cache.shape != expected_correction_shape:
         raise ValueError(
-            f"KDA ReplaySSM replay buffer needs shape {expected_replay_shape}"
+            f"KDA ReplaySSM correction buffer needs shape {expected_correction_shape}"
         )
+    expected_kg_shape = (num_blocks, num_heads, spec_query_len, 2 * key_dim)
+    if kg_cache.shape != expected_kg_shape:
+        raise ValueError(
+            f"KDA ReplaySSM key/gate buffer needs shape {expected_kg_shape}"
+        )
+    if correction_cache.dtype != torch.float32:
+        raise ValueError("KDA ReplaySSM correction buffer must use float32")
+    if kg_cache.dtype != k.dtype:
+        raise ValueError("KDA ReplaySSM key/gate buffer must match activation dtype")
     if A_log.shape != (num_heads,) or dt_bias.numel() != num_heads * key_dim:
         raise ValueError("KDA ReplaySSM gate parameters are incompatible")
     if not A_log.is_contiguous() or not dt_bias.is_contiguous():
@@ -610,7 +665,8 @@ def kda_replayssm_spec_decode(
             A_log,
             dt_bias,
             checkpoint_state,
-            replay_cache,
+            correction_cache,
+            kg_cache,
             query_start_loc,
             state_indices,
             out,
@@ -633,7 +689,8 @@ def kda_replayssm_spec_decode(
             A_log,
             dt_bias,
             checkpoint_state,
-            replay_cache,
+            correction_cache,
+            kg_cache,
             out,
             query_start_loc,
             state_indices,
@@ -648,10 +705,14 @@ def kda_replayssm_spec_decode(
             checkpoint_state.stride(1),
             checkpoint_state.stride(2),
             checkpoint_state.stride(3),
-            replay_cache.stride(0),
-            replay_cache.stride(1),
-            replay_cache.stride(2),
-            replay_cache.stride(3),
+            correction_cache.stride(0),
+            correction_cache.stride(1),
+            correction_cache.stride(2),
+            correction_cache.stride(3),
+            kg_cache.stride(0),
+            kg_cache.stride(1),
+            kg_cache.stride(2),
+            kg_cache.stride(3),
             out.stride(1),
             query_start_loc.stride(0),
             state_indices.stride(0),
@@ -678,9 +739,12 @@ class KDAReplaySSMSpecCommitContext:
     checkpoints: tuple[torch.Tensor, ...]
     state_base_addrs: torch.Tensor
     state_block_strides: torch.Tensor
-    replay_caches: tuple[torch.Tensor, ...]
-    replay_cache_base_addrs: torch.Tensor
-    replay_cache_block_strides: torch.Tensor
+    correction_caches: tuple[torch.Tensor, ...]
+    correction_cache_base_addrs: torch.Tensor
+    correction_cache_block_strides: torch.Tensor
+    kg_caches: tuple[torch.Tensor, ...]
+    kg_cache_base_addrs: torch.Tensor
+    kg_cache_block_strides: torch.Tensor
     commit_lens: torch.Tensor
     final_state_indices: torch.Tensor
     boundary_state_indices: torch.Tensor
@@ -700,14 +764,17 @@ class KDAReplaySSMSpecCommitContext:
     ) -> "KDAReplaySSMSpecCommitContext":
         if not layers:
             raise ValueError("KDA ReplaySSM commit requires at least one layer")
-        if any(len(layer.kv_cache) != 3 for layer in layers):
-            raise ValueError("KDA ReplaySSM pages must contain conv, state, and replay")
+        if any(len(layer.kv_cache) != 4 for layer in layers):
+            raise ValueError(
+                "KDA ReplaySSM pages must contain conv, state, correction, and key/gate"
+            )
 
         conv_states = [layer.kv_cache[0] for layer in layers]
         if not is_conv_state_dim_first():
             conv_states = [state.transpose(-1, -2) for state in conv_states]
         checkpoints = [layer.kv_cache[1] for layer in layers]
-        replay_caches = [layer.kv_cache[2] for layer in layers]
+        correction_caches = [layer.kv_cache[2] for layer in layers]
+        kg_caches = [layer.kv_cache[3] for layer in layers]
         A_log = [layer.A_log for layer in layers]
         dt_bias = [
             layer.dt_bias.view(layer.local_num_heads, layer.head_dim)
@@ -729,22 +796,35 @@ class KDAReplaySSMSpecCommitContext:
                 or state.stride()[1:] != state_ref.stride()[1:]
             ):
                 raise ValueError("KDA ReplaySSM layers need matching checkpoint layout")
-        expected_replay_shape = (
+        expected_correction_shape = (
             num_blocks,
             num_heads,
             spec_query_len,
-            2 * key_dim + value_dim + 1,
+            value_dim,
         )
-        replay_ref = replay_caches[0]
-        for replay_cache in replay_caches:
+        correction_ref = correction_caches[0]
+        for correction_cache in correction_caches:
             if (
-                replay_cache.shape != expected_replay_shape
-                or replay_cache.dtype != replay_ref.dtype
-                or replay_cache.device != state_ref.device
-                or replay_cache.stride()[1:] != replay_ref.stride()[1:]
+                correction_cache.shape != expected_correction_shape
+                or correction_cache.dtype != torch.float32
+                or correction_cache.device != state_ref.device
+                or correction_cache.stride()[1:] != correction_ref.stride()[1:]
             ):
                 raise ValueError(
-                    f"KDA ReplaySSM replay buffers need shape {expected_replay_shape}"
+                    "KDA ReplaySSM correction buffers need float32 shape "
+                    f"{expected_correction_shape}"
+                )
+        expected_kg_shape = (num_blocks, num_heads, spec_query_len, 2 * key_dim)
+        kg_ref = kg_caches[0]
+        for kg_cache in kg_caches:
+            if (
+                kg_cache.shape != expected_kg_shape
+                or kg_cache.dtype != kg_ref.dtype
+                or kg_cache.device != state_ref.device
+                or kg_cache.stride()[1:] != kg_ref.stride()[1:]
+            ):
+                raise ValueError(
+                    f"KDA ReplaySSM key/gate buffers need shape {expected_kg_shape}"
                 )
         if any(param.shape != (num_heads,) for param in A_log):
             raise ValueError("KDA ReplaySSM A_log shape is incompatible")
@@ -801,9 +881,12 @@ class KDAReplaySSMSpecCommitContext:
             checkpoints=tuple(checkpoints),
             state_base_addrs=_base_addrs(checkpoints),
             state_block_strides=_block_strides(checkpoints),
-            replay_caches=tuple(replay_caches),
-            replay_cache_base_addrs=_base_addrs(replay_caches),
-            replay_cache_block_strides=_block_strides(replay_caches),
+            correction_caches=tuple(correction_caches),
+            correction_cache_base_addrs=_base_addrs(correction_caches),
+            correction_cache_block_strides=_block_strides(correction_caches),
+            kg_caches=tuple(kg_caches),
+            kg_cache_base_addrs=_base_addrs(kg_caches),
+            kg_cache_block_strides=_block_strides(kg_caches),
             commit_lens=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
             final_state_indices=torch.empty(
                 max_num_reqs, dtype=torch.int32, device=device
@@ -938,9 +1021,12 @@ class KDAReplaySSMSpecCommitContext:
                 state_ref,
                 self.state_base_addrs,
                 self.state_block_strides,
-                self.replay_caches[0],
-                self.replay_cache_base_addrs,
-                self.replay_cache_block_strides,
+                self.correction_caches[0],
+                self.correction_cache_base_addrs,
+                self.correction_cache_block_strides,
+                self.kg_caches[0],
+                self.kg_cache_base_addrs,
+                self.kg_cache_block_strides,
                 self.A_log,
                 self.dt_bias,
                 state_indices,
@@ -953,9 +1039,12 @@ class KDAReplaySSMSpecCommitContext:
                 state_ref.stride(1),
                 state_ref.stride(2),
                 state_ref.stride(3),
-                self.replay_caches[0].stride(1),
-                self.replay_caches[0].stride(2),
-                self.replay_caches[0].stride(3),
+                self.correction_caches[0].stride(1),
+                self.correction_caches[0].stride(2),
+                self.correction_caches[0].stride(3),
+                self.kg_caches[0].stride(1),
+                self.kg_caches[0].stride(2),
+                self.kg_caches[0].stride(3),
                 self.A_log.stride(0),
                 self.A_log.stride(1),
                 self.dt_bias.stride(0),
@@ -967,7 +1056,6 @@ class KDAReplaySSMSpecCommitContext:
                 BK=block_k,
                 BV=block_v,
                 NUM_HEADS=num_heads,
-                SPEC_QUERY_LEN=self.spec_query_len,
                 USE_LOWER_BOUND=self.lower_bound is not None,
                 ALIGN_MODE=block_table is not None,
                 num_warps=4,

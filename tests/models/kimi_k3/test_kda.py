@@ -62,6 +62,7 @@ def test_kda_replayssm_tp1_state_layout():
     assert dtypes == (
         torch.bfloat16,
         torch.float32,
+        torch.float32,
         torch.bfloat16,
     )
 
@@ -79,7 +80,7 @@ def test_kda_replayssm_tp1_state_layout():
         tp_world_size=1,
         spec_query_len=3,
     )
-    assert shapes[2:] == ((4, 3, 97),)
+    assert shapes[2:] == ((4, 3, 32), (4, 3, 64))
 
 
 def test_kda_replayssm_config_state_layout():
@@ -105,10 +106,12 @@ def test_kda_replayssm_config_state_layout():
     assert KimiLinearForCausalLM.get_mamba_state_dtype_from_config(vllm_config) == (
         torch.bfloat16,
         torch.float32,
+        torch.float32,
         torch.bfloat16,
     )
     assert KimiLinearForCausalLM.get_mamba_state_shape_from_config(vllm_config)[2:] == (
-        (4, 3, 97),
+        (4, 3, 32),
+        (4, 3, 64),
     )
 
 
@@ -616,7 +619,7 @@ def test_kda_replayssm_verify_and_group_commit(
         "is_conv_state_dim_first",
         lambda: conv_state_dim_first,
     )
-    num_layers, num_seqs, query_len = 2, 2, 3
+    num_layers, num_seqs, query_len = 2, 2, 8
     num_blocks, num_heads, dim = (7 if align_mode else 3), 4, 128
     total_tokens = num_seqs * query_len
     torch.manual_seed(20260808)
@@ -649,7 +652,7 @@ def test_kda_replayssm_verify_and_group_commit(
     state_indices = torch.tensor(
         [5, 6] if align_mode else [1, 2], dtype=torch.int32, device=DEVICE
     )
-    accepted = [1, 3]
+    accepted = [2, 8]
     if use_request_indices:
         global_num_accepted = torch.tensor(
             [0, accepted[0], 0, accepted[1]],
@@ -678,8 +681,8 @@ def test_kda_replayssm_verify_and_group_commit(
             device=DEVICE,
         )
         num_computed_tokens = torch.zeros(batch_size, dtype=torch.int32, device=DEVICE)
-        num_computed_tokens[rows] = 2
-        mamba_block_size = 4
+        num_computed_tokens[rows] = 4
+        mamba_block_size = 8
 
     layers = []
     expected_outputs = []
@@ -709,11 +712,19 @@ def test_kda_replayssm_verify_and_group_commit(
             else (num_blocks, history_len + query_len - 1, conv_dim)
         )
         conv_state = torch.randn(conv_shape, dtype=torch.bfloat16, device=DEVICE)
-        replay_cache = torch.empty(
+        correction_cache = torch.empty(
             num_blocks,
             num_heads,
             query_len,
-            3 * dim + 1,
+            dim,
+            dtype=torch.float32,
+            device=DEVICE,
+        )
+        kg_cache = torch.empty(
+            num_blocks,
+            num_heads,
+            query_len,
+            2 * dim,
             dtype=torch.bfloat16,
             device=DEVICE,
         )
@@ -721,7 +732,8 @@ def test_kda_replayssm_verify_and_group_commit(
             kv_cache=(
                 conv_state,
                 checkpoint,
-                replay_cache,
+                correction_cache,
+                kg_cache,
             ),
             A_log=A_log,
             dt_bias=dt_bias,
@@ -743,7 +755,8 @@ def test_kda_replayssm_verify_and_group_commit(
             dt_bias=dt_bias,
             lower_bound=lower_bound,
             checkpoint_state=checkpoint,
-            replay_cache=replay_cache,
+            correction_cache=correction_cache,
+            kg_cache=kg_cache,
             query_start_loc=query_start_loc,
             state_indices=state_indices,
             spec_query_len=query_len,
@@ -792,15 +805,15 @@ def test_kda_replayssm_verify_and_group_commit(
             if align_mode:
                 assert block_table is not None
                 row = request_indices[seq_idx] if use_request_indices else seq_idx
-                final_block = block_table[row, (2 + commit_len) // 4]
+                final_block = block_table[row, (4 + commit_len) // 8]
             committed_states[final_block] = committed_state.transpose(-1, -2)
-            if align_mode and 2 + commit_len >= 4:
+            if align_mode and 4 + commit_len >= 8:
                 _, boundary_state = naive_recurrent_kda(
-                    normalized_q[:, start : start + 2],
-                    normalized_k[:, start : start + 2],
-                    v[:, start : start + 2],
-                    gate[:, start : start + 2],
-                    beta[:, start : start + 2],
+                    normalized_q[:, start : start + 4],
+                    normalized_k[:, start : start + 4],
+                    v[:, start : start + 4],
+                    gate[:, start : start + 4],
+                    beta[:, start : start + 4],
                     initial_state=checkpoint[state_indices[seq_idx]].transpose(-1, -2),
                     output_final_state=True,
                 )
@@ -845,7 +858,7 @@ def test_kda_replayssm_verify_and_group_commit(
             if align_mode:
                 assert block_table is not None
                 row = request_indices[seq_idx] if use_request_indices else seq_idx
-                block = block_table[row, (2 + commit_len) // 4]
+                block = block_table[row, (4 + commit_len) // 8]
             source_block = state_indices[seq_idx] if align_mode else block
             if conv_state_dim_first:
                 actual_conv = layer.kv_cache[0][block, :, :history_len]
@@ -861,7 +874,7 @@ def test_kda_replayssm_verify_and_group_commit(
                     commit_len - 1 : commit_len - 1 + history_len,
                 ]
             torch.testing.assert_close(actual_conv, expected_conv)
-            if align_mode and 2 + commit_len >= 4:
+            if align_mode and 4 + commit_len >= 8:
                 assert block_table is not None
                 boundary_block = block_table[row, 0]
                 if conv_state_dim_first:
@@ -869,14 +882,14 @@ def test_kda_replayssm_verify_and_group_commit(
                         boundary_block, :, :history_len
                     ]
                     expected_boundary_conv = initial_conv_states[layer_idx][
-                        state_indices[seq_idx], :, 1 : 1 + history_len
+                        state_indices[seq_idx], :, 3 : 3 + history_len
                     ]
                 else:
                     actual_boundary_conv = layer.kv_cache[0][
                         boundary_block, :history_len
                     ]
                     expected_boundary_conv = initial_conv_states[layer_idx][
-                        state_indices[seq_idx], 1 : 1 + history_len
+                        state_indices[seq_idx], 3 : 3 + history_len
                     ]
                 torch.testing.assert_close(actual_boundary_conv, expected_boundary_conv)
 

@@ -664,8 +664,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     kda_replayssm_spec_decode,
                 )
 
-                if len(replayssm_records) != 1:
-                    raise ValueError("KDA ReplaySSM requires one replay-record buffer")
+                if len(replayssm_records) != 2:
+                    raise ValueError(
+                        "KDA ReplaySSM requires correction and key/gate buffers"
+                    )
                 core_attn_out_spec = kda_replayssm_spec_decode(
                     q=q_spec,
                     k=k_spec,
@@ -676,7 +678,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     dt_bias=self.dt_bias,
                     lower_bound=self.gate_lower_bound,
                     checkpoint_state=recurrent_state,
-                    replay_cache=replayssm_records[0],
+                    correction_cache=replayssm_records[0],
+                    kg_cache=replayssm_records[1],
                     query_start_loc=spec_cu_seqlens,
                     state_indices=spec_state_indices_tensor[: m.num_spec_decodes, 0],
                     spec_query_len=self.spec_query_len,
