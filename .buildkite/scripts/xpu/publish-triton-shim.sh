@@ -47,7 +47,6 @@ if [[ "$DRY_RUN" == "1" ]]; then
     printf '{"Contents":[{"Key":"%s/%s"}]}' \
         "$PREFIX" "$WHEEL_FILENAME" > "$objects_path"
 else
-    aws sts get-caller-identity
     aws s3 cp "$wheel_path" "$S3_PREFIX"
     aws s3api list-objects-v2 \
         --bucket "$BUCKET" \
