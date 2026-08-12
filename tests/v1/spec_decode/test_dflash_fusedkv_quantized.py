@@ -8,6 +8,7 @@ Pins down:
 - the invariant that packed weights never reach a bare ``F.linear``,
 - the real-FP8 drafter precompute on GPU (per-layer / dequant / scaled_mm).
 """
+
 from types import SimpleNamespace
 
 import pytest
@@ -29,7 +30,7 @@ NUM_HEADS = 4
 NUM_KV_HEADS = 2
 NUM_LAYERS = 3
 NUM_CTX = 5
-Q_SIZE = NUM_HEADS * HEAD_DIM      # 32
+Q_SIZE = NUM_HEADS * HEAD_DIM  # 32
 KV_SIZE = NUM_KV_HEADS * HEAD_DIM  # 16
 
 
@@ -39,8 +40,9 @@ def _cpu_rms_norm(out, input, weight, eps):
     var = input.float().pow(2).mean(-1, keepdim=True)
     normed = (input * (var + eps).rsqrt()).to(input.dtype)
     if weight.ndim == 2 and input.ndim >= 3:
-        weight = weight.reshape(weight.shape[0], *([1] * (input.ndim - 2)),
-                                weight.shape[1])
+        weight = weight.reshape(
+            weight.shape[0], *([1] * (input.ndim - 2)), weight.shape[1]
+        )
     out.copy_(normed * weight)
 
 
@@ -188,8 +190,7 @@ def test_fused_matches_per_layer_unquantized(cpu_rms_norm):
 
     assert all(p.forward_calls == 1 for p in projections)
     for fused, per in ((fk, pk), (fv, pv)):
-        assert fused.shape == per.shape == \
-            (NUM_LAYERS, NUM_CTX, NUM_KV_HEADS, HEAD_DIM)
+        assert fused.shape == per.shape == (NUM_LAYERS, NUM_CTX, NUM_KV_HEADS, HEAD_DIM)
         assert torch.equal(fused, per)
 
 
@@ -215,6 +216,7 @@ def test_quantized_projection_is_never_sliced(monkeypatch, cpu_rms_norm):
 # ---------------------------------------------------------------------------
 # GPU: real FP8 drafter (the issue's reproduction scenario)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_fp8_drafter_precompute(dist_init, default_vllm_config):
@@ -251,10 +253,8 @@ def test_fp8_drafter_precompute(dist_init, default_vllm_config):
         for name, p in proj.named_parameters():
             if p.dtype == torch.float8_e4m3fn:
                 w = torch.randn(p.shape, dtype=torch.float32, device=device)
-                p.data.copy_(
-                    (w / w.abs().max() * 200).to(torch.float8_e4m3fn))
-        proj.weight_scale.data.copy_(
-            torch.tensor([1e-3, 1e-3, 1e-3], device=device))
+                p.data.copy_((w / w.abs().max() * 200).to(torch.float8_e4m3fn))
+        proj.weight_scale.data.copy_(torch.tensor([1e-3, 1e-3, 1e-3], device=device))
         proj.quant_method.process_weights_after_loading(proj)
         return proj
 
@@ -264,15 +264,14 @@ def test_fp8_drafter_precompute(dist_init, default_vllm_config):
     model = object.__new__(DFlashQwen3Model)
     nn.Module.__init__(model)
     model.hidden_norm = SimpleNamespace(
-        weight=torch.ones(HIDDEN, device=device, dtype=dtype))
+        weight=torch.ones(HIDDEN, device=device, dtype=dtype)
+    )
     model._rms_norm_eps = 1e-6
     model.compute_dtype = dtype
     model.layers = [SimpleNamespace() for _ in layers_attn]
     model._build_context_kv_buffers(layers_attn, has_bias=False)
 
-    use_marlin = any(
-        getattr(p.quant_method, "use_marlin", False) for p in projections
-    )
+    use_marlin = any(getattr(p.quant_method, "use_marlin", False) for p in projections)
     if use_marlin:
         expected = ContextKVStrategy.PER_LAYER
     elif cutlass_fp8_supported():
@@ -295,10 +294,10 @@ def test_fp8_drafter_precompute(dist_init, default_vllm_config):
     per_v = []
     for p in projections:
         out = p.quant_method.apply(p, normed, bias=None)
-        per_k.append(out[..., Q_SIZE:Q_SIZE + KV_SIZE].view(
-            NUM_CTX, NUM_KV_HEADS, HEAD_DIM))
-        per_v.append(out[..., Q_SIZE + KV_SIZE:].view(
-            NUM_CTX, NUM_KV_HEADS, HEAD_DIM))
+        per_k.append(
+            out[..., Q_SIZE : Q_SIZE + KV_SIZE].view(NUM_CTX, NUM_KV_HEADS, HEAD_DIM)
+        )
+        per_v.append(out[..., Q_SIZE + KV_SIZE :].view(NUM_CTX, NUM_KV_HEADS, HEAD_DIM))
     torch.testing.assert_close(all_k, torch.stack(per_k), rtol=0.02, atol=0.02)
     torch.testing.assert_close(all_v, torch.stack(per_v), rtol=0.02, atol=0.02)
 
@@ -326,7 +325,8 @@ def test_fp16_compute_dtype_no_crash(dist_init, default_vllm_config):
     model = object.__new__(DFlashQwen3Model)
     nn.Module.__init__(model)
     model.hidden_norm = SimpleNamespace(
-        weight=torch.ones(HIDDEN, device="cuda", dtype=torch.float16))
+        weight=torch.ones(HIDDEN, device="cuda", dtype=torch.float16)
+    )
     model._rms_norm_eps = 1e-6
     model.compute_dtype = torch.float16
     model.layers = [SimpleNamespace() for _ in layers_attn]
@@ -334,9 +334,7 @@ def test_fp16_compute_dtype_no_crash(dist_init, default_vllm_config):
 
     assert model._kv_strategy is ContextKVStrategy.FUSED
     assert model._fused_kv_weight.dtype == torch.float16
-    context_states = torch.randn(
-        NUM_CTX, HIDDEN, device="cuda", dtype=torch.float16
-    )
+    context_states = torch.randn(NUM_CTX, HIDDEN, device="cuda", dtype=torch.float16)
     all_k, all_v = model._project_context_kv(
         context_states, NUM_CTX, NUM_LAYERS, NUM_KV_HEADS, HEAD_DIM
     )
