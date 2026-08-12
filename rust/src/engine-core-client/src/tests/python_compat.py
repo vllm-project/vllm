@@ -97,6 +97,7 @@ class EngineCoreOutput(
     prefill_stats: object | None = None
     routed_experts: object | None = None
     num_nans_in_logits: int = 0
+    mm_cache_miss_hashes: list[str] | None = None
 
 
 class EngineCoreOutputs(
