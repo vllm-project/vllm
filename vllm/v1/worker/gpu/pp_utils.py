@@ -32,10 +32,19 @@ class PendingRecv:
     gen_at_receive_np: np.ndarray  # [num_reqs]
 
 
-def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
+def compute_need_sampled_mask(
+    input_batch: InputBatch, always: bool = False
+) -> np.ndarray | None:
     """Return a bool array of shape `[input_batch.num_reqs]` marking requests
     with outputs that might be needed in a subsequent (decode) step.
-    Returns None if no sampled outputs are needed in the requests' next step."""
+    Returns None if no sampled outputs are needed in the requests' next step.
+
+    With ``always``, every request is marked: the default heuristic reads
+    worker-local ``num_computed_tokens``, which diverges across PP ranks for
+    models that roll it back (diffusion), deadlocking the broadcast pair.
+    """
+    if always:
+        return np.ones(input_batch.num_reqs, dtype=bool)
 
     old_computed = input_batch.num_computed_tokens_np
     prefill_len = input_batch.prefill_len_np
@@ -60,8 +69,13 @@ class PPHandler:
     """
 
     def __init__(
-        self, max_num_reqs: int, num_speculative_steps: int, device: torch.device
+        self,
+        max_num_reqs: int,
+        num_speculative_steps: int,
+        device: torch.device,
+        always_need_sampled: bool = False,
     ):
+        self.always_need_sampled = always_need_sampled
         self.is_last_rank = get_pp_group().is_last_rank
         self.last_rank = get_pp_group().last_rank
         self.max_sample_len = num_speculative_steps + 1
@@ -127,7 +141,9 @@ class PPHandler:
         """Returns True iff sampled tokens need to be gathered from *all*
         requests in the batch."""
         assert not self.is_last_rank
-        need_sampled_mask = compute_need_sampled_mask(input_batch)
+        need_sampled_mask = compute_need_sampled_mask(
+            input_batch, self.always_need_sampled
+        )
         if need_sampled_mask is None:
             # Leave this step's reserved slot as None.
             return False
@@ -175,7 +191,7 @@ class PPHandler:
         input_batch: InputBatch,
     ) -> None:
         assert self.is_last_rank
-        if compute_need_sampled_mask(input_batch) is None:
+        if compute_need_sampled_mask(input_batch, self.always_need_sampled) is None:
             # No request needs sampled outputs for a subsequent decode step.
             return
 
@@ -186,14 +202,19 @@ class PPHandler:
 
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
+            sampled_copy = sampled_token_ids.contiguous().clone()
+            combined = torch.stack((num_sampled, num_rejected), dim=0)
+            snapshot_done = self.broadcast_stream.record_event()
             torch.distributed.broadcast(
-                sampled_token_ids.contiguous(),
+                sampled_copy,
                 src=self.last_rank,
                 group=self.broadcast_group,
             )
-            combined = torch.stack((num_sampled, num_rejected), dim=0)
             torch.distributed.broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )
-            for tensor in (sampled_token_ids, num_sampled, num_rejected):
+            for tensor in (sampled_copy, combined):
                 tensor.record_stream(self.broadcast_stream)
+        # Hold the main stream until the snapshot completes; the sampler
+        # overwrites its output buffers in-place on the next step.
+        self.main_stream.wait_event(snapshot_done)

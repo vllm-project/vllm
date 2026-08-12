@@ -378,6 +378,13 @@ def warmup_kernels(
 
             worker_execute_model(decode_output)
             worker_sample_tokens(None)
+            if (
+                model_runner.pp_handler is not None
+                and model_runner.model_config.is_diffusion
+            ):
+                # Back-to-back steps lack real scheduling's synchronization;
+                # under PP they race host-written index buffers.
+                torch.accelerator.synchronize()
 
             for i, use_spec in zip(indices, spec_flags):
                 req_computed[i] += decode_query_len if use_spec else 1

@@ -273,6 +273,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_reqs=self.max_num_reqs,
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
+                # Diffusion rolls num_computed_tokens back, desyncing the
+                # per-rank need-sampled masks; broadcast unconditionally.
+                always_need_sampled=self.model_config.is_diffusion,
             )
 
         # Samplers and decode_query_len created in load_model() after
@@ -878,13 +881,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for mm_hash in scheduler_output.free_encoder_mm_hashes:
                 self.encoder_cache.free_encoder_cache(mm_hash)
 
-    def update_pp_decode_requests(self):
+    def update_pp_decode_requests(self, scheduler_output: SchedulerOutput):
         # For non-last PP ranks, update decode requests with sampler output from
         # the prior step in which they were scheduled (pp_size steps ago).
         if self.pp_handler is not None:
             outputs = self.pp_handler.get_prev_sampled_outputs()
             if outputs is not None:
                 self.postprocess_sampled(**outputs)
+            apply_state = getattr(self.model_state, "pp_apply_state", None)
+            if apply_state is not None:
+                apply_state(self.req_states, scheduler_output)
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -1300,7 +1306,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
-            self.update_pp_decode_requests()
+            self.update_pp_decode_requests(scheduler_output)
             self.finish_requests(scheduler_output)
             self.free_states(scheduler_output)
             self.add_requests(scheduler_output)
@@ -1587,6 +1593,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # sampled tokens broadcast from the last rank and update local state.
             assert self.pp_handler is not None
             all_decode_next = self.pp_handler.receive(input_batch)
+            receive_state = getattr(self.model_state, "pp_receive_state", None)
+            if receive_state is not None:
+                receive_state(input_batch)
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.
             self.postprocess_num_computed_tokens(input_batch)
@@ -1616,6 +1625,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_rejected,
                 input_batch,
             )
+            broadcast_state = getattr(self.model_state, "pp_broadcast_state", None)
+            if broadcast_state is not None:
+                broadcast_state(input_batch, self.req_states)
 
         assert self.prompt_logprobs_worker is not None
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
