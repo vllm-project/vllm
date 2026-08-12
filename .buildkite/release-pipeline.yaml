@@ -164,6 +164,14 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+  - label: "Publish XPU Triton shim index"
+    key: publish-xpu-triton-shim
+    depends_on: ~
+    agents:
+      queue: cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/xpu/publish-triton-shim.sh"
+
   - label: "Generate and upload wheel indices"
     key: generate-wheel-indices
     depends_on: "build-wheels"
