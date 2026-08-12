@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from typing import Any
 
 import torch
 from einops import rearrange
@@ -393,18 +394,29 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # Vendor-specific KDA kernels: AMD/ROCm and NVIDIA keep their own copies
         # under kimi_k3/{amd,nvidia}/ops so each can diverge independently.
+        # These copies may have different signatures for Kimi-K3, but they agree
+        # on the arguments used here.
+        chunk_kda_with_fused_gate: Callable[..., Any]
         if current_platform.is_rocm():
             from vllm.models.kimi_k3.amd.ops.third_party.kda import (
-                chunk_kda_with_fused_gate,
+                chunk_kda_with_fused_gate as _amd_chunk_kda_with_fused_gate,
+            )
+            from vllm.models.kimi_k3.amd.ops.third_party.kda import (
                 fused_recurrent_kda,
                 fused_recurrent_kda_packed_decode,
             )
+
+            chunk_kda_with_fused_gate = _amd_chunk_kda_with_fused_gate
         else:
             from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
-                chunk_kda_with_fused_gate,
+                chunk_kda_with_fused_gate as _nvidia_chunk_kda_with_fused_gate,
+            )
+            from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
                 fused_recurrent_kda,
                 fused_recurrent_kda_packed_decode,
             )
+
+            chunk_kda_with_fused_gate = _nvidia_chunk_kda_with_fused_gate
 
         assert isinstance(attn_metadata_raw, dict)
         attn_metadata_narrowed = attn_metadata_raw[self.prefix]
