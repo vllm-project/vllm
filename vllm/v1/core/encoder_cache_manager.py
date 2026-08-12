@@ -66,7 +66,9 @@ class EncoderCacheManager:
             last call to get_freed_mm_hashes(). This list is cleared on return.
     """
     @classmethod
-    def create_manager(cls, *, cache_size: int, vllm_config: "VllmConfig") -> "EncoderCacheManager":
+    def create_manager(
+        cls, *, cache_size: int, vllm_config: "VllmConfig"
+    ) -> "EncoderCacheManager":
         return cls(cache_size=cache_size)
 
     def __init__(self, cache_size: int):

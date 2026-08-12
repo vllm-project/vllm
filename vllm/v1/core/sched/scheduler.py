@@ -241,8 +241,7 @@ class Scheduler(SchedulerInterface):
                 else EncoderCacheManager
             )
         self.encoder_cache_manager = manager_cls_obj.create_manager(
-            cache_size=encoder_cache_size,
-            vllm_config=vllm_config
+            cache_size=encoder_cache_size, vllm_config=vllm_config
         )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
