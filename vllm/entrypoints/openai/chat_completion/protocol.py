@@ -472,6 +472,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    skip_writing_prefix_cache: bool | None = Field(
+        default=None,
+        description=(
+            "If true, this request may reuse existing prefix-cache entries but "
+            "will not add newly computed blocks to the local prefix cache."
+        ),
+    )
+
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
@@ -644,6 +652,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             temperature=temperature,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
+            skip_writing_prefix_cache=bool(self.skip_writing_prefix_cache),
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
@@ -698,6 +707,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             prompt_logprobs = self.top_logprobs
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.skip_writing_prefix_cache is not None:
+            extra_args["skip_writing_prefix_cache"] = self.skip_writing_prefix_cache
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
@@ -1103,6 +1114,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     mm_processor_kwargs: dict[str, Any] | None = None
     priority: int = Field(default=0, ge=_INT64_MIN, le=_INT64_MAX)
     cache_salt: str | None = None
+    skip_writing_prefix_cache: bool | None = None
     include_stop_str_in_output: bool = False
     guided_decoding_backend: str | None = None
     echo: bool = False

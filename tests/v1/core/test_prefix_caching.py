@@ -73,6 +73,7 @@ def make_request(
     prompt_logprobs: int | None = None,
     cache_salt: str | None = None,
     lora_request: LoRARequest | None = None,
+    skip_writing_prefix_cache: bool = False,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -86,7 +87,13 @@ def make_request(
             )
             mm_features.append(mm_feature)
 
-    sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
+    sampling_params = SamplingParams(
+        max_tokens=17,
+        prompt_logprobs=prompt_logprobs,
+        extra_args=(
+            {"skip_writing_prefix_cache": True} if skip_writing_prefix_cache else None
+        ),
+    )
     sampling_params.update_from_generation_config({}, eos_token_id=100)
 
     return Request(
@@ -347,6 +354,53 @@ def test_prefill(hash_fn):
         free_block_queue.fake_free_list_tail.prev_free_block
         is free_block_queue.fake_free_list_head
     )
+
+
+def test_request_can_read_prefix_cache_without_populating_it():
+    block_size = 4
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 8),
+        max_model_len=64,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    cached_request = make_request("cached", list(range(8)), block_size, sha256)
+    cached_blocks = manager.allocate_slots(cached_request, 8)
+    assert cached_blocks is not None
+    manager.free(cached_request)
+
+    no_store_request = make_request(
+        "no-store",
+        list(range(13)),
+        block_size,
+        sha256,
+        skip_writing_prefix_cache=True,
+    )
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(
+        no_store_request
+    )
+    assert num_computed_tokens == 8
+    assert len(computed_blocks.blocks[0]) == 2
+
+    new_blocks = manager.allocate_slots(
+        no_store_request,
+        no_store_request.num_tokens - num_computed_tokens,
+        num_new_computed_tokens=num_computed_tokens,
+        new_computed_blocks=computed_blocks,
+    )
+    assert new_blocks is not None
+    assert all(block.block_hash is None for block in new_blocks.blocks[0])
+
+    # Async scheduling commits blocks after the worker completes a step.
+    # The delayed commit must honor the same no-store policy.
+    manager.cache_blocks(no_store_request, no_store_request.num_tokens)
+    assert all(block.block_hash is None for block in new_blocks.blocks[0])
+    manager.free(no_store_request)
+
+    repeated_request = make_request("repeated", list(range(13)), block_size, sha256)
+    _, repeated_num_computed_tokens, _ = manager.get_computed_blocks(repeated_request)
+    assert repeated_num_computed_tokens == 8
 
 
 def test_prefill_hybrid_model():

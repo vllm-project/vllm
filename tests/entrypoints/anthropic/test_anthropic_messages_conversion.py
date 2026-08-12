@@ -1395,6 +1395,23 @@ class TestMessagesFullConverter:
 
 
 # ======================================================================
+# Per-request prefix-cache policy
+# ======================================================================
+
+
+def test_skip_writing_prefix_cache_passed_through():
+    request = _make_request(
+        [{"role": "user", "content": "Hello"}],
+        skip_writing_prefix_cache=True,
+    )
+    result = _convert(request)
+    sampling_params = result.to_sampling_params(16, {})
+
+    assert sampling_params.extra_args is not None
+    assert sampling_params.extra_args["skip_writing_prefix_cache"] is True
+
+
+# ======================================================================
 # cache_salt pass-through (Issue #46688)
 # ======================================================================
 

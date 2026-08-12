@@ -1164,6 +1164,7 @@ class BeamSearchParams(
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
+    skip_writing_prefix_cache: bool = False
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
