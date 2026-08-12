@@ -181,6 +181,15 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 
 
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # ROCm runs adaptive verification through the per-token flattened
+        # indexer path, which derives row ownership from device decode lengths.
+        return (
+            current_platform.is_rocm()
+            or super().supports_device_cpu_query_lens_mismatch()
+        )
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V4_INDEXER"
@@ -190,6 +199,10 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
         # DeepSeek-V4 packs the indexer pages beside the MLA latent pages inside
         # each block, so the layer dim must sit inside the block dim.
         return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
+
+    @staticmethod
+    def get_builder_cls() -> type["DeepseekV4IndexerMetadataBuilder"]:
+        return DeepseekV4IndexerMetadataBuilder
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -502,13 +515,16 @@ def _supports_native_decode(next_n: int) -> bool:
     return next_n in (1, 2)
 
 
-def _use_flattening(vllm_config: VllmConfig) -> bool:
+def _use_flattening(
+    vllm_config: VllmConfig,
+    supports_flattened_device_query_lens: bool,
+) -> bool:
     speculative_config = vllm_config.speculative_config
     next_n = 1 + vllm_config.num_speculative_tokens
     return not _supports_native_decode(next_n) or (
         speculative_config is not None
         and speculative_config.enable_adaptive_verification
-        and _supports_flattened_device_query_lens()
+        and supports_flattened_device_query_lens
     )
 
 
@@ -519,12 +535,23 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     requires_block_table_width = True
 
     @classmethod
+    def _supports_flattened_device_query_lens(cls) -> bool:
+        return _supports_flattened_device_query_lens()
+
+    @classmethod
+    def _use_flattening(cls, vllm_config: VllmConfig) -> bool:
+        return _use_flattening(
+            vllm_config,
+            cls._supports_flattened_device_query_lens(),
+        )
+
+    @classmethod
     def get_cudagraph_support(
         cls,
         vllm_config: VllmConfig,
         kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
-        if _supports_varlen_paged_mqa_logits() or _use_flattening(vllm_config):
+        if _supports_varlen_paged_mqa_logits() or cls._use_flattening(vllm_config):
             return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
@@ -558,7 +585,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
         self.reorder_batch_threshold = None
-        self.use_flattening = _use_flattening(self.vllm_config)
+        self.use_flattening = self._use_flattening(self.vllm_config)
         self.supports_varlen = _supports_varlen_paged_mqa_logits()
         logger.info_once(
             "DSA indexer decode path: use_flattening=%s supports_varlen=%s "
@@ -1070,6 +1097,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         return attn_metadata
+
+
+class DeepseekV4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
+    @classmethod
+    def _supports_flattened_device_query_lens(cls) -> bool:
+        # The ROCm DeepSeek-V4 path can flatten each live query into a
+        # single-token row using device-side decode lengths.
+        return current_platform.is_rocm() or (
+            super()._supports_flattened_device_query_lens()
+        )
 
 
 def build_prefill_chunk_metadata(
