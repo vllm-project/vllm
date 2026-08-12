@@ -3256,12 +3256,18 @@ def _spec_decode_grouping_config(method="dspark"):
     )
 
 
-def _hybrid_specs_with_draft(draft: bool):
+def _hybrid_specs_with_draft(draft: bool, draft_shares_target_spec: bool = False):
     """A K3-shaped hybrid: MLA full attention + Mamba, optionally plus a
-    DSpark-style draft MLA layer marked non_causal_multi_token_decode."""
+    DSpark-style draft MLA layer marked non_causal_multi_token_decode.
+
+    The target's fp8 KV dtype is what keeps the draft in its own bucket, as it
+    does on Kimi-K3 (target `--kv-cache-dtype fp8_e4m3`, draft `auto`). Pass
+    draft_shares_target_spec to collapse them into one group instead.
+    """
+    target_dtype = None if draft_shares_target_spec else "fp8_e4m3"
     specs = {
-        "target.attn.0": new_mla_spec(block_size=64),
-        "target.attn.1": new_mla_spec(block_size=64),
+        "target.attn.0": new_mla_spec(block_size=64, cache_dtype_str=target_dtype),
+        "target.attn.1": new_mla_spec(block_size=64, cache_dtype_str=target_dtype),
         "target.mamba.0": new_mamba_spec(block_size=64, mamba_cache_mode="align"),
         "target.mamba.1": new_mamba_spec(block_size=64, mamba_cache_mode="align"),
     }
@@ -3273,9 +3279,7 @@ def _hybrid_specs_with_draft(draft: bool):
 
 def test_draft_group_annotated_on_hybrid_general_path():
     # A drafter's MLA layer carries non_causal_multi_token_decode, so its group
-    # is identifiable without keying off a model version. Only that group may
-    # be flagged: flagging a Mamba group widens its lookup window to two
-    # consecutive chunks, which align-mode checkpointing never produces.
+    # is identifiable without keying off a model version.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=True)
     )
@@ -3283,9 +3287,25 @@ def test_draft_group_annotated_on_hybrid_general_path():
     flagged = [g for g in groups if g.is_eagle_group]
     assert len(flagged) == 1
     assert flagged[0].layer_names == ["draft.attn.0"]
-    assert not any(
-        g.is_eagle_group for g in groups if isinstance(g.kv_cache_spec, MambaSpec)
+
+
+def test_mamba_groups_never_flagged_even_when_draft_shares_a_group():
+    # MLAAttentionSpec.merge ORs non_causal_multi_token_decode rather than
+    # requiring equality, so a draft layer can share a group with target
+    # layers; that combined group still holds volatile draft KV and must be
+    # flagged. What must never happen is a Mamba group being flagged: that
+    # widens its lookup window to two consecutive chunks, which align-mode
+    # checkpointing never produces, zeroing every lookup.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(),
+        _hybrid_specs_with_draft(draft=True, draft_shares_target_spec=True),
     )
+
+    for group in groups:
+        if "draft.attn.0" in group.layer_names:
+            assert group.is_eagle_group
+        if isinstance(group.kv_cache_spec, MambaSpec):
+            assert not group.is_eagle_group
 
 
 def test_draft_group_not_annotated_without_spec_decode():
