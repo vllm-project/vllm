@@ -645,10 +645,7 @@ class ResponsesCountTokensRequest(ResponsesRequest):
 
 
 class ResponsesCountTokensResponse(OpenAIBaseModel):
-    """
-    Response model for the /v1/responses/input_tokens endpoint.
-    Returns the number of tokens in the input payload.
-    """
+    object: Literal["response.input_tokens"] = "response.input_tokens"
     input_tokens: int
 
 
