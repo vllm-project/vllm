@@ -37,6 +37,7 @@ ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
+EPLBLoadBalancingStrategy = Literal["auto", "hierarchical", "global"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
 All2AllBackend = Literal[
@@ -88,6 +89,15 @@ class EPLBConfig:
 
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
+
+    load_balancing_strategy: EPLBLoadBalancingStrategy = "auto"
+    """Expert placement strategy used by the EPLB policy.
+
+    ``"hierarchical"`` preserves expert-group locality across nodes and is
+    intended for prefill deployments. ``"global"`` balances experts across
+    all ranks and is intended for decode deployments. ``"auto"`` preserves
+    the existing topology-selection behavior.
+    """
 
     communicator: EPLBCommunicatorBackend | None = None
     """

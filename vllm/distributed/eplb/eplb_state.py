@@ -35,6 +35,7 @@ import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
+from vllm.config.parallel import EPLBLoadBalancingStrategy
 from vllm.config.utils import compute_hash_cached
 from vllm.distributed.parallel_state import (
     get_ep_group,
@@ -59,6 +60,43 @@ from .rebalance_execute import (
 )
 
 logger = init_logger(__name__)
+
+
+def _resolve_eplb_rebalancing_topology(
+    strategy: EPLBLoadBalancingStrategy,
+    num_groups: int,
+    num_nodes: int,
+    num_gpus: int,
+) -> tuple[int, int]:
+    """Resolve the group and node counts used for EPLB rebalancing.
+
+    Args:
+        strategy: Requested load-balancing strategy.
+        num_groups: Number of expert groups.
+        num_nodes: Number of nodes in the EP group.
+        num_gpus: Number of ranks in the EP group.
+
+    Returns:
+        The expert-group and node counts passed to the EPLB policy.
+
+    Raises:
+        ValueError: If hierarchical balancing is explicitly requested for an
+            incompatible topology.
+    """
+    supports_hierarchical = num_groups % num_nodes == 0 and num_gpus % num_nodes == 0
+    if strategy == "hierarchical":
+        if not supports_hierarchical:
+            raise ValueError(
+                "Hierarchical EPLB requires num_groups and num_gpus to be "
+                f"divisible by num_nodes, but got {num_groups=}, {num_gpus=}, "
+                f"and {num_nodes=}."
+            )
+        return num_groups, num_nodes
+    if strategy == "global":
+        return 1, 1
+    if num_gpus % num_nodes != 0:
+        return num_groups, 1
+    return num_groups, num_nodes
 
 
 @dataclass
@@ -781,7 +819,6 @@ class EplbState:
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
 
-        # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
         model = eplb_model_state.model
         num_replicas = model.num_physical_experts
@@ -803,12 +840,25 @@ class EplbState:
             num_nodes = get_node_count()
             num_gpus = ep_group.size()
 
-        if num_gpus % num_nodes != 0:
-            num_nodes = 1
+        requested_num_groups = num_groups
+        requested_num_nodes = num_nodes
+        strategy = self.parallel_config.eplb_config.load_balancing_strategy
+        num_groups, num_nodes = _resolve_eplb_rebalancing_topology(
+            strategy,
+            num_groups,
+            num_nodes,
+            num_gpus,
+        )
+        if strategy == "auto" and (num_groups, num_nodes) != (
+            requested_num_groups,
+            requested_num_nodes,
+        ):
             logger.warning_once(
-                f"num_gpus % num_nodes != 0, "
-                "not using hierarchical rearrangement algorithm.\n"
-                f"{num_gpus=}, {num_nodes=}"
+                "Falling back to a single-node EPLB topology because "
+                "hierarchical balancing is unavailable for %s, %s, and %s.",
+                f"num_groups={requested_num_groups}",
+                f"num_gpus={num_gpus}",
+                f"num_nodes={requested_num_nodes}",
             )
 
         # Get new expert mappings
