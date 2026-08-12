@@ -452,10 +452,6 @@ class AsyncLLM(EngineClient):
         session_id: str | None = None,
     ) -> RequestOutputCollector:
         self._validate_streaming_input_sampling_params(sampling_params)
-        if self.vllm_config.artifact_config.enabled:
-            raise VLLMValidationError(
-                "Artifact Connector does not support resumable streaming input."
-            )
 
         inputs = dict(
             supported_tasks=await self.get_supported_tasks(),

@@ -3,13 +3,11 @@
 
 import asyncio
 from collections.abc import AsyncGenerator
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from vllm.engine.protocol import StreamingInput
-from vllm.exceptions import VLLMValidationError
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -172,48 +170,3 @@ async def test_generate_with_async_generator():
     assert outputs[2].finished is True
     # Both inputs were processed
     assert inputs_received == ["Hello", " world"]
-
-
-@pytest.mark.asyncio
-async def test_artifact_connector_rejects_streaming_input():
-    llm = object.__new__(AsyncLLM)
-    llm.vllm_config = SimpleNamespace(artifact_config=SimpleNamespace(enabled=True))
-
-    async def empty_stream():
-        if False:
-            yield
-
-    with pytest.raises(VLLMValidationError, match="resumable streaming input"):
-        await AsyncLLM._add_streaming_input_request(
-            llm,
-            "request",
-            empty_stream(),
-            SamplingParams(),
-        )
-
-
-@pytest.mark.asyncio
-async def test_streaming_input_finish_request_is_not_resumable():
-    llm = object.__new__(AsyncLLM)
-    llm.vllm_config = SimpleNamespace(artifact_config=SimpleNamespace(enabled=False))
-    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
-    final_request = MagicMock(request_id="internal")
-    llm.input_processor = MagicMock()
-    llm.input_processor.process_inputs.return_value = final_request
-    llm._add_request = AsyncMock()
-    llm._run_output_handler = MagicMock()
-
-    async def empty_stream():
-        if False:
-            yield
-
-    queue = await AsyncLLM._add_streaming_input_request(
-        llm,
-        "request",
-        empty_stream(),
-        SamplingParams(),
-    )
-    await queue._input_stream_task
-
-    assert "resumable" not in llm.input_processor.process_inputs.call_args.kwargs
-    llm._add_request.assert_awaited_once_with(final_request, None, None, 0, queue)
