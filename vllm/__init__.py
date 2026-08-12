@@ -4,7 +4,7 @@
 
 # The version.py should be independent library, and we always import the
 # version library first.  Such assumption is critical for some customization.
-from .version import __version__, __version_tuple__  # isort:skip
+from .version import __commit__, __version__, __version_tuple__  # isort:skip
 
 import typing
 
@@ -76,6 +76,7 @@ else:
 __all__ = [
     "__version__",
     "__version_tuple__",
+    "__commit__",
     "LLM",
     "ModelRegistry",
     "PromptType",
