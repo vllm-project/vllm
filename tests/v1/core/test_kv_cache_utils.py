@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib
 from collections.abc import Callable
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -3242,3 +3243,81 @@ def test_iter_layer_specs_returns_group_members():
         block_size=4, kv_cache_specs={"a": full, "b": mla}
     )
     assert list(iter_layer_specs(wrapped)) == [full, mla]
+
+
+def _spec_decode_grouping_config(method="dspark"):
+    """Grouping config with an EAGLE-family speculative method enabled."""
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=SimpleNamespace(
+            method=method,
+            use_eagle=lambda: True,
+        ),
+    )
+
+
+def _hybrid_specs_with_draft(draft: bool):
+    """A K3-shaped hybrid: MLA full attention + Mamba, optionally plus a
+    DSpark-style draft MLA layer marked non_causal_multi_token_decode."""
+    specs = {
+        "target.attn.0": new_mla_spec(block_size=64),
+        "target.attn.1": new_mla_spec(block_size=64),
+        "target.mamba.0": new_mamba_spec(block_size=64, mamba_cache_mode="align"),
+        "target.mamba.1": new_mamba_spec(block_size=64, mamba_cache_mode="align"),
+    }
+    if draft:
+        draft_spec = new_mla_spec(block_size=64)
+        specs["draft.attn.0"] = replace(draft_spec, non_causal_multi_token_decode=True)
+    return specs
+
+
+def test_draft_group_annotated_on_hybrid_general_path():
+    # A drafter's MLA layer carries non_causal_multi_token_decode, so its group
+    # is identifiable without keying off a model version. Only that group may
+    # be flagged: flagging a Mamba group widens its lookup window to two
+    # consecutive chunks, which align-mode checkpointing never produces.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=True)
+    )
+
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert flagged[0].layer_names == ["draft.attn.0"]
+    assert not any(
+        g.is_eagle_group for g in groups if isinstance(g.kv_cache_spec, MambaSpec)
+    )
+
+
+def test_draft_group_not_annotated_without_spec_decode():
+    # The marker alone must not flag anything; the eagle semantics only apply
+    # when a speculative method is actually enabled.
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+    )
+    groups = get_kv_cache_groups(config, _hybrid_specs_with_draft(draft=True))
+
+    assert not any(g.is_eagle_group for g in groups)
+
+
+def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
+    # No group carries the draft marker, so every consumer falls back to
+    # flagging all groups -- including Mamba ones, which then can never report
+    # a hit. That is silent today; it must at least be visible.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=False)
+    )
+
+    assert not any(g.is_eagle_group for g in groups)
+    assert "no KV cache group could be identified as the draft model's" in (
+        caplog_vllm.text
+    )
+    assert "Mamba groups" in caplog_vllm.text
+
+
+def test_no_warning_when_draft_group_is_identified(caplog_vllm):
+    get_kv_cache_groups(
+        _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=True)
+    )
+
+    assert "could be identified as the draft model's" not in caplog_vllm.text

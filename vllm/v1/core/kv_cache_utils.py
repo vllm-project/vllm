@@ -1741,6 +1741,67 @@ def _annotate_eagle_groups_deepseek_v4(
             break
 
 
+def _annotate_eagle_groups_from_draft_spec(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> None:
+    """Flag groups holding drafter attention layers, by spec rather than model.
+
+    non_causal_multi_token_decode marks drafter attention layers and survives
+    MLAAttentionSpec.merge, so it identifies draft groups on the general
+    multi-group path that _annotate_eagle_groups_deepseek_v4 never sees.
+
+    Args:
+        vllm_config: Config supplying the speculative method, if any.
+        kv_cache_groups: Groups to annotate in place.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not spec_config.use_eagle():
+        return
+    for group in kv_cache_groups:
+        if getattr(group.kv_cache_spec, "non_causal_multi_token_decode", False):
+            group.is_eagle_group = True
+
+
+def _warn_if_unannotated_eagle_mamba(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> None:
+    """Warn when the flag-all eagle fallback will silently disable reuse.
+
+    With no group annotated, consumers flag every group as a draft group. That
+    widens a Mamba group's required lookup window to two consecutive chunks,
+    which align-mode checkpointing never produces, so reuse drops to zero with
+    no error and no metric to show it.
+
+    Args:
+        vllm_config: Config supplying the speculative method, if any.
+        kv_cache_groups: Groups as they will be handed to consumers.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not spec_config.use_eagle():
+        return
+    if any(group.is_eagle_group for group in kv_cache_groups):
+        return
+    mamba_groups = [
+        idx
+        for idx, group in enumerate(kv_cache_groups)
+        if isinstance(group.kv_cache_spec, MambaSpec)
+    ]
+    if not mamba_groups:
+        return
+    logger.warning(
+        "Speculative decoding (method=%s) is enabled but no KV cache group "
+        "could be identified as the draft model's, so every group -- "
+        "including Mamba groups %s -- will be treated as a draft group. A "
+        "Mamba group cannot satisfy the widened lookup window that implies, "
+        "so prefix-cache reuse across requests will be disabled and any "
+        "external KV offload tier will store without ever serving a hit.",
+        spec_config.method,
+        mamba_groups,
+    )
+
+
 def _largest_divisor_at_most(value: int, limit: int) -> int:
     for candidate in range(min(value, limit), 0, -1):
         if value % candidate == 0:
@@ -1830,6 +1891,8 @@ def get_kv_cache_groups(
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
+    _annotate_eagle_groups_from_draft_spec(vllm_config, groups)
+    _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
 
 
