@@ -114,6 +114,12 @@ class CacheConfig:
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
     (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
+    turboquant_boundary_skip_n: int = 2
+    """Number of first/last attention layers left unquantized for accuracy when
+    using a TurboQuant KV cache (boundary protection). Set to 0 to quantize all
+    layers: required when quantizing sliding-window layers, since unquantized
+    layers cannot share the packed TurboQuant block pool (their pages do not
+    reconcile with the quantized pages)."""
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""

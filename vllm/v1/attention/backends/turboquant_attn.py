@@ -72,6 +72,12 @@ from vllm.v1.worker.workspace import (
 
 logger = init_logger(__name__)
 
+# ROCm's Composable Kernel flash-attn caps head_dim at 256. Gemma4's
+# full/global attention layers use head_dim=512, so prefills on those layers
+# must fall back to SDPA (which has no such limit). FA2/FA3 share the same 256
+# cap, so this guard is safe on CUDA too.
+_FLASH_ATTN_MAX_HEAD_DIM = 256
+
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
@@ -178,6 +184,16 @@ class TurboQuantAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_sliding_window(cls) -> bool:
+        return True
+
+    @classmethod
+    def indexes_kv_by_block_stride(cls) -> bool:
+        # TQ cache is num-blocks-first ((num_blocks, num_kv_heads, block_size,
+        # slot)) and both the store and decode kernels address blocks via the
+        # runtime ``kv_cache.stride(0)``. That lets the allocator hand us a
+        # strided view with a padded per-block stride, so ``unify`` can pad a
+        # smaller TQ page (e.g. full-attention layers) up to a larger one
+        # (sliding-window layers) instead of failing to reconcile them.
         return True
 
     @staticmethod
@@ -780,7 +796,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Fast path: use flash_attn for first-chunk prefills (all K/V in batch).
         # max_query_len == max_seq_len means no request has prior cached KV.
         # Both are Python ints — no GPU sync.
-        if _HAS_FLASH_ATTN and attn_metadata.max_query_len == attn_metadata.max_seq_len:
+        if (
+            _HAS_FLASH_ATTN
+            and D <= _FLASH_ATTN_MAX_HEAD_DIM
+            and attn_metadata.max_query_len == attn_metadata.max_seq_len
+        ):
             return self._flash_attn_varlen(
                 q=query,
                 k=key,
@@ -841,7 +861,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
             if q_len == seq_len:
                 # First-chunk prefill: all K/V are in the current batch.
-                if _HAS_FLASH_ATTN:
+                if _HAS_FLASH_ATTN and D <= _FLASH_ATTN_MAX_HEAD_DIM:
                     # Assign to slice to avoid gpu/cpu sync.
                     self._cu_2[1:2] = q_len
                     cu = self._cu_2
@@ -1116,7 +1136,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         v_full[cached_len:] = val_chunk
 
         # Attention: q_len queries attending to seq_len K/V with causal mask
-        if _HAS_FLASH_ATTN:
+        if _HAS_FLASH_ATTN and D <= _FLASH_ATTN_MAX_HEAD_DIM:
             # Reuse pre-allocated cu_seqlens (avoid host→device transfer)
             if not hasattr(self, "_cu_2_q"):
                 self._cu_2_q = torch.zeros(2, device=device, dtype=torch.int32)
