@@ -803,9 +803,13 @@ class DiffusionGemmaModelState(ModelState):
         self._req_id_to_index: dict[str, int] = {}
 
         # Persistent buffer for per-request causal flags, updated in-place
-        # so FULL CUDA graph replay sees the latest values.
+        # so FULL CUDA graph replay sees the latest values. int32 to match
+        # what FlashAttentionMetadataBuilder.build() casts causal tensors to
+        # -- a bool buffer would get `.to(torch.int32)`'d into a fresh
+        # tensor on every call, and a graph captured against that address
+        # would replay against a stale, capture-time snapshot forever.
         self._causal_buf = torch.zeros(
-            self.max_num_reqs, dtype=torch.bool, device=device
+            self.max_num_reqs, dtype=torch.int32, device=device
         )
 
         # Persistent inputs_embeds buffer — required so FULL CUDA graph
@@ -1004,11 +1008,11 @@ class DiffusionGemmaModelState(ModelState):
         # Invariant: the sampler flips is_encoder_phase to False only after a
         # request's FINAL prompt chunk, so a prompt spanning multiple chunks
         # (longer than the token budget) stays causal for every chunk.
-        self._causal_buf[:actual_num_reqs] = self.diffusion_states.is_encoder_phase[
-            slots
-        ]
+        self._causal_buf[:actual_num_reqs].copy_(
+            self.diffusion_states.is_encoder_phase[slots]
+        )
         if actual_num_reqs < num_reqs:
-            self._causal_buf[actual_num_reqs:num_reqs] = False
+            self._causal_buf[actual_num_reqs:num_reqs] = 0
         causal: bool | torch.Tensor = self._causal_buf[:num_reqs]
 
         return build_attn_metadata(
