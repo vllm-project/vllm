@@ -20,7 +20,7 @@
 
 #include <cutlass/arch/arch.h>
 
-#include "cutlass_extensions/common.hpp"
+#include "libtorch_stable/cutlass_extensions/common.hpp"
 
 #include "cute/tensor.hpp"
 #include "cutlass/tensor_ref.h"
@@ -173,6 +173,8 @@ void run_get_group_gemm_starts(const torch::stable::Tensor& a_starts,
                                torch::stable::Tensor const& problem_sizes,
                                int M, int N, int K) {
   int num_experts = (int)expert_offsets.size(0);
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a_tensors.get_device_index());
   auto stream = get_current_cuda_stream(a_tensors.get_device_index());
 
   STD_TORCH_CHECK(out_tensors.size(1) == N,
@@ -206,6 +208,8 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
     const torch::stable::Tensor& problem_sizes,
     const torch::stable::Tensor& expert_offsets,
     const torch::stable::Tensor& sf_offsets, int M, int N, int K) {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
   using ProblemShape =
       cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
   using ElementType = cutlass::float_e2m1_t;
@@ -270,6 +274,15 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
 
   using Gemm1SM = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
   using Gemm = Gemm1SM;
+  static_assert(
+      cute::is_same_v<
+          typename Gemm::GemmKernel::TileScheduler,
+          cutlass::gemm::kernel::detail::PersistentTileSchedulerSm100Group<
+              ProblemShape, Gemm::GemmKernel::SchedulerPipelineStageCount>>,
+      "SM100 NVFP4 grouped GEMM must use PersistentTileSchedulerSm100Group "
+      "for batch invariance (VLLM_BATCH_INVARIANT=1). "
+      "If you want to change this, add a dedicated config/code path "
+      "for batch invariant mode, instead of relaxing this check.");
   using StrideA = typename Gemm::GemmKernel::InternalStrideA;
   using StrideB = typename Gemm::GemmKernel::InternalStrideB;
   using StrideC = typename Gemm::GemmKernel::InternalStrideC;
@@ -411,6 +424,8 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
     const torch::stable::Tensor& problem_sizes,
     const torch::stable::Tensor& expert_offsets,
     const torch::stable::Tensor& sf_offsets, int M, int N, int K) {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
   using ProblemShape =
       cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
   using ElementType = cutlass::float_e2m1_t;
@@ -467,6 +482,15 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
                                            CollectiveEpilogue>;
 
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+  static_assert(
+      cute::is_base_of_v<
+          cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative,
+          typename Gemm::GemmKernel::CollectiveMainloop::DispatchPolicy::
+              Schedule>,
+      "SM120 NVFP4 grouped GEMM must use a cooperative ptr-array mainloop "
+      "schedule for batch invariance (VLLM_BATCH_INVARIANT=1). "
+      "If you want to change this, add a dedicated config/code path "
+      "for batch invariant mode, instead of relaxing this check.");
   using StrideA = typename Gemm::GemmKernel::InternalStrideA;
   using StrideB = typename Gemm::GemmKernel::InternalStrideB;
   using StrideC = typename Gemm::GemmKernel::InternalStrideC;

@@ -84,13 +84,11 @@ class OMPProcessManager:
             )
             # The time(milliseconds) that a thread should wait after
             # completing the execution of a parallel region, before sleeping.
-            envs_dict["KMP_BLOCKTIME"] = "1"
+            # A value of 5 masks thread underutilization.
+            # Set to 1 when debugging thread utilization issues.
+            envs_dict["KMP_BLOCKTIME"] = "5"
             # Prevents the CPU to run into low performance state
             envs_dict["KMP_TPAUSE"] = "0"
-            # Provides fine granularity parallelism
-            envs_dict["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
-            envs_dict["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
-            envs_dict["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
         elif self.use_gomp:
             # set GOMP envs
             # likes '0 1 2 ...'
@@ -206,6 +204,14 @@ class OMPProcessManager:
         logical_cpu_list = cr_utils.get_allowed_cpu_list()
 
         local_world_size = self.local_world_size
+
+        # On s390x, numa_node is remapped to book IDs (the best CPU
+        # partitioning level). Derive topology domains from the CPU list
+        # since they no longer correspond to physical memory nodes.
+        cpu_arch = current_platform.get_cpu_architecture()
+        if cpu_arch == CpuArchEnum.S390X:
+            allowed_numa_nodes = sorted(set(cpu.numa_node for cpu in logical_cpu_list))
+
         assert (
             len(allowed_numa_nodes) >= local_world_size or self.simulate_multi_node
         ), (

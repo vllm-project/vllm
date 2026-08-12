@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 import openai
@@ -15,17 +16,18 @@ import psutil
 import pytest
 
 from tests.utils import RemoteOpenAIServer
-from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 # GPU initialization might take take longer
-_IS_ROCM = current_platform.is_rocm()
 _SERVER_STARTUP_TIMEOUT = 120
 _PROCESS_EXIT_TIMEOUT = 15
 _SHUTDOWN_DETECTION_TIMEOUT = 10
 _CHILD_CLEANUP_TIMEOUT = 10
+_INFLIGHT_REQUEST_START_TIMEOUT = 5
+_INFLIGHT_REQUEST_POLL_INTERVAL = 0.1
+_ABORT_CLIENT_TIMEOUT = 3
 
 
 def _get_child_pids(parent_pid: int) -> list[int]:
@@ -71,6 +73,7 @@ class ShutdownState:
     requests_after_sigterm: int = 0
     aborted_requests: int = 0
     connection_errors: int = 0
+    inflight_requests: int = 0
     stop_requesting: bool = False
     errors: list[str] = field(default_factory=list)
 
@@ -86,6 +89,7 @@ async def _concurrent_request_loop(
     async def single_request():
         while not state.stop_requesting:
             try:
+                state.inflight_requests += 1
                 response = await client.completions.create(
                     model=MODEL_NAME,
                     prompt="Write a story: ",
@@ -110,6 +114,8 @@ async def _concurrent_request_loop(
             except Exception as e:
                 state.errors.append(f"Unexpected error: {e}")
                 break
+            finally:
+                state.inflight_requests -= 1
             await asyncio.sleep(0.01)
 
     tasks = [asyncio.create_task(single_request()) for _ in range(concurrency)]
@@ -122,7 +128,7 @@ async def _concurrent_request_loop(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_on_engine_failure():
+async def test_shutdown_on_engine_failure(tmp_path: Path):
     """Verify that API returns connection error when server process is killed.
 
     Starts a vLLM server, kills it to simulate a crash, then verifies that
@@ -131,33 +137,35 @@ async def test_shutdown_on_engine_failure():
 
     port = get_open_port()
 
-    proc = subprocess.Popen(
-        [
-            # dtype, max-len etc set so that this can run in CI
-            sys.executable,
-            "-m",
-            "vllm.entrypoints.openai.api_server",
-            "--model",
-            MODEL_NAME,
-            "--dtype",
-            "bfloat16",
-            "--max-model-len",
-            "128",
-            "--enforce-eager",
-            "--port",
-            str(port),
-            "--gpu-memory-utilization",
-            "0.05",
-            "--max-num-seqs",
-            "2",
-        ],
-        # ROCm: Disable stdout/stderr pipe capture. Subprocess hangs when
-        # stdout/stderr pipes are enabled during ROCm GPU initialization.
-        stdout=None if _IS_ROCM else subprocess.PIPE,
-        stderr=None if _IS_ROCM else subprocess.PIPE,
-        text=None if _IS_ROCM else True,
-        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
-    )
+    # Redirect server output to a file rather than a pipe: nothing drains the
+    # pipes while we poll for startup, so a server that writes more than the
+    # pipe buffer holds would block on write and never become ready.
+    server_log = tmp_path / "server.log"
+    with server_log.open("wb") as log_file:
+        proc = subprocess.Popen(
+            [
+                # dtype, max-len etc set so that this can run in CI
+                sys.executable,
+                "-m",
+                "vllm.entrypoints.openai.api_server",
+                "--model",
+                MODEL_NAME,
+                "--dtype",
+                "bfloat16",
+                "--max-model-len",
+                "128",
+                "--enforce-eager",
+                "--port",
+                str(port),
+                "--gpu-memory-utilization",
+                "0.05",
+                "--max-num-seqs",
+                "2",
+            ],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
+        )
 
     # Wait for server startup
     start_time = time.time()
@@ -178,18 +186,17 @@ async def test_shutdown_on_engine_failure():
         except Exception:
             time.sleep(0.5)
             if proc.poll() is not None:
-                if _IS_ROCM:
-                    pytest.fail(f"Server died during startup: {proc.returncode}")
-                else:
-                    stdout, stderr = proc.communicate(timeout=1)
-                    pytest.fail(
-                        f"Server died during startup. "
-                        f"stdout: {stdout}, stderr: {stderr}"
-                    )
+                pytest.fail(
+                    f"Server died during startup: {proc.returncode}\n"
+                    f"{server_log.read_text(errors='replace')}"
+                )
     else:
         proc.terminate()
         proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
-        pytest.fail(f"Server failed to start in {_SERVER_STARTUP_TIMEOUT} seconds")
+        pytest.fail(
+            f"Server failed to start in {_SERVER_STARTUP_TIMEOUT} seconds\n"
+            f"{server_log.read_text(errors='replace')}"
+        )
 
     # Kill server to simulate crash
     proc.terminate()
@@ -299,22 +306,16 @@ async def test_abort_timeout_exits_quickly(wait_for_engine_idle: float):
         start_time = time.time()
         proc.send_signal(signal.SIGTERM)
 
-        # abort timeout (0) should stop the server promptly. On ROCm, process
-        # exit can spend extra time in HIP/RCCL/native extension teardown after
-        # the server and engine have already shut down.
-        max_exit_time = 4.0 if _IS_ROCM else 2.1
-
+        # abort timeout (0) should stop the server promptly.
         try:
-            proc.wait(timeout=max_exit_time)
+            proc.wait(timeout=4.0)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
             pytest.fail("Process did not exit after SIGTERM with abort timeout")
 
         exit_time = time.time() - start_time
-        assert exit_time < max_exit_time, (
-            f"Default shutdown took too long: {exit_time:.1f}s"
-        )
+        assert exit_time < 4.1, f"Default shutdown took too long: {exit_time:.1f}s"
         assert proc.returncode in (0, -15, None), f"Unexpected: {proc.returncode}"
 
         await _assert_children_cleaned_up(child_pids)
@@ -398,7 +399,7 @@ async def test_abort_timeout_fails_inflight_requests():
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
-        client = remote_server.get_async_client()
+        client = remote_server.get_async_client(timeout=_ABORT_CLIENT_TIMEOUT)
         proc = remote_server.proc
         child_pids = _get_child_pids(proc.pid)
 
@@ -409,7 +410,10 @@ async def test_abort_timeout_fails_inflight_requests():
             _concurrent_request_loop(client, state, sigterm_sent, concurrency=10)
         )
 
-        await asyncio.sleep(0.5)
+        deadline = time.time() + _INFLIGHT_REQUEST_START_TIMEOUT
+        while state.inflight_requests == 0 and time.time() < deadline:
+            await asyncio.sleep(_INFLIGHT_REQUEST_POLL_INTERVAL)
+        assert state.inflight_requests > 0
 
         proc.send_signal(signal.SIGTERM)
         sigterm_sent.set()

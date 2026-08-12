@@ -19,6 +19,7 @@ from vllm.v1.structured_output.backend_types import (
 )
 from vllm.v1.structured_output.utils import (
     choice_as_grammar,
+    compile_regex_with_timeout,
     convert_lark_to_ebnf,
     grammar_is_likely_lark,
 )
@@ -75,7 +76,10 @@ class XgrammarBackend(StructuredOutputBackend):
             )
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
             ctx = self.compiler.compile_json_schema(
@@ -88,7 +92,10 @@ class XgrammarBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
-            ctx = self.compiler.compile_regex(grammar_spec)
+            ctx = compile_regex_with_timeout(
+                self.compiler.compile_regex,
+                grammar_spec,
+            )
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
             if "structures" in s_tag:
@@ -115,6 +122,7 @@ class XgrammarBackend(StructuredOutputBackend):
         return XgrammarGrammar(
             matcher=xgr.GrammarMatcher(
                 ctx,
+                override_stop_tokens=list(stop_token_ids) if stop_token_ids else None,
                 max_rollback_tokens=self.num_speculative_tokens,
             ),
             vocab_size=self.vocab_size,
@@ -277,7 +285,10 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
 
     if so_params.regex:
         try:
-            xgr.Grammar.from_regex(so_params.regex)
+            compile_regex_with_timeout(
+                xgr.Grammar.from_regex,
+                so_params.regex,
+            )
         except Exception as err:
             raise ValueError(
                 f"Failed to transform regex into a grammar: {err}"

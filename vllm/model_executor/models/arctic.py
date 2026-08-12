@@ -213,7 +213,6 @@ class ArcticMoE(nn.Module):
             self.w2s,
             topk_weights,
             topk_ids,
-            inplace=True,
         )
         if self.reduce_results and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
@@ -502,7 +501,7 @@ class ArcticModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for param_name, weight_name, shard_id in mlp_params_mapping:
+                for param_name, weight_name, mlp_shard_id in mlp_params_mapping:
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
@@ -510,10 +509,10 @@ class ArcticModel(nn.Module):
                         continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
+                    weight_loader(param, loaded_weight, mlp_shard_id)
                     break
                 else:
-                    for param_name, weight_name, shard_id in expert_params_mapping:
+                    for param_name, weight_name, expert_id in expert_params_mapping:
                         if weight_name not in name:
                             continue
                         name = name.replace(weight_name, param_name)
@@ -522,7 +521,7 @@ class ArcticModel(nn.Module):
                         param = params_dict[name]
                         weight_loader = param.weight_loader
                         weight_loader(
-                            param, loaded_weight, weight_name, expert_id=shard_id
+                            param, loaded_weight, weight_name, expert_id=expert_id
                         )
                         break
                     else:

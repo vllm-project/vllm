@@ -5,10 +5,14 @@ import fnmatch
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
+from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -24,10 +28,12 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E
     QuarkMoEMethod,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import (
+    QuarkNVFP4,
     QuarkOCP_MX,
     QuarkScheme,
     QuarkW4A8_MXFP4_FP8,
     QuarkW8A8Fp8,
+    QuarkW8A8Fp8PerBlock,
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.utils import (
@@ -44,6 +50,10 @@ __all__ = ["QuarkLinearMethod"]
 
 logger = init_logger(__name__)
 
+# model_type values that use dynamic MXFP4 re-quantization for
+# OCP MX fp4 Quark checkpoints
+_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "deepseek_v32"})
+
 
 class QuarkConfig(QuantizationConfig):
     def __init__(
@@ -57,6 +67,14 @@ class QuarkConfig(QuantizationConfig):
         if kv_cache_group is None:
             kv_cache_group = []
         self.quant_config = quant_config
+        # Copy the class-level default (which a subclass may override, e.g. the
+        # DeepSeek-V4 Quark config) so per-instance edits don't mutate the class.
+        # Read from the class rather than ``self`` because the base
+        # ``QuantizationConfig.__init__`` sets an empty instance-level
+        # ``packed_modules_mapping`` that would otherwise shadow the override.
+        self.packed_modules_mapping = dict(
+            getattr(type(self), "packed_modules_mapping", {})
+        )
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
@@ -65,6 +83,33 @@ class QuarkConfig(QuantizationConfig):
         # that come from shifting to mxfp4. It is left here in case
         # we want to re-enable it in the future.
         self.dynamic_mxfp4_quant = False
+
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ):
+        """Enable dynamic MXFP4 only for DeepSeek-V3-family fp4 checkpoints."""
+
+        if hf_config is None:
+            return
+
+        if (
+            getattr(hf_config, "model_type", None)
+            not in _DEEPSEEK_V3_FAMILY_MODEL_TYPES
+        ):
+            return
+
+        quant_config = getattr(hf_config, "quantization_config", None)
+        if isinstance(quant_config, dict):
+            quant_dtype = (
+                quant_config.get("global_quant_config", {})
+                .get("weight", {})
+                .get("dtype")
+            )
+            if quant_dtype == "fp4":
+                self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -86,8 +131,9 @@ class QuarkConfig(QuantizationConfig):
         Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
 
-        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
-            structure of the qconfig) to vllm model structure
+        Args:
+            hf_to_vllm_mapper: maps from hf model structure (the assumed
+                structure of the qconfig) to vllm model structure
         """
         quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
@@ -112,8 +158,13 @@ class QuarkConfig(QuantizationConfig):
         # Check if the layer is skipped for quantization.
         exclude_layers = cast(list[str], self.quant_config.get("exclude"))
         if should_ignore_layer(
-            prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
+            prefix,
+            ignore=exclude_layers,
+            fused_mapping=self.packed_modules_mapping,
+            check_children=isinstance(layer, RoutedExperts),
         ):
+            if isinstance(layer, RoutedExperts):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             if (
                 "self_attn" not in prefix  # only quantize attention projections
                 or not getattr(self, "dynamic_mxfp4_quant", False)
@@ -299,11 +350,30 @@ class QuarkConfig(QuantizationConfig):
             "per_tensor",
             "per_channel",
         ]
+        block_size = list(weight_quant.get("block_size") or [])
+        is_per_block_weight = (
+            weight_quant.get("qscheme") == "per_block"
+            and block_size == [128, 128]
+            and weight_quant.get("symmetric") is True
+        )
 
-        if not (is_fp8_dtype and is_static_weight and is_per_tensor_or_channel_weight):
+        if not is_fp8_dtype or not is_static_weight:
             return False
 
-        # Dynamic quantization is always supported if weights supported.
+        if is_per_block_weight:
+            if not input_quant.get("is_dynamic"):
+                return False
+            return (
+                input_quant.get("qscheme") == "per_group"
+                and input_quant.get("group_size") == block_size[1]
+                and input_quant.get("symmetric") is True
+            )
+
+        if not is_per_tensor_or_channel_weight:
+            return False
+
+        # Dynamic quantization is always supported if tensor/channel weights
+        # are supported.
         if input_quant.get("is_dynamic"):
             return True
 
@@ -393,6 +463,54 @@ class QuarkConfig(QuantizationConfig):
             and is_per_token_input
             and is_dynamic_input
             and is_weight_symmetric
+        )
+
+    def _is_nvfp4(
+        self,
+        weight_quant: dict[str, Any] | list[dict[str, Any]] | None,
+        input_quant: dict[str, Any] | list[dict[str, Any]] | None,
+    ) -> bool:
+        # Confirm weights and input quantized.
+        if weight_quant is None or input_quant is None:
+            return False
+
+        # Confirm both weight_quant and input_quant are lists with 2 elements
+        if not isinstance(weight_quant, list) or len(weight_quant) != 2:
+            return False
+        if not isinstance(input_quant, list) or len(input_quant) != 2:
+            return False
+
+        # First element should be fp4 with per_group quantization
+        is_fp4_per_group_weight = (
+            weight_quant[0].get("dtype") == "fp4"
+            and weight_quant[0].get("qscheme") == "per_group"
+            and weight_quant[0].get("group_size") == 16
+            and not weight_quant[0].get("is_dynamic")
+        )
+        is_fp4_per_group_input = (
+            input_quant[0].get("dtype") == "fp4"
+            and input_quant[0].get("qscheme") == "per_group"
+            and input_quant[0].get("group_size") == 16
+            and input_quant[0].get("is_dynamic")
+        )
+
+        # Second element should be fp8_e4m3 with per_tensor quantization
+        is_fp8_per_tensor_weight = (
+            weight_quant[1].get("dtype") == "fp8_e4m3"
+            and weight_quant[1].get("qscheme") == "per_tensor"
+            and not weight_quant[1].get("is_dynamic")
+        )
+        is_fp8_per_tensor_input = (
+            input_quant[1].get("dtype") == "fp8_e4m3"
+            and input_quant[1].get("qscheme") == "per_tensor"
+            and not input_quant[1].get("is_dynamic")
+        )
+
+        return (
+            is_fp4_per_group_weight  # type: ignore[return-value]
+            and is_fp4_per_group_input
+            and is_fp8_per_tensor_weight
+            and is_fp8_per_tensor_input
         )
 
     def _is_w_ocp_mx_a_x(
@@ -543,11 +661,15 @@ class QuarkConfig(QuantizationConfig):
         weight_config = cast(dict[str, Any], config.get("weight"))
         input_config = cast(dict[str, Any], config.get("input_tensors"))
 
-        if self._is_fp8_w8a8(weight_config, input_config):
+        if self._is_nvfp4(weight_config, input_config):
+            return QuarkNVFP4()
+        elif self._is_fp8_w8a8(weight_config, input_config):
             is_fp8_w8a8_supported = self._check_scheme_supported(
                 QuarkW8A8Fp8.get_min_capability(), error=False
             )
             if is_fp8_w8a8_supported:
+                if weight_config.get("qscheme") == "per_block":
+                    return QuarkW8A8Fp8PerBlock(weight_config, input_config)
                 return QuarkW8A8Fp8(weight_config, input_config)
         elif self._is_static_tensor_w8a8(weight_config, input_config):
             weight_qscheme = cast(str, weight_config.get("qscheme"))
@@ -595,26 +717,17 @@ class QuarkConfig(QuantizationConfig):
 
         return scheme
 
-    def get_cache_scale(self, name: str) -> str | None:
-        """
-        Check whether the param name matches the format for k/v cache scales
-        in quark. If this is the case, return its equivalent param name
-        expected by vLLM
-
-        :param name: param name
-        :return: matching param name for KV cache scale in vLLM
-        """
-        if name.endswith(".output_scale") and ".k_proj" in name:
-            return name.replace(".k_proj.output_scale", ".attn.k_scale")
-        if name.endswith(".output_scale") and ".v_proj" in name:
-            return name.replace(".v_proj.output_scale", ".attn.v_scale")
-        if name.endswith(".output_scale") and ".q_proj" in name:
-            return name.replace(".q_proj.output_scale", ".attn.q_scale")
-        if name.endswith("self_attn.prob_output_scale"):
-            return name.replace(".prob_output_scale", ".attn.prob_scale")
-
-        # If no matches, return None
-        return None
+    @staticmethod
+    def get_cache_scale_mapper() -> "WeightsMapper":
+        """Map Quark KV-cache scale names to vLLM names."""
+        orig_to_new_suffix = {
+            ".k_proj.output_scale": ".attn.k_scale",
+            ".v_proj.output_scale": ".attn.v_scale",
+            ".q_proj.output_scale": ".attn.q_scale",
+            ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
+        }
+        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=orig_to_new_suffix)
+        return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
 
 class QuarkLinearMethod(LinearMethodBase):
@@ -683,7 +796,9 @@ class QuarkKVCacheMethod(BaseKVCacheMethod):
         """
         Validator for the kv cache configuration. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM
-        :param kv_cache_config: the quark kv cache scheme
+
+        Args:
+            kv_cache_config: the quark kv cache scheme
         """
         if kv_cache_config is None:
             return

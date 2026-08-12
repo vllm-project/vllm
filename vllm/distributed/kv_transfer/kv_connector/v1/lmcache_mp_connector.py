@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -460,7 +461,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         return self.__str__()
 
 
-class LMCacheMPConnector(KVConnectorBase_V1):
+class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     """
     The connector for LMCache multi-process mode.
 
@@ -1188,3 +1189,38 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 "[KVConnector] Cleaned up request_tracker for request %s",
                 request_id,
             )
+
+
+# At module load time, prefer the external LMCacheMPConnector shipped with the
+# ``lmcache`` package. This avoids forcing users to set
+# ``kv_connector_module_path`` when they only configure ``kv_connector``. If
+# the external module is unavailable (e.g. older lmcache version that does
+# not ship this submodule, or any import error), fall back to the builtin
+# implementation defined above.
+def _resolve_lmcache_mp_connector() -> type[KVConnectorBase_V1]:
+    if os.environ.get("LMCACHE_USE_UPSTREAM_MP"):
+        logger.info(
+            "Force use builtin LMCacheMPConnectorUpstream in vLLM.",
+        )
+        return LMCacheMPConnectorUpstream
+
+    try:
+        from lmcache.integration.vllm.lmcache_mp_connector import (
+            LMCacheMPConnector as _ExternalLMCacheMPConnector,
+        )
+
+        logger.info(
+            "Using external LMCacheMPConnector from "
+            "lmcache.integration.vllm.lmcache_mp_connector"
+        )
+        return _ExternalLMCacheMPConnector
+    except ImportError as e:
+        logger.info(
+            "External LMCacheMPConnector is not available (%s), "
+            "falling back to builtin implementation in vLLM.",
+            e,
+        )
+        return LMCacheMPConnectorUpstream
+
+
+LMCacheMPConnector = _resolve_lmcache_mp_connector()

@@ -43,7 +43,7 @@ import uvloop
 
 from vllm import envs
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.utils import log_version_and_model
+from vllm.entrypoints.serve.utils.api_utils import log_version_and_model
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser

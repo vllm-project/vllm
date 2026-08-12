@@ -152,6 +152,8 @@ class EXAONE4_5_VisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: int | None = None,
+        sequence_lengths: torch.Tensor
+        | None = None,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -176,6 +178,7 @@ class EXAONE4_5_VisionAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         context_layer = einops.rearrange(
@@ -190,6 +193,7 @@ class EXAONE4_5_VisionAttention(nn.Module):
     dynamic_arg_dims={
         "x": 0,
         "cu_seqlens": 0,
+        "sequence_lengths": 0,
         "rotary_pos_emb_cos": 0,
         "rotary_pos_emb_sin": 0,
     },
@@ -241,6 +245,8 @@ class Exaone4_5_VisionBlock(nn.Module):
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: int | None = None,  # Only used for Flash Attention
         seqlens: list[int] | None = None,  # Only used for xFormers
+        # Only used for FlashInfer CuDNN backend
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -248,6 +254,7 @@ class Exaone4_5_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)

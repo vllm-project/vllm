@@ -15,6 +15,10 @@ Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 - SDK: `XCode 15.4` or later with Command Line Tools
 - Compiler: `Apple Clang >= 15.0.0`
 
+!!! note
+    The macOS CPU build is smoke-tested in CI on the latest GA Apple Silicon
+    runner; other macOS or Apple Clang versions are best-effort.
+
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
 
@@ -31,14 +35,9 @@ After installation of XCode and the Command Line Tools, which include Apple Clan
 ```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
+uv pip install -r requirements/cpu.txt
 uv pip install -e .
 ```
-
-!!! tip
-    The `--index-strategy unsafe-best-match` flag is needed to resolve dependencies across multiple package indexes (PyTorch CPU index and PyPI). Without this flag, you may encounter `typing-extensions` version conflicts.
-
-    The term "unsafe" refers to the package resolution strategy, not security. By default, `uv` only searches the first index where a package is found to prevent dependency confusion attacks. This flag allows `uv` to search all configured indexes to find the best compatible versions. Since both PyTorch and PyPI are trusted package sources, using this strategy is safe and appropriate for vLLM installation.
 
 !!! note
     On macOS the `VLLM_TARGET_DEVICE` is automatically set to `cpu`, which is currently the only supported device.

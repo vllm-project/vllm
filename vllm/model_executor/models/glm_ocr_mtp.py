@@ -41,13 +41,14 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .glm4 import Glm4DecoderLayer, get_spec_layer_idx_from_weight_name
+from .glm4 import Glm4DecoderLayer
 from .glm4_moe_lite_mtp import (
     Glm4MoeLiteMultiTokenPredictor,
     SharedHead,
 )
 from .interfaces import SupportsPP
 from .utils import (
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     maybe_prefix,
 )
@@ -134,7 +135,6 @@ class GlmOcrMTP(nn.Module, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.expert_weights = []
         self.num_layers = self.config.num_nextn_predict_layers
         for layer in self.model.layers.values():
             assert isinstance(layer, GlmOcrMultiTokenPredictorLayer)
@@ -166,6 +166,10 @@ class GlmOcrMTP(nn.Module, SupportsPP):
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if self.quant_config is not None and (
+            cache_scale_mapper := self.quant_config.get_cache_scale_mapper()
+        ):
+            weights = cache_scale_mapper.apply(weights)
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -188,19 +192,6 @@ class GlmOcrMTP(nn.Module, SupportsPP):
                     continue
 
             name = self._rewrite_spec_layer_name(spec_layer, name)
-
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
 
             if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale or zero point.

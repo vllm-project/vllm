@@ -14,10 +14,14 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
+from vllm.model_executor.models.interfaces import (
+    SupportsEncoderCudaGraph,
+)
+from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
+    EncoderItemSpec,
 )
 
 logger = init_logger(__name__)
@@ -28,21 +32,20 @@ class BudgetGraphMetadata:
     """Metadata for a single budget graph.
 
     CUDA graph replay pattern:
-    1. Copy new batch data into input_buffer (e.g. pixel_values)
-    2. Copy precomputed values into metadata_buffers
-    3. Replay graph
-    4. Read encoder outputs from output_buffer
+    * Copy precomputed values into input_buffers
+    * Replay graph
+    * Read encoder outputs from output_buffer
     """
 
     token_budget: int
     max_batch_size: int  # Max number of images/videos per batch
     max_frames_per_batch: int  # Max total frames per batch (for video)
     graph: torch.cuda.CUDAGraph
-    # The input tensor updated before replay (e.g. pixel_values)
-    input_buffer: torch.Tensor
     # Buffers recorded into the CUDA graph (e.g. embeddings, sequence metadata).
-    # Before replay the manager zeros then slice-copies new data into these.
-    metadata_buffers: dict[str, torch.Tensor]
+    # Before replay the manager updates these in-place. By default buffers are
+    # zeroed before slice-copying the actual values; model-specific padding
+    # behavior is provided by EncoderCudaGraphConfig.padding_logics.
+    input_buffers: dict[str, torch.Tensor]
     # Output written by graph, read after replay
     output_buffer: torch.Tensor
 
@@ -72,25 +75,65 @@ class EncoderCudaGraphManager:
 
         multimodal_config = vllm_config.model_config.multimodal_config
 
+        # Invariant: max_batch_size <= min_token_budget.
+        # This ensures per_image_output = budget // max_batch_size >= 1
+        # for every captured budget, preventing reshape crashes on empty
+        # tensors during CUDA graph capture. Validated/enforced below for
+        # each configuration path.
         if user_budgets and user_max_vision_items > 0:
-            # Fully user-specified
+            # Fully user-specified: validate the invariant.
             self.token_budgets = sorted(user_budgets)
             self.max_batch_size = user_max_vision_items
+            min_tok = min(self.token_budgets)
+            if self.max_batch_size > min_tok:
+                raise ValueError(
+                    f"encoder_cudagraph_max_vision_items_per_batch "
+                    f"({self.max_batch_size}) must be <= smallest token "
+                    f"budget ({min_tok}). With budgets="
+                    f"{self.token_budgets}, per_image_output = "
+                    f"{min_tok} // {self.max_batch_size} = "
+                    f"{min_tok // self.max_batch_size}, which would cause "
+                    f"a capture failure. Either increase the smallest "
+                    f"budget or decrease max_vision_items_per_batch."
+                )
         else:
-            # Auto-infer missing values from model
+            # Auto-infer missing values from model.
             min_budget, max_budget = model.get_encoder_cudagraph_budget_range(
                 vllm_config
             )
-            self.token_budgets = (
-                sorted(user_budgets)
-                if user_budgets
-                else self._generate_budgets(min_budget, max_budget)
-            )
-            self.max_batch_size = (
-                user_max_vision_items
-                if user_max_vision_items > 0
-                else max_budget // min_budget
-            )
+            if min_budget <= 0 or max_budget <= 0:
+                raise ValueError(
+                    f"Invalid encoder cudagraph budget range: "
+                    f"min_budget={min_budget}, max_budget={max_budget}. "
+                    f"Both must be positive."
+                )
+            if min_budget > max_budget:
+                raise ValueError(
+                    f"Invalid encoder cudagraph budget range: "
+                    f"min_budget={min_budget} > max_budget={max_budget}."
+                )
+
+            if user_max_vision_items > 0:
+                # User provided max_vision_items only; adjust auto-inferred
+                # budgets so min(budgets) >= max_batch_size.
+                self.max_batch_size = user_max_vision_items
+                effective_min = max(min_budget, user_max_vision_items)
+                self.token_budgets = self._generate_budgets(effective_min, max_budget)
+            elif user_budgets:
+                # User provided budgets only; cap auto-inferred
+                # max_batch_size to min(user_budgets).
+                self.token_budgets = sorted(user_budgets)
+                self.max_batch_size = min(
+                    max_budget // min_budget,
+                    min(self.token_budgets),
+                )
+            else:
+                # Fully auto-inferred.
+                self.token_budgets = self._generate_budgets(min_budget, max_budget)
+                self.max_batch_size = min(
+                    max_budget // min_budget,
+                    min(self.token_budgets),
+                )
 
         assert multimodal_config is not None
         if multimodal_config.get_limit_per_prompt("video") == 0:
@@ -98,8 +141,8 @@ class EncoderCudaGraphManager:
         elif user_max_frames is not None:
             self.max_frames_per_batch = user_max_frames
         else:
-            # Set it to the model-specific value according to its `processing_info`.
-            max_frames_per_video = self.model.get_max_frames_per_video()
+            # Set it to the model-specific value from config.
+            max_frames_per_video = self.config.max_frames_per_video
             self.max_frames_per_batch = self.max_batch_size * max_frames_per_video
 
         mm_config = vllm_config.model_config.multimodal_config
@@ -109,15 +152,35 @@ class EncoderCudaGraphManager:
             and vllm_config.parallel_config.tensor_parallel_size > 1
         )
 
-        self.budget_graphs: dict[int, BudgetGraphMetadata] = {}
+        self.budget_graphs: dict[str, dict[int, BudgetGraphMetadata]] = {}
+        self.graph_pool: Any | None = None
         self.graph_hits = 0
         self.graph_misses = 0
         self.log_stats_interval = 100
 
+        max_budget = self.token_budgets[-1]
+        if not self.config.paths:
+            raise ValueError("Encoder CUDA graph config must define at least one path")
+        self.path_token_budgets: dict[str, list[int]] = {}
+        for path, path_config in self.config.paths.items():
+            min_path_budget = path_config.min_token_budget
+            if min_path_budget is None:
+                budgets = list(self.token_budgets)
+            else:
+                if min_path_budget <= 0 or min_path_budget > max_budget:
+                    raise ValueError(
+                        f"Invalid minimum budget {min_path_budget} for encoder "
+                        f"CUDA graph path {path!r}; max budget is {max_budget}"
+                    )
+                budgets = self._generate_budgets(min_path_budget, max_budget)
+            if path_config.allow_zero_tokens:
+                budgets.insert(0, 0)
+            self.path_token_budgets[path] = budgets
+
         logger.info(
-            "EncoderCudaGraphManager initialized with "
-            "budgets=%s, max_batch_size=%d, max_frames_per_batch=%s, use_dp=%s",
-            self.token_budgets,
+            "EncoderCudaGraphManager initialized with paths=%s, "
+            "max_batch_size=%d, max_frames_per_batch=%s, use_dp=%s",
+            self.path_token_budgets,
             self.max_batch_size,
             self.max_frames_per_batch,
             self.use_dp,
@@ -140,17 +203,41 @@ class EncoderCudaGraphManager:
         """Check if a modality is supported by this manager."""
         return modality in self.config.modalities
 
-    def capture(self):
-        """Capture CUDA graphs for all token budgets."""
-        for token_budget in self.token_budgets:
-            self._capture_budget_graph(token_budget)
+    def clear(self) -> None:
+        """Release captured encoder CUDA graphs and the manager-local pool."""
+        for graph_set in self.budget_graphs.values():
+            graph_set.clear()
+        self.graph_pool = None
+
+    def capture(self, graph_pool: Any):
+        """Capture CUDA graphs for every configured path and token budget."""
+        self.graph_pool = graph_pool
+
+        for path, budgets in self.path_token_budgets.items():
+            for token_budget in sorted(budgets, reverse=True):
+                if token_budget > 0:
+                    self._capture_budget_graph(token_budget, path=path)
 
         logger.info(
-            "Encoder CUDA graph capture complete. Captured %d budget graphs.",
-            len(self.budget_graphs),
+            "Encoder CUDA graph capture complete. Captured %d graphs across %d paths.",
+            self.get_num_graphs_to_capture(),
+            len(self.path_token_budgets),
         )
 
-    def _capture_budget_graph(self, token_budget: int):
+    def get_num_graphs_to_capture(self) -> int:
+        return sum(
+            token_budget > 0
+            for budgets in self.path_token_budgets.values()
+            for token_budget in budgets
+        )
+
+    def _get_graph_set(self, path: str = "default") -> dict[int, BudgetGraphMetadata]:
+        """Return the captured graphs for one encoder path."""
+        if path not in self.budget_graphs:
+            self.budget_graphs[path] = {}
+        return self.budget_graphs[path]
+
+    def _capture_budget_graph(self, token_budget: int, path: str = "default"):
         """Capture CUDA graph for a single token budget."""
         logger.debug(
             "Capturing encoder cudagraph for budget=%d, max_batch_size=%d, "
@@ -160,122 +247,110 @@ class EncoderCudaGraphManager:
             self.max_frames_per_batch,
         )
 
+        graph_set = self._get_graph_set(path)
+
         capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
             token_budget,
             self.max_batch_size,
             self.max_frames_per_batch,
             self.device,
             self.dtype,
+            path,
         )
 
-        mm_kwargs = capture_inputs.mm_kwargs
-        buffers = capture_inputs.buffers
+        values = capture_inputs.values
 
         with torch.inference_mode():
-            output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
+            output = self.model.encoder_cudagraph_forward({**values}, path=path)
             output_buffer = torch.empty_like(output)
 
         graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode(), torch.cuda.graph(graph):
-            output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
+        with torch.inference_mode(), torch.cuda.graph(graph, pool=self.graph_pool):
+            output = self.model.encoder_cudagraph_forward({**values}, path=path)
             output_buffer.copy_(output)
 
-        # Since the image and video modalities share the same per-patch shape,
-        # so we can use the image dummy inputs to capture CUDA graph for both
-        # image and video.
-        input_key = self.config.input_key_by_modality["image"]
-        self.budget_graphs[token_budget] = BudgetGraphMetadata(
+        graph_set[token_budget] = BudgetGraphMetadata(
             token_budget=token_budget,
             max_batch_size=self.max_batch_size,
             max_frames_per_batch=self.max_frames_per_batch,
             graph=graph,
-            input_buffer=mm_kwargs[input_key],
-            metadata_buffers=buffers,
+            input_buffers=values,
             output_buffer=output_buffer,
         )
 
     def _find_smallest_fitting_budget_given_tokens(
-        self, total_tokens: int
+        self, total_tokens: int, budgets: list[int] | None = None
     ) -> int | None:
         """Find smallest budget >= total_tokens.
 
         Returns:
             Token budget if found, None if no fitting budget.
         """
-        for budget in self.token_budgets:
+        budgets = budgets if budgets is not None else self.token_budgets
+        for budget in budgets:
             if budget >= total_tokens:
                 return budget
         return None
 
+    def _get_item_specs(self, mm_kwargs: dict[str, Any]) -> list[EncoderItemSpec]:
+        """Get item specs from the model."""
+        return self.model.get_encoder_cudagraph_item_specs(mm_kwargs)
+
     def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
         """Get per-item output token counts as plain ints."""
-        return [
-            int(t)
-            for t in self.model.get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)
-        ]
+        return [spec.output_tokens for spec in self._get_item_specs(mm_kwargs)]
 
     @staticmethod
-    def _scatter_output_slices(
-        output: torch.Tensor,
-        indices: list[int],
-        per_item_out_tokens: list[int],
-        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
-        clone: bool = False,
+    def _copy_padded_buffer(
+        dst: torch.Tensor,
+        src: torch.Tensor,
     ) -> None:
-        """Slice a concatenated output tensor and scatter into dest by index."""
-        offset = 0
-        for idx in indices:
-            n_tok = per_item_out_tokens[idx]
-            sliced = output[offset : offset + n_tok]
-            dest[idx] = sliced.clone() if clone else sliced
-            offset += n_tok
+        dst.zero_()
+        dst[: src.shape[0]].copy_(src)
 
     def _run_budget_graph(
         self,
         mm_kwargs: dict[str, Any],
         token_budget: int,
-        replay_buffers: dict[str, torch.Tensor | None],
+        path: str = "default",
     ) -> torch.Tensor | None:
         """Execute budget graph.
 
         Args:
             mm_kwargs: Multimodal inputs for the batch.
             token_budget: Token budget to use.
-            replay_buffers: Buffer values to copy into captured buffers.
-                None values leave the corresponding buffer unchanged.
-
+            path: Configured encoder path.
         Returns:
             Encoder outputs, or None if graph not captured.
         """
-        num_items = self.model.get_encoder_cudagraph_num_items(mm_kwargs)
-        if token_budget not in self.budget_graphs:
+        graph_set = self._get_graph_set(path)
+        num_items = len(self._get_item_specs(mm_kwargs))
+
+        if token_budget not in graph_set:
             self.graph_misses += num_items
             return None
 
-        graph_meta = self.budget_graphs[token_budget]
+        graph_meta = graph_set[token_budget]
 
-        # Copy the input tensor. Buffers are sized for the full budget;
-        # actual inputs may be smaller. Zero then slice-copy so padded
-        # positions are invisible to attention (cu_seqlens masks them out).
-        input_key = self.config.input_key_by_modality[
-            self.model.get_input_modality(mm_kwargs)
-        ]
-        src = mm_kwargs[input_key]
-        n = src.shape[0]
-        graph_meta.input_buffer[:n].copy_(src)
+        replay = self.model.prepare_encoder_cudagraph_replay_buffers(
+            mm_kwargs,
+            self.max_batch_size,
+            self.max_frames_per_batch,
+            path,
+        )
 
-        # Copy metadata buffers using keys from config.buffer_keys.
-        for key in self.config.buffer_keys:
-            src = replay_buffers.get(key)
+        # Copy replay values into the buffers recorded for this path.
+        for key, buf in graph_meta.input_buffers.items():
+            src = replay.values.get(key)
             if src is None:
                 continue
-            buf = graph_meta.metadata_buffers[key]
             if src.ndim == 0:
                 buf.copy_(src)
             else:
-                n = src.shape[0]
-                buf.zero_()
-                buf[:n].copy_(src)
+                padding_logic = self.config.padding_logics.get(
+                    key, self._copy_padded_buffer
+                )
+                padding_logic(buf, src)
 
         graph_meta.graph.replay()
 
@@ -286,129 +361,93 @@ class EncoderCudaGraphManager:
         self,
         mm_kwargs: dict[str, Any],
     ) -> list[torch.Tensor]:
-        """Execute encoder on local inputs using greedy-packed CUDA graphs.
+        """Execute locally using greedy packing across all configured paths."""
+        item_specs = self._get_item_specs(mm_kwargs)
+        num_items = len(item_specs)
+        paths = tuple(self.path_token_budgets)
+        per_item_path_tokens = {
+            path: [spec.get_path_output_tokens(path) for spec in item_specs]
+            for path in paths
+        }
+        per_item_out_tokens = [spec.output_tokens for spec in item_specs]
+        max_path_budgets = {path: max(self.path_token_budgets[path]) for path in paths}
 
-        Sort images by output token count (smallest first), then greedily pack
-        as many images as possible into each batch while staying within
-        max_budget tokens and max_batch_size. Once a batch is finalised (next
-        image would overflow either constraint), find the smallest fitting
-        budget once for that batch.
-
-        By exchange argument, greedy smallest-first packing minimises eager
-        fallbacks -- any other ordering yields a higher token sum in some batch,
-        making that batch more likely to exceed the budget.
-
-        Stats note:
-          graph_hits  -- counted inside _run_budget_graph after successful replay.
-          graph_misses -- counted here for single-image batches where the image
-                         exceeds max_budget. Batches split due to max_batch_size
-                         always satisfy total_tokens <= max_budget and therefore
-                         always find a valid budget (no miss).
-        """
-        num_items = self.model.get_encoder_cudagraph_num_items(mm_kwargs)
-        max_budget = self.token_budgets[-1]
-
-        per_item_out_tokens = self._get_per_item_out_tokens(mm_kwargs)
-
-        # Sort ascending by output token count (smallest first)
         sorted_indices = sorted(range(num_items), key=lambda i: per_item_out_tokens[i])
-
-        # Greedy pack against max_budget and max_batch_size.
-        # _find_smallest_fitting_budget_given_tokens is called once per
-        # finalised batch, not per image.
-        batches: list[tuple[list[int], int | None]] = []
+        batches: list[tuple[list[int], dict[str, int | None]]] = []
         current_batch: list[int] = []
-        current_batch_tokens = 0
+        current_tokens = dict.fromkeys(paths, 0)
+
+        def append_current_batch() -> None:
+            if not current_batch:
+                return
+            path_budgets = {
+                path: (
+                    0
+                    if current_tokens[path] == 0
+                    else self._find_smallest_fitting_budget_given_tokens(
+                        current_tokens[path], self.path_token_budgets[path]
+                    )
+                )
+                for path in paths
+            }
+            batches.append((list(current_batch), path_budgets))
 
         for orig_idx in sorted_indices:
-            item_tokens = per_item_out_tokens[orig_idx]
-            if (
-                current_batch_tokens + item_tokens <= max_budget
-                and len(current_batch) < self.max_batch_size
-            ):
-                current_batch.append(orig_idx)
-                current_batch_tokens += item_tokens
-            else:
-                if current_batch:
-                    batches.append(
-                        (
-                            current_batch,
-                            self._find_smallest_fitting_budget_given_tokens(
-                                current_batch_tokens
-                            ),
-                        )
-                    )
-                current_batch = [orig_idx]
-                current_batch_tokens = item_tokens
-
-        if current_batch:
-            batches.append(
-                (
-                    current_batch,
-                    self._find_smallest_fitting_budget_given_tokens(
-                        current_batch_tokens
-                    ),
-                )
+            item_tokens = {path: per_item_path_tokens[path][orig_idx] for path in paths}
+            fits = len(current_batch) < self.max_batch_size and all(
+                current_tokens[path] + item_tokens[path] <= max_path_budgets[path]
+                for path in paths
             )
+            if current_batch and not fits:
+                append_current_batch()
+                current_batch = []
+                current_tokens = dict.fromkeys(paths, 0)
 
-        # outputs_by_orig_idx maps each original image index to its output
-        # tensor. Needed because greedy packing reorders images; we restore
-        # the original order before returning.
+            current_batch.append(orig_idx)
+            for path in paths:
+                current_tokens[path] += item_tokens[path]
+
+        append_current_batch()
+
         outputs_by_orig_idx: dict[int, torch.Tensor] = {}
-
-        for batch_orig_indices, token_budget in batches:
+        for batch_indices, path_budgets in batches:
             batch_mm_kwargs = self.model.select_encoder_cudagraph_items(
-                mm_kwargs, batch_orig_indices
+                mm_kwargs, batch_indices
             )
-            batch_out_tokens = sum(per_item_out_tokens[i] for i in batch_orig_indices)
+            graph_outputs: dict[str, torch.Tensor] = {}
+            all_eager = True
 
-            if token_budget is None:
-                # Single oversized image: item_tokens > max_budget.
-                # graph_misses counted here for this eager fallback.
-                logger.debug(
-                    "Encoder CUDA graph fallback to eager: no budget for "
-                    "%d tokens from %d images",
-                    batch_out_tokens,
-                    len(batch_orig_indices),
-                )
-                self.graph_misses += len(batch_orig_indices)
-                with torch.inference_mode():
-                    raw = self.model.encoder_eager_forward(batch_mm_kwargs)
-                self._scatter_output_slices(
-                    raw,
-                    batch_orig_indices,
-                    per_item_out_tokens,
-                    outputs_by_orig_idx,
-                )
-            else:
-                logger.debug(
-                    "Encoder CUDA graph: batch_size=%d, tokens=%d, "
-                    "budget=%d, waste=%.1f%%",
-                    len(batch_orig_indices),
-                    batch_out_tokens,
-                    token_budget,
-                    (token_budget - batch_out_tokens) / token_budget * 100,
-                )
-                replay = self.model.prepare_encoder_cudagraph_replay_buffers(
-                    batch_mm_kwargs,
-                    self.max_batch_size,
-                    self.max_frames_per_batch,
-                )
+            for path in paths:
+                path_tokens = sum(per_item_path_tokens[path][i] for i in batch_indices)
+                if path_tokens == 0:
+                    continue
 
-                # graph_hits counted inside _run_budget_graph after replay.
-                output = self._run_budget_graph(
-                    batch_mm_kwargs, token_budget, replay.buffers
-                )
-                assert output is not None
-                self._scatter_output_slices(
-                    output,
-                    batch_orig_indices,
-                    per_item_out_tokens,
-                    outputs_by_orig_idx,
-                    clone=True,
-                )
+                token_budget = path_budgets[path]
+                if token_budget is None:
+                    with torch.inference_mode():
+                        output = self.model.encoder_eager_forward(
+                            batch_mm_kwargs, path=path
+                        )
+                else:
+                    all_eager = False
+                    output = self._run_budget_graph(
+                        batch_mm_kwargs, token_budget, path=path
+                    )
+                    assert output is not None
+                graph_outputs[path] = output
 
-        # Return in original batch order (caller maps outputs to token positions)
+            if all_eager:
+                self.graph_misses += len(batch_indices)
+
+            self.model.postprocess_encoder_output(
+                graph_outputs,
+                batch_indices,
+                per_item_out_tokens,
+                outputs_by_orig_idx,
+                clone=True,
+                batch_mm_kwargs=batch_mm_kwargs,
+            )
+
         return [outputs_by_orig_idx[i] for i in range(num_items)]
 
     def _dp_shard(
@@ -431,9 +470,8 @@ class EncoderCudaGraphManager:
         tp_size = get_tensor_model_parallel_world_size()
         current_rank = get_tensor_model_parallel_rank()
 
-        per_item_input_sizes = self.model.get_encoder_cudagraph_per_item_input_sizes(
-            mm_kwargs
-        )
+        item_specs = self._get_item_specs(mm_kwargs)
+        per_item_input_sizes = [spec.input_size for spec in item_specs]
 
         (image_rank_assignment, images_per_rank, input_patches_per_rank) = (
             get_load_balance_assignment(per_item_input_sizes, tp_size)
@@ -533,7 +571,7 @@ class EncoderCudaGraphManager:
             count = images_per_rank[rank]
             if count > 0:
                 rank_items = image_rank_assignment[current_idx : current_idx + count]
-                self._scatter_output_slices(
+                scatter_output_slices(
                     rank_outputs[rank],
                     rank_items,
                     per_item_out_tokens,
@@ -597,10 +635,12 @@ class EncoderCudaGraphManager:
         total_requests = self.graph_hits + self.graph_misses
         hit_rate = self.graph_hits / total_requests if total_requests > 0 else 0.0
 
+        num_budgets = sum(len(g) for g in self.budget_graphs.values())
+
         return {
             "graph_hits": self.graph_hits,
             "graph_misses": self.graph_misses,
             "hit_rate": hit_rate,
-            "num_budgets": len(self.budget_graphs),
+            "num_budgets": num_budgets,
             "token_budgets": self.token_budgets,
         }

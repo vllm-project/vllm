@@ -15,15 +15,66 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 logger = init_logger(__name__)
 
+# Ordered by priority.
 _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.FLASHINFER_TRTLLM,
+    Fp8MoeBackend.DEEPGEMM,
     Fp8MoeBackend.MARLIN,
+    Fp8MoeBackend.XPU,
+    # AITER FlyDSL (gfx950): auto-picked by select_mxfp8_moe_backend when
+    # is_supported_config passes (gfx950 + flydsl installed + not EP). On other
+    # devices / no flydsl / EP it is skipped and native is used.
+    Fp8MoeBackend.AITER_MXFP8,
+    Fp8MoeBackend.HUMMING,
+    Fp8MoeBackend.TRITON_MXFP8,
+    Fp8MoeBackend.EMULATION,
 )
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
+    "deep_gemm": Fp8MoeBackend.DEEPGEMM,
     "marlin": Fp8MoeBackend.MARLIN,
+    "xpu": Fp8MoeBackend.XPU,
+    "aiter": Fp8MoeBackend.AITER_MXFP8,
+    "triton": Fp8MoeBackend.TRITON_MXFP8,
+    "humming": Fp8MoeBackend.HUMMING,
 }
+
+
+def _mxfp8_backend_to_kernel_cls(
+    backend: Fp8MoeBackend,
+) -> list[type[mk.FusedMoEExperts]]:
+    """Resolve the MXFP8 expert classes for a backend.
+
+    DeepGEMM resolves directly to ``DeepGemmExperts`` (not the
+    ``TritonOrDeepGemmExperts`` wrapper, whose Triton fallback cannot handle the
+    MXFP8 1x32 scheme); all other backends defer to the FP8 resolver.
+    """
+    if backend == Fp8MoeBackend.DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+            DeepGemmExperts,
+        )
+
+        return [DeepGemmExperts]
+    if backend == Fp8MoeBackend.AITER_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
+            AiterMxfp8Experts,
+        )
+
+        return [AiterMxfp8Experts]
+    if backend == Fp8MoeBackend.TRITON_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+            Mxfp8NativeTritonExperts,
+        )
+
+        return [Mxfp8NativeTritonExperts]
+    if backend == Fp8MoeBackend.EMULATION:
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
+            Mxfp8EmulationTritonExperts,
+        )
+
+        return [Mxfp8EmulationTritonExperts]
+    return backend_to_kernel_cls(backend)
 
 
 def _select_kernel_cls(
@@ -37,7 +88,7 @@ def _select_kernel_cls(
         else mk.FusedMoEActivationFormat.Standard
     )
     last_reason: str | None = None
-    for cls in backend_to_kernel_cls(backend):
+    for cls in _mxfp8_backend_to_kernel_cls(backend):
         supported, reason = cls.is_supported_config(
             cls,
             config,
@@ -86,4 +137,5 @@ def select_mxfp8_moe_backend(
         logger.info_once("Using '%s' MxFp8 MoE backend.", backend.value)
         return backend, experts_cls
 
+    # TODO: add debug log with reason.
     raise ValueError("No MXFP8 MoE backends available.")
