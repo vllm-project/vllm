@@ -948,8 +948,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             if current_platform.is_cuda() and has_deep_gemm():
+                # DeepGEMM sm90_paged_mqa_logits_metadata reads one element
+                # past its shared-memory prefix-sum buffer when every context
+                # length is zero and batch_size is a multiple of 32 (the
+                # per-SM binary search runs to q_idx == batch_size). All-zero
+                # lens occur whenever compress_ratio > 1 divides a dummy or
+                # padded decode batch seq_len of 1 down to 0 — e.g. every
+                # FULL-cudagraph capture warmup. Clamping only the scheduler
+                # input is safe: the schedule is a work-distribution hint and
+                # the logits kernel re-derives per-token work from the true
+                # context_lens.
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
-                    seq_lens,
+                    torch.clamp(seq_lens, min=1),
                     self.kv_cache_spec.storage_block_size,
                     self.num_sms,
                 )
