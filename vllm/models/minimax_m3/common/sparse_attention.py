@@ -245,14 +245,13 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
-        # Decode-first batch: context lengths into the stable cudagraph buffer.
-        context_lens = self.context_len_buffer[:num_reqs]
-        context_lens.copy_(
-            common_attn_metadata.compute_num_computed_tokens(), non_blocking=True
-        )
-
         prefill_metadata: MiniMaxM3SparsePrefillMetadata | None = None
         if num_prefills > 0:
+            # Decode-first batch: context lengths into the stable cudagraph buffer.
+            context_lens = self.context_len_buffer[:num_reqs]
+            context_lens.copy_(
+                common_attn_metadata.compute_num_computed_tokens(), non_blocking=True
+            )
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
             prefill_seq_lens_cpu = seq_lens_cpu[num_decodes:]
