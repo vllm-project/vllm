@@ -119,9 +119,13 @@ class NixlBaseConnectorWorker:
             # read across all regions, same for [3], but group0-group1 blocks will
             # always differ (different areas). Therefore we can just flatten the
             # block_ids and compute the descs ids for all groups at once.
-            block_arr = np.concatenate(block_ids)[None, :]
-            region_ids = np.arange(self.num_regions)[:, None]
-            return (region_ids * num_blocks + block_arr).flatten()
+            if len(block_ids) == 1:
+                block_arr = np.asarray(block_ids[0], dtype=np.int32)
+            else:
+                block_arr = np.concatenate(block_ids, dtype=np.int32)
+            block_arr = block_arr[None, :]
+            region_ids = np.arange(self.num_regions, dtype=np.int32)[:, None]
+            return (region_ids * num_blocks + block_arr).ravel()
 
         # Compute desc ids per group using the right stride: FA descs have
         # num_blocks entries per region (kernel granularity, expanded by
@@ -131,11 +135,11 @@ class NixlBaseConnectorWorker:
         logical_blocks = dst_num_blocks // physical_blocks_per_logical
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
-            group_arr = np.asarray(group)
+            group_arr = np.asarray(group, dtype=np.int32)
             if _is_attention_spec(self._group_spec_types[i]):
-                fa_region_ids = np.arange(self.num_regions)[:, None]
+                fa_region_ids = np.arange(self.num_regions, dtype=np.int32)[:, None]
                 all_descs.append(
-                    (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
+                    (fa_region_ids * num_blocks + group_arr[None, :]).ravel()
                 )
             elif _is_ssm_spec(self._group_spec_types[i]):
                 # NOTE (NickLucche) SSM and Attention block regions can
@@ -145,13 +149,13 @@ class NixlBaseConnectorWorker:
                 # num_fa_descs offset must be computed per-engine since
                 # P and D can have different num_blocks (and thus
                 # different FA desc counts).
-                ssm_region_ids = np.arange(num_ssm_regions)[:, None]
+                ssm_region_ids = np.arange(num_ssm_regions, dtype=np.int32)[:, None]
                 all_descs.append(
                     (
                         ssm_region_ids * logical_blocks
                         + group_arr[None, :]
                         + num_fa_descs
-                    ).flatten()
+                    ).ravel()
                 )
             else:
                 raise ValueError(
