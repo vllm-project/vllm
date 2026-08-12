@@ -234,17 +234,16 @@ class Scheduler(SchedulerInterface):
         )
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
         manager_cls_obj = vllm_config.ec_manager_config.get_encoder_cache_manager_obj()
-        if manager_cls_obj is not None:
-            self.encoder_cache_manager = manager_cls_obj.create_manager(
-                cache_size=encoder_cache_size,
-                vllm_config=vllm_config
-            )
-        else:
-            self.encoder_cache_manager = (
-                EncoderDecoderCacheManager(cache_size=encoder_cache_size)
+        if manager_cls_obj is None:
+            manager_cls_obj = (
+                EncoderDecoderCacheManager
                 if self.is_encoder_decoder
-                else EncoderCacheManager(cache_size=encoder_cache_size)
+                else EncoderCacheManager
             )
+        self.encoder_cache_manager = manager_cls_obj.create_manager(
+            cache_size=encoder_cache_size,
+            vllm_config=vllm_config
+        )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
