@@ -268,6 +268,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
     ):
         super().__init__()
         self.prefix = prefix
+        self.capture_fn: Callable[[torch.Tensor], None] | None = None
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
         self.experts_start_idx = experts_start_idx
@@ -513,6 +514,10 @@ class DeepseekV4MegaMoEExperts(nn.Module):
     def update_expert_map(self) -> None:
         pass
 
+    @property
+    def layer_id(self) -> int:
+        return extract_layer_index(self.prefix)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -536,6 +541,9 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             is_padding = get_forward_context().is_padding
             if is_padding is not None:
                 is_padding = is_padding[:num_tokens]
+
+        if self.capture_fn is not None:
+            self.capture_fn(topk_ids)
 
         # EPLB: map logical expert IDs to physical replicas and record load.
         eplb_state = self.eplb_state
@@ -876,20 +884,11 @@ class DeepseekV4MoE(nn.Module):
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
         org_shape = hidden_states.shape
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the MoERunner class
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=hidden_states,
-                input_ids=input_ids,
-            )
-        else:
-            router_logits, _ = self.gate(hidden_states)
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=hidden_states,
+            input_ids=input_ids,
+        )
 
         return final_hidden_states.view(org_shape)
 
@@ -1196,7 +1195,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.rms_norm_eps = config.rms_norm_eps
 
         # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4Attention.attn_gemm_parallel_execute
+        # DeepseekV4Attention._run_parallel_input_projections
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]

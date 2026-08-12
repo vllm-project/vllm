@@ -65,7 +65,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.deepseek_v4_chat_kwargs import (
     apply_deepseek_v4_chat_kwargs,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, StopParam
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -310,7 +310,7 @@ class ResponsesRequest(OpenAIBaseModel):
 
     repetition_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = []
+    stop: StopParam = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,

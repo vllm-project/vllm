@@ -8,7 +8,7 @@ from collections import Counter
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
 from typing_extensions import Self
@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.config import CompactGroupSliceConfig
 
 logger = init_logger(__name__)
+
+_SpecT = TypeVar("_SpecT", bound="KVCacheSpec")
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +88,18 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
+
+
+def replace_as(spec: KVCacheSpec, target_cls: type[_SpecT], **changes) -> _SpecT:
+    """``dataclasses.replace``, but rebuilding *spec* as *target_cls*
+      e.g. ``SlidingWindowSpec`` -> ``FullAttentionSpec``
+
+    Every field of *spec* must exist on *target_cls*; fields only *target_cls* has keep
+    their default values.
+    """
+    kwargs = {f.name: getattr(spec, f.name) for f in fields(spec) if f.init}
+    kwargs.update(changes)
+    return target_cls(**kwargs)
 
 
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:

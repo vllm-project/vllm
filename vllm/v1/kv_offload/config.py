@@ -92,8 +92,11 @@ class OffloadingParallelConfig:
     dcp_size: int
     # Data parallel replica index of this engine.
     data_parallel_index: int
-    # True when concatenating a block's data across all workers yields
-    # the same result regardless of the parallelism configuration.
+    # True when the bytes that will be persisted for a block are portable
+    # across parallelism configurations: for the direct layout, concatenating
+    # the block's data across all workers in rank order yields the same bytes
+    # under any topology; for the canonical layout, the canonical page itself
+    # is topology-free.
     is_parallelism_agnostic: bool
 
 
@@ -122,3 +125,6 @@ class OffloadingConfig:
     # support it. Aggregate layout decision; per-layer replication metadata
     # is planned for CanonicalKVCacheRef (#48408).
     replicated_layout: bool = False
+    # True when the canonical per-layer host byte layout was requested via
+    # kv_connector_extra_config; certified per-layer at worker registration.
+    canonical_layout: bool = False

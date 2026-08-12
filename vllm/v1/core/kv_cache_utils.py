@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    replace_as,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.compact_geometry import (
@@ -624,8 +625,7 @@ def resolve_kv_cache_block_sizes(
       ``cache_config.prefix_match_unit`` override if set, else the GCD of
       group block sizes; every group's block size must be divisible by it.
       Returns the scheduler block size (i.e. disables finer hashing) if block
-      hashing is inactive or a mamba group's block size diverges from the
-      cache block size (mamba_cache_mode != "align").
+      hashing is inactive or a mamba group is not using cache mode "align".
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
@@ -1455,43 +1455,27 @@ def _promote_local_kv_cache_specs(
         )
         return max(spec.page_size_padded, unpadded_page_size)
 
+    promotions: dict[type[AttentionSpec], type[AttentionSpec]] = {
+        SlidingWindowMLASpec: MLAAttentionSpec,
+        SlidingWindowSpec: FullAttentionSpec,
+        ChunkedLocalAttentionSpec: FullAttentionSpec,
+    }
+
     if has_full_attention and (has_sliding_window or has_chunked_local_attention):
         for layer_name, spec in kv_cache_spec.items():
-            if isinstance(spec, SlidingWindowMLASpec):
-                block_size = full_attention_block_size or spec.block_size
-                promoted_specs[layer_name] = MLAAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=spec.num_kv_heads,
-                    head_size=spec.head_size,
-                    dtype=spec.dtype,
-                    page_size_padded=promoted_page_size_padded(spec, block_size),
-                    cache_dtype_str=spec.cache_dtype_str,
-                    alignment=spec.alignment,
-                    compress_ratio=spec.compress_ratio,
-                    model_version=spec.model_version,
-                )
-            elif isinstance(spec, SlidingWindowSpec):
-                block_size = full_attention_block_size or spec.block_size
-                promoted_specs[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=spec.num_kv_heads,
-                    head_size=spec.head_size,
-                    head_size_v=spec.head_size_v,
-                    dtype=spec.dtype,
-                    kv_quant_mode=spec.kv_quant_mode,
-                    sliding_window=spec.sliding_window,
-                    page_size_padded=promoted_page_size_padded(spec, block_size),
-                )
-            elif isinstance(spec, ChunkedLocalAttentionSpec):
-                block_size = full_attention_block_size or spec.block_size
-                promoted_specs[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=spec.num_kv_heads,
-                    head_size=spec.head_size,
-                    dtype=spec.dtype,
-                    attention_chunk_size=spec.attention_chunk_size,
-                    page_size_padded=promoted_page_size_padded(spec, block_size),
-                )
+            target_cls = next(
+                (promotions[c] for c in type(spec).__mro__ if c in promotions), None
+            )
+            if target_cls is None:
+                continue
+            assert isinstance(spec, AttentionSpec)
+            block_size = full_attention_block_size or spec.block_size
+            promoted_specs[layer_name] = replace_as(
+                spec,
+                target_cls,
+                block_size=block_size,
+                page_size_padded=promoted_page_size_padded(spec, block_size),
+            )
 
     if not (
         is_kv_cache_spec_uniform(promoted_specs)

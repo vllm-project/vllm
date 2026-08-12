@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
@@ -231,7 +231,11 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp, raise_if_nan_logits
+from vllm.v1.worker.utils import (
+    EncoderTimingStats,
+    is_residual_scattered_for_sp,
+    raise_if_nan_logits,
+)
 from vllm.v1.worker.workspace import lock_workspace
 
 from .utils import (
@@ -2010,10 +2014,11 @@ class GPUModelRunner(
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
+        int,
     ]:
         """
         Returns:
-            tuple[logits_indices, spec_decode_metadata]
+            tuple[logits_indices, spec_decode_metadata, max_num_sampled_tokens]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -2325,6 +2330,7 @@ class GPUModelRunner(
         return (
             logits_indices,
             spec_decode_metadata,
+            int(num_sampled_tokens.max()),
         )
 
     def _build_attention_metadata(
@@ -2336,6 +2342,7 @@ class GPUModelRunner(
         num_reqs_padded: int | None = None,
         ubatch_slices: UBatchSlices | None = None,
         logits_indices: torch.Tensor | None = None,
+        max_num_sampled_tokens: int | None = None,
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
@@ -2510,6 +2517,7 @@ class GPUModelRunner(
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
+            cm_base.max_logits_per_req = max_num_sampled_tokens
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
                 logits_indices
             )
@@ -4352,9 +4360,8 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            logits_indices, spec_decode_metadata = self._prepare_inputs(
-                scheduler_output,
-                num_scheduled_tokens_np,
+            logits_indices, spec_decode_metadata, max_num_sampled_tokens = (
+                self._prepare_inputs(scheduler_output, num_scheduled_tokens_np)
             )
 
             cascade_attn_prefix_lens = None
@@ -4492,6 +4499,7 @@ class GPUModelRunner(
                     max_query_len=max_num_scheduled_tokens,
                     ubatch_slices=ubatch_slices_attn,
                     logits_indices=logits_indices,
+                    max_num_sampled_tokens=max_num_sampled_tokens,
                     use_spec_decode=use_spec_decode,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
@@ -6487,6 +6495,21 @@ class GPUModelRunner(
                 logits,
                 dummy_metadata,
             )
+            # All-greedy is a separate Triton specialization from the
+            # mixed-sampling path above. Compile and exercise it before serving.
+            all_greedy_metadata = replace(
+                dummy_metadata,
+                temperature=None,
+                all_greedy=True,
+                all_random=False,
+            )
+            self.rejection_sampler(
+                dummy_spec_decode_metadata,
+                draft_probs,
+                logits,
+                all_greedy_metadata,
+            )
+            torch.accelerator.synchronize()
         return sampler_output
 
     def _dummy_pooler_run_task(
@@ -6698,16 +6721,26 @@ class GPUModelRunner(
     @staticmethod
     @contextmanager
     def _freeze_gc():
+        gc_was_enabled = gc.isenabled()
         gc.collect()
         should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
         if should_freeze:
             gc.freeze()
+            # A Triton kernel finalized during stream capture unloads its
+            # module and invalidates the captured graph.
+            gc.disable()
         try:
             yield
         finally:
             if should_freeze:
-                gc.unfreeze()
-                gc.collect()
+                try:
+                    gc.unfreeze()
+                    gc.collect()
+                finally:
+                    if gc_was_enabled:
+                        gc.enable()
+                    else:
+                        gc.disable()
 
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
@@ -8037,20 +8070,3 @@ class GPUModelRunner(
                     stats = self.encoder_timing_registry[req_id]
                     stats.encoder_forward_secs += per_request_time
                     stats.num_encoder_calls += 1
-
-
-@dataclass
-class EncoderTimingStats:
-    """Per-request timing statistics for encoder forward pass."""
-
-    encoder_forward_secs: float = 0.0
-    """Time spent in vision encoder forward pass (seconds)."""
-
-    num_encoder_calls: int = 0
-    """Number of times encoder was called for this request."""
-
-    def to_dict(self) -> dict[str, float | int]:
-        return {
-            "encoder_forward_secs": self.encoder_forward_secs,
-            "num_encoder_calls": self.num_encoder_calls,
-        }

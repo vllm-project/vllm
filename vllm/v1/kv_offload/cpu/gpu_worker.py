@@ -3,7 +3,9 @@
 import functools
 import time
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -18,6 +20,7 @@ from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
     CanonicalKVCaches,
+    CanonicalPageMapping,
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingWorker,
@@ -39,7 +42,7 @@ logger = init_logger(__name__)
 
 
 def _select_swap_blocks_fn(
-    kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
+    layer_refs_per_group: list[list[CanonicalKVCacheRef]],
     gpu_to_cpu: bool,
 ):
     """Resolve the swap_blocks function for a handler at init time."""
@@ -52,7 +55,7 @@ def _select_swap_blocks_fn(
     # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
     if not HAS_TRITON or current_platform.is_xpu() or current_platform.is_rocm():
         return ops.swap_blocks_batch
-    page_sizes = [r.page_size_bytes for g in kv_cache_groups_data_refs for r in g]
+    page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
     # Triton wins only on small, 8-byte-aligned payloads.
     if (
         not page_sizes
@@ -124,6 +127,73 @@ def compute_sub_block_ptrs(
     # Flatten and apply skip_count / truncation
     flat = all_ptrs.ravel()
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
+
+
+class CopyPlan(NamedTuple):
+    """Precomputed fragment-copy template for one data ref under the canonical
+    CPU layout, unrolled from the ref's mapped runs. Offsets are relative to
+    the per-block base pointers on each side."""
+
+    frag_offsets_src: np.ndarray
+    frag_offsets_dst: np.ndarray
+    frag_sizes: np.ndarray
+    total_bytes: int
+
+    @property
+    def num_frags(self) -> int:
+        return len(self.frag_sizes)
+
+
+def _build_copy_plan(ref: CanonicalKVCacheRef, gpu_to_cpu: bool) -> CopyPlan:
+    """Unroll one data ref's mapped runs into a per-fragment CopyPlan."""
+    mapping = ref.mapping
+    assert mapping is not None
+    local: list[int] = []
+    canonical: list[int] = []
+    sizes: list[int] = []
+    for run in mapping.runs:
+        for i in range(run.num_fragments):
+            local.append(run.local_offset + i * run.local_stride)
+            canonical.append(run.canonical_offset + i * run.canonical_stride)
+            sizes.append(run.fragment_size)
+    src, dst = (local, canonical) if gpu_to_cpu else (canonical, local)
+    return CopyPlan(
+        frag_offsets_src=np.asarray(src, dtype=np.uint64),
+        frag_offsets_dst=np.asarray(dst, dtype=np.uint64),
+        frag_sizes=np.asarray(sizes, dtype=np.int64),
+        total_bytes=sum(sizes),
+    )
+
+
+def _canonical_page_ids(
+    block_ids: np.ndarray, blocks_per_chunk: int, count: int, skip_count: int
+) -> np.ndarray:
+    """Global canonical page ids matching compute_sub_block_ptrs' enumeration.
+    These identify canonical pages consistently across ranks, so they key
+    CanonicalPageMapping.is_writer rotation."""
+    if blocks_per_chunk == 1:
+        return block_ids[:count]
+    flat = (
+        block_ids[:, np.newaxis] * blocks_per_chunk + np.arange(blocks_per_chunk)
+    ).ravel()
+    return flat[skip_count : skip_count + count]
+
+
+def _canonical_block_sizes(
+    layer_refs_per_group: list[list[CanonicalKVCacheRef]], num_tensors: int
+) -> list[int]:
+    """Canonical CPU bytes per GPU block for each tensor, taken from the refs'
+    mappings. Requires every ref to carry a mapping."""
+    canonical_bytes_per_block = [0] * num_tensors
+    for layer_refs in layer_refs_per_group:
+        for ref in layer_refs:
+            assert ref.mapping is not None
+            canonical_bytes_per_block[ref.tensor_idx] = max(
+                canonical_bytes_per_block[ref.tensor_idx],
+                ref.mapping.canonical_page_size_bytes,
+            )
+    assert all(size > 0 for size in canonical_bytes_per_block)
+    return canonical_bytes_per_block
 
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
@@ -232,8 +302,9 @@ class SingleDirectionOffloadingHandler:
         gpu_tensors: list[torch.Tensor],
         cpu_tensors: list[torch.Tensor],
         blocks_per_chunk: int,
-        kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
+        layer_refs_per_group: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
+        canonical_layout: bool = False,
         mmap_region: SharedOffloadRegion | None = None,
         compact_region: torch.Tensor | None = None,
         compact_group_slice_configs: tuple[CompactGroupSliceConfig, ...] | None = None,
@@ -247,9 +318,11 @@ class SingleDirectionOffloadingHandler:
             cpu_tensors: list of CPU KV cache tensors.
                 Each of shape (num_cpu_blocks, cpu_page_size_bytes) with dtype int8.
                 Order should match gpu_tensors.
+            layer_refs_per_group: list of CanonicalKVCacheRef per group.
             blocks_per_chunk: number of GPU blocks per CPU block.
-            kv_cache_groups_data_refs: list of CanonicalKVCacheRef per group.
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
+            canonical_layout: if True, CPU pages use the canonical layout
+                described by the refs' mappings.
             compact_region: contiguous pinned CPU region for compact layout.
             compact_group_slice_configs: slice accounting for compact transfer
                 planning, matching the transported compact_slice_accounting.
@@ -267,8 +340,14 @@ class SingleDirectionOffloadingHandler:
         if not gpu_tensors:
             raise ValueError("at least one GPU tensor is required")
 
+        canonical_bytes_per_block = (
+            _canonical_block_sizes(layer_refs_per_group, len(gpu_tensors))
+            if canonical_layout
+            else None
+        )
+
         # assert input tensors are as expected
-        for gpu_tensor, cpu_tensor in zip(gpu_tensors, cpu_tensors):
+        for t_idx, (gpu_tensor, cpu_tensor) in enumerate(zip(gpu_tensors, cpu_tensors)):
             assert gpu_tensor.dtype == torch.int8
             assert gpu_tensor.ndim == 2
             assert gpu_tensor.is_cuda or gpu_tensor.is_xpu
@@ -277,7 +356,12 @@ class SingleDirectionOffloadingHandler:
             assert cpu_tensor.device.type == "cpu"
             _, gpu_page_size = gpu_tensor.shape
             _, cpu_page_size = cpu_tensor.shape
-            assert cpu_page_size == gpu_page_size * blocks_per_chunk
+            if canonical_bytes_per_block is not None:
+                assert (
+                    cpu_page_size == canonical_bytes_per_block[t_idx] * blocks_per_chunk
+                )
+            else:
+                assert cpu_page_size == gpu_page_size * blocks_per_chunk
 
         self.src_tensors: list[torch.Tensor] = (
             gpu_tensors if gpu_to_cpu else cpu_tensors
@@ -286,11 +370,11 @@ class SingleDirectionOffloadingHandler:
             cpu_tensors if gpu_to_cpu else gpu_tensors
         )
         self.gpu_to_cpu: bool = gpu_to_cpu
-        self.kv_cache_groups_data_refs = kv_cache_groups_data_refs
+        self.layer_refs_per_group = layer_refs_per_group
         self._compact_region = compact_region
         self._compact_group_slice_configs = compact_group_slice_configs
         self._swap_blocks_batch = _select_swap_blocks_fn(
-            kv_cache_groups_data_refs, gpu_to_cpu
+            layer_refs_per_group, gpu_to_cpu
         )
 
         # GPU blocks may be smaller
@@ -298,8 +382,24 @@ class SingleDirectionOffloadingHandler:
         self.src_blocks_per_chunk = 1 if self.gpu_to_cpu else blocks_per_chunk
         self.dst_blocks_per_chunk = blocks_per_chunk if self.gpu_to_cpu else 1
 
-        # mmap_region to clean up on shutdown (gpu_to_cpu handler owns it)
-        self._mmap_region = mmap_region
+        # Per (group, ref) static copy plans for the canonical layout
+        self._canonical_copy_plans: list[list[CopyPlan]] | None = (
+            [
+                [_build_copy_plan(ref, gpu_to_cpu) for ref in layer_refs]
+                for layer_refs in layer_refs_per_group
+            ]
+            if canonical_layout
+            else None
+        )
+        self._fill_group_ops = (
+            self._fill_canonical_ops if canonical_layout else self._fill_direct_ops
+        )
+        # Reusable per-block base-pointer scratch for the canonical fill,
+        # sized to the largest possible group (grown on demand)
+        num_scratch_blocks = gpu_tensors[0].shape[0] if canonical_layout else 0
+        self._scratch_bases_src = np.empty(num_scratch_blocks, dtype=np.uint64)
+        self._scratch_bases_dst = np.empty(num_scratch_blocks, dtype=np.uint64)
+
         # job_id -> event
         self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
@@ -311,6 +411,178 @@ class SingleDirectionOffloadingHandler:
         # list of pinned descriptor buffer sets available for re-use
         self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
+    def _estimate_max_copy_ops(self, group_sizes: Sequence[int]) -> int:
+        """Upper bound on the number of copy descriptors for a transfer.
+
+        Exact for the direct layout. The canonical path may fill fewer:
+        writer rotation later drops the blocks this rank does not write."""
+        num_copy_ops = 0
+        for g_idx, (group_size, layer_refs) in enumerate(
+            zip(group_sizes, self.layer_refs_per_group)
+        ):
+            if self._canonical_copy_plans is None:
+                num_copy_ops += group_size * len(layer_refs)
+            else:
+                num_copy_ops += group_size * sum(
+                    plan.num_frags for plan in self._canonical_copy_plans[g_idx]
+                )
+        return num_copy_ops
+
+    def _fill_direct_ops(
+        self,
+        g_idx: int,
+        group_src: np.ndarray,
+        group_dst: np.ndarray,
+        group_size: int,
+        src_skip_count: int,
+        dst_skip_count: int,
+        all_src: np.ndarray,
+        all_dst: np.ndarray,
+        all_sizes: np.ndarray,
+        op_idx: int,
+    ) -> tuple[int, int]:
+        """Fill one group's copy descriptors for the direct (worker-private)
+        layout: one whole-page copy per (block, ref).
+
+        Returns (op_idx past the filled descriptors, bytes added)."""
+        num_bytes = 0
+        for data_ref in self.layer_refs_per_group[g_idx]:
+            t_idx = data_ref.tensor_idx
+            end_idx = op_idx + group_size
+
+            compute_sub_block_ptrs(
+                group_src,
+                self.src_blocks_per_chunk,
+                all_src[op_idx:end_idx],
+                self.src_tensors[t_idx],
+                skip_count=src_skip_count,
+            )
+            compute_sub_block_ptrs(
+                group_dst,
+                self.dst_blocks_per_chunk,
+                all_dst[op_idx:end_idx],
+                self.dst_tensors[t_idx],
+                skip_count=dst_skip_count,
+            )
+
+            all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
+            num_bytes += group_size * data_ref.page_size_bytes
+            op_idx = end_idx
+        return op_idx, num_bytes
+
+    def _fill_canonical_ops(
+        self,
+        g_idx: int,
+        group_src: np.ndarray,
+        group_dst: np.ndarray,
+        group_size: int,
+        src_skip_count: int,
+        dst_skip_count: int,
+        all_src: np.ndarray,
+        all_dst: np.ndarray,
+        all_sizes: np.ndarray,
+        op_idx: int,
+    ) -> tuple[int, int]:
+        """Fill one group's copy descriptors for the canonical layout:
+        scatter each block through the ref's precomputed CopyPlan, keeping
+        only the blocks this rank writes.
+
+        Returns (op_idx past the filled descriptors, bytes added)."""
+        assert self._canonical_copy_plans is not None
+        # Zero-copy reinterpretation for pointer arithmetic: uint64 and the
+        # buffers' int64 are bit-equivalent for addresses
+        all_src_u64 = all_src.view(np.uint64)
+        all_dst_u64 = all_dst.view(np.uint64)
+        if group_size > len(self._scratch_bases_src):
+            self._scratch_bases_src = np.empty(group_size, dtype=np.uint64)
+            self._scratch_bases_dst = np.empty(group_size, dtype=np.uint64)
+
+        num_bytes = 0
+        for plan, data_ref in zip(
+            self._canonical_copy_plans[g_idx], self.layer_refs_per_group[g_idx]
+        ):
+            if plan.num_frags == 0:
+                continue
+            t_idx = data_ref.tensor_idx
+
+            # 1. Base byte pointer of every block on each side
+            block_bases_src = self._scratch_bases_src[:group_size]
+            block_bases_dst = self._scratch_bases_dst[:group_size]
+            compute_sub_block_ptrs(
+                group_src,
+                self.src_blocks_per_chunk,
+                block_bases_src,
+                self.src_tensors[t_idx],
+                skip_count=src_skip_count,
+            )
+            compute_sub_block_ptrs(
+                group_dst,
+                self.dst_blocks_per_chunk,
+                block_bases_dst,
+                self.dst_tensors[t_idx],
+                skip_count=dst_skip_count,
+            )
+
+            # 2. On store, keep only the blocks this rank is elected to write
+            mapping = data_ref.mapping
+            assert mapping is not None
+            if self.gpu_to_cpu and mapping.num_writers > 1:
+                block_bases_src, block_bases_dst = self._filter_writer_blocks(
+                    block_bases_src,
+                    block_bases_dst,
+                    mapping,
+                    group_dst,
+                    group_size,
+                    dst_skip_count,
+                )
+            num_active_blocks = len(block_bases_src)
+
+            # 3. Expand (block base + fragment offset) into one descriptor
+            #    per (block, fragment), writing straight into the descriptor
+            #    buffers: reshaping a contiguous 1D slice is a view, so the
+            #    broadcasts below allocate nothing
+            end_idx = op_idx + num_active_blocks * plan.num_frags
+            np.add(
+                block_bases_src[:, None],
+                plan.frag_offsets_src[None, :],
+                out=all_src_u64[op_idx:end_idx].reshape(
+                    num_active_blocks, plan.num_frags
+                ),
+            )
+            np.add(
+                block_bases_dst[:, None],
+                plan.frag_offsets_dst[None, :],
+                out=all_dst_u64[op_idx:end_idx].reshape(
+                    num_active_blocks, plan.num_frags
+                ),
+            )
+            all_sizes[op_idx:end_idx].reshape(num_active_blocks, plan.num_frags)[:] = (
+                plan.frag_sizes
+            )
+            num_bytes += num_active_blocks * plan.total_bytes
+            op_idx = end_idx
+        return op_idx, num_bytes
+
+    def _filter_writer_blocks(
+        self,
+        block_bases_src: np.ndarray,
+        block_bases_dst: np.ndarray,
+        mapping: CanonicalPageMapping,
+        group_dst: np.ndarray,
+        group_size: int,
+        dst_skip_count: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Keep only the blocks this rank writes: replicated ranks take turns
+        writing shared canonical pages, keyed by the rank-consistent CPU-side
+        canonical page id."""
+        cpu_page_ids = _canonical_page_ids(
+            group_dst,
+            self.dst_blocks_per_chunk,
+            group_size,
+            dst_skip_count,
+        )
+        writer_mask = cpu_page_ids % mapping.num_writers == mapping.writer_index
+        return block_bases_src[writer_mask], block_bases_dst[writer_mask]
     def _submit_descriptors(
         self,
         *,
@@ -344,8 +616,13 @@ class SingleDirectionOffloadingHandler:
             else torch.Event(enable_timing=True)
         )
 
-        if self.gpu_to_cpu:
-            stream.wait_stream(current_platform.current_stream())
+        # Stores must wait for the model to finish writing the KV they read.
+        # Loads must wait for pending writes (including zeroing) to their
+        # destination blocks; otherwise an earlier transfer can be overwritten
+        # by compute-stream work that was already queued when the load began.
+        # (upstream dropped the gpu_to_cpu guard here; this helper is the
+        # extracted form of that block and needs the same fix.)
+        stream.wait_stream(current_platform.current_stream())
         if self._transfers:
             stream.wait_event(self._transfers[-1].end_event)
         is_src_access_order_any = not self.gpu_to_cpu
@@ -492,17 +769,13 @@ class SingleDirectionOffloadingHandler:
         gpu_spec = src_spec if self.gpu_to_cpu else dst_spec
         assert isinstance(gpu_spec, GPULoadStoreSpec)
         group_sizes = gpu_spec.group_sizes
-        assert len(group_sizes) == len(self.kv_cache_groups_data_refs)
+        assert len(group_sizes) == len(self.layer_refs_per_group)
 
         # extract block indices from the GPU spec
         block_indices = gpu_spec.block_indices
-        assert len(block_indices) == len(self.kv_cache_groups_data_refs)
+        assert len(block_indices) == len(self.layer_refs_per_group)
 
-        num_copy_ops = 0
-        for group_size, group_data_refs in zip(
-            group_sizes, self.kv_cache_groups_data_refs
-        ):
-            num_copy_ops += group_size * len(group_data_refs)
+        num_copy_ops = self._estimate_max_copy_ops(group_sizes)
 
         # reuse a pooled buffer set, growing it if this transfer needs more room
         batch_src, batch_dst, batch_sizes = (
@@ -525,8 +798,8 @@ class SingleDirectionOffloadingHandler:
         op_idx = 0
         # count total number of bytes copied
         num_transfer_bytes = 0
-        for group_size, block_idx, group_data_refs in zip(
-            group_sizes, block_indices, self.kv_cache_groups_data_refs
+        for g_idx, (group_size, block_idx) in enumerate(
+            zip(group_sizes, block_indices)
         ):
             if group_size == 0:
                 continue
@@ -544,38 +817,31 @@ class SingleDirectionOffloadingHandler:
             src_end_offset = src_offset + src_blocks_count
             assert src_end_offset <= num_src_blocks
 
-            group_src = src_blocks[src_offset:src_end_offset]
-            group_dst = dst_blocks[dst_offset:dst_end_offset]
-
-            for data_ref in group_data_refs:
-                t_idx = data_ref.tensor_idx
-                end_idx = op_idx + group_size
-
-                compute_sub_block_ptrs(
-                    group_src,
-                    self.src_blocks_per_chunk,
-                    all_src[op_idx:end_idx],
-                    self.src_tensors[t_idx],
-                    skip_count=src_logical_blocks_to_skip,
-                )
-                compute_sub_block_ptrs(
-                    group_dst,
-                    self.dst_blocks_per_chunk,
-                    all_dst[op_idx:end_idx],
-                    self.dst_tensors[t_idx],
-                    skip_count=dst_logical_blocks_to_skip,
-                )
-
-                all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
-                num_transfer_bytes += group_size * data_ref.page_size_bytes
-                op_idx = end_idx
+            op_idx, group_bytes = self._fill_group_ops(
+                g_idx,
+                group_src=src_blocks[src_offset:src_end_offset],
+                group_dst=dst_blocks[dst_offset:dst_end_offset],
+                group_size=group_size,
+                src_skip_count=src_logical_blocks_to_skip,
+                dst_skip_count=dst_logical_blocks_to_skip,
+                all_src=all_src,
+                all_dst=all_dst,
+                all_sizes=all_sizes,
+                op_idx=op_idx,
+            )
+            num_transfer_bytes += group_bytes
 
             src_offset = src_end_offset
             dst_offset = dst_end_offset
 
         assert src_offset == num_src_blocks
         assert dst_offset == num_dst_blocks
-        assert op_idx == num_copy_ops
+        # Writer rotation may skip non-writer blocks, leaving op_idx below
+        # the sized upper bound
+        assert op_idx <= num_copy_ops
+        src = src[:op_idx]
+        dst = dst[:op_idx]
+        sizes = sizes[:op_idx]
 
         return self._submit_descriptors(
             job_id=job_id,
@@ -617,15 +883,31 @@ class SingleDirectionOffloadingHandler:
                 event.synchronize()
 
     def shutdown(self) -> None:
+        """Drain this direction and release its transfer-side resources."""
+        sync_error: Exception | None = None
         while self._transfers:
-            transfer = self._transfers.popleft()
-            transfer.end_event.synchronize()
+            transfer = self._transfers[0]
+            try:
+                transfer.end_event.synchronize()
+            except Exception as e:
+                logger.exception(
+                    "Failed to synchronize transfer end event; "
+                    "skipping %d remaining transfers",
+                    len(self._transfers) - 1,
+                )
+                self._transfers.clear()
+                sync_error = e
+                break
+            self._transfers.popleft()
+
         self._transfer_events.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
         self._buffer_pool.clear()
         self.src_tensors.clear()
         self.dst_tensors.clear()
+        if sync_error is not None:
+            raise sync_error
         self._compact_region = None
         self._compact_group_slice_configs = None
         if self._mmap_region is not None:
@@ -652,9 +934,15 @@ class CPUOffloadingWorker(OffloadingWorker):
         blocks_per_chunk: int,
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
+        canonical_layout: bool = False,
         compact_slice_accounting: tuple[CompactGroupSliceConfig, ...] | None = None,
         compact_cpu_budget_bytes_per_rank: int | None = None,
     ):
+        assert not canonical_layout or mmap_region is not None
+        # The caller owns mmap_region until this constructor returns. After a
+        # successful construction, the worker is the sole owner and releases
+        # it after both transfer directions have stopped.
+        self._mmap_region = mmap_region
         pin_memory = PIN_MEMORY
         compact_mode = compact_slice_accounting is not None
         if compact_mode != (compact_cpu_budget_bytes_per_rank is not None):
@@ -667,6 +955,11 @@ class CPUOffloadingWorker(OffloadingWorker):
         if mmap_region is not None and pin_memory:
             pin_mmap_region(mmap_region)
 
+        canonical_bytes_per_block = (
+            _canonical_block_sizes(kv_caches.group_data_refs, len(kv_caches.tensors))
+            if canonical_layout
+            else None
+        )
         compact_region: torch.Tensor | None = None
         if compact_mode:
             assert compact_cpu_budget_bytes_per_rank is not None
@@ -681,20 +974,31 @@ class CPUOffloadingWorker(OffloadingWorker):
 
         gpu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
-        for kv_cache_tensor in kv_caches.tensors:
+        for t_idx, kv_cache_tensor in enumerate(kv_caches.tensors):
             gpu_page_size_bytes = kv_cache_tensor.page_size_bytes
             gpu_tensor = kv_cache_tensor.tensor.view(torch.int8).view(
                 (-1, gpu_page_size_bytes)
             )
             cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
 
+            # Compact and canonical are mutually exclusive CPU page layouts;
+            # compact short-circuits because it shares one contiguous region
+            # across both handlers rather than carving per-tensor views.
+            assert not (compact_mode and canonical_bytes_per_block is not None), (
+                "compact and canonical CPU layouts cannot be combined"
+            )
             if compact_mode:
                 # Compact mode uses one contiguous CPU region shared by both
                 # handlers. The gpu_tensor is still needed for row geometry.
                 gpu_tensors.append(gpu_tensor)
                 continue
-            if mmap_region is not None:
-                cpu_tensor = mmap_region.create_next_view(cpu_page_size_bytes)
+            if canonical_bytes_per_block is not None:
+                assert mmap_region is not None
+                cpu_tensor = mmap_region.create_next_canonical_view(
+                    canonical_bytes_per_block[t_idx] * blocks_per_chunk
+                )
+            elif mmap_region is not None:
+                cpu_tensor = mmap_region.create_next_worker_view(cpu_page_size_bytes)
             else:
                 t0 = time.monotonic()
                 cpu_tensor = torch.zeros(
@@ -718,8 +1022,9 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             blocks_per_chunk=blocks_per_chunk,
-            kv_cache_groups_data_refs=kv_caches.group_data_refs,
+            layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=True,
+            canonical_layout=canonical_layout,
             mmap_region=mmap_region,
             compact_region=compact_region,
             compact_group_slice_configs=compact_slice_accounting,
@@ -729,8 +1034,9 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             blocks_per_chunk=blocks_per_chunk,
-            kv_cache_groups_data_refs=kv_caches.group_data_refs,
+            layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=False,
+            canonical_layout=canonical_layout,
             compact_region=compact_region,
             compact_group_slice_configs=compact_slice_accounting,
         )
@@ -755,5 +1061,28 @@ class CPUOffloadingWorker(OffloadingWorker):
         self._load_handler.wait(job_ids)
 
     def shutdown(self) -> None:
-        self._store_handler.shutdown()
-        self._load_handler.shutdown()
+        handler_failed = False
+        try:
+            self._store_handler.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down store offloading handler")
+            handler_failed = True
+
+        try:
+            self._load_handler.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down load offloading handler")
+            handler_failed = True
+
+        if self._mmap_region is not None:
+            if handler_failed:
+                try:
+                    torch.accelerator.synchronize()
+                except Exception:
+                    logger.warning(
+                        "Device sync before mmap cleanup failed; "
+                        "proceeding with cleanup anyway",
+                        exc_info=True,
+                    )
+            self._mmap_region.cleanup()
+            self._mmap_region = None

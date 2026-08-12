@@ -379,6 +379,8 @@ class SpecDecodeBaseProposer:
         dflash_config = getattr(model_hf_config, "dflash_config", None)
         if dflash_config and "mask_token_id" in dflash_config:
             self.parallel_drafting_token_id = dflash_config["mask_token_id"]
+        elif getattr(model_hf_config, "mask_token_id", None) is not None:
+            self.parallel_drafting_token_id = model_hf_config.mask_token_id
         elif hasattr(model_hf_config, "dspark_noise_token_id"):
             self.parallel_drafting_token_id = model_hf_config.dspark_noise_token_id
         elif hasattr(model_hf_config, "pard_token"):
@@ -388,8 +390,9 @@ class SpecDecodeBaseProposer:
         else:
             raise ValueError(
                 "For parallel drafting, the draft model config must have "
-                "`pard_token`, `ptd_token_id`, or "
-                "`dflash_config.mask_token_id` specified in its config.json."
+                "`dflash_config.mask_token_id`, `mask_token_id`, "
+                "`dspark_noise_token_id`, `pard_token`, or `ptd_token_id` "
+                "specified in its config.json."
             )
 
         if self.pass_hidden_states_to_model:
