@@ -95,14 +95,11 @@ if (
     and has_flashinfer()
 ):
     try:
-        from flashinfer import (
-            add_rmsnorm_fp4quant as _FLASHINFER_ADD_RMSNORM_FP4QUANT,
-        )
+        from flashinfer import add_rmsnorm_fp4quant
     except ImportError:
         pass
     else:
-        # FlashInfer requires block_scale_unswizzled to have the full shape for
-        # TVM-FFI validation, but does not write it when output_both_sf_layouts=False.
+        _FLASHINFER_ADD_RMSNORM_FP4QUANT = add_rmsnorm_fp4quant
         direct_register_custom_op(
             op_name="flashinfer_fused_add_rms_norm_nvfp4_quant",
             op_func=_flashinfer_fused_add_rms_norm_nvfp4_quant,
