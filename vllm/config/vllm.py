@@ -66,9 +66,14 @@ else:
 
 logger = init_logger(__name__)
 
+MRV1_UNSUPPORTED_PIECEWISE_CUDAGRAPH_ARCHITECTURES = frozenset(
+    {"DeepseekV4ForCausalLM"}
+)
+
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
+        "DeepseekV4ForCausalLM",
         "GraniteMoeForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
@@ -702,6 +707,25 @@ class VllmConfig:
             return False
         return is_default_v2_architecture or not model_config.is_moe
 
+    def _validate_mrv1_piecewise_cudagraph(self) -> None:
+        if self.use_v2_model_runner:
+            return
+        model_config = self.model_config
+        if model_config is None:
+            return
+        if not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs():
+            return
+        architectures = getattr(model_config, "architectures", [])
+        if any(
+            arch in MRV1_UNSUPPORTED_PIECEWISE_CUDAGRAPH_ARCHITECTURES
+            for arch in architectures
+        ):
+            raise ValueError(
+                "DeepSeek V4 does not support PIECEWISE CUDA graphs with "
+                "Model Runner V1. Use Model Runner V2 or disable PIECEWISE "
+                "CUDA graphs."
+            )
+
     @property
     def needs_dp_coordinator(self) -> bool:
         """
@@ -1245,6 +1269,18 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+        if self.profiler_config.profiler == "proton":
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "The Proton profiler currently supports NVIDIA CUDA only"
+                )
+            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                raise ValueError(
+                    "The Proton profiler requires CUDA graphs to be disabled. "
+                    "Use --enforce-eager or set "
+                    "--compilation-config.cudagraph_mode=none."
+                )
+
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
                 "TORCH_COMPILE_DISABLE is set, disabling torch.compile. "
@@ -1588,6 +1624,8 @@ class VllmConfig:
                         "this will likely lead to an error.",
                         "pipeline parallelism",
                     )
+
+        self._validate_mrv1_piecewise_cudagraph()
 
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():
