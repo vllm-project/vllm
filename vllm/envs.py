@@ -163,6 +163,7 @@ if TYPE_CHECKING:
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
+    VLLM_PROMPT_LOGPROBS_CHUNK_SIZE: int = 1024
     VLLM_MLA_DISABLE: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -1414,6 +1415,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE": lambda: int(
         os.getenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", "128")
     ),
+    # Maximum number of prompt-token rows whose full-vocabulary logits are
+    # materialized at once while computing prompt logprobs. The prompt
+    # logprobs path upcasts logits to float32 via log_softmax, so an
+    # unchunked [num_scheduled_tokens, vocab_size] tensor can dominate the
+    # activation peak and OOM (see issue #5907). Lower this to trade
+    # throughput for a smaller peak.
+    "VLLM_PROMPT_LOGPROBS_CHUNK_SIZE": lambda: int(
+        os.getenv("VLLM_PROMPT_LOGPROBS_CHUNK_SIZE", "1024")
+    ),
     # If set, vLLM will disable the MLA attention optimizations.
     "VLLM_MLA_DISABLE": lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
     # If set, vLLM will pick up the provided Flash Attention MLA
@@ -2262,6 +2272,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_WORKER_MULTIPROC_METHOD",
         "VLLM_ENABLE_V1_MULTIPROCESSING",
         "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
+        "VLLM_PROMPT_LOGPROBS_CHUNK_SIZE",
         "VLLM_CPU_KVCACHE_SPACE",
         "VLLM_CPU_MOE_PREPACK",
         "VLLM_ZENTORCH_WEIGHT_PREPACK",
