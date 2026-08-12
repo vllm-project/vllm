@@ -112,7 +112,7 @@ class LLFp32WDotprod:
         tA: cute.Tensor,
         tB: cute.Tensor,
         M: cutlass.Constexpr,
-        EPB: cutlass.Constexpr,
+        epb: cutlass.Constexpr,
         num_tiles: cutlass.Constexpr,
     ):
         for tile in cutlass.range_constexpr(num_tiles):
@@ -121,7 +121,7 @@ class LLFp32WDotprod:
             cute.autovec_copy(bt0, br0)
             br0_f32 = br0.load().to(cutlass.Float32)
 
-            if const_expr(EPB == 2):
+            if const_expr(epb == 2):
                 bt1 = tB[1, None, tile]
                 br1 = cute.make_rmem_tensor_like(bt1)
                 cute.autovec_copy(bt1, br1)
@@ -135,7 +135,7 @@ class LLFp32WDotprod:
                 for v in cutlass.range_constexpr(vec_width):
                     av = ar[v].to(cutlass.Float32)
                     acc[m, 0] = acc[m, 0] + av * br0_f32[v]
-                    if const_expr(EPB == 2):
+                    if const_expr(epb == 2):
                         acc[m, 1] = acc[m, 1] + av * br1_f32[v]
 
     def _make_thread_vector_slice(
@@ -145,7 +145,7 @@ class LLFp32WDotprod:
         tidx: cutlass.Int32,
         bs: cutlass.Constexpr,
     ):
-        # A: (M, K_TILE, K_LANE, K_VEC); B: (EPB, K_TILE, K_LANE, K_VEC).
+        # A: (M, K_TILE, K_LANE, K_VEC); B: (epb, K_TILE, K_LANE, K_VEC).
         tA = cute.logical_divide(gA_vec, (None, (None, bs)))
         tB = cute.logical_divide(gB_vec, (None, (None, bs)))
         return tA[None, (None, (tidx, None))], tB[None, (None, (tidx, None))]
@@ -217,8 +217,8 @@ class LLFp32WDotprod:
         n_tile_idx: cutlass.Int32,
         tidx: cutlass.Int32,
         local_wid: cutlass.Int32,
-        M_PER_GROUP: cutlass.Constexpr,
-        M_OFFSET: cutlass.Int32,
+        m_per_group: cutlass.Constexpr,
+        m_offset: cutlass.Int32,
         main_vec_width: cutlass.Constexpr,
         tail_vec_width: cutlass.Constexpr,
         bs: cutlass.Constexpr,
@@ -235,12 +235,12 @@ class LLFp32WDotprod:
         tail_tiles: cutlass.Constexpr,
     ):
         # Each CTA reuses A for epb adjacent experts.
-        acc = cute.make_rmem_tensor((M_PER_GROUP, epb), cutlass.Float32)
+        acc = cute.make_rmem_tensor((m_per_group, epb), cutlass.Float32)
         acc.fill(0.0)
 
-        gA_group = self._make_m_slice(gA, M_OFFSET, M_PER_GROUP)
+        gA_group = self._make_m_slice(gA, m_offset, m_per_group)
         gB_epb = self._make_n_tile(gB, n_tile_idx, epb)
-        sm_group = self._make_sm_m_slice(sm, M_OFFSET, M_PER_GROUP, epb, num_warps)
+        sm_group = self._make_sm_m_slice(sm, m_offset, m_per_group, epb, num_warps)
 
         if const_expr(k_main_elems > 0):
             gA_main = self._make_k_slice(gA_group, 0, k_main_elems)
@@ -248,7 +248,7 @@ class LLFp32WDotprod:
             gA_vec = cute.logical_divide(gA_main, (None, main_vec_width))
             gB_vec = cute.logical_divide(gB_main, (None, main_vec_width))
             tA, tB = self._make_thread_vector_slice(gA_vec, gB_vec, tidx, bs)
-            self._vector_dotprod(acc, tA, tB, M_PER_GROUP, epb, main_tiles)
+            self._vector_dotprod(acc, tA, tB, m_per_group, epb, main_tiles)
 
         if const_expr(k_tail_elems > 0):
             gA_tail = self._make_k_slice(gA_group, k_main_elems, k_tail_elems)
@@ -258,7 +258,7 @@ class LLFp32WDotprod:
             tA_t, tB_t = self._make_thread_vector_slice(
                 gA_tail_vec, gB_tail_vec, tidx, bs
             )
-            self._vector_dotprod(acc, tA_t, tB_t, M_PER_GROUP, epb, tail_tiles)
+            self._vector_dotprod(acc, tA_t, tB_t, m_per_group, epb, tail_tiles)
 
         if const_expr(ks_full > 0):
             gA_scalar = self._make_k_slice(gA_group, k_done_all, k_scalar_full)
@@ -268,24 +268,24 @@ class LLFp32WDotprod:
             tA_s, tB_s = self._make_thread_vector_slice(
                 gA_scalar_vec, gB_scalar_vec, tidx, bs
             )
-            self._vector_dotprod(acc, tA_s, tB_s, M_PER_GROUP, epb, ks_full)
+            self._vector_dotprod(acc, tA_s, tB_s, m_per_group, epb, ks_full)
 
         if const_expr(ks_part > 0):
             gA_part = self._make_k_slice(gA_group, k_part_offset, ks_part)
             gB_part = self._make_k_slice(gB_epb, k_part_offset, ks_part)
             if tidx < ks_part:
-                for local_m in cutlass.range_constexpr(M_PER_GROUP):
+                for local_m in cutlass.range_constexpr(m_per_group):
                     av = gA_part[local_m, tidx].to(cutlass.Float32)
                     for e in cutlass.range_constexpr(epb):
                         bv = gB_part[e, tidx].to(cutlass.Float32)
                         acc[local_m, e] = acc[local_m, e] + av * bv
 
-        for local_m in cutlass.range_constexpr(M_PER_GROUP):
+        for local_m in cutlass.range_constexpr(m_per_group):
             for e in cutlass.range_constexpr(epb):
                 acc[local_m, e] = cute.arch.warp_reduction_sum(acc[local_m, e])
 
         with cute.arch.elect_one():
-            for local_m in cutlass.range_constexpr(M_PER_GROUP):
+            for local_m in cutlass.range_constexpr(m_per_group):
                 for e in cutlass.range_constexpr(epb):
                     sm_group[local_m, e, local_wid] = acc[local_m, e]
 
@@ -299,15 +299,15 @@ class LLFp32WDotprod:
         tidx: cutlass.Int32,
         group_idx: cutlass.Int32,
         M: cutlass.Constexpr,
-        EPB: cutlass.Constexpr,
+        epb: cutlass.Constexpr,
     ):
         n_tile_layout = cute.make_layout(
-            (cute.ceil_div(N_dim, EPB), EPB), stride=(EPB, 1)
+            (cute.ceil_div(N_dim, epb), epb), stride=(epb, 1)
         )
         n_coords = cute.make_tensor(0, n_tile_layout)
 
         if group_idx == 0 and tidx < M:
-            for e in cutlass.range_constexpr(EPB):
+            for e in cutlass.range_constexpr(epb):
                 n = n_coords[n_tile_idx, e]
                 if n < N_dim:
                     partials = sm[tidx, e, None].load()

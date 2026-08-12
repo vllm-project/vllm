@@ -6,12 +6,14 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+pytestmark = pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="CUDA required"
+)
 
 
 @pytest.fixture(autouse=True, scope="module")
 def _require_sm90_and_cutedsl():
-    if torch.cuda.get_device_capability()[0] < 9:
+    if torch.accelerator.get_device_capability()[0] < 9:
         pytest.skip("Requires SM90+ (Hopper/Blackwell)")
     from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
         is_available,
@@ -244,13 +246,13 @@ def test_cudagraph(M, K, N):
     a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(N, K, dtype=torch.float32, device="cuda")
     _gemm(a, b)
-    torch.cuda.synchronize()
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
+    torch.accelerator.synchronize()
+    g = torch.accelerator.CUDAGraph()
+    with torch.accelerator.graph(g):
         out = _gemm(a, b)
     for _ in range(5):
         g.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     _assert_close(out, _ref(a, b), context=f"cudagraph M={M} K={K}")
 
 
@@ -259,14 +261,14 @@ def test_cudagraph_20x_replay():
     a = torch.randn(4, 4096, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(64, 4096, dtype=torch.float32, device="cuda")
     _gemm(a, b)
-    torch.cuda.synchronize()
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
+    torch.accelerator.synchronize()
+    g = torch.accelerator.CUDAGraph()
+    with torch.accelerator.graph(g):
         out = _gemm(a, b)
     results = []
     for _ in range(20):
         g.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         results.append(out.clone())
     for i in range(1, len(results)):
         torch.testing.assert_close(
@@ -279,13 +281,13 @@ def test_cudagraph_input_update():
     a = torch.randn(4, 5120, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(128, 5120, dtype=torch.float32, device="cuda")
     _gemm(a, b)
-    torch.cuda.synchronize()
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
+    torch.accelerator.synchronize()
+    g = torch.accelerator.CUDAGraph()
+    with torch.accelerator.graph(g):
         out = _gemm(a, b)
     a.copy_(torch.randn_like(a))
     g.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     _assert_close(out, _ref(a, b), context="cudagraph input update")
 
 

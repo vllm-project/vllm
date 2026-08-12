@@ -50,7 +50,7 @@ _LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
 )
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
 
-_LL_FP32W_WARMUP_M_RANGE = range(1, 17)
+_LL_FP32W_WARMUP_M_RANGE = range(1, 33)
 
 
 def _warmup_ll_bf16_router_gemm() -> None:
