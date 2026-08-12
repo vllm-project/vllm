@@ -69,6 +69,7 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
     """
 
     token_ordering: torch.Tensor
+    suppress_mask: torch.Tensor
 
     def __init__(
         self,
@@ -90,6 +91,21 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
             "token_ordering",
             torch.empty(vocab_size, dtype=torch.long),
         )
+        # Derived from the generation config rather than the checkpoint, so it
+        # is non-persistent and stays out of ``state_dict``.
+        self.has_suppressed_tokens = False
+        self.register_buffer(
+            "suppress_mask",
+            torch.zeros(vocab_size, dtype=torch.bool),
+            persistent=False,
+        )
+
+    def set_suppressed_token_ids(self, token_ids: list[int]) -> None:
+        """Mark tokens that the sparse argmax must never return."""
+        if not token_ids:
+            return
+        self.suppress_mask[torch.tensor(token_ids, dtype=torch.long)] = True
+        self.has_suppressed_tokens = True
 
     def _select_and_score(
         self,
@@ -143,6 +159,11 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
     ) -> torch.Tensor:
         """Sparse argmax — returns vocab token IDs without full-vocab tensor."""
         logits, indices = self._select_and_score(hidden_states, lm_head_weight)
+        if self.has_suppressed_tokens:
+            # `compute_logits` masks suppressed tokens on the dense path, but
+            # this sparse argmax bypasses it entirely. Mask the candidates
+            # before the argmax so the drafter cannot emit a suppressed token.
+            logits = logits.masked_fill(self.suppress_mask[indices], float("-inf"))
         return indices.gather(-1, logits.argmax(-1, keepdim=True)).squeeze(-1)
 
 
@@ -519,6 +540,8 @@ class Gemma4MTP(nn.Module):
         draft_cfg = vllm_config.speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        if self.masked_embedding is not None and self._suppress_token_ids:
+            self.masked_embedding.set_suppressed_token_ids(self._suppress_token_ids)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
