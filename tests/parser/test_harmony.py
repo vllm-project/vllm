@@ -1194,3 +1194,42 @@ class TestAdjustRequest:
             adjusted_request,
             expected_admission,
         )
+
+
+def test_process_chunk_recovers_from_malformed_header(
+    harmony_parser, gpt_oss_tokenizer
+):
+    """A header Harmony rejects must not escape as an unhandled HarmonyError.
+
+    gpt-oss can sample a header with leftover tokens (here a repeated `to=`
+    clause). Harmony raises on it mid-stream, which used to propagate out of
+    process_chunk and fail the request with a 500 (#51977). The generated text
+    should come back on the final channel instead.
+    """
+    encoding = get_encoding()
+    token_ids = encoding.encode(
+        "<|channel|>commentary to=functions.get_weather to=functions.get_weather"
+        "<|message|>{}<|call|>",
+        allowed_special="all",
+    )
+
+    result = harmony_parser.process_chunk(token_ids)
+
+    assert result.segments, "expected recovered segments, not an exception"
+    delta_segment, message_segment = result.segments[-2:]
+    assert delta_segment.channel == "final"
+    assert delta_segment.completed_message is None
+    assert "get_weather" in delta_segment.delta
+    # parse() and the Responses message loop only read completed messages,
+    # so the recovered text must also arrive as one (flush() recovery parity).
+    completed = message_segment.completed_message
+    assert completed is not None
+    assert completed.channel == "final"
+    assert completed.content[0].text == delta_segment.delta
+    # State is reset, so an ordinary message still parses afterwards.
+    follow_up = harmony_parser.process_chunk(
+        encoding.encode(
+            "<|channel|>final<|message|>hi<|return|>", allowed_special="all"
+        )
+    )
+    assert "".join(segment.delta for segment in follow_up.segments) == "hi"
