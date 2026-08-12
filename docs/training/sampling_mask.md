@@ -23,14 +23,14 @@ preserves language consistency during RL training.
 
 ```bash
 vllm serve <model> \
-    --enable-return-sampling-mask \
+    --return-sampling-mask \
     --logprobs-mode processed_logprobs
 ```
 
 ```python
 from vllm import LLM, SamplingParams
 
-llm = LLM(model, enable_return_sampling_mask=True,
+llm = LLM(model, return_sampling_mask=True,
            logprobs_mode="processed_logprobs")
 output = llm.generate(
     "The capital of France is",
@@ -57,7 +57,7 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 
 | Requirement | Reason |
 | --- | --- |
-| `--enable-return-sampling-mask` | Engine-level opt-in (disables FlashInfer sampler) |
+| `--return-sampling-mask` | Engine-level opt-in (disables FlashInfer sampler) |
 | `--logprobs-mode processed_logprobs` | Returned logprobs are normalized over the nucleus, not full vocab |
 | `temperature > 0` | Greedy has no truncated distribution |
 | `top_k > 0` | Bounds mask size; pure top-p can produce vocab-sized masks |
@@ -106,7 +106,7 @@ consistent.
 
 ## Limitations
 
-- **Engine-level flag:** `--enable-return-sampling-mask` globally disables the
+- **Engine-level flag:** `--return-sampling-mask` globally disables the
   FlashInfer fused sampler. All requests pay the cost of the PyTorch sampling
   path, even if they don't need the mask.
 - **No streaming support:** The mask is returned only in the final response,

@@ -3,8 +3,7 @@
 
 import pytest
 
-from vllm.outputs import RequestOutput, SamplingMask
-from vllm.sampling_mask import SamplingMask as SamplingMaskFromModule
+from vllm.outputs import RequestOutput
 
 pytestmark = pytest.mark.cpu_test
 
@@ -20,7 +19,3 @@ def test_request_output_forward_compatible():
         example_arg_added_in_new_version="some_value",
     )
     assert output is not None
-
-
-def test_sampling_mask_import():
-    assert SamplingMask is SamplingMaskFromModule

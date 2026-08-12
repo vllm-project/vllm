@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -8,6 +10,16 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, SamplingMaskLists
+
+
+@dataclass
+class SamplerOutput:
+    sampled_token_ids: torch.Tensor
+    logprobs_tensors: LogprobsTensors | None
+    num_nans: torch.Tensor | None
+    num_sampled: torch.Tensor | None
+    num_rejected: torch.Tensor | None = None
+    sampling_mask_tensors: SamplingMaskTensors | None = None
 
 
 @triton.jit
@@ -64,7 +76,7 @@ class SamplingMaskTensors(NamedTuple):
         cls,
         logits: torch.Tensor,
         num_sampled_tokens: torch.Tensor,
-    ) -> "SamplingMaskTensors":
+    ) -> SamplingMaskTensors:
         """Pack the finite-logit support for requests that sampled tokens."""
         num_reqs, vocab_size = logits.shape
         packed_width = (vocab_size + 7) // 8
@@ -87,7 +99,7 @@ class SamplingMaskTensors(NamedTuple):
 
         return cls(packed_mask, counts, vocab_size)
 
-    def to_cpu_nonblocking(self) -> "SamplingMaskTensors":
+    def to_cpu_nonblocking(self) -> SamplingMaskTensors:
         if self.packed_mask.device.type == "cpu":
             return self
         return SamplingMaskTensors(
@@ -117,13 +129,3 @@ class SamplingMaskTensors(NamedTuple):
                 np.concatenate(([0], num_sampled_tokens))
             ).tolist(),
         )
-
-
-@dataclass
-class SamplerOutput:
-    sampled_token_ids: torch.Tensor
-    logprobs_tensors: LogprobsTensors | None
-    num_nans: torch.Tensor | None
-    num_sampled: torch.Tensor | None
-    num_rejected: torch.Tensor | None = None
-    sampling_mask_tensors: SamplingMaskTensors | None = None

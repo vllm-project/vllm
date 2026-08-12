@@ -40,7 +40,7 @@ class Sampler:
         num_speculative_tokens: int = 1,
         use_fp64_gumbel: bool = False,
         reasoning_config: ReasoningConfig | None = None,
-        enable_return_sampling_mask: bool = False,
+        return_sampling_mask: bool = False,
     ):
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
@@ -54,9 +54,9 @@ class Sampler:
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.thinking_budget_state = ThinkingBudgetState(req_states, reasoning_config)
         self.num_speculative_tokens = num_speculative_tokens
-        self.enable_return_sampling_mask = enable_return_sampling_mask
+        self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
-            not enable_return_sampling_mask and flashinfer_sampler_supported()
+            not return_sampling_mask and flashinfer_sampler_supported()
         )
 
     def add_request(
@@ -142,7 +142,7 @@ class Sampler:
         )
 
         sampling_mask_tensors = None
-        if self.enable_return_sampling_mask:
+        if self.return_sampling_mask:
             sampling_mask_tensors = SamplingMaskTensors.from_logits(
                 processed_logits, num_sampled
             )

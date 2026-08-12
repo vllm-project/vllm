@@ -324,9 +324,7 @@ class Scheduler(SchedulerInterface):
         self.enable_return_routed_experts = (
             vllm_config.model_config.enable_return_routed_experts
         )
-        self.enable_return_sampling_mask = (
-            vllm_config.model_config.enable_return_sampling_mask
-        )
+        self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
         if self.enable_return_routed_experts:
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
@@ -1940,7 +1938,7 @@ class Scheduler(SchedulerInterface):
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
-            if self.enable_return_sampling_mask:
+            if self.return_sampling_mask:
                 sampling_masks = model_runner_output.sampling_masks
                 if new_token_ids and sampling_masks is not None:
                     new_sampling_mask = sampling_masks.slice_request(

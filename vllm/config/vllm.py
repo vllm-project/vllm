@@ -1041,7 +1041,7 @@ class VllmConfig:
 
     def _verify_sampling_replay_config(self) -> None:
         model_config = self.model_config
-        if model_config is None or not model_config.enable_return_sampling_mask:
+        if model_config is None or not model_config.return_sampling_mask:
             return
         if not self.use_v2_model_runner:
             raise ValueError("sampling distribution replay requires Model Runner V2")

@@ -108,7 +108,7 @@ class InputProcessor:
                 self.tokenizer,
             )
 
-            if self.model_config.enable_return_sampling_mask:
+            if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
                     raise ValueError(
                         "sampling distribution replay requires temperature > 0"
