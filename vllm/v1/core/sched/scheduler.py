@@ -584,15 +584,12 @@ class Scheduler(SchedulerInterface):
 
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    preempted_req = (
+                    victim_index, preempted_req = (
                         self.scheduler_plugin_manager.select_preemption_victim(
                             self.running
                         )
                     )
-                    # Record the index of the preemption victim to
-                    # maintain accurate loop state.
-                    victim_index = self.running.index(preempted_req)
-                    del self.running[victim_index]
+                    self.running.pop(victim_index)
                     # Decrement the loop cursor if the removed request
                     # preceded the current iteration, preventing the
                     # silent omission of the subsequent request.
@@ -878,6 +875,10 @@ class Scheduler(SchedulerInterface):
                 elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
                     # DP prefill balancing: defer this step's local prefill
                     # compute to a cadence-aligned step.
+                    if self._defer_infeasible_candidate(
+                        request_queue, request, step_skipped_waiting
+                    ):
+                        continue
                     break
                 else:
                     # Number of tokens to be scheduled.
@@ -901,6 +902,10 @@ class Scheduler(SchedulerInterface):
                             or num_computed_tokens + num_new_tokens > self.max_model_len
                         ):
                             # Prefer to not schedule than schedule un-padded here.
+                            if self._defer_infeasible_candidate(
+                                request_queue, request, step_skipped_waiting
+                            ):
+                                continue
                             break
                         pad_spec_decode = True
 
@@ -916,6 +921,10 @@ class Scheduler(SchedulerInterface):
                     ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
+                        if self._defer_infeasible_candidate(
+                            request_queue, request, step_skipped_waiting
+                        ):
+                            continue
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
@@ -937,6 +946,10 @@ class Scheduler(SchedulerInterface):
                         )
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
+                            if self._defer_infeasible_candidate(
+                                request_queue, request, step_skipped_waiting
+                            ):
+                                continue
                             break
 
                 # Skip block alignment when setting up async receive (no local work).
@@ -948,6 +961,10 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens,
                     )
                     if num_new_tokens == 0:
+                        if self._defer_infeasible_candidate(
+                            request_queue, request, step_skipped_waiting
+                        ):
+                            continue
                         break
 
                 # During async KV load, no forward pass is run yet.
@@ -999,6 +1016,10 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                    if self._defer_infeasible_candidate(
+                        request_queue, request, step_skipped_waiting
+                    ):
+                        continue
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -2097,6 +2118,18 @@ class Scheduler(SchedulerInterface):
         popped = request_queue.pop_request()
         assert popped is request
         return popped
+
+    def _defer_infeasible_candidate(
+        self,
+        request_queue: RequestQueue,
+        request: Request,
+        step_skipped_waiting: RequestQueue,
+    ) -> bool:
+        if not self.scheduler_plugin_manager.has_candidate_plugins:
+            return False
+        self._remove_waiting_candidate(request_queue, request)
+        step_skipped_waiting.prepend_request(request)
+        return True
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""

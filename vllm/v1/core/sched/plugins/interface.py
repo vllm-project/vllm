@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -116,6 +116,13 @@ class ScorePlugin(SchedulerPlugin, ABC):
 
 class PreemptionPlugin(SchedulerPlugin, ABC):
     """Plugin interface for the Preemption extension point."""
+
+    def select_victim_index(self, running: Sequence["Request"]) -> int:
+        """Return the index of the request to preempt."""
+        return max(
+            range(len(running)),
+            key=lambda index: self.preemption_key(running[index], index),
+        )
 
     @abstractmethod
     def preemption_key(

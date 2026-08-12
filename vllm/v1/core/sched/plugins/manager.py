@@ -218,9 +218,6 @@ class SchedulerPluginManager:
     def select_preemption_victim(
         self,
         running: "Sequence[Request]",
-    ) -> "Request":
-        _, victim = max(
-            enumerate(running),
-            key=lambda item: self.preemption_plugin.preemption_key(item[1], item[0]),
-        )
-        return victim
+    ) -> "tuple[int, Request]":
+        victim_index = self.preemption_plugin.select_victim_index(running)
+        return victim_index, running[victim_index]

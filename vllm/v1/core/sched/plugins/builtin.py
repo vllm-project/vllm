@@ -17,7 +17,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
     from vllm.v1.core.sched.request_queue import RequestQueue
     from vllm.v1.request import Request
@@ -46,6 +46,9 @@ class FCFSSchedulerPlugin(QueueSortPlugin, PreemptionPlugin):
         running_position: int,
     ) -> tuple[int | float, ...]:
         return (running_position,)
+
+    def select_victim_index(self, running: "Sequence[Request]") -> int:
+        return len(running) - 1
 
     def order_candidates(
         self,
