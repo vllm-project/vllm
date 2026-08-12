@@ -13,16 +13,22 @@ import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
+from vllm.v1.worker.gpu.attn_utils import (
+    get_query_lens_mismatch_unsupported_backend,
+)
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
     from vllm.v1.worker.gpu.input_batch import InputBatch
     from vllm.v1.worker.gpu.states import RequestState
+    from vllm.v1.worker.utils import AttentionGroup
 
 
 def _assign_draft_token_budget(
@@ -427,3 +433,45 @@ class AdaptiveVerificationManager:
             self.query_start_loc,
             draft_budget,
         )
+
+
+def maybe_create_adaptive_verification_manager(
+    *,
+    enable_adaptive_verification: bool,
+    attn_groups: list[list["AttentionGroup"]],
+    attn_cg_support: "AttentionCGSupportInfo",
+    req_states: "RequestState",
+    query_start_loc: torch.Tensor,
+    num_bonus_tokens: int,
+    max_total_logits: int,
+) -> AdaptiveVerificationManager | None:
+    if not enable_adaptive_verification:
+        return None
+
+    # The selector rejects unsupported backends, but models that
+    # hard-wire theirs (e.g. DeepSeek-V4) never go through it.
+    backend = get_query_lens_mismatch_unsupported_backend(attn_groups)
+    if backend is not None:
+        raise ValueError(
+            "Adaptive verification trims verification requests on device, which"
+            f" the {backend} attention backend does not support. Pass "
+            "enable_adaptive_verification=false in the speculative config, or "
+            "use a backend that does."
+        )
+
+    if attn_cg_support.min_cg_support != AttentionCGSupport.ALWAYS:
+        raise ValueError(
+            "Adaptive verification captures varlen decode cudagraphs, so every"
+            " attention builder must report AttentionCGSupport.ALWAYS, but "
+            f"{attn_cg_support.min_cg_attn_backend} reports "
+            f"{attn_cg_support.min_cg_support}. Pass "
+            "enable_adaptive_verification=false in the speculative config, or "
+            "use a backend that does."
+        )
+
+    return AdaptiveVerificationManager(
+        req_states,
+        query_start_loc,
+        num_bonus_tokens,
+        max_total_logits=max_total_logits,
+    )

@@ -61,7 +61,6 @@ from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
@@ -81,7 +80,6 @@ from vllm.v1.worker.gpu.async_utils import (
 from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
     get_kv_cache_spec,
-    get_query_lens_mismatch_unsupported_backend,
     init_attn_backend,
     init_kv_cache,
 )
@@ -133,6 +131,7 @@ from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
+    maybe_create_adaptive_verification_manager,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -531,33 +530,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         # The speculator clears the flag at load time when the checkpoint has
         # no confidence head, so it holds the effective value.
-        if getattr(self.speculator, "enable_adaptive_verification", False):
-            # The selector rejects unsupported backends, but models that
-            # hard-wire theirs (e.g. DeepSeek-V4) never go through it.
-            backend = get_query_lens_mismatch_unsupported_backend(self.attn_groups)
-            if backend is not None:
-                raise ValueError(
-                    "Adaptive verification trims verification requests on device, which"
-                    f" the {backend} attention backend does not support. Pass "
-                    "enable_adaptive_verification=false in the speculative config, or "
-                    "use a backend that does."
-                )
-            # Decode graphs become varlen
-            if attn_cg_support.min_cg_support != AttentionCGSupport.ALWAYS:
-                raise ValueError(
-                    "Adaptive verification captures varlen decode cudagraphs, so every"
-                    " attention builder must report AttentionCGSupport.ALWAYS, but "
-                    f"{attn_cg_support.min_cg_attn_backend} reports "
-                    f"{attn_cg_support.min_cg_support}. Pass "
-                    "enable_adaptive_verification=false in the speculative config, or "
-                    "use a backend that does."
-                )
-            self.adaptive_verification = AdaptiveVerificationManager(
-                self.req_states,
-                self.input_buffers.query_start_loc,
-                self.model_state.num_new_sampled_tokens_per_step,
-                max_total_logits=get_max_chunk_logits(self.vocab_size),
-            )
+        self.adaptive_verification = maybe_create_adaptive_verification_manager(
+            enable_adaptive_verification=getattr(
+                self.speculator, "enable_adaptive_verification", False
+            ),
+            attn_groups=self.attn_groups,
+            attn_cg_support=attn_cg_support,
+            req_states=self.req_states,
+            query_start_loc=self.input_buffers.query_start_loc,
+            num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
+            max_total_logits=get_max_chunk_logits(self.vocab_size),
+        )
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
@@ -1060,15 +1043,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None, get_uniform_token_count(num_reqs, num_toks, max_query_len)
 
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
-        adaptive_draft_tokens = draft_tokens if self.adaptive_verification else {}
-        if adaptive_draft_tokens:
-            num_toks = self.adaptive_verification.get_num_tokens(  # type: ignore[union-attr]
-                num_tokens_per_req, adaptive_draft_tokens
-            )
         # batch_idx -> req_id
         req_ids = sort_batch_req_ids(
-            num_tokens_per_req, adaptive_draft_tokens, self.decode_query_len
+            num_tokens_per_req, draft_tokens, self.decode_query_len
         )
+
         numtoks_iter = map(num_tokens_per_req.__getitem__, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
 
@@ -1079,6 +1058,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping_np
         ]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
+
+        if self.adaptive_verification is not None:
+            num_toks = self.adaptive_verification.get_num_tokens(
+                num_tokens_per_req, draft_tokens
+            )
 
         batch_state = BatchReqState(
             req_ids=req_ids,
