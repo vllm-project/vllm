@@ -3,6 +3,7 @@
 
 import functools
 from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar, Final
 
 import torch
@@ -75,6 +76,24 @@ def _fp8_mla_prefill_supported() -> bool:
     except Exception:  # noqa: BLE001
         return False
     return True
+
+
+@functools.lru_cache(maxsize=1)
+def _aiter_mla_native_h24_supported() -> bool:
+    """Whether AITER's JIT reducer supports the native H24/512 shape.
+
+    AITER ships the reducer source used by its JIT build. Detect the H24
+    specialization there so older AITER builds keep the 24-to-32 padding
+    fallback while builds containing ROCm/aiter#4710 use 24 heads directly.
+    """
+    try:
+        from aiter.jit.core import AITER_CSRC_DIR
+
+        reduce_source = Path(AITER_CSRC_DIR) / "kernels" / "mla" / "reduce.cu"
+        source = "".join(reduce_source.read_text(encoding="utf-8").split())
+    except (ImportError, OSError):
+        return False
+    return "MLA_REDUCE_CASE_EF(NUM_HEAD,24,HEAD_DIM,512," in source
 
 
 @functools.lru_cache(maxsize=1)
@@ -838,9 +857,10 @@ class AiterMLAHelper:
     """
     AITER MLA persistent (asm) decode requires a multiple of 16 heads. Unaligned
     head counts through 128 are padded to the next multiple of 16 by tiling the
-    query heads and slicing to the padded size. Small divisors of 16 retain the
-    existing repeat_interleave and strided-unpad behavior. Aligned counts are
-    passed through without copies.
+    query heads and slicing to the padded size. Native H24 AITER builds bypass
+    that padding. Small divisors of 16 retain the existing repeat_interleave and
+    strided-unpad behavior. Native and aligned counts pass through without
+    copies.
     """
 
     _AITER_MIN_MLA_HEADS: Final = 16
@@ -873,6 +893,8 @@ class AiterMLAHelper:
 
     @staticmethod
     def get_actual_mla_num_heads(num_heads: int) -> int:
+        if num_heads == 24 and _aiter_mla_native_h24_supported():
+            return num_heads
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
         return -(-num_heads // m) * m
 

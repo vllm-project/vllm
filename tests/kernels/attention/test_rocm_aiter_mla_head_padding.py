@@ -17,6 +17,7 @@ import torch.nn.functional as F
 
 from vllm._aiter_ops import is_aiter_found
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla import rocm_aiter_mla
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLADecodeMetadata,
     AiterMLAHelper,
@@ -35,6 +36,14 @@ SCALE = 1.0 / math.sqrt(QK_HEAD_DIM)
 # repeat_interleave. Both pad to exactly 16 and round-trip.
 NON_DIVISOR_HEADS = [3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15]
 DIVISOR_HEADS = [1, 2, 4, 8]
+
+
+@pytest.fixture(autouse=True)
+def _disable_native_h24(monkeypatch):
+    """Exercise the padding fallback unless a test explicitly enables H24."""
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h24_supported", lambda: False
+    )
 
 
 def _rocm_aiter_available() -> bool:
@@ -139,6 +148,17 @@ def test_h24_output_discards_h32_padding_heads():
 
     assert unpadded_o.shape == (2, 24, 4)
     torch.testing.assert_close(unpadded_o, o[:, :24])
+
+
+def test_native_h24_is_zero_copy(monkeypatch):
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h24_supported", lambda: True
+    )
+    q = torch.arange(2 * 24 * 4, dtype=torch.float32).view(2, 24, 4)
+
+    assert AiterMLAHelper.get_actual_mla_num_heads(24) == 24
+    assert AiterMLAHelper.get_mla_padded_q(24, q) is q
+    assert AiterMLAHelper.get_mla_unpadded_o(24, q) is q
 
 
 def test_existing_divisor_head_mapping_is_unchanged():
