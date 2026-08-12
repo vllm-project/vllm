@@ -58,6 +58,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
     create_fp8_quant_key,
     is_layer_skipped,
     kFp8Dynamic128Sym,
@@ -772,6 +773,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def supports_eplb(self) -> bool:
         return True
 
+    @property
+    def input_quant_key(self) -> QuantKey | None:
+        if self.moe_kernel is None:
+            return None
+        return self.moe_kernel.input_quant_key
+
     def apply_monolithic(
         self,
         layer: RoutedExperts,
@@ -819,6 +826,36 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+        )
+
+    def apply_prequantized(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
+        data: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> torch.Tensor:
+        assert not self.is_monolithic
+        assert self.moe_kernel is not None
+        assert self.input_quant_key == kFp8Dynamic128Sym
+        return self.moe_kernel.apply(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
+            prequantized_data=data,
+            prequantized_scale=scale,
         )
 
 
