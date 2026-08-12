@@ -5,7 +5,6 @@ from typing import NamedTuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, SamplingMaskLists
@@ -70,32 +69,21 @@ class SamplingMaskTensors(NamedTuple):
         num_reqs, vocab_size = logits.shape
         packed_width = (vocab_size + 7) // 8
 
-        if logits.device.type == "cpu":
-            keep = torch.isfinite(logits)
-            keep &= num_sampled_tokens.bool().unsqueeze(1)
-            counts = keep.sum(dim=-1, dtype=torch.int32)
-            padding = -vocab_size % 8
-            if padding:
-                keep = F.pad(keep, (0, padding))
-            bit_shifts = torch.arange(8, device=logits.device, dtype=torch.uint8)
-            packed_mask = keep.reshape(num_reqs, -1, 8).to(torch.uint8)
-            packed_mask = (packed_mask << bit_shifts).sum(dim=-1, dtype=torch.uint8)
-        else:
-            packed_mask = torch.empty(
-                (num_reqs, packed_width), dtype=torch.uint8, device=logits.device
-            )
-            counts = torch.empty(num_reqs, dtype=torch.int32, device=logits.device)
-            _pack_sampling_mask_kernel[(num_reqs,)](
-                logits,
-                logits.stride(0),
-                logits.stride(1),
-                num_sampled_tokens,
-                packed_mask,
-                packed_mask.stride(0),
-                counts,
-                vocab_size,
-                BLOCK_SIZE=8192,
-            )
+        packed_mask = torch.empty(
+            (num_reqs, packed_width), dtype=torch.uint8, device=logits.device
+        )
+        counts = torch.empty(num_reqs, dtype=torch.int32, device=logits.device)
+        _pack_sampling_mask_kernel[(num_reqs,)](
+            logits,
+            logits.stride(0),
+            logits.stride(1),
+            num_sampled_tokens,
+            packed_mask,
+            packed_mask.stride(0),
+            counts,
+            vocab_size,
+            BLOCK_SIZE=8192,
+        )
 
         return cls(packed_mask, counts, vocab_size)
 
