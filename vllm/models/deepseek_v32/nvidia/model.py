@@ -35,7 +35,10 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
 )
-from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.models.common.ops.fused_allreduce_rms_norm import (
+    fused_allreduce_rms_norm,
+    fused_allreduce_rms_norm_fp8_quant,
+)
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -118,6 +121,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         full_num_tokens = positions.shape[0]
+        qkv_input = None
 
         if residual is None:
             residual = hidden_states
@@ -127,26 +131,44 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         else:
             # The previous layer's MLP/MoE output is left un-reduced; fuse its
             # all-reduce into this input_layernorm.
-            hidden_states, residual = fused_allreduce_rms_norm(
-                hidden_states, residual, self.input_layernorm
+            hidden_states, residual, qkv_input = fused_allreduce_rms_norm_fp8_quant(
+                hidden_states,
+                residual,
+                self.input_layernorm,
+                self.self_attn.fused_qkv_a_proj,
             )
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         # self_attn's o_proj runs reduce_results=False; reduce before RMSNorm.
-        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            qkv_input=qkv_input,
+        )
+        moe_input = None
         if self.use_sequence_parallel:
             hidden_states = sp_reduce_scatter(hidden_states)
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
         else:
-            hidden_states, residual = fused_allreduce_rms_norm(
-                hidden_states, residual, self.post_attention_layernorm
-            )
+            if isinstance(self.mlp, DeepseekV2MoE):
+                hidden_states, residual, moe_input = fused_allreduce_rms_norm_fp8_quant(
+                    hidden_states,
+                    residual,
+                    self.post_attention_layernorm,
+                    self.mlp.experts,
+                )
+            else:
+                hidden_states, residual = fused_allreduce_rms_norm(
+                    hidden_states, residual, self.post_attention_layernorm
+                )
 
         if self.use_sequence_parallel and isinstance(self.mlp, DeepseekV2MoE):
             hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+        elif isinstance(self.mlp, DeepseekV2MoE):
+            hidden_states = self.mlp(hidden_states, quantized_hidden_states=moe_input)
         else:
             hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
