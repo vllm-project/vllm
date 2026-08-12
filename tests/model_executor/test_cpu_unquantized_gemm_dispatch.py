@@ -6,8 +6,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers import utils
-from vllm.platforms import CpuArchEnum
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 
 
 @pytest.fixture(scope="module")
