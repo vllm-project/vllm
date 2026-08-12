@@ -11,6 +11,9 @@ from vllm.distributed import (
     tensor_model_parallel_gather,
 )
 from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
@@ -63,10 +66,11 @@ class LogitsProcessor(PluggableLayer):
     def forward(
         self,
         lm_head: VocabParallelEmbedding,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
         embedding_bias: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         if self.logits_as_input:
+            assert isinstance(hidden_states, torch.Tensor)
             logits = hidden_states
         else:
             # Get the logits for the next tokens.
@@ -98,14 +102,21 @@ class LogitsProcessor(PluggableLayer):
     def _apply_head(
         self,
         lm_head: VocabParallelEmbedding,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor:
         """Project hidden states through the lm_head, honoring head_dtype."""
-        if self.head_dtype is None or self.head_dtype == hidden_states.dtype:
+        input_dtype = (
+            hidden_states.orig_dtype
+            if isinstance(hidden_states, QuantizedActivation)
+            else hidden_states.dtype
+        )
+        if self.head_dtype is None or self.head_dtype == input_dtype:
             return lm_head.quant_method.apply(
                 lm_head, hidden_states, bias=embedding_bias
             )
+
+        assert isinstance(hidden_states, torch.Tensor)
 
         if not isinstance(lm_head.quant_method, UnquantizedEmbeddingMethod):
             raise ValueError(
@@ -136,7 +147,7 @@ class LogitsProcessor(PluggableLayer):
 
     def _get_logits(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
         lm_head: VocabParallelEmbedding,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:

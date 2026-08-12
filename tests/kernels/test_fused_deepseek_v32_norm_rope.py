@@ -27,6 +27,9 @@ rtol/atol=1e-2 (the tolerance the sibling deepseek_v4 fused-kernel test uses).
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8_packed_for_deepgemm,
+)
 from vllm.models.deepseek_v32.common import kernels as K
 from vllm.platforms import current_platform
 
@@ -290,6 +293,67 @@ def test_fused_norm_rope_no_indexer(num_tokens: int):
     )
     # Shared layers reuse the previous indexer's top-k: buffer must be untouched.
     assert (topk == 7).all(), "topk buffer should be untouched on shared layer"
+
+
+@pytest.mark.parametrize("num_tokens", [1, 17, 512])
+def test_fused_norm_rope_quantizes_q_lora_for_deepgemm(num_tokens: int):
+    torch.manual_seed(7)
+    dev = "cuda"
+    max_pos = 8192
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
+    mla_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+    mla_cache = torch.zeros(
+        1,
+        max_pos,
+        KV_LORA + ROPE_DIM,
+        device=dev,
+        dtype=torch.bfloat16,
+    )
+    slot = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+    topk = torch.full((num_tokens, 2048), 7, device=dev, dtype=torch.int32)
+    q_quant = torch.empty_like(q_c, dtype=FP8)
+    num_scale_packs = (Q_LORA // 128 + 3) // 4
+    aligned_tokens = ((num_tokens + 3) // 4) * 4
+    q_scale = torch.empty_strided(
+        (num_tokens, num_scale_packs),
+        (1, aligned_tokens),
+        device=dev,
+        dtype=torch.int32,
+    )
+
+    q_out = K.fused_norm_rope(
+        pos,
+        q_c,
+        qw,
+        EPS,
+        kv_c,
+        kvw,
+        EPS,
+        k_pe,
+        mla_cos_sin,
+        None,
+        None,
+        None,
+        EPS,
+        None,
+        topk,
+        slot_mapping=slot,
+        mla_kv_cache=mla_cache,
+        has_indexer=False,
+        q_c_quant_out=q_quant,
+        q_c_quant_scale=q_scale,
+    )
+    ref_quant, ref_scale = per_token_group_quant_fp8_packed_for_deepgemm(q_out, 128)
+
+    torch.testing.assert_close(
+        q_quant.view(torch.uint8), ref_quant.view(torch.uint8), rtol=0, atol=0
+    )
+    torch.testing.assert_close(q_scale, ref_scale, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])

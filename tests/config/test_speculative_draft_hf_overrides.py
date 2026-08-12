@@ -86,6 +86,21 @@ def test_arch_mapping_applies_before_callable_override():
 
 
 @pytest.mark.cpu_test
+def test_glm_dsa_uses_sparse_mtp_model():
+    config = _make_hf_config(
+        architectures=["GlmMoeDsaForCausalLM"],
+        model_type="glm_moe_dsa",
+        num_nextn_predict_layers=1,
+    )
+
+    out = SpeculativeConfig.hf_config_override(config)
+
+    assert out.model_type == "deepseek_mtp"
+    assert out.architectures == ["DeepseekV32MTPModel"]
+    assert out.n_predict == 1
+
+
+@pytest.mark.cpu_test
 def test_inkling_override_exposes_only_first_mtp_depth():
     text_config = _make_hf_config(
         architectures=["InklingForCausalLM"],

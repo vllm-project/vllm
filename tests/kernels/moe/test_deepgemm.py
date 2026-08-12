@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
+    per_token_group_quant_fp8_packed_for_deepgemm,
 )
 from vllm.utils.deep_gemm import (
     calc_diff,
@@ -184,6 +185,26 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     )
     diff = calc_diff(out_deepgemm, out_triton)
     assert diff < 0.001, f"Diff exceeded 1%: {diff}"
+    if deep_gemm_experts.input_quant_key is not None:
+        prequantized, prequantized_scale = (
+            per_token_group_quant_fp8_packed_for_deepgemm(tokens_bf16, block_size[1])
+        )
+        out_prequantized = deep_gemm_experts.apply(
+            hidden_states=tokens_bf16,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=num_experts,
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=None,
+            prequantized_data=prequantized,
+            prequantized_scale=prequantized_scale,
+        )
+        torch.testing.assert_close(out_prequantized, out_deepgemm, rtol=0, atol=0)
+        return 2
+    return 1
 
 
 # Note: N <= 512 will disable the deepgemm path due to performance issues.
@@ -222,7 +243,7 @@ def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch, workspace_i
         if topk > num_experts:
             pytest.skip(f"topk={topk} > num_experts={num_experts}")
 
-        run_single_case(
+        expected_calls = run_single_case(
             m=m,
             n=n,
             k=k,
@@ -232,7 +253,7 @@ def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch, workspace_i
         )
 
         # ensure that the DeepGEMM path was indeed taken.
-        assert call_counter["cnt"] == 1, (
+        assert call_counter["cnt"] == expected_calls, (
             f"DeepGEMM path was not executed during the test. "
             f"Call counter: {call_counter['cnt']}"
         )

@@ -12,7 +12,10 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+)
 
 
 @dataclass
@@ -33,6 +36,41 @@ class QuantizedActivation:
     orig_dtype: torch.dtype
     orig_shape: torch.Size
     quant_key: QuantKey
+
+
+def index_quantized_activation(
+    x: torch.Tensor | QuantizedActivation,
+    index: torch.Tensor | slice,
+) -> torch.Tensor | QuantizedActivation:
+    """Select rows while preserving the packed DeepGEMM scale layout."""
+    if not isinstance(x, QuantizedActivation):
+        return x[index]
+
+    assert x.quant_key == kFp8Dynamic128Sym
+    assert x.data.ndim == 2 and x.scale.ndim == 2
+    data = x.data[index]
+    if data.ndim == 1:
+        data = data.unsqueeze(0)
+
+    selected_scale = x.scale[index]
+    if selected_scale.ndim == 1:
+        selected_scale = selected_scale.unsqueeze(0)
+    num_rows = data.shape[0]
+    aligned_rows = ((num_rows + 3) // 4) * 4
+    scale = torch.empty_strided(
+        (num_rows, selected_scale.shape[1]),
+        (1, aligned_rows),
+        dtype=selected_scale.dtype,
+        device=selected_scale.device,
+    )
+    scale.copy_(selected_scale)
+    return QuantizedActivation(
+        data=data,
+        scale=scale,
+        orig_dtype=x.orig_dtype,
+        orig_shape=data.shape,
+        quant_key=x.quant_key,
+    )
 
 
 def expose_input_quant_key(layer: torch.nn.Module, kernel) -> None:

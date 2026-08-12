@@ -9,6 +9,10 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    index_quantized_activation,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -258,7 +262,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         spec_module_idx: int,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
             attn_metadata,
@@ -410,7 +414,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             )
 
             # Sample draft tokens for the current step.
-            sample_hidden_states = last_hidden_states[last_token_indices]
+            sample_hidden_states = index_quantized_activation(
+                last_hidden_states, last_token_indices
+            )
             draft_tokens = self.sample_draft(
                 sample_hidden_states,
                 sample_positions,

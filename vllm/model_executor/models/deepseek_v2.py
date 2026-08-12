@@ -54,6 +54,7 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -394,6 +395,7 @@ class DeepseekV2MoE(nn.Module):
         self,
         hidden_states: torch.Tensor,
         already_sequence_parallel: bool = False,
+        quantized_hidden_states: QuantizedActivation | None = None,
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -403,9 +405,19 @@ class DeepseekV2MoE(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=hidden_states
-        )
+        if self.experts.is_internal_router:
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=hidden_states,
+                quantized_hidden_states=quantized_hidden_states,
+            )
+        else:
+            router_logits, _ = self.gate(hidden_states)
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                quantized_hidden_states=quantized_hidden_states,
+            )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(

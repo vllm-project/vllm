@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
@@ -36,6 +37,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.
         return self.moe_kernel is not None
+
+    @property
+    def input_quant_key(self) -> QuantKey | None:
+        return None
 
     @property
     def mk_can_overlap_shared_experts(self) -> bool:

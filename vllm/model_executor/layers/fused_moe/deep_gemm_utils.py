@@ -187,6 +187,7 @@ def _fwd_kernel_ep_scatter_2(
     SCALE_HIDDEN_SIZE: tl.constexpr,
     SCALE_HIDDEN_SIZE_PAD: tl.constexpr,
     PACK_UE8M0: tl.constexpr,
+    INPUT_PACKED_UE8M0: tl.constexpr,
     SCALE_PACKED_SIZE: tl.constexpr,
     SCALE_PACKED_SIZE_PAD: tl.constexpr,
 ):
@@ -210,28 +211,37 @@ def _fwd_kernel_ep_scatter_2(
         to_copy = tl.load(recv_x + token_id * recv_x_stride0 + offset_in, mask=mask)
 
         if PACK_UE8M0:
-            # Pack 4 UE8M0 bytes into one int32 (byte j = group 4*pk+j).
             base_s = recv_x_scale + token_id * recv_x_scale_stride0
-            g0, g1 = offs_pk * 4, offs_pk * 4 + 1
-            g2, g3 = offs_pk * 4 + 2, offs_pk * 4 + 3
-            b0 = tl.load(
-                base_s + g0 * recv_x_scale_stride1, mask=g0 < SCALE_HIDDEN_SIZE
-            )
-            b1 = tl.load(
-                base_s + g1 * recv_x_scale_stride1, mask=g1 < SCALE_HIDDEN_SIZE
-            )
-            b2 = tl.load(
-                base_s + g2 * recv_x_scale_stride1, mask=g2 < SCALE_HIDDEN_SIZE
-            )
-            b3 = tl.load(
-                base_s + g3 * recv_x_scale_stride1, mask=g3 < SCALE_HIDDEN_SIZE
-            )
-            packed_s = (
-                b0.to(tl.int32)
-                | (b1.to(tl.int32) << 8)
-                | (b2.to(tl.int32) << 16)
-                | (b3.to(tl.int32) << 24)
-            )
+            if INPUT_PACKED_UE8M0:
+                packed_s = tl.load(
+                    base_s + offs_pk * recv_x_scale_stride1, mask=mask_pk
+                )
+            else:
+                # Pack 4 UE8M0 bytes into one int32 (byte j = group 4*pk+j).
+                g0, g1 = offs_pk * 4, offs_pk * 4 + 1
+                g2, g3 = offs_pk * 4 + 2, offs_pk * 4 + 3
+                b0 = tl.load(
+                    base_s + g0 * recv_x_scale_stride1,
+                    mask=g0 < SCALE_HIDDEN_SIZE,
+                )
+                b1 = tl.load(
+                    base_s + g1 * recv_x_scale_stride1,
+                    mask=g1 < SCALE_HIDDEN_SIZE,
+                )
+                b2 = tl.load(
+                    base_s + g2 * recv_x_scale_stride1,
+                    mask=g2 < SCALE_HIDDEN_SIZE,
+                )
+                b3 = tl.load(
+                    base_s + g3 * recv_x_scale_stride1,
+                    mask=g3 < SCALE_HIDDEN_SIZE,
+                )
+                packed_s = (
+                    b0.to(tl.int32)
+                    | (b1.to(tl.int32) << 8)
+                    | (b2.to(tl.int32) << 16)
+                    | (b3.to(tl.int32) << 24)
+                )
         else:
             to_copy_s = tl.load(
                 recv_x_scale + token_id * recv_x_scale_stride0 + offset_in_s,
@@ -286,6 +296,7 @@ def ep_scatter(
     align_m: int = 128,
     block_size: int = 128,
     pack_ue8m0: bool = False,
+    input_packed_ue8m0: bool = False,
 ):
     # BLOCK_E is the m_indices fill-loop tile (masked), independent of align_m.
     BLOCK_E = 128
@@ -299,7 +310,9 @@ def ep_scatter(
     assert m_indices.shape[0] % align_m == 0
     assert expert_start_loc.shape[0] == num_experts
 
-    # pack_ue8m0: scatter packs 4 UE8M0 bytes per int32; else copies scales as-is.
+    assert not input_packed_ue8m0 or pack_ue8m0
+    # pack_ue8m0: scatter writes 4 UE8M0 bytes per int32; input may already
+    # have that representation or be packed by the scatter kernel.
     scale_hidden_size = hidden_size // BLOCK_D
     scale_packed_size = (scale_hidden_size + 3) // 4 if pack_ue8m0 else 1
 
@@ -346,6 +359,7 @@ def ep_scatter(
         SCALE_HIDDEN_SIZE=scale_hidden_size,
         SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(scale_hidden_size),
         PACK_UE8M0=pack_ue8m0,
+        INPUT_PACKED_UE8M0=input_packed_ue8m0,
         SCALE_PACKED_SIZE=scale_packed_size,
         SCALE_PACKED_SIZE_PAD=triton.next_power_of_2(scale_packed_size),
     )
@@ -493,9 +507,10 @@ def deepgemm_moe_permute(
     if aq_out is None:
         aq_out = torch.empty((M_sum, H), device=device, dtype=aq.dtype)
 
-    # uint8 UE8M0 (MXFP8) -> scatter packs into DeepGEMM's int32 MN-major
-    # TMA-aligned layout; float32 (FP8/FP4) scattered row-major as-is.
-    pack_ue8m0 = aq_scale.dtype == torch.uint8
+    # uint8 UE8M0 (MXFP8) is packed by scatter; int32 UE8M0 is already packed;
+    # float32 FP8/FP4 scales are scattered row-major as-is.
+    input_packed_ue8m0 = aq_scale.dtype == torch.int32
+    pack_ue8m0 = aq_scale.dtype == torch.uint8 or input_packed_ue8m0
     sf_k = H // block_k
     if pack_ue8m0:
         packed_sf_k = (sf_k + 3) // 4
@@ -544,6 +559,7 @@ def deepgemm_moe_permute(
         align_m=align_used,
         block_size=block_k,
         pack_ue8m0=pack_ue8m0,
+        input_packed_ue8m0=input_packed_ue8m0,
     )
 
     return aq_out, aq_scale_out, expert_ids, inv_perm, align_used

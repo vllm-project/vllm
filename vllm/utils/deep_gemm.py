@@ -91,6 +91,7 @@ class DeepGemmQuantScaleFMT(Enum):
 
 
 @functools.cache
+@torch.compiler.assume_constant_result
 def is_deep_gemm_supported() -> bool:
     """Return `True` if DeepGEMM is supported on the current platform.
     Currently, only Hopper and Blackwell GPUs are supported.
@@ -100,6 +101,7 @@ def is_deep_gemm_supported() -> bool:
 
 
 @functools.cache
+@torch.compiler.assume_constant_result
 def is_deep_gemm_e8m0_used() -> bool:
     """Return `True` if vLLM is configured to use DeepGEMM "
     "E8M0 scale on a Hopper or Blackwell-class GPU.

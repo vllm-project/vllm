@@ -44,6 +44,8 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
@@ -117,6 +119,8 @@ def _moe_forward(
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
+    prequantized_data: torch.Tensor | None,
+    prequantized_scale: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> torch.Tensor:
@@ -126,6 +130,8 @@ def _moe_forward(
         router_logits,
         shared_experts_input,
         input_ids,
+        prequantized_data,
+        prequantized_scale,
     )
 
 
@@ -134,6 +140,8 @@ def _moe_forward_fake(
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
+    prequantized_data: torch.Tensor | None,
+    prequantized_scale: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> torch.Tensor:
@@ -151,6 +159,8 @@ def _moe_forward_shared(
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
+    prequantized_data: torch.Tensor | None,
+    prequantized_scale: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -160,6 +170,8 @@ def _moe_forward_shared(
         router_logits,
         shared_experts_input,
         input_ids,
+        prequantized_data,
+        prequantized_scale,
     )
 
 
@@ -168,6 +180,8 @@ def _moe_forward_shared_fake(
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
+    prequantized_data: torch.Tensor | None,
+    prequantized_scale: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -310,6 +324,14 @@ class MoERunner(MoERunnerInterface):
     @property
     def shared_experts(self) -> SharedExperts | None:
         return self._shared_experts
+
+    @property
+    def is_internal_router(self) -> bool:
+        return self.gate is not None
+
+    @property
+    def input_quant_key(self) -> QuantKey | None:
+        return self._quant_method.input_quant_key
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
@@ -574,6 +596,8 @@ class MoERunner(MoERunnerInterface):
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
         shared_experts_overlapping: bool = False,
+        prequantized_data: torch.Tensor | None = None,
+        prequantized_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
@@ -605,13 +629,26 @@ class MoERunner(MoERunnerInterface):
                 input_ids=input_ids,
             )
 
-            fused_out = self.routed_experts.forward_modular(
-                x=hidden_states,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                shared_experts=self._shared_experts,
-                shared_experts_input=shared_experts_input,
-            )
+            if prequantized_data is None:
+                assert prequantized_scale is None
+                fused_out = self.routed_experts.forward_modular(
+                    x=hidden_states,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    shared_experts=self._shared_experts,
+                    shared_experts_input=shared_experts_input,
+                )
+            else:
+                assert prequantized_scale is not None
+                fused_out = self.routed_experts.forward_modular_prequantized(
+                    x=hidden_states,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    data=prequantized_data,
+                    scale=prequantized_scale,
+                    shared_experts=self._shared_experts,
+                    shared_experts_input=shared_experts_input,
+                )
 
         if shared_experts_overlapping:
             assert self._shared_experts is not None
@@ -659,6 +696,7 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        quantized_hidden_states: QuantizedActivation | None = None,
     ) -> torch.Tensor:
         """Invoke the fused moe layer.
 
@@ -703,11 +741,22 @@ class MoERunner(MoERunnerInterface):
             )
         )
 
+        if quantized_hidden_states is None:
+            prequantized_data = None
+            prequantized_scale = None
+        else:
+            assert quantized_hidden_states.quant_key == self.input_quant_key
+            assert quantized_hidden_states.orig_shape == hidden_states.shape
+            prequantized_data = quantized_hidden_states.data
+            prequantized_scale = quantized_hidden_states.scale
+
         result = self._forward_entry(
             hidden_states,
             router_logits,
             shared_experts_input,
             input_ids,
+            prequantized_data,
+            prequantized_scale,
             self._encode_layer_name(),
             self.moe_config.hidden_dim_unpadded
             if self._quant_method.has_unpadded_output
@@ -825,6 +874,8 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
+        prequantized_data: torch.Tensor | None = None,
+        prequantized_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Entry point called by the custom op to run the MoE computation.
 
@@ -868,12 +919,18 @@ class MoERunner(MoERunnerInterface):
                 router_logits,
             )
 
+            if prequantized_data is not None:
+                assert not self.do_naive_dispatch_combine
+                assert self.moe_config.pcp_size == 1
+
             shared_output, hidden_states = self._apply_quant_method(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
                 shared_experts_overlapping=shared_experts_overlapping,
+                prequantized_data=prequantized_data,
+                prequantized_scale=prequantized_scale,
             )
 
             return self._maybe_combine(

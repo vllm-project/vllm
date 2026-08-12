@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
 class MoERunnerInterface(PluggableLayer, ABC):
@@ -43,6 +44,16 @@ class MoERunnerInterface(PluggableLayer, ABC):
     @property
     @abstractmethod
     def shared_experts(self) -> SharedExperts | None:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def is_internal_router(self) -> bool:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def input_quant_key(self) -> QuantKey | None:
         raise NotImplementedError
 
     @property
