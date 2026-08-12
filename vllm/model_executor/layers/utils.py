@@ -183,7 +183,7 @@ def rocm_unquantized_gemm_impl(
     )
 
     if use_skinny_n5to8:
-        x_view = x.reshape(-1, x.size(-1))
+        x_view = x.reshape(-1, x.size(-1)).contiguous()
         out = ops.swmmac_gemm(x_view, weight, m, cu_count, bias)
         return out.reshape(*x.shape[:-1], out.shape[-1])
 
