@@ -9,8 +9,12 @@ import torch
 
 from tests.kernels.quantization.nvfp4_utils import dequant_nvfp4_kv_cache
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import fp8_k_nvfp4_v_cache_split_views
-from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+from vllm.v1.attention.backends.flashinfer import (
+    FlashInferBackend,
+    FlashInferMetadataBuilder,
+)
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
@@ -33,6 +37,29 @@ def test_fp8_k_nvfp4_v_query_dtype_is_e4m3() -> None:
 
     assert builder.get_q_data_type(is_prefill=True) == torch.float8_e4m3fn
     assert builder.get_q_data_type(is_prefill=False) == torch.float8_e4m3fn
+
+
+def test_fp8_k_nvfp4_v_rejects_sm107() -> None:
+    kwargs = dict(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="fp8_k_nvfp4_v",
+        block_size=64,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+    )
+    assert (
+        FlashInferBackend.supports_combination(
+            **kwargs, device_capability=DeviceCapability(10, 3)
+        )
+        is None
+    )
+    reason = FlashInferBackend.supports_combination(
+        **kwargs, device_capability=DeviceCapability(10, 7)
+    )
+    assert reason == "fp8_k_nvfp4_v is not supported on SM107"
 
 
 @torch.inference_mode()
