@@ -839,6 +839,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "DeepseekOCR2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR-2",
     ),
+    "Dots3NoteForCausalLM": _HfExamplesInfo(
+        "rednote-hilab/dots3.note",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "UnlimitedOCRForCausalLM": _HfExamplesInfo(
         "baidu/Unlimited-OCR",
     ),
@@ -1647,6 +1652,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DeepSeekV4MTPModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash",
         speculative_model="deepseek-ai/DeepSeek-V4-Flash",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
+    "Dots3NoteMTPModel": _HfExamplesInfo(
+        "rednote-hilab/dots3.note",
+        speculative_model="rednote-hilab/dots3.note",
         trust_remote_code=True,
         is_available_online=False,
     ),
