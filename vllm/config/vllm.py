@@ -1585,6 +1585,13 @@ class VllmConfig:
                 "Prefill context parallelism requires Model Runner V2. "
                 "Remove VLLM_USE_V2_MODEL_RUNNER=0."
             )
+        elif self.model_config is not None and self.model_config.enable_word_timestamps:
+            # Capture is only wired into the V2 model runner; failing here beats
+            # silently returning null word timestamps.
+            raise ValueError(
+                "Word-level timestamps require the V2 model runner. "
+                "Unset VLLM_USE_V2_MODEL_RUNNER to let it be selected."
+            )
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)

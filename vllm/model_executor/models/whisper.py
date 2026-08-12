@@ -3,7 +3,9 @@
 
 import enum
 import math
-from collections.abc import Iterable, Mapping, Sequence
+import os
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from typing import Annotated
 
@@ -84,6 +86,315 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+# Word-timestamp capture (opt-in): record cross-attention Q/K before the fused
+# kernel and recompute softmax(Q.K^T) + DTW on ``alignment_heads`` post-forward,
+# so the fused backends need not expose attention weights. State is module-level
+# so the compiled forward reads the enable flag as a compile-time constant.
+_WORD_ALIGN_ENABLED = False
+# Per-slot capture buffers, keyed by a stable request slot the runner assigns.
+_WORD_ALIGN_QBUF: torch.Tensor | None = None  # [layers, slots, max_tgt, d_model]
+_WORD_ALIGN_KBUF: torch.Tensor | None = None  # [layers, slots, max_src, d_model]
+# Destination row per captured token/frame (slot * max_positions + pos), which
+# the runner uploads before each forward. Layer-major buffers make it the same
+# row in every layer, so one index serves them all.
+_WORD_ALIGN_QIDX: torch.Tensor | None = None  # [max_q_tokens]
+_WORD_ALIGN_KIDX: torch.Tensor | None = None  # [max_k_frames]
+# Actual (pre-padding) encoder-frame count per slot, for DTW cropping. Whisper
+# pads audio to 30s so the encoder always emits 1500 frames; without cropping to
+# the real length the DTW degenerates on short clips.
+_WORD_ALIGN_NFRAMES: torch.Tensor | None = None  # [max_slots]
+_WORD_ALIGN_POOL: ThreadPoolExecutor | None = None  # parallel per-request DTW
+
+
+@torch.library.custom_op("whisper_align::capture", mutates_args={"qbuf", "kbuf"})
+def _word_align_capture(
+    q: torch.Tensor,
+    k: torch.Tensor | None,
+    qbuf: torch.Tensor,
+    kbuf: torch.Tensor,
+    qidx: torch.Tensor,
+    kidx: torch.Tensor,
+    layer: int,
+) -> None:
+    # Stateless scatter into per-slot buffers using runner-provided row
+    # indices; CUDA-graph safe (index_copy_ + static buffers).
+    nq = q.shape[0]
+    if nq > qidx.shape[0]:  # skip oversized profiling/warmup batch
+        return
+    ql, _, _, qd = qbuf.shape
+    qbuf.view(ql, -1, qd)[layer].index_copy_(0, qidx[:nq], q.to(qbuf.dtype))
+    if k is not None:
+        nk = k.shape[0]
+        if nk <= kidx.shape[0]:
+            kl, _, _, kd = kbuf.shape
+            kbuf.view(kl, -1, kd)[layer].index_copy_(0, kidx[:nk], k.to(kbuf.dtype))
+
+
+@_word_align_capture.register_fake
+def _(q, k, qbuf, kbuf, qidx, kidx, layer):
+    return None
+
+
+def _word_align_median_filter(x: torch.Tensor, width: int) -> torch.Tensor:
+    pad = width // 2
+    if x.shape[-1] <= pad:  # too few frames for reflect-pad (near-silent clip)
+        return x
+    xp = nn.functional.pad(x, (pad, pad), mode="reflect")
+    return xp.unfold(-1, width, 1).median(dim=-1).values
+
+
+def _word_align_neg_weights(
+    qbuf: torch.Tensor,
+    kbuf: torch.Tensor,
+    n_positions: int,
+    alignment_heads: list[tuple[int, int]],
+    num_heads: int,
+    head_dim: int,
+    num_audio_frames: int,
+    median_filter_width: int,
+) -> torch.Tensor:
+    """GPU part: recompute cross-attention on ``alignment_heads``, standardize +
+    median-filter, and return the negated weight matrix (float32) still on the
+    device. The caller fetches it, so one step's finishing requests can queue all
+    their device work before anything waits on it."""
+    scaling = head_dim**-0.5
+    frames = num_audio_frames // 2  # encoder downsamples audio frames by 2
+    # Cast once per *layer*, not once per head: several alignment heads share a
+    # layer (turbo: 6 heads over 2 layers), and re-casting the whole encoder K
+    # per head rewrote max_source_positions x d_model floats each time.
+    qc: dict[int, torch.Tensor] = {}
+    kc: dict[int, torch.Tensor] = {}
+    for layer, _ in alignment_heads:
+        if layer in qc:
+            continue
+        qc[layer] = (
+            qbuf[layer, :n_positions].float().view(n_positions, num_heads, head_dim)
+        )
+        kc[layer] = kbuf[layer].float().view(-1, num_heads, head_dim)
+    per_head = []
+    for layer, head in alignment_heads:
+        q, k = qc[layer], kc[layer]
+        # The softmax still normalizes over every encoder frame (transformers
+        # parity); cropping to the real frames before the stack only shrinks the
+        # copy, from n_heads x n_positions x max_frames down to the real length.
+        per_head.append(
+            torch.softmax(scaling * (q[:, head] @ k[:, head].T), dim=-1)[..., :frames]
+        )
+    weights = torch.stack(per_head)
+    weights = (weights - weights.mean(-2, keepdim=True)) / weights.std(
+        -2, keepdim=True, unbiased=False
+    )
+    weights = _word_align_median_filter(weights, median_filter_width).mean(dim=0)
+    return (-weights).float()
+
+
+def _word_align_fetch(weights: list[torch.Tensor]) -> list[np.ndarray]:
+    """Bring a step's weight matrices to the host in a single copy.
+
+    The per-request matrices differ in shape (decoder positions x real encoder
+    frames), so they are flattened into one transfer and viewed back out. Copying
+    them one at a time would make each request's recompute a separate blocking
+    wait; one copy lets them queue and pays a single synchronization.
+    """
+    if len(weights) == 1:
+        return [weights[0].cpu().numpy()]
+    flat = torch.cat([w.reshape(-1) for w in weights]).cpu().numpy()
+    out: list[np.ndarray] = []
+    offset = 0
+    for w in weights:
+        end = offset + w.numel()
+        out.append(flat[offset:end].reshape(w.shape))
+        offset = end
+    return out
+
+
+def _word_align_finishing(
+    req_ids: list[str],
+    sampled_token_ids: list[list[int]],
+    req_slots: dict[str, int],
+    req_npos: dict[str, int],
+    req_final_npos: dict[str, int],
+    eos_token_id: int,
+) -> list[tuple[str, int, int]]:
+    """Pick the ``(req_id, slot, n_positions)`` triples to align this step.
+
+    The readout runs in the worker, where finish reasons are not known yet -- the
+    scheduler decides those a step later, by which time the capture slot may have
+    been handed to another request. So "is this the last decode step?" is inferred
+    from what the worker does know: the request emitted eos, or it just used the
+    last decoder position its token budget allows.
+    """
+    finishing: list[tuple[str, int, int]] = []
+    for i, req_id in enumerate(req_ids):
+        toks = sampled_token_ids[i] if i < len(sampled_token_ids) else None
+        if not toks:
+            continue
+        slot = req_slots.get(req_id)
+        n = req_npos.get(req_id, 0)
+        if slot is None or n <= 0:
+            continue
+        # No budget recorded -> a bound that no request can reach, so only eos
+        # triggers the readout (the pre-existing behaviour).
+        if toks[-1] != eos_token_id and n < req_final_npos.get(req_id, 1 << 62):
+            continue
+        finishing.append((req_id, slot, n))
+    return finishing
+
+
+def _word_align_dtw_core(neg_weights: np.ndarray, time_precision: float) -> np.ndarray:
+    """Scalar DTW over the cost matrix, written for numba (see
+    ``_word_align_dtw_kernel``); do not call this uncompiled.
+
+    Bit-identical to transformers' ``_dynamic_time_warping``: same float32
+    arithmetic, same tie-breaking, and row-major cell order resolves the same
+    dependencies (``[i-1,j-1]``, ``[i-1,j]``, ``[i,j-1]`` are all already final).
+    """
+    n, m = neg_weights.shape
+    cost = np.full((n + 1, m + 1), np.inf, dtype=np.float32)
+    cost[0, 0] = np.float32(0.0)
+    trace = np.zeros((n + 1, m + 1), dtype=np.int8)
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            c0 = cost[i - 1, j - 1]
+            c1 = cost[i - 1, j]
+            c2 = cost[i, j - 1]
+            if c0 < c1 and c0 < c2:
+                t = 0
+            elif c1 < c0 and c1 < c2:
+                t = 1
+            else:
+                t = 2
+            mn = c0 if c0 < c1 else c1
+            if c2 < mn:
+                mn = c2
+            # ``np.minimum`` propagates NaN but a bare ``<`` chain does not, and
+            # NaN does reach here (a one-position request standardizes by a zero
+            # std). c1 is already covered by the else-branch above.
+            if c0 != c0:
+                mn = c0
+            if c2 != c2:
+                mn = c2
+            cost[i, j] = neg_weights[i - 1, j - 1] + mn
+            trace[i, j] = t
+    # Backtrace. Outside the grid the trace is fixed: row 0 walks left, column 0
+    # walks up (transformers seeds trace[0, :] = 2 and trace[:, 0] = 1).
+    cap = n + m + 2
+    bt_text = np.empty(cap, dtype=np.int64)
+    bt_time = np.empty(cap, dtype=np.int64)
+    i = n
+    j = m
+    cnt = 0
+    while i > 0 or j > 0:
+        bt_text[cnt] = i - 1
+        bt_time[cnt] = j - 1
+        cnt += 1
+        if i == 0:
+            t = 2
+        elif j == 0:
+            t = 1
+        else:
+            t = trace[i, j]
+        if t == 0:
+            i -= 1
+            j -= 1
+        elif t == 1:
+            i -= 1
+        else:
+            j -= 1
+    # Walk the backtrace in forward order and keep the first frame of each
+    # decoder position (the "jumps" mask in the transformers reference).
+    out = np.empty(cnt, dtype=np.float64)
+    k = 0
+    prev_text = np.int64(-1)
+    for p in range(cnt - 1, -1, -1):
+        if p == cnt - 1 or bt_text[p] != prev_text:
+            out[k] = np.float64(bt_time[p]) * time_precision
+            k += 1
+        prev_text = bt_text[p]
+    return out[:k]
+
+
+def _word_align_dtw_numpy(neg_weights: np.ndarray, time_precision: float) -> np.ndarray:
+    """Fallback for builds without numba: same DTW, vectorized over
+    anti-diagonals. An order of magnitude slower than the compiled kernel, so it
+    is a portability path; it is also the bit-exact reference that kernel is
+    tested against."""
+    n, m = neg_weights.shape
+    cost = np.full((n + 1, m + 1), np.inf, dtype=np.float32)
+    cost[0, 0] = 0.0
+    trace = np.zeros((n + 1, m + 1), dtype=np.int8)
+    for d in range(2, n + m + 1):
+        i = np.arange(max(1, d - m), min(n, d - 1) + 1)
+        if not i.size:
+            continue
+        j = d - i
+        c0, c1, c2 = cost[i - 1, j - 1], cost[i - 1, j], cost[i, j - 1]
+        t = np.full(i.shape, 2, dtype=np.int8)
+        t[(c0 < c1) & (c0 < c2)] = 0
+        t[(c1 < c0) & (c1 < c2)] = 1
+        cost[i, j] = neg_weights[i - 1, j - 1] + np.minimum(np.minimum(c0, c1), c2)
+        trace[i, j] = t
+    trace[0, :] = 2
+    trace[:, 0] = 1
+    i, j, path = n, m, []
+    while i > 0 or j > 0:
+        path.append((i - 1, j - 1))
+        t = trace[i, j]
+        if t == 0:
+            i -= 1
+            j -= 1
+        elif t == 1:
+            i -= 1
+        else:
+            j -= 1
+    text_idx = np.array([p[0] for p in path[::-1]])
+    time_idx = np.array([p[1] for p in path[::-1]])
+    jumps = np.pad(np.diff(text_idx), (1, 0), constant_values=1).astype(bool)
+    return time_idx[jumps] * time_precision
+
+
+_WORD_ALIGN_DTW_KERNEL: Callable[[np.ndarray, float], np.ndarray] | None = None
+
+
+def _word_align_dtw_kernel() -> Callable[[np.ndarray, float], np.ndarray]:
+    """Resolve (once) the DTW kernel: numba-compiled if numba is installed.
+
+    The DTW is the host-side bottleneck: an n x m cost matrix (m = 750 encoder
+    frames for a 30s window) whose cells are strictly sequential, since each
+    depends on its three predecessors. That defeats vectorization -- the numpy
+    form is dispatch-bound on tiny arrays, and a GPU version needs n+m-1
+    sequential launches -- so a compiled scalar loop wins by an order of
+    magnitude. numba is already a vLLM requirement and is used the same way in
+    ``ngram_proposer``, so this adds no dependency; ``_word_align_dtw_numpy``
+    keeps numba-less builds working.
+    """
+    global _WORD_ALIGN_DTW_KERNEL
+    if _WORD_ALIGN_DTW_KERNEL is None:
+        try:
+            from numba import njit
+        except ImportError:
+            logger.warning_once(
+                "numba is not installed; Whisper word timestamps will use the "
+                "numpy DTW fallback, which is ~30x slower per request."
+            )
+            _WORD_ALIGN_DTW_KERNEL = _word_align_dtw_numpy
+        else:
+            # nogil matters as much as the speed: it lets the per-request DTWs
+            # of one step actually run in parallel on the thread pool.
+            _WORD_ALIGN_DTW_KERNEL = njit(cache=True, nogil=True)(_word_align_dtw_core)
+    return _WORD_ALIGN_DTW_KERNEL
+
+
+def _word_align_dtw(
+    neg_weights: np.ndarray, time_precision: float = 0.02
+) -> list[float]:
+    """CPU part: DTW-align decoder positions to audio frames, one onset time (s)
+    per position. Bit-identical to transformers' ``_dynamic_time_warping``
+    (same tie-breaking)."""
+    kernel = _word_align_dtw_kernel()
+    return kernel(np.ascontiguousarray(neg_weights), time_precision).tolist()
 
 
 class WhisperPosEmbedType(enum.Enum):
@@ -270,6 +581,11 @@ class WhisperCrossAttention(WhisperAttention):
             prefix=prefix,
             attn_type=AttentionType.ENCODER_DECODER,
         )
+        # Decoder-layer index for word-timestamp capture (-1 if not a decoder).
+        try:
+            self._align_layer = int(prefix.split("layers.")[1].split(".")[0])
+        except (IndexError, ValueError):
+            self._align_layer = -1
 
     def _init_qkv(
         self,
@@ -310,6 +626,18 @@ class WhisperCrossAttention(WhisperAttention):
             k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
         else:
             k = v = None
+
+        # Capture Q (and encoder K at prefill) before the fused kernel.
+        if _WORD_ALIGN_ENABLED and self._align_layer >= 0:
+            torch.ops.whisper_align.capture(
+                q,
+                k,
+                _WORD_ALIGN_QBUF,
+                _WORD_ALIGN_KBUF,
+                _WORD_ALIGN_QIDX,
+                _WORD_ALIGN_KIDX,
+                self._align_layer,
+            )
 
         attn_output = self.attn(q, k, v)
 
@@ -785,8 +1113,145 @@ class WhisperForConditionalGeneration(
     # Whisper only supports audio-conditioned generation.
     supports_transcription_only = True
     supports_segment_timestamp = True
+    supports_word_timestamp = True
     supports_explicit_language_detection = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
+
+    def enable_word_align(
+        self,
+        alignment_heads: list[list[int]],
+        eos_token_id: int,
+        median_filter_width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        max_slots: int,
+        positions: torch.Tensor,
+        max_k_frames: int,
+    ) -> None:
+        """Allocate per-slot capture buffers and turn on cross-attention capture.
+
+        Called once by the model runner (before compilation) when word
+        timestamps are enabled. ``max_slots`` bounds the number of concurrent
+        word-timestamp requests; ``max_k_frames`` bounds the per-forward
+        encoder-frame count. ``positions`` is the runner's own per-token
+        position buffer, which sizes the row-index buffer the runner fills.
+        """
+        global _WORD_ALIGN_ENABLED, _WORD_ALIGN_QBUF, _WORD_ALIGN_KBUF
+        global _WORD_ALIGN_QIDX, _WORD_ALIGN_KIDX
+        global _WORD_ALIGN_NFRAMES, _WORD_ALIGN_POOL
+        cfg = self.config
+        n_heads = cfg.decoder_attention_heads
+        self._word_align_heads = [tuple(h) for h in alignment_heads]
+        # Only the decoder layers that carry alignment heads need capturing;
+        # disable the rest so their capture op compiles out, and index the
+        # buffers by alignment-layer rank rather than by decoder layer so no
+        # memory is reserved for layers that never write (turbo: 2 of 32).
+        align_layers = sorted({h[0] for h in self._word_align_heads})
+        layer_slot = {layer: i for i, layer in enumerate(align_layers)}
+        for m in self.modules():
+            if isinstance(m, WhisperCrossAttention):
+                m._align_layer = layer_slot.get(getattr(m, "_align_layer", -1), -1)
+        self._word_align_heads = [
+            (layer_slot[layer], head) for layer, head in self._word_align_heads
+        ]
+        n_layers = len(align_layers)
+        _WORD_ALIGN_QBUF = torch.zeros(
+            n_layers,
+            max_slots,
+            cfg.max_target_positions,
+            cfg.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        _WORD_ALIGN_KBUF = torch.zeros(
+            n_layers,
+            max_slots,
+            cfg.max_source_positions,
+            cfg.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        z = lambda n: torch.zeros(n, device=device, dtype=torch.long)  # noqa: E731
+        _WORD_ALIGN_QIDX = z(positions.shape[0])
+        _WORD_ALIGN_KIDX = z(max_k_frames)
+        _WORD_ALIGN_NFRAMES = torch.full(
+            (max_slots,), cfg.max_source_positions, device=device, dtype=torch.long
+        )
+        _WORD_ALIGN_POOL = ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4)))
+        # Compile the DTW now (~0.9s cold, ~0.2s from the numba cache) so the
+        # first finishing request does not pay it on the engine's critical path.
+        _word_align_dtw(np.zeros((2, 2), dtype=np.float32))
+        self._word_align_eos = eos_token_id
+        self._word_align_mfw = median_filter_width
+        self._word_align_nheads = n_heads
+        self._word_align_hdim = cfg.d_model // n_heads
+        _WORD_ALIGN_ENABLED = True
+
+    @staticmethod
+    def word_align_index_tensors() -> tuple[torch.Tensor, ...]:
+        """Return the (qidx, kidx) device buffers the runner fills each step to
+        route capture rows to per-request slots."""
+        return (_WORD_ALIGN_QIDX, _WORD_ALIGN_KIDX)
+
+    def compute_word_align(
+        self,
+        req_ids: list[str],
+        sampled_token_ids: list[list[int]],
+        req_slots: dict[str, int],
+        req_npos: dict[str, int],
+        req_final_npos: dict[str, int] | None = None,
+    ) -> dict[str, list[float]] | None:
+        """DTW-align each request that finishes this step; return per-token times.
+
+        Reads each finishing request's own capture slot (``req_slots``) over its
+        ``req_npos`` decoder positions, so concurrent requests don't collide.
+        ``req_final_npos`` gives the last position a request's token budget
+        allows, so one stopping there rather than on eos is still read out.
+        """
+        finishing = _word_align_finishing(
+            req_ids,
+            sampled_token_ids,
+            req_slots,
+            req_npos,
+            req_final_npos or {},
+            self._word_align_eos,
+        )
+        if not finishing:
+            return None
+        # Crop each DTW to the request's real audio length (not the 30s pad).
+        # Read in one batched copy: indexing per request costs a host sync each,
+        # on the engine's critical path.
+        slots_t = torch.tensor(
+            [s for _, s, _ in finishing],
+            device=_WORD_ALIGN_NFRAMES.device,
+            dtype=torch.long,
+        )
+        nframes_np = _WORD_ALIGN_NFRAMES[slots_t].cpu().numpy()
+        # Phase 1 (GPU): queue every finishing request's recompute, then fetch
+        # them in one transfer. Fetching inside the loop would make each
+        # request's kernel chain a separate blocking wait.
+        weights = [
+            _word_align_neg_weights(
+                _WORD_ALIGN_QBUF[:, slot],
+                _WORD_ALIGN_KBUF[:, slot],
+                n,
+                self._word_align_heads,
+                self._word_align_nheads,
+                self._word_align_hdim,
+                int(nframes) * 2,
+                self._word_align_mfw,
+            )
+            for (_, slot, n), nframes in zip(finishing, nframes_np)
+        ]
+        jobs: list[tuple[str, np.ndarray]] = list(
+            zip((r for r, _, _ in finishing), _word_align_fetch(weights))
+        )
+        # Phase 2 (CPU): the compiled DTW holds no GIL, so a batch of finishing
+        # requests runs in parallel across the pool.
+        if len(jobs) == 1 or _WORD_ALIGN_POOL is None:
+            return {r: _word_align_dtw(w) for r, w in jobs}
+        times = _WORD_ALIGN_POOL.map(_word_align_dtw, [w for _, w in jobs])
+        return {r: t for (r, _), t in zip(jobs, times)}
 
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
@@ -961,10 +1426,35 @@ class WhisperForConditionalGeneration(
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         # Required as part of SupportsMultiModal interface.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
+        feats = audio_input["input_features"]
         # Split concatenated encoder outputs into one tensor per audio input
-        enc_output = self.model.get_encoder_outputs(audio_input["input_features"])
+        enc_output = self.model.get_encoder_outputs(feats)
+        if _WORD_ALIGN_ENABLED and _WORD_ALIGN_NFRAMES is not None:
+            self._word_align_record_nframes(feats)
         # The assumption is we can only process whole mm items (audios)
         return enc_output.unbind(dim=0)
+
+    def _word_align_record_nframes(self, feats) -> None:
+        """Record each audio's real (pre-padding) encoder-frame count per slot,
+        so ``compute_word_align`` can crop the DTW to actual content. Whisper
+        pads audio to 30s with zeros, so the trailing mel columns are a constant
+        floor; the last column that differs from it marks the content boundary.
+        Runs at prefill (eager), matching the encoder-K slot order in KIDX."""
+        src = int(self.config.max_source_positions)
+        fs = feats if isinstance(feats, torch.Tensor) else torch.stack(list(feats))
+        # fs: [N, n_mel, n_frames]; trailing zero-pad columns equal the last one.
+        differs = (fs != fs[:, :, -1:]).any(dim=1)  # [N, n_frames]
+        ar = torch.arange(differs.shape[1], device=fs.device)
+        n_mel = torch.where(differs, ar, ar.new_zeros(())).amax(dim=1) + 1  # [N]
+        nframes = (n_mel // 2).clamp_(1, src)
+        n = fs.shape[0]
+        # More audio items than the slot buffer holds: the runner skipped the
+        # slot routing for this batch, so KIDX holds nothing to read here.
+        if n * src > _WORD_ALIGN_KIDX.shape[0]:
+            return
+        # Each audio's first frame sits at row slot * src, so dividing recovers it.
+        slots = _WORD_ALIGN_KIDX[torch.arange(n, device=fs.device) * src] // src
+        _WORD_ALIGN_NFRAMES[slots] = nframes  # GPU scatter — no host sync
 
     def embed_input_ids(
         self,
