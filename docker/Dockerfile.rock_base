@@ -14,7 +14,7 @@ ARG MORI_REPO="https://github.com/ROCm/mori.git"
 # TheRock configuration
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL=https://repo.amd.com/rocm/whl-multi-arch/ # For pre-built GPU images, packages, etc.
-ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL=https://rocm.nightlies.amd.com/whl-multi-arch/ # For torch, triton, etc. wheels with latest fixes.
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL=https://rocm.nightlies.amd.com/whl-multi-arch/torch/ # For torch, triton, etc. wheels with latest fixes.
 ARG ROCM_SDK_VERSION=7.14.0
 
 # Build configuration
@@ -84,14 +84,14 @@ RUN pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
-# Install PyTorch wheels (release primary, nightly as fallback)
+# Install PyTorch wheels (nightly for latest torch, release as fallback)
 ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
 ARG TORCH_VERSION
 ARG TORCHAUDIO_VERSION
 ARG TORCHVISION_VERSION
 RUN pip install \
-    --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-    --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
+    --index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
+    --extra-index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
     "torch==${TORCH_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}"
@@ -107,7 +107,7 @@ RUN python3 -c "import torch; print(f'torch={torch.__version__}, hip={torch.vers
 # For each arch in PYTORCH_ROCM_ARCH, install the precompiled GPU code that
 # PyTorch needs to run on that specific chip.
 SHELL ["/bin/bash", "-c"]
-RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)" | sed 's/a[0-9]\{8\}$//') \
+RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
     && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
         echo "Installing device packages for ${arch}" \
         && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
