@@ -679,11 +679,13 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 positions=positions,
                 cos_sin_cache=cos_sin_cache,
             )
-            if not getattr(self.impl, "supports_quant_query_input", False):
+            if not self.impl.supports_quant_query_input:  # type: ignore[attr-defined]
                 # Backend dequantizes fp8 KV on load and takes a bf16 query
                 # (e.g. TRITON_MLA, the DSpark draft); undo the query
                 # quantization.
-                mqa_q = mqa_q.to(ql_nope.dtype) * self._q_scale
+                mqa_q = (mqa_q.to(torch.float32) * self._q_scale).to(
+                    ql_nope.dtype
+                )
             return mqa_q
         return fused_mla_decode_q_concat_kv_cache_insert(
             ql_nope,
