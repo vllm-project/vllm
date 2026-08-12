@@ -2921,14 +2921,11 @@ class rocm_aiter_ops:
         """Whether (N, K) has a tuned aiter blockscale bpreshuffle config."""
         if not current_platform.is_rocm():
             return False
-        try:
-            import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
 
-            csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
-            gfx = aiter_gemm_a8w8_ops.get_gfx()
-            cu_num = aiter_gemm_a8w8_ops.get_cu_num()
-        except Exception:
-            return False
+        csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+        gfx = aiter_gemm_a8w8_ops.get_gfx()
+        cu_num = aiter_gemm_a8w8_ops.get_cu_num()
         return (n, k) in _load_blockscale_bpreshuffle_tuned_shapes(
             csv_path, gfx, cu_num
         )
