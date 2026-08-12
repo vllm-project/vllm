@@ -2075,6 +2075,11 @@ def get_tensor_model_parallel_rank() -> int:
     return get_tp_group().rank_in_group
 
 
+def get_pipeline_model_parallel_rank() -> int:
+    """Return my rank for the pipeline model parallel group."""
+    return get_pp_group().rank_in_group
+
+
 def get_node_count() -> int:
     """Return the total number of nodes in the distributed environment."""
     assert _NODE_COUNT is not None, "distributed environment is not initialized"
