@@ -116,9 +116,12 @@ class Llama4PythonicToolParser(ToolParser):
             if isinstance(parsed, ast.List) and all(
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
+                tool_calls = salvage_tool_calls(parsed.elts)
+                if not tool_calls:
+                    raise UnexpectedAstError("No convertible tool call in the block")
                 return ExtractedToolCallInformation(
                     tools_called=True,
-                    tool_calls=salvage_tool_calls(parsed.elts),
+                    tool_calls=tool_calls,
                     content=None,
                 )
             else:
@@ -163,6 +166,10 @@ class Llama4PythonicToolParser(ToolParser):
             ):
                 raise UnexpectedAstError("Tool output must be a list of function calls")
             tool_calls = salvage_tool_calls(parsed.elts)
+            if not tool_calls:
+                # A partially arrived call routinely completes to a shape that
+                # cannot be converted yet; wait for more text.
+                return None
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):

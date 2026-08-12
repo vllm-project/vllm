@@ -250,9 +250,10 @@ class Lfm2ToolParser(ToolParser):
             ):
                 # Restoring reserved-keyword names is an exact inverse and a
                 # no-op when the rename rewrite did not fire.
-                tool_calls = [
-                    self._restore_reserved(tc) for tc in salvage_tool_calls(parsed.elts)
-                ]
+                converted = salvage_tool_calls(parsed.elts)
+                if not converted:
+                    raise UnexpectedAstError("No convertible tool call in the block")
+                tool_calls = [self._restore_reserved(tc) for tc in converted]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -395,6 +396,11 @@ class Lfm2ToolParser(ToolParser):
             ):
                 raise UnexpectedAstError("Tool output must be a list of function calls")
             tool_calls = salvage_tool_calls(parsed.elts)
+            if not tool_calls:
+                # A partially arrived call routinely completes to a shape that
+                # cannot be converted yet; wait for more text rather than
+                # logging a failure on every chunk.
+                return _content_only_or_none()
             if kw_renamed:
                 tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
 

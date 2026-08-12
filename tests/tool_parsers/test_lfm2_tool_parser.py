@@ -738,6 +738,59 @@ def test_regex_timeout_handling(streaming: bool, lfm2_tokenizer: TokenizerLike):
         mock_regex.match.assert_called_once()
 
 
+def test_streaming_positional_call_logged_once_not_per_chunk(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """A call written with a positional argument is unconvertible at every
+    point in the stream, so treating that as a failure logged an exception
+    with a traceback on each of its chunks — thirteen for this call, and over
+    a thousand in one production run, without a tool call being lost."""
+    from vllm.tool_parsers import lfm2_tool_parser
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[read('/etc/hosts')]{TOOL_CALL_END}"
+
+    with patch.object(lfm2_tool_parser.logger, "exception") as logged_exception:
+        run_tool_extraction(
+            cls(lfm2_tokenizer),
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert logged_exception.call_count == 0
+
+
+def test_streaming_waits_for_a_half_streamed_parameter_name(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """A parameter name still arriving is recognized by counting ``=`` against
+    ``,``, so an earlier string value holding an ``=`` defeats the count and
+    the half-typed name completes to a bare name — a positional argument. That
+    state is transient: waiting must be silent, and both calls must still be
+    emitted once the ``=`` arrives."""
+    from vllm.tool_parsers import lfm2_tool_parser
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[fetch(url='http://x/?a=1'), bash(cmd='ls')]{TOOL_CALL_END}"
+    )
+
+    with patch.object(lfm2_tool_parser.logger, "exception") as logged_exception:
+        _, tool_calls = run_tool_extraction(
+            cls(lfm2_tokenizer),
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert logged_exception.call_count == 0
+    assert [call.function for call in tool_calls] == [
+        FunctionCall(name="fetch", arguments='{"url": "http://x/?a=1"}'),
+        FunctionCall(name="bash", arguments='{"cmd": "ls"}'),
+    ]
+
+
 def test_good_call_survives_unparsable_sibling(lfm2_tokenizer: TokenizerLike):
     """A genuinely ambiguous nested quote makes the whole block a
     SyntaxError, so the per-call salvage never gets a call list and the

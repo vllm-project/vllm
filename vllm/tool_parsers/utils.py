@@ -614,8 +614,10 @@ def salvage_tool_calls(call_nodes: Sequence[ast.expr]) -> list[ToolCall]:
     each parseable sibling call in the block. Skipping is deterministic on
     the text, so streaming chunks stay index-consistent.
 
-    Raises:
-        UnexpectedAstError: If no call in the block is convertible.
+    Returns an empty list when nothing is convertible; callers decide what
+    that means. It is a hard failure while parsing a complete block, but a
+    normal wait state mid-stream, where a partially arrived call routinely
+    completes to a shape that cannot be converted yet.
     """
     tool_calls = []
     for node in call_nodes:
@@ -623,8 +625,6 @@ def salvage_tool_calls(call_nodes: Sequence[ast.expr]) -> list[ToolCall]:
             tool_calls.append(handle_single_tool(node))  # type: ignore
         except UnexpectedAstError as e:
             logger.warning("Skipping unconvertible tool call: %s", e)
-    if not tool_calls:
-        raise UnexpectedAstError("No convertible tool call in the block")
     return tool_calls
 
 
