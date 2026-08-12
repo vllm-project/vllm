@@ -156,11 +156,6 @@ def kernel_paged_attention_2d(
         # Supports non-contiguous mapping
         # from logical blocks to physical blocks
         abs_token_idx = start_n + offs_n
-        # Slots >= seq_len are unwritten KV cache and may hold NaN/garbage
-        # (e.g. the tail of the last partial block). They are score-masked
-        # below, but 0 * NaN = NaN would still poison the output, so exclude
-        # them from the K/V loads too.
-        kv_load_mask = abs_token_idx < seq_len
         l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
         # Vectorized loading of physical block IDs
         p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
@@ -183,26 +178,45 @@ def kernel_paged_attention_2d(
             + internal_offsets[:, None] * stride_v_cache_3
         )
 
-        # K : (HEAD_SIZE, BLOCK_SIZE)
-        K_load = tl.load(
-            key_cache_ptr + k_offset,
-            mask=dim_mask[:, None] & kv_load_mask[None, :],
-            other=0.0,
-            eviction_policy="evict_last",
-        )
+        # Only the final tile can straddle seq_len. Slots >= seq_len are
+        # unwritten KV cache that may hold NaN/garbage; they are score-masked
+        # below, but 0 * NaN = NaN would still poison the output, so mask them
+        # out of the K/V loads too. Earlier tiles are fully written, so they
+        # use the cheaper token-uniform dim_mask (matching the pre-0.25.0 fast
+        # path) and skip the per-token predicate entirely.
+        # K : (HEAD_SIZE, BLOCK_SIZE), V : (BLOCK_SIZE, HEAD_SIZE)
+        if j == num_blocks - 1:
+            kv_load_mask = abs_token_idx < seq_len
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None] & kv_load_mask[None, :],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :] & kv_load_mask[:, None],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+        else:
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
 
         if K_load.dtype.is_fp8():
             K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
         else:
             K = K_load
-
-        # V : (BLOCK_SIZE, HEAD_SIZE)
-        V_load = tl.load(
-            value_cache_ptr + v_offset,
-            mask=dim_mask[None, :] & kv_load_mask[:, None],
-            other=0.0,
-            eviction_policy="evict_last",
-        )
 
         if V_load.dtype.is_fp8():
             V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
