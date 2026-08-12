@@ -75,6 +75,7 @@ class EngineCoreRequest(
     reasoning_ended: bool | None = None
     reasoning_parser_kwargs: dict[str, object] | None = None
     abort_immediately: bool = False
+    session_id: str | None = None
 
 
 class EngineCoreOutput(
@@ -96,6 +97,7 @@ class EngineCoreOutput(
     prefill_stats: object | None = None
     routed_experts: object | None = None
     num_nans_in_logits: int = 0
+    mm_cache_miss_hashes: list[str] | None = None
 
 
 class EngineCoreOutputs(
@@ -137,6 +139,7 @@ request = EngineCoreRequest(
     pooling_params=None,
     arrival_time=42.5,
     client_index=0,
+    session_id="session-1",
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.
@@ -354,6 +357,18 @@ multipart_prompt_logprobs = engine_outputs_wire(
 
 
 @dataclass
+class KVEventsConfig:
+    enable_kv_cache_events: bool
+    publisher: str
+    endpoint: str
+    replay_endpoint: str | None
+    buffer_steps: int
+    hwm: int
+    max_queue_size: int
+    topic: str
+
+
+@dataclass
 class EngineCoreReadyResponse:
     max_model_len: int
     num_gpu_blocks: int
@@ -372,6 +387,7 @@ class EngineCoreReadyResponse:
     instance_id: str
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
+    kv_events_config: KVEventsConfig | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -390,6 +406,16 @@ ready_response = EngineCoreReadyResponse(
     max_num_seqs=256,
     max_num_batched_tokens=8192,
     instance_id="test-instance",
+    kv_events_config=KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://127.0.0.1:5557",
+        replay_endpoint="tcp://127.0.0.1:5558",
+        buffer_steps=10_000,
+        hwm=100_000,
+        max_queue_size=100_000,
+        topic="kv",
+    ),
 )
 
 print(msgspec.msgpack.encode(request).hex())

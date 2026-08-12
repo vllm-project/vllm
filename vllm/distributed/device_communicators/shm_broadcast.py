@@ -36,7 +36,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
     get_ip,
-    get_open_port,
     get_open_zmq_inproc_path,
     get_open_zmq_ipc_path,
     is_valid_ipv6_address,
@@ -525,13 +524,13 @@ class MessageQueue:
                 connect_ip = get_ip()
             self.remote_socket = context.socket(XPUB)
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
-            remote_subscribe_port = get_open_port()
             if is_valid_ipv6_address(connect_ip):
                 self.remote_socket.setsockopt(IPV6, 1)
                 remote_addr_ipv6 = True
                 connect_ip = f"[{connect_ip}]"
-            socket_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
-            self.remote_socket.bind(socket_addr)
+            self.remote_socket.bind(f"tcp://{connect_ip}:0")
+            last_endpoint = self.remote_socket.getsockopt(zmq.LAST_ENDPOINT)
+            remote_subscribe_port = last_endpoint.decode().rsplit(":", 1)[1]
             remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
         else:
             remote_subscribe_addr = None
@@ -909,7 +908,8 @@ class MessageQueue:
 
     @staticmethod
     def recv(socket: zmq.Socket, timeout: float | None) -> Any:
-        timeout_ms = None if timeout is None else int(timeout * 1000)
+        # Ensure non-negative timeout passed to zmq poll.
+        timeout_ms = None if timeout is None else max(0, int(timeout * 1000))
         if not socket.poll(timeout=timeout_ms):
             raise TimeoutError
         recv, *recv_oob = socket.recv_multipart(copy=False)

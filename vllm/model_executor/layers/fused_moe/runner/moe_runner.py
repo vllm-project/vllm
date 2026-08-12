@@ -28,9 +28,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
-    FusedMoEModularMethod,
-)
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
@@ -314,10 +311,6 @@ class MoERunner(MoERunnerInterface):
     def shared_experts(self) -> SharedExperts | None:
         return self._shared_experts
 
-    @property
-    def is_internal_router(self) -> bool:
-        return self.gate is not None
-
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
         self.routed_experts._replace_quant_method(quant_method)
@@ -353,7 +346,7 @@ class MoERunner(MoERunnerInterface):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Apply transform for routed experts (e.g., latent projection).
 
-        This is called by FusedMoE.forward_native. The original hidden_states
+        This is called by MoERunner.forward_native. The original hidden_states
         is saved separately so shared experts get [S, hidden_size] while
         routed experts get the transformed [S, moe_latent_size].
 
@@ -580,12 +573,17 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
+        shared_experts_overlapping: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
         Orchestrates shared expert execution (before/after), expert selection
         via the router, and the actual fused MoE computation. Returns
         (shared_expert_output, fused_expert_output).
+
+        `shared_experts_overlapping` should be True only if using multi-stream
+        overlap. Then the shared expert was already launched in a separate
+        stream, so the results only have to be awaited here.
         """
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
@@ -615,10 +613,9 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input=shared_experts_input,
             )
 
-        self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
-        )
+        if shared_experts_overlapping:
+            assert self._shared_experts is not None
+            self._shared_experts.wait()
 
         return (
             self._shared_experts.output if self._shared_experts is not None else None,
@@ -639,18 +636,6 @@ class MoERunner(MoERunnerInterface):
             if ctx.dp_metadata
             else nullcontext()
         )
-
-    def _maybe_sync_shared_experts_stream(
-        self,
-        shared_experts_input: torch.Tensor | None,
-    ):
-        # If router/gate provided, then apply it here.
-        # (Note: This code runs only when "overlapped mode" is on to allow
-        #        parallel execution of shared experts with the FusedMoE via
-        #        separate cuda stream)
-        if self._shared_experts is not None:
-            assert shared_experts_input is not None
-            self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
     def _maybe_add_zero_expert_output(
         self,
@@ -856,8 +841,13 @@ class MoERunner(MoERunnerInterface):
         # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
 
-        # Sync aux and main stream for shared expert multi-stream overlap.
-        self._maybe_sync_shared_experts_stream(shared_experts_input)
+        # If using multi-stream overlap for shared experts, we must launch it
+        # before routed expert dispatch.
+        shared_experts_overlapping = False
+        if self._shared_experts is not None:
+            shared_experts_overlapping = self._shared_experts.maybe_forward_async(
+                shared_experts_input
+            )
 
         # If the Runner holds the gate, apply it after the stream sync,
         # so it can run overlapped with the
@@ -883,6 +873,7 @@ class MoERunner(MoERunnerInterface):
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
+                shared_experts_overlapping=shared_experts_overlapping,
             )
 
             return self._maybe_combine(
@@ -895,44 +886,6 @@ class MoERunner(MoERunnerInterface):
     # Old methods from FusedMoE layer. Remove when possible.
     #
     #########################################################
-
-    # Note: maybe_init_modular_kernel should only be called by
-    # prepare_communication_buffer_for_model.
-    # This is called after all weight loading and post-processing, so it
-    # should be safe to swap out the quant_method.
-    def maybe_init_modular_kernel(self) -> None:
-        # NOTE(rob): WIP refactor. For quant methods that own the MK
-        # we create the MK during process_weights_after_loading.
-        if (
-            self.routed_experts.quant_method.supports_internal_mk
-            or self.routed_experts.quant_method.is_monolithic
-        ):
-            return None
-
-        self.routed_experts._ensure_moe_quant_config_init()
-        # routing_tables only needed for round-robin expert placement with
-        # DeepEP all2all backend.
-        routing_tables = self._expert_routing_tables()
-
-        if isinstance(self.routed_experts.quant_method, FusedMoEModularMethod):
-            base_quant_method = self.routed_experts.quant_method.old_quant_method
-        else:
-            base_quant_method = self.routed_experts.quant_method
-
-        prepare_finalize = base_quant_method.maybe_make_prepare_finalize(
-            routing_tables=routing_tables
-        )
-        if prepare_finalize is not None:
-            logger.debug(
-                "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
-            )
-            self._replace_quant_method(
-                FusedMoEModularMethod.make(
-                    self.routed_experts,
-                    base_quant_method,
-                    prepare_finalize,
-                )
-            )
 
     #
     # Properties

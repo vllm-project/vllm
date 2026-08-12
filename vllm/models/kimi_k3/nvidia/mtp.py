@@ -27,6 +27,11 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import get_pp_missing_layer_names, maybe_prefix
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_shard,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
@@ -38,7 +43,6 @@ from .model import (
     get_spec_layer_idx_from_weight_name,
     make_kimi_k3_mega_moe_expert_params_mapping,
 )
-from .ops.sequence_parallel import sp_all_gather, sp_padding_mask, sp_shard
 
 logger = init_logger(__name__)
 

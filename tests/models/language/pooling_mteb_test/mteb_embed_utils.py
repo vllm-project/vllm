@@ -207,9 +207,18 @@ def mteb_test_embed_models(
         vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
         head_dtype = model_config.head_dtype
 
-        # Test embedding_size, isnan and whether to use normalize
+        # Test embedding_size, isnan and whether to use normalize.
+        # Apply the same prompt_prefix used for scoring so this check compares
+        # identical effective inputs: HF's SentenceTransformer.encode() applies
+        # the model's default prompt (e.g. "Document: "), so vLLM must receive it
+        # too. This mirrors VllmMtebEncoder and changes no production behavior.
+        consistency_prompts = (
+            [prompt_prefix + p for p in example_prompts]
+            if prompt_prefix
+            else example_prompts
+        )
         vllm_outputs = vllm_model.embed(
-            example_prompts,
+            consistency_prompts,
             tokenization_kwargs=dict(truncate_prompt_tokens=-1),
         )
         outputs_tensor = torch.tensor(vllm_outputs)

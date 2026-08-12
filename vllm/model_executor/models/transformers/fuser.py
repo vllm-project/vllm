@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.transformers.fusers import (
     BaseFuser,
     GLUFuser,
+    MLAFuser,
     PackedQKVFuser,
     QKVFuser,
     RewriteFuser,
@@ -48,7 +49,7 @@ def get_fuser(module: nn.Module) -> BaseFuser | None:
         return None
     if (graph := trace(module)) is None:
         return None
-    for fuser_cls in (GLUFuser, QKVFuser, PackedQKVFuser, RMSNormFuser):
+    for fuser_cls in (MLAFuser, GLUFuser, QKVFuser, PackedQKVFuser, RMSNormFuser):
         if (fuser := fuser_cls.match(graph, module)) is not None:
             if isinstance(fuser, RewriteFuser):
                 try:
@@ -74,14 +75,14 @@ def get_fuser(module: nn.Module) -> BaseFuser | None:
 
 
 class Fusers(UserDict):
-    """Mapping from module class to fuser, for all fusable classes in a model."""
+    """Mapping from module class and shape to fuser, for all fusable modules."""
 
     def __init__(self, model: nn.Module, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
-        super().__init__({type(m): get_fuser(m) for m in model.modules()})
+        super().__init__({key(m): get_fuser(m) for m in model.modules()})
 
     def __getitem__(self, m: nn.Module) -> BaseFuser | None:
-        fuser = self.data.get(type(m))
+        fuser = self.data.get(key(m))
         if fuser is not None and fuser.validate(m, self.vllm_config):
             return fuser
         return None
