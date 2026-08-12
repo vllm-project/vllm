@@ -583,6 +583,7 @@ class SingleDirectionOffloadingHandler:
         )
         writer_mask = cpu_page_ids % mapping.num_writers == mapping.writer_index
         return block_bases_src[writer_mask], block_bases_dst[writer_mask]
+
     def _submit_descriptors(
         self,
         *,
@@ -836,19 +837,19 @@ class SingleDirectionOffloadingHandler:
 
         assert src_offset == num_src_blocks
         assert dst_offset == num_dst_blocks
-        # Writer rotation may skip non-writer blocks, leaving op_idx below
-        # the sized upper bound
+        # Writer rotation may skip non-writer blocks, so op_idx is the number
+        # of descriptors actually written; num_copy_ops is only the sized upper
+        # bound. Submitting the bound would hand the DMA the untouched tail of
+        # buffers that come from torch.empty and are recycled through
+        # _buffer_pool -- i.e. uninitialized or stale device pointers.
         assert op_idx <= num_copy_ops
-        src = src[:op_idx]
-        dst = dst[:op_idx]
-        sizes = sizes[:op_idx]
 
         return self._submit_descriptors(
             job_id=job_id,
             batch_src=batch_src,
             batch_dst=batch_dst,
             batch_sizes=batch_sizes,
-            num_copy_ops=num_copy_ops,
+            num_copy_ops=op_idx,
             num_transfer_bytes=num_transfer_bytes,
         )
 
@@ -910,9 +911,6 @@ class SingleDirectionOffloadingHandler:
             raise sync_error
         self._compact_region = None
         self._compact_group_slice_configs = None
-        if self._mmap_region is not None:
-            self._mmap_region.cleanup()
-            self._mmap_region = None
 
 
 class CPUOffloadingWorker(OffloadingWorker):
