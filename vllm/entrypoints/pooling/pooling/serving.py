@@ -56,6 +56,12 @@ class ServingPooling(PoolingBaseServing):
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
         request = cast(PoolingRequest, request)
         pooling_task = self._verify_pooling_task(request)
+        if pooling_task == "embed&token_classify":
+            raise ValueError(
+                "The 'embed&token_classify' pooling task is only available "
+                "through an IO processor plugin. Send an IOProcessorRequest, "
+                "or select a concrete task with --pooler-config.task."
+            )
         return self.io_processors[pooling_task]
 
     def _verify_pooling_task(self, request: PoolingRequest) -> str:

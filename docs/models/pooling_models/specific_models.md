@@ -370,7 +370,9 @@ the architecture is declared as `XLMRobertaModel`, which makes `vLLM` load it as
 extra weights. To load the full model weights, override its architecture like this:
 
 ```shell
-vllm serve BAAI/bge-m3 --hf-overrides '{"architectures": ["BgeM3EmbeddingModel"]}'
+vllm serve BAAI/bge-m3 \
+  --hf-overrides '{"architectures": ["BgeM3EmbeddingModel"]}' \
+  --pooler-config.task token_classify
 ```
 
 Then you obtain the sparse embeddings like this:
@@ -389,7 +391,8 @@ token scores for each token for each input. This means that you'll have to call
 Refer to the tests in  `tests/models/language/pooling/test_bge_m3.py` to see how
 to do that.
 
-You can obtain the colbert embeddings like this:
+To obtain ColBERT embeddings, restart the server with
+`--pooler-config.task token_embed`, then send this request:
 
 ```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{

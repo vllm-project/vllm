@@ -24,10 +24,6 @@ from .protocol import IOProcessorRequest, IOProcessorResponse
 logger = init_logger(__name__)
 
 
-class EmbedAndTokenClassifyIOProcessor(PoolingIOProcessor):
-    name = "embed&token_classify"
-
-
 class PluginWithoutIOProcessorPlugins(PoolingIOProcessor):
     # Some models, such as Terratorch (tests/models/test_terratorch.py),
     # use plugin tasks in the pooler but do not use IO Processor plugins.
