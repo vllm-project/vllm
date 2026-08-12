@@ -2,32 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Hermes 2 Pro tool-call parser, backed by the declarative parser engine.
 
-Hermes tool-call format::
+Tool calls repeat as back-to-back pairs::
 
-    <tool_call>
-    {"name": "get_weather", "arguments": {"city": "SF"}}
-    </tool_call>
+    <tool_call>{"name": "get_weather", "arguments": {"city": "SF"}}</tool_call>
 
-Tool calls repeat as separate ``<tool_call>...</tool_call>`` pairs back to
-back (not a single JSON array). Each call's body is a JSON object whose
-``name`` is extracted by the engine's name-from-args path and whose
-``arguments`` value is carved out of the wrapper by
-:func:`_hermes_arg_converter` -- the same envelope shape as Inkling
-(``{"name":...,"args":{...}}``), just with the key spelled ``arguments``
-and delimited by ``<tool_call>``/``</tool_call>`` instead of special tokens.
-
-Hermes has no closing-tag requirement: if ``</tool_call>`` never arrives
-before EOS, the remaining text is still treated as that call's body, and
-the engine's own EOS-completion path (best-effort extraction of whatever
-arrived) applies with no separate state needed for it here.
-
-Legacy Hermes is stricter than that generic best-effort convention for the
-single-shot, non-streaming ``extract_tool_calls`` path specifically: it
-requires the *whole* ``{"name":...,"arguments":{...}}`` body to parse as
-valid JSON, and reports no tool call at all (falling back to raw content)
-otherwise -- unlike incremental streaming, which always did best-effort
-extraction via ``is_complete_json`` on partial text. See
-:meth:`HermesParser.extract_tool_calls_from_content`.
+The body is a JSON wrapper, so the name comes from the engine's
+name-from-args path and :func:`_hermes_arg_converter` carves out the
+``arguments`` value -- the same shape as Inkling, with the key spelled
+``arguments``.
 """
 
 from __future__ import annotations
@@ -93,13 +75,11 @@ def _scan_json_value(raw: str, start: int) -> int | None:
 
 
 def _args_value_span(raw: str) -> str | None:
-    """Extract the raw text span of the top-level ``"arguments"`` value
-    from a (possibly incomplete) ``{"name":...,"arguments":{...}}`` body.
+    """Return the verbatim text of the top-level ``"arguments"`` value,
+    possibly an unterminated prefix, or ``None`` if it has not started.
 
-    Returns the verbatim substring (prefix-stable across growing input,
-    which the engine's argument-delta diffing relies on), possibly an
-    unterminated object prefix; ``None`` when the value has not started.
-    Raises ``ValueError`` when the value is not a JSON object.
+    Raises:
+        ValueError: the value is not a JSON object.
     """
     depth = 0
     in_string = False
@@ -141,28 +121,16 @@ def _args_value_span(raw: str) -> str | None:
 
 
 def _hermes_arg_converter(raw_args: str, partial: bool) -> str:
-    """Carve the ``arguments`` object out of the tool-call JSON body.
+    """Carve the ``arguments`` object out of the tool-call JSON wrapper.
 
-    Why a converter at all: the engine's ``tool_args_json`` machinery
-    treats the *entire* TOOL_ARGS text as the tool arguments, but Hermes's
-    payload is the ``{"name":...,"arguments":{...}}`` wrapper -- without a
-    converter, ``_compute_arg_delta`` streams the wrapper verbatim into the
-    OpenAI ``arguments`` field (``converter is None -> raw delta``,
-    unconditionally), and non-streaming extraction never runs
-    ``_fix_arg_types`` on it either.
+    The engine treats the whole ``TOOL_ARGS`` span as the arguments, and
+    skips ``_fix_arg_types`` when there is no converter, so omitting one
+    makes streaming and non-streaming disagree on argument types.
 
-    Why a hand-rolled scanner instead of (partial) ``json.loads`` +
-    ``json.dumps``: the engine diffs successive converter outputs and
-    requires each to extend the previous one (``startswith``); a violation
-    silently drops argument deltas. Re-serialization changes whitespace and
-    closes unterminated structures differently across ticks, so the only
-    prefix-stable output is a verbatim substring of the input. The scanner
-    is also string/escape-aware so an ``"arguments"`` literal inside the
-    name or a string value cannot mislead it (this is the exact bug class
-    that motivated this migration: an argument literally named ``"name"``
-    must not be mistaken for the tool's own name field), and it still
-    recovers a partial span when EOS truncates the wrapper (where
-    ``json.loads`` would fail).
+    The span is returned verbatim rather than re-serialised: the engine
+    requires each converter output to extend the previous one, and
+    ``json.dumps`` reflows whitespace between ticks, silently dropping
+    argument deltas.
     """
     span = _args_value_span(raw_args)
     if span is None:
@@ -182,17 +150,10 @@ def hermes_config(
             "TOOL_START": tool_call_start,
             "TOOL_END": tool_call_end,
         },
-        # Left empty (not mirroring `terminals`) so the engine always trusts
-        # the text lexer for these terminals, even after real token IDs have
-        # started flowing -- see StreamingParserEngine._process_lex_tokens's
-        # "strict" token-id mode, which otherwise refuses to accept a
-        # text-matched terminal once it has seen any token IDs, unless that
-        # terminal was also pre-lexed by an actual matching token ID. Hermes
-        # delimiters reliably arrive as literal text (ParserEngine.adjust_request
-        # forces skip_special_tokens=False), so token-ID pre-lexing buys nothing
-        # here and only risks starving text matching for models/tokenizers where
-        # the delimiter is a synthesized string rather than one true token
-        # (Inkling opts out the same way, for the same reason).
+        # Text-matched only: the engine stops trusting text matches for
+        # token-id terminals once real token IDs arrive, which strands
+        # tokenizers whose delimiter is not a single token. Inkling opts
+        # out the same way.
         token_id_terminals={},
         transitions={
             (ParserState.CONTENT, "TOOL_START"): Transition(
@@ -217,18 +178,8 @@ def hermes_config(
 class HermesParser(ParserEngine):
     """Hermes 2 Pro parser backed by the declarative parser engine.
 
-    Hermes has no dedicated reasoning parser (no ``vllm/reasoning/*hermes*``
-    module exists), so this engine config has no ``THINK_*`` terminals and
-    ``initial_state=ParserState.CONTENT`` -- ``ParserEngine.__init__``
-    detects the absence of reasoning terminals and leaves
-    ``_reasoning_ended`` true from the start, matching that there is no
-    separate reasoning phase to bridge.
-
-    ``TOOL_CALL_START``/``TOOL_CALL_END`` are class attributes rather than
-    hardcoded so subclasses can reuse this same wrapper grammar with a
-    different pair of delimiters (e.g. Longcat's ``<longcat_tool_call>``),
-    the same way the legacy implementation let subclasses override
-    ``tool_call_start_token``/``tool_call_end_token`` instance attributes.
+    Delimiters are class attributes so subclasses can reuse this grammar
+    with different tags; see :class:`~vllm.parser.longcat.LongcatParser`.
     """
 
     TOOL_CALL_START: str = TOOL_CALL_START
@@ -259,11 +210,10 @@ class HermesParser(ParserEngine):
         content: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-        """Reject the whole response if any tool-call body is not valid
-        JSON, matching the legacy Hermes parser's single-shot
-        ``json.loads`` requirement (see module docstring). Streaming keeps
-        the engine's normal best-effort behavior; this override only
-        affects this non-streaming entry point.
+        """Reject the response when a tool-call body is not valid JSON.
+
+        Matches the legacy parser: non-streaming is all-or-nothing, while
+        streaming keeps the engine's best-effort behaviour.
         """
         for match in self._tool_call_regex.finditer(content):
             body = match.group(1) if match.group(1) is not None else match.group(2)

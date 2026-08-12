@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Longcat Flash tool-call parser.
-
-Same ``{"name":...,"arguments":{...}}`` wrapper grammar as Hermes, just
-delimited by ``<longcat_tool_call>``/``</longcat_tool_call>`` instead of
-``<tool_call>``/``</tool_call>``.
-"""
+"""Longcat Flash tool calls: the Hermes wrapper grammar with its own tags."""
 
 from __future__ import annotations
 
