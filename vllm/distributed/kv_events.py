@@ -75,6 +75,7 @@ class BlockStored(KVCacheEvent):
     kv_cache_spec_sliding_window: int | None = None
     locality: str | None = None
     """LOCAL or REMOTE relative to the publisher; None means unspecified."""
+    ownership: str | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -90,6 +91,7 @@ class BlockStored(KVCacheEvent):
                 self.kv_cache_spec_kind,
                 self.kv_cache_spec_sliding_window,
                 self.locality,
+                self.ownership,
             )
         )
 
@@ -100,6 +102,7 @@ class BlockRemoved(KVCacheEvent):
     group_idx: int | None = None
     locality: str | None = None
     """LOCAL or REMOTE relative to the publisher; None means unspecified."""
+    ownership: str | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -108,6 +111,7 @@ class BlockRemoved(KVCacheEvent):
                 self.medium,
                 self.group_idx,
                 self.locality,
+                self.ownership,
             )
         )
 
