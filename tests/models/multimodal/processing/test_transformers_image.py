@@ -162,6 +162,28 @@ def test_legacy_placeholders_hold_only_image_tokens():
 
 
 @offsets_only
+def test_processor_refusing_text_only_calls():
+    """Idefics3 raises when a prompt holds `<image>` but no images are passed, which
+    is how the offsets path has to tokenize the prompt before splicing in the
+    expansion."""
+    mm_processor = create_processor(
+        "HuggingFaceTB/SmolVLM-256M-Instruct", OffsetsMultiModalProcessor
+    )
+    result = mm_processor(
+        prompt="<image>What is this?",
+        mm_items=mm_processor.info.parse_mm_data(
+            {"image": ImageAsset("cherry_blossom").pil_image}
+        ),
+        hf_processor_mm_kwargs={},
+    )
+
+    (placeholder,) = result["mm_placeholders"]["image"]
+    # The span covers the tokens structuring the image as well as the image itself
+    assert placeholder.is_embed is not None
+    assert 0 < int(placeholder.is_embed.sum()) < placeholder.length
+
+
+@offsets_only
 def test_missing_replacement_offsets_names_the_processor():
     """A processor that reports no replacement offsets cannot be served, which must
     be said plainly rather than surfacing later as a field config mismatch."""
