@@ -24,8 +24,8 @@ KV cache, and absorbs ``kv_b_proj`` into ``W_UK_T`` / ``W_UV`` -- mirroring the
 K3 specifics: optional rotary embedding (disabled for the target model's NoPE
 layers, enabled for DSpark) and an optional sigmoid output gate (``g_proj``).
 
-Out of scope (extension points, not wired here): context parallelism (DCP/PCP),
-sparse/indexer MLA, and the ROCm/aiter fp8/fp4 BMM fast paths.
+Out of scope (extension points, not wired here): prefill context parallelism
+(PCP), sparse/indexer MLA, and the ROCm/aiter fp8/fp4 BMM fast paths.
 """
 
 import math
@@ -35,7 +35,11 @@ import torch
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -78,6 +82,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+from vllm.v1.attention.ops.dcp_utils import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, get_kv_quant_mode
@@ -301,14 +306,45 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             kv_b_proj=self.kv_b_proj,
             indexer=None,
         )
+        if getattr(self.impl, "dcp_world_size", -1) < 1:
+            # FlashAttention requires the cp_world_size is positive and the cp_rank
+            # is non negative; manually set here if not set by caller (-1 is unset)
+            self.impl.dcp_world_size = 1
+            self.impl.dcp_rank = 0
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
 
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
-        assert (
-            parallel_config.decode_context_parallel_size <= 1
-            and parallel_config.prefill_context_parallel_size <= 1
-        ), "Kimi-K3 MultiHeadLatentAttention does not support context parallelism."
+        assert parallel_config.prefill_context_parallel_size == 1, (
+            "Kimi-K3 MultiHeadLatentAttention does not support prefill context "
+            "parallelism."
+        )
+        self.dcp_world_size = parallel_config.decode_context_parallel_size
+        assert self.dcp_world_size <= 1 or self.rotary_emb is None, (
+            "Kimi-K3 MultiHeadLatentAttention does not support RoPE with decode "
+            "context parallelism because gathered queries require gathered "
+            "positions."
+        )
+        self.dcp_manager: MLADCPManager | None = None
+        if self.dcp_world_size > 1:
+            query_dtype = (
+                torch.float8_e4m3fn
+                if is_quantized_kv_cache(self.kv_cache_dtype)
+                and self.kv_cache_dtype != "fp8_ds_mla"
+                else dtype
+            )
+            self.dcp_manager = MLADCPManager(
+                vllm_config=vllm_config,
+                device=next(self.kv_b_proj.parameters()).device,
+                num_heads=self.num_local_heads,
+                query_head_dim=self.head_size,
+                output_head_dim=self.kv_lora_rank,
+                query_dtype=query_dtype,
+                output_dtype=dtype,
+                padded_num_heads=self.q_pad_num_heads,
+                is_lse_base_on_e=self.impl.lse_base_on_e,
+                use_pcp=False,
+            )
         self.prefill_backend = get_mla_prefill_backend(vllm_config)(
             num_heads=self.num_local_heads,
             scale=self.scale,
@@ -579,9 +615,25 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 cos_sin_cache,
                 slot_mapping[:num_mqa_tokens],
             )
-            latent_out, _lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+            if self.dcp_world_size > 1:
+                assert self.dcp_manager is not None
+                assert self.dcp_manager.query_gather is not None
+                mqa_q = self.dcp_manager.query_gather(mqa_q)
+            latent_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
                 mqa_q, self._attn_read_kv_cache(), attn_metadata, self
             )
+            if self.dcp_world_size > 1:
+                assert lse is not None
+                assert self.dcp_manager is not None
+                assert attn_metadata.decode is not None
+                latent_out = self.dcp_manager.combine(
+                    latent_out,
+                    lse,
+                    seq_lens=attn_metadata.decode.seq_lens,
+                    query_start_loc=attn_metadata.query_start_loc[
+                        : attn_metadata.num_decodes + 1
+                    ],
+                )
             self._v_up_proj(latent_out, out=attn_out[:num_mqa_tokens])
 
     def _decode_concat_cache(
@@ -747,9 +799,20 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         )
 
         if has_context:
-            context_output, context_lse = self.impl._compute_prefill_context(  # type: ignore[attr-defined]
-                q, self._attn_read_kv_cache(), attn_metadata, self._k_scale
-            )
+            if self.dcp_world_size > 1:
+                context_output, context_lse = (
+                    self.impl._context_parallel_compute_prefill_context(  # type: ignore[attr-defined]
+                        q,
+                        self._attn_read_kv_cache(),
+                        attn_metadata,
+                        k_scale=self._k_scale,
+                        dcp_world_size=self.dcp_world_size,
+                    )
+                )
+            else:
+                context_output, context_lse = self.impl._compute_prefill_context(  # type: ignore[attr-defined]
+                    q, self._attn_read_kv_cache(), attn_metadata, self._k_scale
+                )
             suffix_output, suffix_lse = output_prefill
             out = out.view(-1, self.num_local_heads, self.v_head_dim)
             merge_attn_states(
@@ -758,7 +821,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 prefix_lse=context_lse,
                 suffix_output=suffix_output[..., : self.v_head_dim],
                 suffix_lse=suffix_lse,
-                prefill_tokens_with_context=prefill.chunked_context.prefill_tokens_with_context,
             )
         elif not writes_out:
             out.copy_(output_prefill[..., : self.v_head_dim].flatten(start_dim=-2))

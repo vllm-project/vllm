@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from functools import partial
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import torch
@@ -20,40 +23,24 @@ from vllm.v1.outputs import RoutedExpertsTensors
 logger = logging.getLogger(__name__)
 
 
-def _get_num_experts_per_tok(hf_config) -> int:
-    """Resolve the per-token expert count from the HF config.
+@runtime_checkable
+class RoutedExpertsCaptureSource(Protocol):
+    layer_id: int
+    capture_fn: Callable[[torch.Tensor], None] | None
 
-    Different model families store this under different attribute names
-    (e.g. ``num_experts_per_tok`` for DeepSeek, ``top_k_experts`` for Gemma 4).
-    """
-    val = getattr(hf_config, "num_experts_per_tok", None)
-    if val is None:
-        val = getattr(hf_config, "top_k_experts", None)
-    if val is None:
+
+def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
+    model_config = vllm_config.model_config
+    num_layers = model_config.get_total_num_hidden_layers()
+    num_experts = model_config.get_num_experts()
+    num_experts_per_tok = model_config.get_num_experts_per_tok()
+    if num_layers <= 0 or num_experts <= 0 or num_experts_per_tok <= 0:
         raise ValueError(
-            "Cannot determine num_experts_per_tok: HF config has neither "
-            "'num_experts_per_tok' nor 'top_k_experts'"
+            "Routed-experts capture requires positive layer, expert, and "
+            "experts-per-token counts, got "
+            f"{num_layers=}, {num_experts=}, {num_experts_per_tok=}."
         )
-    return val
-
-
-def get_num_experts(hf_config) -> int:
-    """Resolve ``num_experts`` across HuggingFace config naming conventions.
-
-    Different MoE model families expose this under different keys:
-      - ``num_experts``: Mixtral, Qwen2-MoE, Qwen3-MoE
-      - ``n_routed_experts``: DeepSeek-V2/V3
-      - ``num_local_experts``: Mixtral (older exports)
-    """
-    for key in ("num_experts", "n_routed_experts", "num_local_experts"):
-        val = getattr(hf_config, key, None)
-        if val is not None:
-            return val
-    raise ValueError(
-        "Could not resolve num_experts from model config. "
-        "Expected one of 'num_experts', 'n_routed_experts', "
-        "or 'num_local_experts'."
-    )
+    return num_layers, num_experts, num_experts_per_tok
 
 
 class RoutedExpertsCapturer:
@@ -89,9 +76,7 @@ class RoutedExpertsCapturer:
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
     ) -> None:
-        hf_config = vllm_config.model_config.hf_text_config
-        num_experts_per_tok = _get_num_experts_per_tok(hf_config)
-        num_layers = hf_config.num_hidden_layers
+        num_layers, _, num_experts_per_tok = _get_routed_experts_shape(vllm_config)
         logger.info(
             "RoutedExpertsCapturer: allocating buffer with "
             "max_tokens=%d, num_layers=%d, num_experts_per_tok=%d "
@@ -99,7 +84,7 @@ class RoutedExpertsCapturer:
             max_num_batched_tokens,
             num_layers,
             num_experts_per_tok,
-            getattr(hf_config, "model_type", "unknown"),
+            vllm_config.model_config.hf_text_config.model_type,
         )
         self.device_buffer = torch.zeros(
             (
@@ -258,6 +243,10 @@ def bind_routed_experts_capturer(
 
     num_bound = 0
     for module in model.modules():
+        if isinstance(module, RoutedExpertsCaptureSource):
+            module.capture_fn = partial(capturer.capture, module.layer_id)
+            num_bound += 1
+            continue
         if not isinstance(module, MoERunner):
             continue
         layer_id = module.layer_id
@@ -344,9 +333,9 @@ class RoutedExpertsManager:
         # block IDs span [0, num_blocks) regardless of how many groups
         # exist. Sizing to the full pool avoids index-out-of-range
         # when different groups happen to land on the same block.
-        hf_config = vllm_config.model_config.hf_text_config
-        num_experts = get_num_experts(hf_config)
-        num_experts_per_tok = _get_num_experts_per_tok(hf_config)
+        num_layers, num_experts, num_experts_per_tok = _get_routed_experts_shape(
+            vllm_config
+        )
         max_num_slots = kv_cache_config.num_blocks * self.block_size
         # Expert IDs are 0..num_experts-1; uint8 fits 256 distinct
         # values so the boundary is ``<= 256`` (NOT ``< 256``). Keeping
@@ -356,7 +345,7 @@ class RoutedExpertsManager:
         self.routed_experts_by_slot = np.zeros(
             (
                 max_num_slots,
-                hf_config.num_hidden_layers,
+                num_layers,
                 num_experts_per_tok,
             ),
             dtype=expert_id_dtype,
@@ -366,8 +355,8 @@ class RoutedExpertsManager:
             "(slots=%d, layers=%d, top_k=%d, dtype=%s)",
             self.routed_experts_by_slot.nbytes / 1e9,
             max_num_slots,
-            hf_config.num_hidden_layers,
-            hf_config.num_experts_per_tok,
+            num_layers,
+            num_experts_per_tok,
             self.routed_experts_by_slot.dtype.name,
         )
 
