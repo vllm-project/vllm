@@ -96,8 +96,15 @@ def _fused_norm_rope_kernel(
     q_rms_eps,
     q_c_out_ptr,
     q_c_out_stride,
+    q_c_quant_out_ptr,
+    q_c_quant_scale_ptr,
+    q_c_quant_scale_stride,
     Q_DIM: tl.constexpr,
     Q_BLOCK_SIZE: tl.constexpr,
+    Q_FP8_QUANT: tl.constexpr,
+    Q_QUANT_GROUP_SIZE: tl.constexpr,
+    Q_NUM_GROUPS: tl.constexpr,
+    Q_NUM_SCALE_PACKS: tl.constexpr,
     # KV RMS norm
     kv_ptr,
     kv_stride,
@@ -188,7 +195,42 @@ def _fused_norm_rope_kernel(
         q_c = tl.load(q_c_ptr + tok_idx * q_c_stride + q_block, mask=q_mask, other=0.0)
         q_c_rms_w = tl.load(q_rms_norm_w_ptr + q_block, mask=q_mask)
         q_c = _rms_norm(q_c, q_c_rms_w, q_rms_eps, Q_DIM)
+        q_c = q_c.to(q_c_out_ptr.dtype.element_ty)
         tl.store(q_c_out_ptr + tok_idx * q_c_out_stride + q_block, q_c, mask=q_mask)
+        if Q_FP8_QUANT:
+            num_groups: tl.constexpr = Q_BLOCK_SIZE // Q_QUANT_GROUP_SIZE
+            q_groups = tl.reshape(q_c.to(tl.float32), (num_groups, Q_QUANT_GROUP_SIZE))
+            group_absmax = tl.max(tl.abs(q_groups), axis=1)
+            scale = tl.maximum(group_absmax * (1.0 / 448.0), 1e-10)
+            scale = tl.math.exp2(tl.math.ceil(tl.math.log2(scale)))
+            q_quant = tl.clamp(
+                q_groups / tl.reshape(scale, (num_groups, 1)), -448.0, 448.0
+            ).to(q_c_quant_out_ptr.dtype.element_ty)
+            tl.store(
+                q_c_quant_out_ptr + tok_idx * Q_DIM + q_block,
+                tl.reshape(q_quant, (Q_BLOCK_SIZE,)),
+                mask=q_mask,
+            )
+
+            scales_per_pack: tl.constexpr = 4
+            scale_packs = tl.reshape(
+                scale, (num_groups // scales_per_pack, scales_per_pack)
+            )
+            scale_bits = scale_packs.to(tl.int32, bitcast=True)
+            scale_bytes = (scale_bits >> 23) & 0xFF
+            byte_offsets = tl.arange(0, scales_per_pack)
+            group_offsets = (
+                tl.arange(0, num_groups // scales_per_pack)[:, None] * scales_per_pack
+                + byte_offsets[None, :]
+            )
+            scale_bytes = tl.where(group_offsets < Q_NUM_GROUPS, scale_bytes, 0)
+            packed_scale = tl.sum(scale_bytes << (byte_offsets[None, :] * 8), axis=1)
+            pack_offsets = tl.arange(0, num_groups // scales_per_pack)
+            tl.store(
+                q_c_quant_scale_ptr + tok_idx + pack_offsets * q_c_quant_scale_stride,
+                packed_scale,
+                mask=pack_offsets < Q_NUM_SCALE_PACKS,
+            )
     elif pid == 1:
         # KV RMS Norm + KV RoPE + MLA concat_and_cache.
         # Merged so the normed kv_c and RoPE'd k_pe can be written
@@ -395,6 +437,8 @@ def fused_norm_rope(
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
     q_c_out: torch.Tensor | None = None,
+    q_c_quant_out: torch.Tensor | None = None,
+    q_c_quant_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert positions.ndim == 1
     assert q_c.ndim == 2
@@ -478,6 +522,18 @@ def fused_norm_rope(
 
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
+    q_fp8_quant = q_c_quant_out is not None
+    assert q_fp8_quant == (q_c_quant_scale is not None)
+    if q_fp8_quant:
+        assert q_dim % 128 == 0
+        assert q_c_quant_out is not None
+        assert q_c_quant_scale is not None
+        assert q_c_quant_out.shape == q_c.shape
+        assert q_c_quant_scale.shape == (num_tokens, (q_dim // 128 + 3) // 4)
+        assert q_c_quant_scale.stride(0) == 1
+    else:
+        q_c_quant_out = torch.empty(0, dtype=torch.float8_e4m3fn, device=device)
+        q_c_quant_scale = torch.empty(0, dtype=torch.int32, device=device)
     use_pdl = current_platform.is_arch_support_pdl()
     _fused_norm_rope_kernel[(4, num_tokens)](
         positions,
@@ -488,8 +544,15 @@ def fused_norm_rope(
         q_rms_eps,
         q_c_out,
         q_c_out.stride(0),
+        q_c_quant_out,
+        q_c_quant_scale,
+        q_c_quant_scale.stride(1) if q_fp8_quant else 0,
         q_dim,
         triton.next_power_of_2(q_dim),
+        q_fp8_quant,
+        128,
+        q_dim // 128 if q_fp8_quant else 0,
+        (q_dim // 128 + 3) // 4 if q_fp8_quant else 0,
         # KV RMS norm
         kv_c,
         kv_c.stride(0),

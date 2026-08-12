@@ -9,6 +9,10 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.fusion.fused_act_quant import (
+    maybe_allocate_fp8_block_quant,
+)
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -332,9 +336,12 @@ class DeepseekV32Attention(MLAAttention):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        qkv_input: torch.Tensor | QuantizedActivation | None = None,
     ) -> torch.Tensor:
         # Captured: A-projections (+ indexer A-GEMM on indexer layers).
-        qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+        qkv_lora = self.fused_qkv_a_proj(
+            hidden_states if qkv_input is None else qkv_input
+        )[0]
         q_c, kv_c, k_pe = qkv_lora.split(
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
@@ -394,6 +401,10 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
+        q_consumers = [self.q_b_proj]
+        if self.indexer is not None and not self.skip_topk:
+            q_consumers.append(self.indexer.wq_b)
+        q_c_quant = maybe_allocate_fp8_block_quant(q_c, *q_consumers)
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -417,15 +428,20 @@ class DeepseekV32Attention(MLAAttention):
             mla_k_scale=mla_k_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
+            q_c_quant_out=q_c_quant.data if q_c_quant is not None else None,
+            q_c_quant_scale=q_c_quant.scale if q_c_quant is not None else None,
         )
 
-        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        q_proj_input = q_c_quant if q_c_quant is not None else q_c
+        q = self.q_b_proj(q_proj_input)[0].view(
+            -1, self.num_local_heads, self.qk_head_dim
+        )
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_nope = q_nope.transpose(0, 1)
         ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
 
         if self.indexer is not None and not self.skip_topk:
-            index_q = self.indexer.wq_b(q_c)[0]
+            index_q = self.indexer.wq_b(q_proj_input)[0]
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
             index_q = None
