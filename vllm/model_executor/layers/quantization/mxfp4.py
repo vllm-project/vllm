@@ -878,20 +878,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         return w13, w2, w13_scale, w2_scale
 
     def _setup_kernel_k3_situ_gfx942(self, layer: RoutedExperts) -> None:
-        # gfx942 has no native MXFP4 matmul. Convert the weights to groupwise
-        # int4 once at load time for AITER's existing bf16 x int4 FlyDSL path.
+        # Convert the weights to groupwise int4 once at load time for AITER's
+        # replacement bf16 x int4 FlyDSL path.
         import inspect
 
-        from aiter.ops.flydsl.kernels.moe_gemm_2stage import compile_moe_gemm1
+        from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import (
+            flydsl_a16w4_gemm1,
+        )
 
-        # Before ROCm/aiter#4471 the packed-int4 stage1 dropped the requested
-        # activation and hardcoded SiLU, so K3 served fluent text while
-        # computing the wrong function. Refuse instead of repeating that.
-        if "act" not in inspect.signature(compile_moe_gemm1).parameters:
+        # Refuse any AITER build whose replacement int4 stage1 cannot apply the
+        # requested SiTUv2 activation.
+        if "act" not in inspect.signature(flydsl_a16w4_gemm1).parameters:
             raise RuntimeError(
                 "This AITER build ignores the SiTUv2 activation on the "
-                "packed-int4 MoE path and would silently compute SiLU. "
-                "Rebuild with an AITER that includes ROCm/aiter#4471."
+                "replacement packed-int4 MoE path and would silently compute "
+                "SiLU. Rebuild with the replacement A16W4/int4 pipeline."
             )
 
         from aiter import dtypes as aiter_dtypes
