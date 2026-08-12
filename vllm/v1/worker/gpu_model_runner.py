@@ -217,7 +217,7 @@ from vllm.v1.worker.cp_utils import (
     get_dcp_dummy_context_len,
     prepare_dcp_dummy_context_metadata,
 )
-from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
+from vllm.v1.worker.dp_utils import DPProfilerSync, coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu.attn_utils import _reshape_attention_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -515,6 +515,19 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+
+        # Rides the per-step DP coordination all-reduce to start the torch
+        # profiler on the same step across all DP ranks. Only meaningful with DP
+        # (that reduce only runs when data_parallel_size > 1) and opt-in via
+        # VLLM_ENABLE_MULTINODE_PROFILING.
+        self.dp_profiler_sync: DPProfilerSync | None = (
+            DPProfilerSync()
+            if (
+                envs.VLLM_ENABLE_MULTINODE_PROFILING
+                and self.parallel_config.data_parallel_size > 1
+            )
+            else None
+        )
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -4107,6 +4120,7 @@ class GPUModelRunner(
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
                     cudagraph_mode=cudagraph_mode.value,
+                    profiler_sync=self.dp_profiler_sync,
                 )
             )
 

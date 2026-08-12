@@ -8,6 +8,7 @@ from vllm.config import CUDAGraphMode, ProfilerConfig
 from vllm.config.profiler import _is_uri_path
 from vllm.profiler.wrapper import WorkerProfiler
 from vllm.v1.core.sched.output import CachedRequestData
+from vllm.v1.worker.dp_utils import DPProfilerSync
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
 
@@ -280,6 +281,104 @@ class TestAnnotateProfile:
         assert self._annotate(detailed=True) == (
             "execute_5_context_1(sq4sk4sqsq16sqsk16)_generation_1(sq1sk11sqsq1sqsk11)"
         )
+
+
+class TestDPProfilerSync:
+    """Unit tests for the OR-reduced, deferred profiler start used by
+    VLLM_ENABLE_MULTINODE_PROFILING (see DPProfilerSync). observe(consensus)
+    stands in for the value read back from the per-step DP all-reduce."""
+
+    def test_local_request_reaches_consensus(self):
+        sync = DPProfilerSync()
+        assert sync.consume_start() is False  # nothing requested yet
+
+        sync.request_start()
+        assert sync._pending is True
+        # Reduce carries this rank's request; every rank observes the OR.
+        sync.observe(consensus=True)
+
+        assert sync.consume_start() is True
+        # Consumed exactly once, and the request is cleared afterwards.
+        assert sync.consume_start() is False
+        assert sync._pending is False
+
+    def test_remote_request_starts_this_rank(self):
+        """A rank that never received start_profile still starts once the OR
+        across DP ranks is True (only one rank needs the HTTP call)."""
+        sync = DPProfilerSync()
+        assert sync._pending is False
+
+        sync.observe(consensus=True)
+
+        assert sync.consume_start() is True
+
+    def test_no_request_no_start(self):
+        sync = DPProfilerSync()
+        sync.observe(consensus=False)
+        assert sync.consume_start() is False
+
+    def test_latch_survives_later_false_observation(self):
+        """After consensus, a second reduce in the same step (PP+SP) reports
+        False once _pending is cleared; that must not drop the latch before the
+        worker consumes it."""
+        sync = DPProfilerSync()
+        sync.request_start()
+        sync.observe(consensus=True)
+        sync.observe(consensus=False)  # second reduce, pending already cleared
+        assert sync.consume_start() is True
+
+    def test_cancel_drops_pending_request(self):
+        """stop_profile before consensus cancels a pending start."""
+        sync = DPProfilerSync()
+        sync.request_start()
+        sync.cancel()
+        assert sync._pending is False
+        # A stale reduce value must not resurrect a cancelled request as a start
+        # this rank acts on; but if the OR is genuinely True from another rank it
+        # still starts. Here nothing else requested, so no start.
+        sync.observe(consensus=False)
+        assert sync.consume_start() is False
+
+
+class TestWorkerSyncedProfileStart:
+    """Worker._maybe_start_synced_profile drives the deferred start from the
+    per-step consensus latch."""
+
+    def _worker(self, dp_profiler_sync, profiler):
+        worker = MagicMock()
+        worker.model_runner.dp_profiler_sync = dp_profiler_sync
+        worker.profiler = profiler
+        return worker
+
+    def test_starts_on_consensus(self):
+        sync = DPProfilerSync()
+        sync.request_start()
+        sync.observe(consensus=True)
+        profiler = MagicMock()
+        worker = self._worker(sync, profiler)
+
+        Worker._maybe_start_synced_profile(worker)
+        profiler.start.assert_called_once()
+
+        # Latch consumed: a later step does not start again.
+        Worker._maybe_start_synced_profile(worker)
+        profiler.start.assert_called_once()
+
+    def test_no_start_without_consensus(self):
+        sync = DPProfilerSync()
+        sync.request_start()  # requested but reduce has not agreed yet
+        profiler = MagicMock()
+        worker = self._worker(sync, profiler)
+
+        Worker._maybe_start_synced_profile(worker)
+        profiler.start.assert_not_called()
+
+    def test_noop_when_sync_disabled(self):
+        profiler = MagicMock()
+        worker = self._worker(None, profiler)
+
+        Worker._maybe_start_synced_profile(worker)
+        profiler.start.assert_not_called()
 
 
 def test_profiler_entered_during_capture():

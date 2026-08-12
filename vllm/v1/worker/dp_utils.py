@@ -15,6 +15,54 @@ from vllm.v1.worker.ubatch_utils import (
 logger = init_logger(__name__)
 
 
+class DPProfilerSync:
+    """Starts the torch profiler on the same step across all DP ranks.
+
+    ``start_profile`` reaches each DP rank asynchronously, at a different point
+    in its own step loop, and every step all DP ranks must jointly execute the
+    EP all-to-all / DP coordination collective. A separate barrier on the
+    profiler control path therefore deadlocks: the first rank to reach it stops
+    stepping, so the others wedge on the next collective before they ever reach
+    their own barrier (see VLLM_ENABLE_MULTINODE_PROFILING).
+
+    Instead this rides the per-step DP coordination all-reduce that every rank
+    already executes in lockstep. ``request_start`` sets a pending flag; the
+    flag is OR-reduced across DP ranks inside ``_synchronize_dp_ranks``; once any
+    rank has requested it, ``start_now`` latches on every rank on the same step,
+    and the worker starts capture next step. No extra collective, no deadlock,
+    and it needs only one rank to receive start_profile (the OR propagates it).
+    """
+
+    def __init__(self) -> None:
+        # This rank has received start_profile but capture has not begun yet.
+        self._pending = False
+        # Consensus reached: every rank should start capture. Latched until the
+        # worker consumes it, so a second reduce in the same step (PP+SP) can't
+        # clear it before the worker reads it.
+        self.start_now = False
+
+    def request_start(self) -> None:
+        self._pending = True
+
+    def cancel(self) -> None:
+        """Drop a pending request (e.g. stop_profile before capture began)."""
+        self._pending = False
+        self.start_now = False
+
+    def observe(self, consensus: bool) -> None:
+        """Record the OR-reduced request flag from a DP coordination reduce."""
+        if consensus:
+            self.start_now = True
+
+    def consume_start(self) -> bool:
+        """Return True once, on the step every rank agreed to start capture."""
+        if self.start_now:
+            self.start_now = False
+            self._pending = False
+            return True
+        return False
+
+
 def _get_device_and_group(parallel_config: ParallelConfig):
     # Use the actual device assigned to the DP group, not just the device type
     device = get_dp_group().device
@@ -39,16 +87,20 @@ def _run_ar(
     padded_num_tokens_per_ubatch: int,
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
+    profile_start_pending: bool = False,
 ) -> torch.Tensor:
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
-    # Populate this rank's contribution on CPU to reduce GPU syncs.
-    tensor_cpu = torch.zeros(4, dp_size, dtype=torch.int32)
+    # Populate this rank's contribution on CPU to reduce GPU syncs. Row 4 carries
+    # the profiler start request so it is OR-reduced together with the batch
+    # coordination, avoiding a separate collective (see DPProfilerSync).
+    tensor_cpu = torch.zeros(5, dp_size, dtype=torch.int32)
     tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
     tensor_cpu[3][dp_rank] = cudagraph_mode
+    tensor_cpu[4][dp_rank] = 1 if profile_start_pending else 0
     tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
     return tensor
@@ -104,6 +156,7 @@ def _synchronize_dp_ranks(
     should_attempt_ubatching: bool,
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
+    profiler_sync: "DPProfilerSync | None" = None,
 ) -> tuple[bool, torch.Tensor | None, int]:
     """
     1. Decides if each DP rank is going to microbatch. Either all ranks
@@ -134,7 +187,13 @@ def _synchronize_dp_ranks(
         padded_num_tokens_per_ubatch=num_tokens_padded,
         cudagraph_mode=cudagraph_mode,
         parallel_config=parallel_config,
+        profile_start_pending=profiler_sync is not None and profiler_sync._pending,
     )
+
+    # OR-reduced profiler start request: latch it so the worker starts capture
+    # on the same step across all DP ranks.
+    if profiler_sync is not None:
+        profiler_sync.observe(bool(tensor[4].any().item()))
 
     # Synchronize cudagraph_mode across ranks first (take min).
     # This is needed before DP padding decision since we use the synced
@@ -168,6 +227,7 @@ def coordinate_batch_across_dp(
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
     cudagraph_mode: int = 0,
+    profiler_sync: "DPProfilerSync | None" = None,
 ) -> tuple[bool, torch.Tensor | None, int]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
@@ -183,6 +243,9 @@ def coordinate_batch_across_dp(
             only contains single token decodes
         cudagraph_mode: The cudagraph mode for this rank (0=NONE, 1=PIECEWISE, 2=FULL).
             DP padding is enabled when synced cudagraph mode across ranks is not NONE.
+        profiler_sync: Optional DPProfilerSync. When provided, its pending
+            profiler-start request is OR-reduced across DP ranks so capture
+            starts on the same step everywhere (see VLLM_ENABLE_MULTINODE_PROFILING).
 
     Returns: tuple[
         ubatch_slices: if this is set then all DP ranks have agreed to
@@ -219,6 +282,7 @@ def coordinate_batch_across_dp(
             should_attempt_ubatching,
             cudagraph_mode,
             parallel_config,
+            profiler_sync=profiler_sync,
         )
     )
 

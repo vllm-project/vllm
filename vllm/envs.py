@@ -301,6 +301,15 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
+    VLLM_ENABLE_MULTINODE_PROFILING: bool = False
+    """If set, the torch profiler start is synchronized across all data-parallel
+    ranks so per-rank traces from different nodes cover the same iterations,
+    which is required to align multi-node profiles. The start request is
+    OR-reduced onto the existing per-step DP coordination all-reduce and capture
+    begins on the agreed step everywhere, so it needs no extra collective and,
+    unlike a barrier on the profiler control path, cannot deadlock when only a
+    subset of ranks receives start_profile. Only affects DP (data_parallel_size
+    > 1); off by default."""
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
@@ -2057,6 +2066,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # memory allocation. Enabled by default as of v0.21.0
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
+    ),
+    # If set to 1, synchronize the torch profiler start across all DP ranks (via
+    # the per-step DP coordination all-reduce) so multi-node per-rank traces
+    # cover the same iterations. Only affects data_parallel_size > 1.
+    "VLLM_ENABLE_MULTINODE_PROFILING": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_MULTINODE_PROFILING", "0"))
     ),
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
