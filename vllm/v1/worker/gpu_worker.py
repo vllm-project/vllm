@@ -1127,41 +1127,12 @@ class Worker(WorkerBase):
             )
 
         if is_start:
-            # Generate the trace name by combining prefix with comprehensive rank suffix
-            from vllm.distributed.utils import get_worker_rank_suffix
+            # Create the profiler wrapper only on the first start call; later
+            # calls (including an OR-reduced synced start on a rank that never
+            # received start_profile locally) reuse the existing wrapper.
+            self._create_profiler(profile_prefix)
+            assert self.profiler is not None
 
-            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
-
-            # Build the full trace name
-            if profile_prefix:
-                trace_name = f"{profile_prefix}_{rank_suffix}"
-            else:
-                trace_name = rank_suffix
-
-            # Create the profiler wrapper only on the first start call
-            if self.profiler is None:
-                profiler_type = self.profiler_config.profiler
-                if profiler_type == "torch":
-                    self.profiler = TorchProfilerWrapper(
-                        self.profiler_config,
-                        worker_name=trace_name,
-                        local_rank=self.local_rank,
-                        activities=["CPU", "CUDA"],
-                    )
-                    logger.debug(
-                        "Starting torch profiler with trace name: %s", trace_name
-                    )
-                elif profiler_type == "cuda":
-                    self.profiler = CudaProfilerWrapper(self.profiler_config)
-                    logger.debug("Starting CUDA profiler")
-                else:
-                    # Config validation should prevent this code being reached
-                    raise ValueError(
-                        f"Invalid profiler value of {self.profiler_config.profiler}"
-                    )
-
-            # If profiler already initialized, restart profiling but keep
-            # the original trace name from the first initialization.
             dp_profiler_sync = getattr(self.model_runner, "dp_profiler_sync", None)
             if dp_profiler_sync is not None:
                 # Defer the actual start: request it here and let the per-step DP
@@ -1181,17 +1152,71 @@ class Worker(WorkerBase):
                 return
             self.profiler.stop()
 
+    def _create_profiler(self, profile_prefix: str | None = None) -> None:
+        """Build self.profiler (torch/cuda wrapper) if not already created.
+
+        Idempotent: the first call wins the trace name; later calls (e.g. an
+        OR-reduced synced start on a rank that never received start_profile
+        locally) reuse the existing wrapper.
+        """
+        if self.profiler is not None:
+            return
+
+        # Generate the trace name by combining prefix with comprehensive rank suffix
+        from vllm.distributed.utils import get_worker_rank_suffix
+
+        rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+        trace_name = (
+            f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
+        )
+
+        profiler_type = self.profiler_config.profiler
+        if profiler_type == "torch":
+            self.profiler = TorchProfilerWrapper(
+                self.profiler_config,
+                worker_name=trace_name,
+                local_rank=self.local_rank,
+                activities=["CPU", "CUDA"],
+            )
+            logger.debug("Starting torch profiler with trace name: %s", trace_name)
+        elif profiler_type == "cuda":
+            self.profiler = CudaProfilerWrapper(self.profiler_config)
+            logger.debug("Starting CUDA profiler")
+        else:
+            # Config validation should prevent this code being reached
+            raise ValueError(
+                f"Invalid profiler value of {self.profiler_config.profiler}"
+            )
+
     def _maybe_start_synced_profile(self) -> None:
         """Start capture once all DP ranks have agreed on the start step.
 
         Called every worker step (real and dummy) so idle DP ranks start in
         lockstep with busy ones. No-op unless VLLM_ENABLE_MULTINODE_PROFILING
         deferred a start via DPProfilerSync.
+
+        Only one rank needs to receive start_profile: the request is OR-reduced
+        across DP ranks, so a rank that never got the HTTP call still reaches
+        consensus here. Such a rank has no profiler wrapper yet (it is created in
+        profile()), so build it now -- otherwise the latch is consumed and the
+        rank silently never captures.
         """
         dp_profiler_sync = getattr(self.model_runner, "dp_profiler_sync", None)
-        if dp_profiler_sync is None or self.profiler is None:
+        if dp_profiler_sync is None:
             return
         if dp_profiler_sync.consume_start():
+            if self.profiler is None:
+                if (
+                    self.profiler_config is None
+                    or self.profiler_config.profiler is None
+                ):
+                    logger.warning(
+                        "Synced profile start requested but profiling is not "
+                        "configured on this rank; skipping."
+                    )
+                    return
+                self._create_profiler()
+            assert self.profiler is not None
             self.profiler.start()
 
     def execute_dummy_batch(self) -> None:

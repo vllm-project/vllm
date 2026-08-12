@@ -380,6 +380,41 @@ class TestWorkerSyncedProfileStart:
         Worker._maybe_start_synced_profile(worker)
         profiler.start.assert_not_called()
 
+    def test_creates_profiler_on_remote_rank(self):
+        """A rank that reached consensus via the OR-reduce but never received
+        start_profile has no profiler wrapper yet; it must be created and
+        started here, not silently skipped. Regression: an early
+        ``self.profiler is None`` return dropped every rank that did not get the
+        HTTP call, so only the called node captured (single-node traces)."""
+        sync = DPProfilerSync()
+        sync.observe(consensus=True)  # remote request; this rank never asked
+        worker = self._worker(sync, profiler=None)
+        worker.profiler_config = MagicMock(profiler="torch")
+
+        created = MagicMock()
+
+        def _create(*args, **kwargs):
+            worker.profiler = created
+
+        worker._create_profiler.side_effect = _create
+
+        Worker._maybe_start_synced_profile(worker)
+
+        worker._create_profiler.assert_called_once()
+        created.start.assert_called_once()
+
+    def test_skips_when_profiling_not_configured(self):
+        """Consensus on a rank where profiling is not configured must no-op
+        (and not build a profiler), rather than crash."""
+        sync = DPProfilerSync()
+        sync.observe(consensus=True)
+        worker = self._worker(sync, profiler=None)
+        worker.profiler_config = None
+
+        Worker._maybe_start_synced_profile(worker)
+
+        worker._create_profiler.assert_not_called()
+
 
 def test_profiler_entered_during_capture():
     """Profiler is used as a context manager in _warmup_and_capture,
