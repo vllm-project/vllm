@@ -1973,9 +1973,9 @@ class VllmConfig:
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
-            if (
-                self.parallel_config.tensor_parallel_size > 1
-                and self.compilation_config.pass_config.enable_sp
+            if self.parallel_config.tensor_parallel_size > 1 and (
+                self.compilation_config.pass_config.enable_sp
+                or self.parallel_config.use_sequence_parallel_moe
             ):
                 cudagraph_capture_sizes = self.update_sizes_for_sequence_parallelism(
                     cudagraph_capture_sizes

@@ -548,6 +548,10 @@ class GPUModelRunner(
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        if parallel_config.use_sequence_parallel_moe:
+            self.max_num_tokens = round_up(
+                self.max_num_tokens, parallel_config.tensor_parallel_size
+            )
         self.max_num_reqs = scheduler_config.max_num_seqs
 
         # Broadcast PP output for external_launcher (torchrun)
@@ -3568,10 +3572,12 @@ class GPUModelRunner(
         )
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
-        # Pad tokens to multiple of tensor_parallel_size when
-        # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if self.compilation_config.pass_config.enable_sp and tp_size > 1:
+        sequence_parallel = (
+            self.compilation_config.pass_config.enable_sp
+            or self.parallel_config.use_sequence_parallel_moe
+        )
+        if sequence_parallel and tp_size > 1:
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -3698,14 +3704,20 @@ class GPUModelRunner(
             inputs_embeds = None
             model_kwargs = self._init_model_kwargs()
 
+        if num_input_tokens > num_scheduled_tokens:
+            if input_ids is not None:
+                input_ids[num_scheduled_tokens:].zero_()
+            if inputs_embeds is not None:
+                inputs_embeds[num_scheduled_tokens:].zero_()
+
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
         elif self.uses_xdrope_dim > 0:
             positions = self.xdrope_positions.gpu[:, :num_input_tokens]
         else:
             positions = self.positions[:num_input_tokens]
-            if num_input_tokens > num_scheduled_tokens:
-                self.positions[num_scheduled_tokens:num_input_tokens].zero_()
+        if num_input_tokens > num_scheduled_tokens:
+            positions[..., num_scheduled_tokens:num_input_tokens].zero_()
 
         if is_first_rank:
             intermediate_tensors = None
@@ -4085,7 +4097,10 @@ class GPUModelRunner(
             num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
-        if self.compilation_config.pass_config.enable_sp:
+        if (
+            self.compilation_config.pass_config.enable_sp
+            or self.parallel_config.use_sequence_parallel_moe
+        ):
             assert (
                 batch_descriptor.num_tokens
                 % self.vllm_config.parallel_config.tensor_parallel_size

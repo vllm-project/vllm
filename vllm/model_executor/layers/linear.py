@@ -10,14 +10,20 @@ from torch.nn.parameter import Parameter
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    sequence_parallel_all_gather,
+    sequence_parallel_reduce_scatter,
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
+)
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -44,6 +50,34 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+# Models whose attention AG/RS communication is handled by ColumnParallelLinear
+# and RowParallelLinear instead of model-specific forward code.
+_LINEAR_SEQUENCE_PARALLEL_MODEL_TYPES = frozenset(
+    {
+        "qwen3_next",
+        "qwen3_5_moe_text",
+    }
+)
+
+
+def _use_linear_sequence_parallel() -> bool:
+    # Only these models have moved attention AG/RS into the parallel Linear
+    # layers. Other models still execute AG/RS in their model code, so enabling
+    # this path for them would perform the same collective twice.
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return False
+    model_type = getattr(
+        vllm_config.model_config.hf_text_config,
+        "model_type",
+        None,
+    )
+    return vllm_config.parallel_config.use_sequence_parallel_moe and (
+        model_type in _LINEAR_SEQUENCE_PARALLEL_MODEL_TYPES
+    )
+
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "UnquantizedLinearMethod",
@@ -482,6 +516,7 @@ class ColumnParallelLinear(LinearBase):
 
         self._maybe_allow_fp8_block_shape_mismatch()
         self.gather_output = gather_output
+        self.sequence_parallel = _use_linear_sequence_parallel()
 
         self.quant_method.create_weights(
             layer=self,
@@ -570,6 +605,7 @@ class ColumnParallelLinear(LinearBase):
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        input_ = self.prepare_input(input_)
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
@@ -586,12 +622,28 @@ class ColumnParallelLinear(LinearBase):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+    def prepare_input(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.sequence_parallel or self.tp_size == 1:
+            return input_
+        if is_forward_context_available():
+            batch_descriptor = get_forward_context().batch_descriptor
+            if (
+                batch_descriptor is not None
+                and input_.shape[0] == batch_descriptor.num_tokens
+            ):
+                return input_
+        return sequence_parallel_all_gather(input_)
+
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size_per_partition}"
         s += f", bias={self.bias is not None}"
         s += f", tp_size={self.tp_size}"
         s += f", gather_output={self.gather_output}"
+        s += f", sequence_parallel={self.sequence_parallel}"
         return s
 
 
@@ -1572,6 +1624,7 @@ class RowParallelLinear(LinearBase):
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
+        self.sequence_parallel = _use_linear_sequence_parallel()
 
         self.quant_method.create_weights(
             layer=self,
@@ -1650,15 +1703,24 @@ class RowParallelLinear(LinearBase):
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
 
-        if self.reduce_results and self.tp_size > 1:
-            output = tensor_model_parallel_all_reduce(output_parallel)
-        else:
-            output = output_parallel
+        output = self.reduce_output(output_parallel)
 
         if not self.return_bias:
             return output
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
+
+    def reduce_output(self, output_parallel: torch.Tensor) -> torch.Tensor:
+        if self.tp_size == 1:
+            return output_parallel
+        if self.sequence_parallel and not self.reduce_results:
+            assert output_parallel.shape[0] % self.tp_size == 0, (
+                "Sequence-parallel input must be padded by the model runner"
+            )
+            return sequence_parallel_reduce_scatter(output_parallel)
+        if not self.reduce_results:
+            return output_parallel
+        return tensor_model_parallel_all_reduce(output_parallel)
 
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size_per_partition}"
@@ -1666,4 +1728,5 @@ class RowParallelLinear(LinearBase):
         s += f", bias={self.bias is not None}"
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
+        s += f", sequence_parallel={self.sequence_parallel}"
         return s

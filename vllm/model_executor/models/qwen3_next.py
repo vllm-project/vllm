@@ -16,7 +16,6 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
-    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -481,10 +480,8 @@ class Qwen3NextDecoderLayer(nn.Module):
         **kwargs: object,
     ):
         full_num_tokens = positions.shape[-1]
-        input_is_sequence_parallel = (
-            self.use_attn_reduce_scatter_for_moe
-            and residual is not None
-            and hidden_states.shape[0] != full_num_tokens
+        shard_residual_after_attention = self.use_attn_reduce_scatter_for_moe and (
+            residual is None or hidden_states.shape[0] == full_num_tokens
         )
 
         if residual is None:
@@ -492,10 +489,6 @@ class Qwen3NextDecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-
-        if input_is_sequence_parallel:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            hidden_states = hidden_states[:full_num_tokens]
 
         if self.layer_type == "linear_attention":
             hidden_states = self.linear_attn(hidden_states=hidden_states)
@@ -517,15 +510,8 @@ class Qwen3NextDecoderLayer(nn.Module):
                     self.attn_layer_scale.to(hidden_states.dtype) + 1
                 )
 
-        if self.use_attn_reduce_scatter_for_moe:
-            tp_world_size = get_tensor_model_parallel_world_size()
-            # small trick using minus, eg. -17 % 8 = 7
-            sp_pad = (-hidden_states.shape[0]) % tp_world_size
-            # pad if not divisible by world size
-            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
-            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
-            if not input_is_sequence_parallel:
-                residual = sequence_parallel_chunk(residual)
+        if shard_residual_after_attention:
+            residual = sequence_parallel_chunk(residual)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)

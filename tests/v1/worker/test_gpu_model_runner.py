@@ -316,6 +316,21 @@ def test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_
     assert runner.input_batch.logitsprocs_need_output_token_ids is False
 
 
+def test_model_runner_pads_moe_sequence_parallel_input():
+    runner = object.__new__(GPUModelRunner)
+    parallel_config = SimpleNamespace(
+        tensor_parallel_size=4,
+        use_sequence_parallel_moe=True,
+    )
+    runner.parallel_config = parallel_config
+    runner.vllm_config = SimpleNamespace(parallel_config=parallel_config)
+    runner.compilation_config = SimpleNamespace(
+        pass_config=SimpleNamespace(enable_sp=False)
+    )
+
+    assert runner._pad_for_sequence_parallelism(5) == 8
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     ("world_size", "is_last_rank", "expected_calls"),

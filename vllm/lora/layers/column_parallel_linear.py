@@ -130,7 +130,8 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         return lora_b
 
     def forward(
-        self, input_: torch.Tensor
+        self,
+        input_: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
         """Forward of ColumnParallelLinear
 
@@ -141,6 +142,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             - output
             - bias
         """
+        input_ = self.prepare_input(input_)
         bias = self.base_layer.bias if not self.base_layer.skip_bias_add else None
 
         # Matrix multiply.
@@ -156,6 +158,12 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
         output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
         return output, output_bias
+
+    def prepare_input(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.base_layer.prepare_input(input_)
 
     @classmethod
     @_not_fully_sharded_can_replace
