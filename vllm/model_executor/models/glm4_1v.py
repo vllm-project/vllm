@@ -548,9 +548,9 @@ class Glm4vVisionEmbeddings(nn.Module):
         else:
             # Convert inputs to tensors if needed
             if isinstance(lengths, list):
-                lengths = torch.tensor(lengths, device=device, dtype=torch.long)
+                lengths = async_tensor_h2d(lengths, device=device, dtype=torch.long)
             if not isinstance(image_shapes, torch.Tensor):
-                image_shapes = torch.tensor(
+                image_shapes = async_tensor_h2d(
                     image_shapes, device=device, dtype=torch.long
                 )
 

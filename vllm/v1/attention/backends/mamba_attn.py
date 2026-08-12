@@ -324,6 +324,33 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         return cu_chunk_seqlen, seq_idx, last_chunk_indices
 
+    def _prefill_cpu_metadata(
+        self,
+        common: M,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prefill context lengths and query offsets, from CPU data only.
+
+        `seq_lens_cpu_upper_bound` is precise for prefill rows in all modes
+        (including async spec decode), so this avoids the D2H sync that
+        `compute_num_computed_tokens().cpu()` would force.
+
+        Returns (num_computed_tokens_p_cpu, query_start_loc_p_cpu).
+        """
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        assert seq_lens_cpu is not None
+        num_reqs = common.num_reqs
+        num_prefills = common.num_prefills
+        query_start_loc_p_cpu = (
+            common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
+            - common.num_decode_tokens
+        )
+        prefill_query_lens_cpu = query_start_loc_p_cpu[1:] - query_start_loc_p_cpu[:-1]
+        num_computed_tokens_p_cpu = (
+            seq_lens_cpu[num_reqs - num_prefills : num_reqs] - prefill_query_lens_cpu
+        )
+        return num_computed_tokens_p_cpu, query_start_loc_p_cpu
+
     def _build_chunk_metadata_tensors(
         self,
         chunk_size: int,
@@ -334,23 +361,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         Compute chunk metadata and return as device tensors.
         Returns (cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p).
         """
-        num_reqs = common.num_reqs
         num_prefills = common.num_prefills
-        num_decode_tokens = common.num_decode_tokens
 
-        # Derive prefill context lengths from CPU data only.
-        # `seq_lens_cpu_upper_bound` is precise for prefill rows in all modes
-        # (including async spec decode), so this avoids the D2H sync that
-        # `compute_num_computed_tokens().cpu()` would force.
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-        assert seq_lens_cpu is not None
-        query_start_loc_p_cpu = (
-            common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-            - num_decode_tokens
-        )
-        prefill_query_lens_cpu = query_start_loc_p_cpu[1:] - query_start_loc_p_cpu[:-1]
-        num_computed_tokens_p_cpu = (
-            seq_lens_cpu[num_reqs - num_prefills : num_reqs] - prefill_query_lens_cpu
+        num_computed_tokens_p_cpu, query_start_loc_p_cpu = self._prefill_cpu_metadata(
+            common, common_attn_metadata
         )
 
         cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
