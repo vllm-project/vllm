@@ -745,8 +745,8 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
     ) -> "BatchFeature":
         """Ask for the replacement each placeholder expands to, and record it as
         per-item fields: its token ids, and the tokens or patches behind them."""
-        has_mm_data = any(mm_data.values())
-        mm_data = {**mm_data, "return_text_replacement_offsets": True}
+        if has_mm_data := any(mm_data.values()):
+            mm_data = {**mm_data, "return_text_replacement_offsets": True}
         hf_inputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
         offsets = hf_inputs.pop("text_replacement_offsets", None)
