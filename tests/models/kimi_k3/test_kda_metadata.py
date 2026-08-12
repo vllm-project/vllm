@@ -45,12 +45,13 @@ PRUNED_METADATA_FIELDS = {
 }
 
 
-def _assert_matches_shared_gdn(reference, actual: KimiK3KDAMetadata):
-    for field in fields(KimiK3KDAMetadata):
+def _assert_matches_shared_gdn(
+    reference: GDNAttentionMetadata, actual: KimiK3KDAMetadata
+):
+    assert actual.replayssm_commit is None
+    assert actual._replayssm_committer is None
+    for field in fields(GDNAttentionMetadata):
         actual_value = getattr(actual, field.name)
-        if field.name in {"replayssm_commit", "_replayssm_committer"}:
-            assert actual_value is None
-            continue
         expected_value = getattr(reference, field.name)
         if field.name in PRUNED_METADATA_FIELDS:
             assert actual_value is None
@@ -436,13 +437,19 @@ def test_replayssm_spec_cudagraph_stages_one_checkpoint_per_request():
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device
     ).replace(is_prefilling=torch.tensor([False, False]))
-    actual = _make_builder(
+    builder = _make_builder(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=2,
         full_cuda_graph=True,
         device=device,
         use_replayssm_spec=True,
-    ).build_for_cudagraph_capture(common_attn_metadata)
+    )
+    assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    assert builder.spec_state_indices_tensor.shape == (
+        builder.vllm_config.scheduler_config.max_num_seqs,
+        1,
+    )
+    actual = builder.build_for_cudagraph_capture(common_attn_metadata)
 
     assert actual.spec_state_indices_tensor is not None
     assert actual.spec_state_indices_tensor.shape == (batch.batch_size, 1)

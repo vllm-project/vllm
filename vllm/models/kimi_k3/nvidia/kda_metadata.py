@@ -341,13 +341,14 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             else None
         )
         if self.use_replayssm_spec:
+            max_num_reqs = vllm_config.scheduler_config.max_num_seqs
             self.spec_state_indices_tensor = torch.empty(
-                (self.decode_cudagraph_max_bs, 1),
+                (max_num_reqs, 1),
                 dtype=torch.int32,
                 device=device,
             )
             self.replayssm_num_accepted_tokens = torch.ones(
-                self.decode_cudagraph_max_bs,
+                max_num_reqs,
                 dtype=torch.int32,
                 device=device,
             )
@@ -571,7 +572,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_spec_decodes > 0
             and num_prefills == 0
             and num_decodes == 0
-            and num_spec_decodes <= self.decode_cudagraph_max_bs
+            and batch_size <= self.spec_state_indices_tensor.shape[0]
             and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
             # Equivalent PyTorch staging:
