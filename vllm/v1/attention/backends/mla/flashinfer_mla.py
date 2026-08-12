@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
@@ -29,6 +29,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import KVCacheLayoutType
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
@@ -117,6 +121,22 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
     # Non-causal DSpark blocks are flattened to single-token rows in forward_mqa.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+
+    def __init__(
+        self,
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: "VllmConfig",
+        device: torch.device,
+    ) -> None:
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            MLACommonMetadata,
+            supports_dcp_with_varlen=True,
+        )
 
 
 class FlashInferMLABackend(MLACommonBackend):
@@ -276,16 +296,39 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         block_table = attn_metadata.decode.block_table
         seq_lens = attn_metadata.decode.seq_lens
+        query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
 
         if not attn_metadata.causal:
             # Non-causal DSpark block: flatten to single-token decode rows with
             # per-row context seq_lens (trtllm-gen has no causal flag and would
             # otherwise mask the block causally).
-            query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
             q = q.unsqueeze(1)
             if query_len > 1:
                 block_table = block_table.repeat_interleave(query_len, dim=0)
                 seq_lens = seq_lens.repeat_interleave(query_len)
+        elif self.dcp_world_size > 1 and query_len > 1:
+            global_seq_lens = attn_metadata.decode.dcp_tot_seq_lens
+            assert global_seq_lens is not None
+            offsets = torch.arange(
+                query_len - 1,
+                -1,
+                -1,
+                device=global_seq_lens.device,
+                dtype=global_seq_lens.dtype,
+            )
+            per_query_global_lens = torch.clamp(
+                (global_seq_lens.unsqueeze(1) - offsets).reshape(-1), min=0
+            )
+            interleave = self.cp_kv_cache_interleave_size
+            dcp_span = self.dcp_world_size * interleave
+            remainder = torch.clamp(
+                per_query_global_lens % dcp_span - self.dcp_rank * interleave,
+                min=0,
+                max=interleave,
+            )
+            seq_lens = per_query_global_lens // dcp_span * interleave + remainder
+            block_table = block_table.repeat_interleave(query_len, dim=0)
+            q = q.unsqueeze(1)
         # trtllm API requires extra dimension q_len_per_request for MTP
         elif attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
             logger.warning_once(
