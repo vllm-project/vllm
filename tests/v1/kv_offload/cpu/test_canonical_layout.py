@@ -272,3 +272,59 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
     finally:
         for region in regions:
             region.cleanup()
+
+
+def _replicated_mapping(num_writers: int, writer_index: int) -> CanonicalPageMapping:
+    # Ranks holding identical bytes -- the replicated-MLA-KV-under-TP shape --
+    # take turns writing canonical pages, so each writes 1/num_writers of them.
+    identity = CopyRun(0, 0, 2048, 1, 2048, 2048)
+    return CanonicalPageMapping(
+        2048, 2048, (identity,), num_writers, writer_index, True
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_writer_rotation_submits_only_the_descriptors_it_wrote():
+    """A rotated store must submit the descriptors it filled, not the sized
+    upper bound.
+
+    The descriptor buffers come from ``torch.empty`` and are recycled through
+    ``_buffer_pool``, so the untouched tail holds uninitialized memory on a
+    fresh buffer and a previous transfer's live pointers on a reused one.
+    Submitting the bound hands that tail to a raw-pointer DMA. No existing case
+    catches this: every other transfer-level test here uses ``num_writers=1``,
+    where the bound and the fill are equal and the defect is invisible.
+    """
+    num_blocks = 4
+
+    def submitted_count(num_writers: int) -> int:
+        gpu = torch.randint(
+            -128, 128, (num_blocks, 2048), dtype=torch.int8, device="cuda"
+        )
+        cpu = torch.zeros(num_blocks, 2048, dtype=torch.int8, pin_memory=True)
+        store = _canonical_handler(
+            gpu, cpu, _replicated_mapping(num_writers, 0), gpu_to_cpu=True
+        )
+        seen: list[int] = []
+        real = store._swap_blocks_batch
+
+        def spy(src, dst, sizes, **kwargs):
+            assert src.numel() == dst.numel() == sizes.numel()
+            seen.append(src.numel())
+            return real(src, dst, sizes, **kwargs)
+
+        store._swap_blocks_batch = spy
+        _transfer(store, num_blocks, gpu_to_cpu=True)
+        torch.accelerator.synchronize()
+        assert len(seen) == 1, f"expected one descriptor batch, got {seen}"
+        return seen[0]
+
+    # Stated relationally so the assertion does not re-derive the canonical page
+    # id arithmetic it is meant to be independent of.
+    unrotated = submitted_count(1)
+    rotated = submitted_count(2)
+    assert unrotated == num_blocks, unrotated
+    assert rotated == num_blocks // 2, (
+        f"rotated store submitted {rotated} descriptors but wrote "
+        f"{num_blocks // 2}; the tail is uninitialized or stale"
+    )
