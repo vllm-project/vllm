@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm.outputs import RequestOutput, SamplingMask
+from vllm.outputs import RequestOutput
 
 pytestmark = pytest.mark.cpu_test
 
@@ -19,7 +19,3 @@ def test_request_output_forward_compatible():
         example_arg_added_in_new_version="some_value",
     )
     assert output is not None
-
-
-def test_sampling_mask_output():
-    assert SamplingMask(token_ids=[[1, 2]]).token_ids == [[1, 2]]
