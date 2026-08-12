@@ -1141,8 +1141,12 @@ class SpeculativeConfig:
                     )
                 )
 
-        if self.method != "dspark" and self.enable_adaptive_verification:
-            raise ValueError("Adaptive verification only supported with DSpark")
+        if self.enable_adaptive_verification and self.use_local_argmax_reduction:
+            raise ValueError(
+                "Adaptive verification estimates per-position acceptance from "
+                "the draft logits, which use_local_argmax_reduction never "
+                "materializes. Disable one of them."
+            )
 
         return self
 

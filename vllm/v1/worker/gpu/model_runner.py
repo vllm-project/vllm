@@ -1048,6 +1048,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.kv_cache_block_copies,
             )
 
+    def _skip_adaptive_verification(self) -> bool:
+        """Whether the speculator wants adaptive verification to sit out.
+
+        Both callers run before propose(), which is where the underlying flag
+        can change, so they always see the same answer within a step.
+        """
+        return (
+            self.speculator is not None and self.speculator.skip_adaptive_verification
+        )
+
     def gather_batch_req_state(
         self, scheduler_output: SchedulerOutput, dummy_run: bool
     ) -> tuple["BatchReqState | None", int | None]:
@@ -1082,7 +1092,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
 
-        if self.adaptive_verification is not None and draft_tokens:
+        if (
+            self.adaptive_verification is not None
+            and not self._skip_adaptive_verification()
+            and draft_tokens
+        ):
             num_toks = self.adaptive_verification.get_num_tokens(
                 num_tokens_per_req, draft_tokens
             )
@@ -1154,7 +1168,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
         adaptive_verification = (
-            self.adaptive_verification if num_draft_tokens_per_req is not None else None
+            self.adaptive_verification
+            if num_draft_tokens_per_req is not None
+            and not self._skip_adaptive_verification()
+            else None
         )
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
         if adaptive_verification is not None:
