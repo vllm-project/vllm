@@ -284,16 +284,50 @@ class CudaGraphManager:
         if not descs_by_token_lora:
             return
 
+        # FULL decode graphs, ascending by token count, can serve any smaller
+        # uniform-decode batch via request/token padding. They are inert for
+        # non-uniform batches (rejected by _is_compatible on uniform_token_count),
+        # so it is safe to offer them ahead of the mixed/PIECEWISE fallback for
+        # every token count. Without this, a uniform-decode batch whose exact
+        # token count has no FULL decode graph (a gap in round_up(size, qlen))
+        # silently drops to an eager PIECEWISE graph -- e.g. with a spec-decode
+        # query length of 3 and the default capture ladder, 12 tokens (4 reqs)
+        # finds only the size-16 PIECEWISE desc and never the size-18 FULL decode
+        # desc that could pad 4->6 reqs, so attention runs eager (metadata build
+        # + kernels on the host critical path) every decode step.
+        decode_full_descs = (
+            sorted(
+                (
+                    d
+                    for d in descs_by_mode.get(decode_mode, [])
+                    if d.uniform_token_count is not None
+                ),
+                key=lambda d: d.num_tokens,
+            )
+            if separate_decode_routine and decode_mode == CUDAGraphMode.FULL
+            else []
+        )
+
         all_token_counts = sorted({k[0] for k in descs_by_token_lora})
         current_range_start = 0
         for token_cg_size in all_token_counts:
             for i in range(current_range_start, token_cg_size + 1):
                 for num_active_loras in self.lora_capture_cases:
                     staging_key = (token_cg_size, num_active_loras)
-                    if staging_key in descs_by_token_lora:
-                        self._candidates[(i, num_active_loras)] = descs_by_token_lora[
-                            staging_key
-                        ]
+                    if staging_key not in descs_by_token_lora:
+                        continue
+                    fallback = descs_by_token_lora[staging_key]
+                    # Prefer the smallest FULL decode graph that can pad up to
+                    # this token count over the mixed/PIECEWISE fallback.
+                    pad_up = [
+                        d
+                        for d in decode_full_descs
+                        if d.num_tokens >= i
+                        and d.num_active_loras == num_active_loras
+                    ]
+                    self._candidates[(i, num_active_loras)] = pad_up + [
+                        d for d in fallback if d not in pad_up
+                    ]
             current_range_start = token_cg_size + 1
 
         for mode, descs in descs_by_mode.items():
