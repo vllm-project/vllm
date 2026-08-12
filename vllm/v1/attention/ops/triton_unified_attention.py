@@ -1038,14 +1038,22 @@ def unified_attention(
     # 2. The batch includes at least one prefill request, or
     # 3. The number of sequences exceeds the configured threshold, or
     # 4. Batch invariance is enabled
+    # Allow the 3D (split-KV) launch for small-query speculative-decode verify
+    # shapes as well. With the previous `max_seqlen_q > 1` gate, an MTP/EAGLE
+    # verify step (q_len 2-8) over long KV fell back to the 2D grid — e.g.
+    # q_len=4 over ~7k KV launches ~8-10 workgroups on a 64-CU GPU, leaving it
+    # >84% idle (measured 1,279us/launch vs 33us at q_len=1 on gfx1201).
+    # The segment buffers and reduce_segments are already indexed per TOKEN,
+    # so the correct capacity guard is q.shape[0] (tokens), not num_seqs.
+    MAX_QLEN_3D = 8
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
-        or num_seqs > seq_threshold_3D
+        or max_seqlen_q > MAX_QLEN_3D
+        or q.shape[0] > seq_threshold_3D
         or is_batch_invariant
     )
 
