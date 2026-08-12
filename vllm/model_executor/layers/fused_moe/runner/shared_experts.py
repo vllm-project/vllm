@@ -139,6 +139,13 @@ class SharedExperts(torch.nn.Module):
         assert self._stream is not None
         idx = self._output_idx
         assert self._output[idx] is None
+
+        # Clone as some models (Qwen3.5) alias shared experts input and hidden states,
+        # and later mutate the hidden state in the routed experts. That can lead to
+        # reading mutated memory in the shared experts producing incorrect results.
+        shared_experts_input = shared_experts_input.clone()
+        shared_experts_input.record_stream(self._stream)
+
         self._input_ready_event[idx].record(current_stream())
         with torch.cuda.stream(self._stream):
             self._input_ready_event[idx].wait(self._stream)
