@@ -670,7 +670,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             alignment=576 if uses_fp8_ds_mla_layout else 512,
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
-            # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token; 
+            # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token;
             # head_size stays semantic (512).
             state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
         )
