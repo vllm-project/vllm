@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
 
@@ -88,54 +89,56 @@ def load_audio_pyav(
         ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
         NumPy array and *sample_rate* is the native sample rate in Hz.
     """
-    native_sr = None
     try:
-        with av.open(path) as container:
-            if not container.streams.audio:
-                raise ValueError("No audio stream found.")
-            stream = container.streams.audio[0]
-            stream.thread_type = "AUTO"
-            native_sr = stream.rate
-            sr = sr or native_sr
+        container = av.open(path)
+    except av.error.FFmpegError as e:
+        raise ValueError(
+            "Invalid or corrupted audio data. Ensure the input is a valid "
+            "audio or video file (e.g. a complete WAV, MP3, or MP4)."
+        ) from e
 
-            # Early rejection from container/stream metadata to avoid
-            # wasting resources on decoding decompression bombs.
-            if max_duration_s is not None:
-                metadata_duration_s = None
-                if stream.duration and stream.time_base:
-                    metadata_duration_s = float(stream.duration * stream.time_base)
-                elif container.duration:
-                    metadata_duration_s = container.duration / 1_000_000
-                if (
-                    metadata_duration_s is not None
-                    and metadata_duration_s > max_duration_s
-                ):
-                    raise ValueError(
-                        f"Audio exceeds maximum allowed duration of "
-                        f"{max_duration_s}s (metadata reports "
-                        f"{metadata_duration_s:.1f}s). Set "
-                        f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
-                        f"increase this limit."
-                    )
+    with container:
+        if not container.streams.audio:
+            raise ValueError("No audio stream found.")
+        stream = container.streams.audio[0]
+        stream.thread_type = "AUTO"
+        native_sr = stream.rate
+        sr = sr or native_sr
 
-            max_samples = (
-                int(sr * max_duration_s) if max_duration_s is not None else None
-            )
-            total_samples = 0
-            total_decode_bytes = 0
+        # Early rejection from container/stream metadata to avoid
+        # wasting resources on decoding decompression bombs.
+        if max_duration_s is not None:
+            metadata_duration_s = None
+            if stream.duration and stream.time_base:
+                metadata_duration_s = float(stream.duration * stream.time_base)
+            elif container.duration:
+                metadata_duration_s = container.duration / 1_000_000
+            if metadata_duration_s is not None and metadata_duration_s > max_duration_s:
+                raise ValueError(
+                    f"Audio exceeds maximum allowed duration of "
+                    f"{max_duration_s}s (metadata reports "
+                    f"{metadata_duration_s:.1f}s). Set "
+                    f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                    f"increase this limit."
+                )
 
-            chunks: list[npt.NDArray] = []
-            needs_resampling = not math.isclose(
-                float(sr),
-                float(native_sr),
-                rel_tol=0.0,
-                abs_tol=1e-6,
-            )
-            resampler = (
-                av.AudioResampler(format="fltp", layout="mono", rate=sr)
-                if needs_resampling
-                else None
-            )
+        max_samples = int(sr * max_duration_s) if max_duration_s is not None else None
+        total_samples = 0
+        total_decode_bytes = 0
+
+        chunks: list[npt.NDArray] = []
+        needs_resampling = not math.isclose(
+            float(sr),
+            float(native_sr),
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        )
+        resampler = (
+            av.AudioResampler(format="fltp", layout="mono", rate=sr)
+            if needs_resampling
+            else None
+        )
+        try:
             for frame in container.decode(stream):
                 if needs_resampling:
                     assert resampler is not None
@@ -170,16 +173,14 @@ def load_audio_pyav(
                         f"VLLM_MAX_AUDIO_DECODE_BYTES to increase this "
                         f"limit."
                     )
-    except (ValueError, ImportError):
-        raise
-    except Exception as e:
-        raise ValueError(
-            "Invalid or corrupted video data when extracting audio. "
-            "Ensure the input is valid video bytes (e.g. a complete MP4)."
-        ) from e
+        except av.error.FFmpegError as e:
+            raise ValueError(
+                "Invalid or corrupted audio data. Ensure the input is a valid "
+                "audio or video file (e.g. a complete WAV, MP3, or MP4)."
+            ) from e
 
     if not chunks:
-        raise ValueError("No audio found in the video.")
+        raise ValueError("No audio found in the input.")
 
     audio = np.concatenate(chunks, axis=-1).astype(np.float32)
     if mono and audio.ndim > 1:
@@ -262,93 +263,101 @@ def load_audio_torchcodec(
         array (1-D when ``mono=True``) and *sample_rate* is the output
         sample rate in Hz.
     """
+    if sr is not None and sr != int(sr):
+        raise ValueError(f"torchcodec requires an integer sample rate, got {sr}")
+    sample_rate = int(sr) if sr is not None else None
+
+    # Opening the source and reading container metadata both touch untrusted
+    # input; torchcodec signals corrupt/unsupported data with RuntimeError.
     try:
-        # AudioDecoder takes an integer sample_rate; reject a non-integer
-        # `sr` here rather than surfacing a TypeError from the C++ layer.
-        if sr is not None and sr != int(sr):
-            raise ValueError(f"torchcodec requires an integer sample rate, got {sr}")
-        decoder = AudioDecoder(path, sample_rate=int(sr) if sr is not None else None)
-
-        # Pre-check the memory budget from container metadata so an
-        # obviously oversized stream is rejected before allocating the PCM
-        # buffer. Metadata is attacker-controlled, so this may only reject,
-        # never admit; the post-decode check below is authoritative.
-        if max_decode_bytes is not None:
-            metadata = decoder.metadata
-            est_duration_s = metadata.duration_seconds
-            # Estimate at the *output* rate: when `sr` is set torchcodec
-            # resamples to it during decode.
-            est_sample_rate = sr if sr is not None else metadata.sample_rate
-            est_num_channels = metadata.num_channels
-            if (
-                est_duration_s is not None
-                and est_sample_rate is not None
-                and est_num_channels is not None
-            ):
-                estimated_bytes = (
-                    int(est_duration_s * est_sample_rate)
-                    * est_num_channels
-                    * np.dtype(np.float32).itemsize
-                )
-                if estimated_bytes > max_decode_bytes:
-                    raise ValueError(
-                        f"Audio would allocate "
-                        f"{estimated_bytes / MiB_bytes:.0f} MiB of PCM "
-                        f"(~{est_duration_s:.1f}s at {est_sample_rate}Hz x "
-                        f"{est_num_channels}ch), exceeding the "
-                        f"{max_decode_bytes / MiB_bytes:.0f} MiB limit. Set "
-                        f"VLLM_MAX_AUDIO_DECODE_BYTES to increase this limit."
-                    )
-
-        if max_duration_s is None:
-            samples = decoder.get_all_samples()
-        else:
-            # Guard in two stages like load_audio_pyav: the metadata
-            # pre-check may only reject, never admit.
-            duration_s = decoder.metadata.duration_seconds
-            if duration_s is not None and duration_s > max_duration_s:
-                raise ValueError(
-                    f"Audio exceeds maximum allowed duration of "
-                    f"{max_duration_s}s (metadata reports "
-                    f"{duration_s:.1f}s). Set "
-                    f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
-                    f"increase this limit."
-                )
-            # Bounding the range keeps an under-reported duration from
-            # expanding into unbounded PCM; decoding slightly past the
-            # limit makes an over-long stream fail the check below instead
-            # of being silently truncated to it.
-            samples = decoder.get_samples_played_in_range(
-                0.0, max_duration_s + _DURATION_GUARD_MARGIN_S
-            )
-            # Same `int()` semantics as load_audio_pyav's
-            # `total_samples > int(sr * max_duration_s)`.
-            max_samples = int(samples.sample_rate * max_duration_s)
-            if samples.data.shape[-1] > max_samples:
-                raise ValueError(
-                    f"Audio exceeds maximum allowed duration of "
-                    f"{max_duration_s}s (decoded {samples.data.shape[-1]} "
-                    f"samples at {samples.sample_rate}Hz). Set "
-                    f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
-                    f"increase this limit."
-                )
-
-        # Re-check the actual decoded size: the metadata estimate above can
-        # be bypassed by a container that lies about its duration.
-        if max_decode_bytes is not None and samples.data.nbytes > max_decode_bytes:
-            raise ValueError(
-                f"Audio decode exceeded "
-                f"{max_decode_bytes / MiB_bytes:.0f} MiB memory "
-                f"limit ({samples.data.nbytes / MiB_bytes:.0f} MiB decoded). "
-                f"Set VLLM_MAX_AUDIO_DECODE_BYTES to increase this limit."
-            )
-    except (ValueError, ImportError):
-        raise
-    except Exception as e:
+        decoder = AudioDecoder(path, sample_rate=sample_rate)
+        metadata = decoder.metadata
+    except RuntimeError as e:
         raise ValueError(
             "Invalid or corrupted audio data. Ensure the input is a valid "
             "audio or video file (e.g. a complete WAV, MP3, or MP4)."
         ) from e
+
+    # Pre-check the memory budget from container metadata so an obviously
+    # oversized stream is rejected before allocating the PCM buffer. Metadata
+    # is attacker-controlled, so this may only reject, never admit; the
+    # post-decode check below is authoritative.
+    if max_decode_bytes is not None:
+        est_duration_s = metadata.duration_seconds
+        # Estimate at the *output* rate: when `sr` is set torchcodec
+        # resamples to it during decode.
+        est_sample_rate = sr if sr is not None else metadata.sample_rate
+        est_num_channels = metadata.num_channels
+        if (
+            est_duration_s is not None
+            and est_sample_rate is not None
+            and est_num_channels is not None
+        ):
+            estimated_bytes = (
+                int(est_duration_s * est_sample_rate)
+                * est_num_channels
+                * np.dtype(np.float32).itemsize
+            )
+            if estimated_bytes > max_decode_bytes:
+                raise ValueError(
+                    f"Audio would allocate "
+                    f"{estimated_bytes / MiB_bytes:.0f} MiB of PCM "
+                    f"(~{est_duration_s:.1f}s at {est_sample_rate}Hz x "
+                    f"{est_num_channels}ch), exceeding the "
+                    f"{max_decode_bytes / MiB_bytes:.0f} MiB limit. Set "
+                    f"VLLM_MAX_AUDIO_DECODE_BYTES to increase this limit."
+                )
+
+    # Duration pre-check, same attacker-controlled → reject-only semantics.
+    if max_duration_s is not None:
+        duration_s = metadata.duration_seconds
+        if duration_s is not None and duration_s > max_duration_s:
+            raise ValueError(
+                f"Audio exceeds maximum allowed duration of "
+                f"{max_duration_s}s (metadata reports "
+                f"{duration_s:.1f}s). Set "
+                f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                f"increase this limit."
+            )
+
+    # Decode the stream. RuntimeError here covers a corrupt stream or a
+    # container that lies about its length. Bounding the range (when a
+    # duration limit is set) keeps an under-reported duration from expanding
+    # into unbounded PCM.
+    try:
+        if max_duration_s is None:
+            samples = decoder.get_all_samples()
+        else:
+            samples = decoder.get_samples_played_in_range(
+                0.0, max_duration_s + _DURATION_GUARD_MARGIN_S
+            )
+    except RuntimeError as e:
+        raise ValueError(
+            "Invalid or corrupted audio data. Ensure the input is a valid "
+            "audio or video file (e.g. a complete WAV, MP3, or MP4)."
+        ) from e
+
+    # Authoritative post-decode checks: the metadata estimates above can be
+    # bypassed by a container that lies about its duration or size.
+    if max_duration_s is not None:
+        # Same `int()` semantics as load_audio_pyav's
+        # `total_samples > int(sr * max_duration_s)`.
+        max_samples = int(samples.sample_rate * max_duration_s)
+        if samples.data.shape[-1] > max_samples:
+            raise ValueError(
+                f"Audio exceeds maximum allowed duration of "
+                f"{max_duration_s}s (decoded {samples.data.shape[-1]} "
+                f"samples at {samples.sample_rate}Hz). Set "
+                f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                f"increase this limit."
+            )
+    if max_decode_bytes is not None and samples.data.nbytes > max_decode_bytes:
+        raise ValueError(
+            f"Audio decode exceeded "
+            f"{max_decode_bytes / MiB_bytes:.0f} MiB memory "
+            f"limit ({samples.data.nbytes / MiB_bytes:.0f} MiB decoded). "
+            f"Set VLLM_MAX_AUDIO_DECODE_BYTES to increase this limit."
+        )
 
     out_sr = samples.sample_rate
     audio = samples.data.numpy()  # (num_channels, num_samples), float32
@@ -361,6 +370,44 @@ def load_audio_torchcodec(
         audio = np.mean(audio, axis=0)
 
     return audio, out_sr
+
+
+_AUDIO_LOADERS: dict[str, Callable[..., tuple[npt.NDArray, float]]] = {
+    "torchcodec": load_audio_torchcodec,
+    "pyav": load_audio_pyav,
+    "soundfile": load_audio_soundfile,
+}
+
+
+def _defer_torchcodec(exc: Exception) -> bool:
+    """Whether the ``"auto"`` chain should skip torchcodec and try soundfile.
+
+    Only a missing torchcodec/ffmpeg defers. Decode errors propagate —
+    torchcodec is FFmpeg-based, like PyAV, so retrying would just fail the
+    same way, and guard ``ValueError``s must surface unchanged.
+    """
+    if isinstance(exc, ImportError):
+        logger.warning(
+            "torchcodec unavailable (%r); falling back to soundfile/PyAV.", exc
+        )
+        return True
+    return False
+
+
+def _defer_soundfile(exc: Exception) -> bool:
+    """Whether the ``"auto"`` chain should skip soundfile and try PyAV.
+
+    Defers when soundfile is missing, or when libsndfile reports a format it
+    can't handle (it covers fewer containers than FFmpeg). A corrupt-but-
+    recognised file does NOT defer — PyAV would hit the same corruption.
+
+    ``ImportError`` is checked first: if soundfile is a PlaceholderModule,
+    evaluating ``soundfile.LibsndfileError`` below would itself raise.
+    """
+    if isinstance(exc, ImportError):
+        logger.error("Failed to load audio via soundfile: %r", exc)
+        return True
+    return isinstance(exc, soundfile.LibsndfileError) and exc.code in _BAD_SF_CODES
 
 
 def load_audio(
@@ -386,24 +433,9 @@ def load_audio(
             f"Unknown audio backend {backend!r}. "
             f"Available backends: {list(AUDIO_BACKENDS)}"
         )
-    if backend == "torchcodec":
-        return load_audio_torchcodec(
-            path,
-            sr=sr,
-            mono=mono,
-            max_duration_s=max_duration_s,
-            max_decode_bytes=max_decode_bytes,
-        )
-    if backend == "pyav":
-        return load_audio_pyav(
-            path,
-            sr=sr,
-            mono=mono,
-            max_duration_s=max_duration_s,
-            max_decode_bytes=max_decode_bytes,
-        )
-    if backend == "soundfile":
-        return load_audio_soundfile(
+
+    if backend != "auto":
+        return _AUDIO_LOADERS[backend](
             path,
             sr=sr,
             mono=mono,
@@ -411,7 +443,11 @@ def load_audio(
             max_decode_bytes=max_decode_bytes,
         )
 
-    # "auto": torchcodec first, then the soundfile → PyAV chain.
+    # "auto": torchcodec → soundfile → PyAV. Each optional backend is tried
+    # by its bare name (so tests that monkeypatch it take effect) and defers
+    # to the next only when ``_defer_*`` says so; any other error propagates.
+    if isinstance(path, BytesIO):
+        path.seek(0)
     try:
         return load_audio_torchcodec(
             path,
@@ -420,15 +456,12 @@ def load_audio(
             max_duration_s=max_duration_s,
             max_decode_bytes=max_decode_bytes,
         )
-    except ImportError as exc:
-        # torchcodec (or its system ffmpeg) is not installed — fall through
-        # to soundfile. Decode errors do not fall back: torchcodec is
-        # FFmpeg-based like PyAV, and guard ValueErrors must propagate.
-        logger.warning(
-            "torchcodec unavailable (%r); falling back to soundfile/PyAV.", exc
-        )
-        if isinstance(path, BytesIO):
-            path.seek(0)
+    except Exception as exc:
+        if not _defer_torchcodec(exc):
+            raise
+
+    if isinstance(path, BytesIO):
+        path.seek(0)
     try:
         return load_audio_soundfile(
             path,
@@ -437,19 +470,13 @@ def load_audio(
             max_duration_s=max_duration_s,
             max_decode_bytes=max_decode_bytes,
         )
-    except ImportError as exc:
-        # soundfile (or resampy) is not installed — fall through to pyav.
-        # NOTE: this clause must stay BEFORE ``soundfile.LibsndfileError``
-        # because when soundfile is a PlaceholderModule, evaluating
-        # ``soundfile.LibsndfileError`` itself raises ImportError.
-        logger.error("Failed to load audio via soundfile: %r", exc)
-    except soundfile.LibsndfileError as exc:
-        # Only fall back for known format-detection failures.
-        # Re-raise anything else (e.g. corrupt but recognised format).
-        if exc.code not in _BAD_SF_CODES:
+    except Exception as exc:
+        if not _defer_soundfile(exc):
             raise
-    # soundfile may have advanced the BytesIO seek position before failing;
-    # reset it so PyAV can read from the beginning.
+
+    # PyAV is terminal: nothing left to fall back to. Normalize an FFmpeg
+    # failure to ValueError; let a missing soundfile/PyAV surface its
+    # "install vllm[audio]" ImportError.
     if isinstance(path, BytesIO):
         path.seek(0)
     try:
@@ -461,9 +488,9 @@ def load_audio(
             max_decode_bytes=max_decode_bytes,
         )
     except ImportError:
-        raise  # Let PlaceholderModule's message ("install vllm[audio]") propagate.
-    except Exception as pyav_exc:
-        raise ValueError("Invalid or unsupported audio file.") from pyav_exc
+        raise
+    except av.error.FFmpegError as exc:
+        raise ValueError("Invalid or unsupported audio file.") from exc
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
