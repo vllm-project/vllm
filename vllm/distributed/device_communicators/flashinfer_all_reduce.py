@@ -40,6 +40,9 @@ _fi_ar_workspace = None
 # allreduce backend or a fallback backend when the primary workspace is not
 # available on the current topology.
 _fi_ar_quant_workspace = None
+# TensorRT-LLM-only workspace for packed per-token-group FP8 patterns. MNNVL
+# does not currently implement the DeepGEMM UE8M0 scale layout.
+_fi_ar_packed_quant_workspace = None
 _fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
 
 
@@ -270,27 +273,75 @@ def get_fi_ar_quant_workspace(
     return _fi_ar_quant_workspace
 
 
+def get_fi_ar_packed_quant_workspace(
+    world_size: int,
+    rank: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    group: ProcessGroup,
+):
+    """Return a TensorRT-LLM workspace for packed group-FP8 fusion."""
+    global _fi_ar_packed_quant_workspace
+    if _fi_ar_packed_quant_workspace is not None:
+        return _fi_ar_packed_quant_workspace
+
+    if get_node_count() > 1:
+        logger.warning_once(
+            "FlashInfer packed group-FP8 allreduce fusion is unavailable for "
+            "multi-node tensor parallelism; using the non-quantized fusion."
+        )
+        return None
+
+    for workspace in (_fi_ar_workspace, _fi_ar_quant_workspace):
+        if workspace is not None and workspace.backend == "trtllm":
+            _fi_ar_packed_quant_workspace = workspace
+            return workspace
+
+    _fi_ar_packed_quant_workspace = _create_workspace(
+        "trtllm", world_size, rank, max_token_num, hidden_dim, dtype, group
+    )
+    if _fi_ar_packed_quant_workspace is not None:
+        logger.info_once(
+            "Initialized FlashInfer packed group-FP8 allreduce fusion workspace"
+        )
+    return _fi_ar_packed_quant_workspace
+
+
 _fi_ar_workspace_lock = threading.Lock()
 
 
 def destroy_fi_ar_workspace():
-    global _fi_ar_workspace, _fi_ar_quant_workspace
+    global _fi_ar_workspace, _fi_ar_packed_quant_workspace, _fi_ar_quant_workspace
     with _fi_ar_workspace_lock:
-        is_alias = _fi_ar_workspace is _fi_ar_quant_workspace
+        workspaces = {
+            id(workspace): workspace
+            for workspace in (
+                _fi_ar_workspace,
+                _fi_ar_quant_workspace,
+                _fi_ar_packed_quant_workspace,
+            )
+            if workspace is not None
+        }
+        for workspace in workspaces.values():
+            workspace.destroy()
 
-        if _fi_ar_workspace is not None:
-            _fi_ar_workspace.destroy()
-        if _fi_ar_quant_workspace is not None and not is_alias:
-            _fi_ar_quant_workspace.destroy()
-
-        _fi_ar_workspace = _fi_ar_quant_workspace = None
+        _fi_ar_workspace = None
+        _fi_ar_quant_workspace = None
+        _fi_ar_packed_quant_workspace = None
         _fi_ar_workspace_groups.clear()
 
 
 def _fi_ar_workspaces_for_group(group: ProcessGroup) -> list[Any]:
-    workspaces = [_fi_ar_workspace]
-    if _fi_ar_quant_workspace is not _fi_ar_workspace:
-        workspaces.append(_fi_ar_quant_workspace)
+    workspaces = {
+        id(workspace): workspace
+        for workspace in (
+            _fi_ar_workspace,
+            _fi_ar_quant_workspace,
+            _fi_ar_packed_quant_workspace,
+        )
+        if workspace is not None
+    }.values()
 
     group_workspaces = []
     for workspace in workspaces:
