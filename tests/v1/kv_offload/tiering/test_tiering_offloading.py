@@ -481,7 +481,7 @@ class TestTieringOffloadingManager:
         # Lookup each block to initiate promotion for all of them
         for block in blocks:
             result = self.manager.lookup(block, _CTX)
-            assert result is LookupResult.RETRY  # promotion initiated
+            assert result is LookupResult.HIT_PENDING  # promotion initiated
 
         # End of step 1: flushes deferred submit_load() calls
         self._simulate_on_schedule_end()
@@ -533,7 +533,7 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.submit_load = submit_partial
 
         for block in blocks:
-            assert self.manager.lookup(block, _CTX) is LookupResult.RETRY
+            assert self.manager.lookup(block, _CTX) is LookupResult.HIT_PENDING
 
         self._simulate_on_schedule_end()
         self._simulate_on_schedule_end()
@@ -589,7 +589,7 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.blocks[block] = True
 
         # First lookup finds the block in a secondary tier and defers.
-        assert self.manager.lookup(block, _CTX) is LookupResult.RETRY
+        assert self.manager.lookup(block, _CTX) is LookupResult.HIT_PENDING
 
         # Promotion is not treated as unresolved secondary lookup time.
         self._simulate_on_schedule_end(new_req_ids=[_CTX.req_id])
@@ -648,7 +648,7 @@ class TestTieringOffloadingManager:
                 stats.reduce(), TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY
             )
 
-        assert self.manager.lookup(block, ctx) is LookupResult.RETRY
+        assert self.manager.lookup(block, ctx) is LookupResult.HIT_PENDING
 
         stats = self.manager.get_stats()
         assert stats is not None
@@ -771,11 +771,11 @@ class TestTieringOffloadingManager:
         ctx_a = ReqContext(req_id="req_a")
         ctx_b = ReqContext(req_id="req_b")
 
-        # All lookups return RETRY: secondary hit triggers promotion
-        assert self.manager.lookup(blocks[0], ctx_a) is LookupResult.RETRY
-        assert self.manager.lookup(blocks[1], ctx_a) is LookupResult.RETRY
-        assert self.manager.lookup(blocks[2], ctx_b) is LookupResult.RETRY
-        assert self.manager.lookup(blocks[3], ctx_b) is LookupResult.RETRY
+        # All lookups return HIT_PENDING: secondary hit triggers promotion
+        assert self.manager.lookup(blocks[0], ctx_a) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(blocks[1], ctx_a) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(blocks[2], ctx_b) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(blocks[3], ctx_b) is LookupResult.HIT_PENDING
 
         # submit_load must not fire during lookup - only at end of step
         self.secondary_tier1.submit_load.assert_not_called()
@@ -812,9 +812,9 @@ class TestTieringOffloadingManager:
         result_a = self.manager.lookup(shared_block, ctx_a)
         result_b = self.manager.lookup(shared_block, ctx_b)
 
-        # First lookup triggers promotion (RETRY), second finds block
-        # already in primary with write in-flight (HIT_PENDING).
-        assert result_a is LookupResult.RETRY
+        # Both lookups find the shared_block and trigger promotion
+        # returning HIT_PENDING.
+        assert result_a is LookupResult.HIT_PENDING
         assert result_b is LookupResult.HIT_PENDING
 
         self._simulate_on_schedule_end()
@@ -1098,7 +1098,7 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.blocks[promo_block] = True
         assert (
             self.manager.lookup(promo_block, ReqContext(req_id="pending"))
-            is LookupResult.RETRY
+            is LookupResult.HIT_PENDING
         )
         assert self.manager._pending_load_submissions
 
@@ -1209,7 +1209,7 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
 
         ctx = ReqContext(req_id="r2", load_tier_filter=load_tier_filter)
-        assert self.manager.lookup(blocks[0], ctx) is LookupResult.RETRY
+        assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT_PENDING
         self.secondary_tier1.lookup.assert_called()
 
 
