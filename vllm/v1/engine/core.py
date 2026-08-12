@@ -2139,22 +2139,20 @@ class DPEngineCoreProc(EngineCoreProc):
             and self.step_counter % self.prefill_schedule_interval != 0
         )
 
-
-    def _has_pending_scheduler_work(self) -> bool:
-        if self.scheduler.has_unfinished_requests() or self.scheduler.has_requests():
-            return True
+    def _mori_connector_backlog(self) -> bool:
         conn = self.scheduler.get_kv_connector()
         sched = getattr(conn, "connector_scheduler", None) if conn else None
-        if sched is not None:
-            for name in (
-                "_reqs_need_send",
-                "_reqs_need_recv",
-                "_reqs_need_save",
-                "_pending_sent_acks",
-            ):
-                pending = getattr(sched, name, None)
-                if pending and len(pending) > 0:
-                    return True
+        if sched is None:
+            return False
+        for name in (
+            "_reqs_need_send",
+            "_reqs_need_recv",
+            "_reqs_need_save",
+            "_pending_sent_acks",
+        ):
+            pending = getattr(sched, name, None)
+            if pending and len(pending) > 0:
+                return True
         return False
 
     def _idle_during_active_wave(self) -> bool:
@@ -2163,8 +2161,8 @@ class DPEngineCoreProc(EngineCoreProc):
             pc.data_parallel_size > 1
             and self.engines_running
             and not self.scheduler.has_requests()
-            and not self._has_pending_scheduler_work()
             and not self.scheduler.has_unfinished_requests()
+            and not self._mori_connector_backlog()
         )
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
@@ -2174,7 +2172,6 @@ class DPEngineCoreProc(EngineCoreProc):
             self.execute_dummy_batch()
             return {}, False
         return super().step()
-
 
     @fault_tolerant_wrapper
     def run_busy_loop(self):
@@ -2203,13 +2200,13 @@ class DPEngineCoreProc(EngineCoreProc):
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
-            if not executed and not self.model_executor.is_sleeping:
-                pending = self._has_pending_scheduler_work()
-                if not self.batch_queue:
-                    if self._idle_during_active_wave() and not pending:
+            if not executed:
+                if not local_unfinished_reqs and not self.engines_running:
+                    continue
+
+                elif not self.model_executor.is_sleeping:
+                    if not self.batch_queue and self._idle_during_active_wave():
                         pass
-                    elif pending:
-                        time.sleep(0.01)
                     else:
                         with self.capture_iteration_details(None) as iteration_details:
                             self.execute_dummy_batch()
