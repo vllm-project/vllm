@@ -60,6 +60,14 @@ class MooncakeStoreScheduler:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         kvc_extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.load_async = kvc_extra_config.get("load_async", True)
+        # Layerwise mode embeds KV load into the model forward pass
+        # (wait_for_layer_load is called during attention computation).
+        # The request MUST enter RUNNING state for the forward pass to
+        # start, so load_async (which puts requests into
+        # WAITING_FOR_REMOTE_KVS) is incompatible with layerwise mode.
+        self._layerwise_enabled = str(kvc_extra_config.get("use_layerwise", "False")).lower() == "true"
+        if self._layerwise_enabled:
+            self.load_async = False
         self.lookup_async = kvc_extra_config.get("lookup_async", False)
         # Skips lookup CPU cost on instances that never load KV from the store.
         self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
@@ -141,7 +149,7 @@ class MooncakeStoreScheduler:
             can_load=False,
         )
 
-        return need_to_allocate, self.load_async
+        return need_to_allocate, self.load_async and not self._layerwise_enabled
 
     def update_state_after_alloc(
         self,
