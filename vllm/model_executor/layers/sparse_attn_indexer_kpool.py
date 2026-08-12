@@ -327,11 +327,19 @@ def sparse_attn_indexer_kpool(
                 # Persist the prefill tail (trailing incomplete pool's raw K +
                 # gate score) into the paged tail cache, so the decode side can
                 # compress the boundary pool correctly -- including across PD
-                # transfer, where the connector ships this block. Only the last
-                # r = n_prefill % kpool tokens matter (the in-progress pool);
-                # their tail slots land at offsets 0..r-1 of the request's tail
-                # block (pos % kpool), exactly where the decode reconstruction
-                # reads them. The op is eager, so the host syncs here are safe.
+                # transfer, where the connector ships this block. Their tail
+                # slots land at offsets pos % kpool of the request's tail block,
+                # exactly where the decode reconstruction reads them.
+                #
+                # This must run PER REQUEST (sglang writes the tail inside its
+                # per-request extend loop, `set_compress_tail_for_request`).
+                # Taking the batch's trailing `n_prefill % kpool` tokens only
+                # covers the LAST request: every other request in a
+                # multi-request prefill batch then compresses its boundary pool
+                # against a stale tail block (the ring is reused across
+                # requests), corrupting one pool at each request's
+                # prompt->decode boundary. Invisible on single-request probes;
+                # hit by every concurrent-serving batch.
                 if (
                     tail_kv_cache is not None
                     and tail_prefix is not None
@@ -340,21 +348,36 @@ def sparse_attn_indexer_kpool(
                     tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
                     if tail_meta is not None:
                         assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
-                        r = n_prefill % index_kpool
-                        if r > 0:
-                            t_start = num_tokens - r
-                            tslot = tail_meta.slot_mapping[t_start:num_tokens]
-                            valid = tslot >= 0
-                            if bool(valid.any()):
-                                tslot_v = tslot[valid].to(torch.int64)
-                                block_ids = tslot_v // index_kpool
-                                offsets = tslot_v % index_kpool
-                                tail_kv_cache[block_ids, 0, offsets, :] = k[
-                                    t_start:num_tokens
-                                ][valid]
-                                tail_kv_cache[block_ids, 1, offsets, :] = gate_score[
-                                    t_start:num_tokens
-                                ][valid]
+                        tslot = tail_meta.slot_mapping[prefill_slice]
+                        # Each request owns exactly one tail block
+                        # (KpoolTailSpec allocates 1 block/req), so the block id
+                        # identifies the request -- more robust than comparing
+                        # positions, which can be accidentally contiguous across
+                        # two requests. Token i is among its request's last
+                        # kpool tokens iff the token kpool ahead belongs to a
+                        # different request (or is past the batch): sentinel -2
+                        # differs from every real block and from the -1 that an
+                        # invalid slot floor-divides to.
+                        tblock = tslot // index_kpool
+                        ahead = torch.full_like(tblock, -2)
+                        n_tail_tok = tblock.shape[0]
+                        if n_tail_tok > index_kpool:
+                            ahead[: n_tail_tok - index_kpool] = tblock[index_kpool:]
+                        valid = (tslot >= 0) & (ahead != tblock)
+                        if bool(valid.any()):
+                            tslot_v = tslot[valid].to(torch.int64)
+                            block_ids = tslot_v // index_kpool
+                            offsets = tslot_v % index_kpool
+                            # Within one request the kept tokens are its last
+                            # <= kpool consecutive positions, so pos % kpool is
+                            # distinct across them: no duplicate destinations,
+                            # hence a deterministic scatter.
+                            tail_kv_cache[block_ids, 0, offsets, :] = k[prefill_slice][
+                                valid
+                            ]
+                            tail_kv_cache[block_ids, 1, offsets, :] = gate_score[
+                                prefill_slice
+                            ][valid]
         else:
             # standard: per-token fp8 quant + scatter (all tokens).
             assert scale_fmt is not None
