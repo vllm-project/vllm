@@ -7,26 +7,32 @@ import torch
 from vllm.exceptions import VLLMValidationError
 
 
-def test_empty_prompt(vllm_runner_factory):
-    llm = vllm_runner_factory("openai-community/gpt2", enforce_eager=True).llm
-    with pytest.raises(VLLMValidationError, match="decoder prompt cannot be empty"):
-        llm.generate([""])
+def test_empty_prompt(vllm_runner):
+    with (
+        vllm_runner("openai-community/gpt2", enforce_eager=True) as runner,
+        pytest.raises(VLLMValidationError, match="decoder prompt cannot be empty"),
+    ):
+        runner.llm.generate([""])
 
 
-def test_out_of_vocab_token(vllm_runner_factory):
-    llm = vllm_runner_factory("openai-community/gpt2", enforce_eager=True).llm
-    with pytest.raises(VLLMValidationError, match="out of vocabulary"):
-        llm.generate({"prompt_token_ids": [999999]})
+def test_out_of_vocab_token(vllm_runner):
+    with (
+        vllm_runner("openai-community/gpt2", enforce_eager=True) as runner,
+        pytest.raises(VLLMValidationError, match="out of vocabulary"),
+    ):
+        runner.llm.generate({"prompt_token_ids": [999999]})
 
 
-def test_require_mm_embeds(vllm_runner_factory):
-    llm = vllm_runner_factory(
-        "llava-hf/llava-1.5-7b-hf",
-        enforce_eager=True,
-        enable_mm_embeds=False,
-    ).llm
-    with pytest.raises(ValueError, match="--enable-mm-embeds"):
-        llm.generate(
+def test_require_mm_embeds(vllm_runner):
+    with (
+        vllm_runner(
+            "llava-hf/llava-1.5-7b-hf",
+            enforce_eager=True,
+            enable_mm_embeds=False,
+        ) as runner,
+        pytest.raises(ValueError, match="--enable-mm-embeds"),
+    ):
+        runner.llm.generate(
             {
                 "prompt": "<image>",
                 "multi_modal_data": {"image": torch.empty(1, 1, 1)},

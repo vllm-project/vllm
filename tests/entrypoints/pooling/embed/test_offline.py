@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import weakref
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -27,7 +29,9 @@ def llm(vllm_runner):
         enable_chunked_prefill=None,
     ) as runner:
         assert embedding_size == runner.llm.model_config.embedding_size
-        yield runner.llm
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.mark.skip_global_cleanup

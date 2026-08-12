@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import weakref
+
 import pytest
 
 from vllm import LLM, SamplingParams
@@ -23,7 +25,9 @@ def llm(vllm_runner):
         enable_mm_embeds=True,
         limit_mm_per_prompt={"image": 0},
     ) as runner:
-        yield runner.llm
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.mark.skip_global_cleanup

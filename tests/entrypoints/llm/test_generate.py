@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import weakref
+
 import pytest
 
 from vllm import LLM, SamplingParams
@@ -31,7 +33,9 @@ def llm(vllm_runner):
         gpu_memory_utilization=0.10,
         enforce_eager=True,
     ) as runner:
-        yield runner.llm
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.mark.skip_global_cleanup
@@ -87,34 +91,34 @@ def test_single_prompt_priority(llm: LLM):
     assert len(outputs) == 1
 
 
-def test_max_model_len(vllm_runner_factory):
+def test_max_model_len(vllm_runner):
     max_model_len = 20
-    llm = vllm_runner_factory(
+    with vllm_runner(
         MODEL_NAME,
         max_model_len=max_model_len,
         gpu_memory_utilization=0.10,
         enforce_eager=True,  # reduce test time
-    ).llm
-    sampling_params = SamplingParams(max_tokens=max_model_len + 10)
-    outputs = llm.generate(PROMPTS, sampling_params)
-    for output in outputs:
-        num_total_tokens = len(output.prompt_token_ids) + len(
-            output.outputs[0].token_ids
-        )
-        # Total tokens must not exceed max_model_len.
-        # It can be less if generation finishes due to other reasons (e.g., EOS)
-        # before reaching the absolute model length limit.
-        assert num_total_tokens <= max_model_len
+    ) as runner:
+        sampling_params = SamplingParams(max_tokens=max_model_len + 10)
+        outputs = runner.llm.generate(PROMPTS, sampling_params)
+        for output in outputs:
+            num_total_tokens = len(output.prompt_token_ids) + len(
+                output.outputs[0].token_ids
+            )
+            # Total tokens must not exceed max_model_len.
+            # It can be less if generation finishes due to other reasons (e.g., EOS)
+            # before reaching the absolute model length limit.
+            assert num_total_tokens <= max_model_len
 
 
-def test_log_stats(vllm_runner_factory):
-    llm = vllm_runner_factory(
+def test_log_stats(vllm_runner):
+    with vllm_runner(
         MODEL_NAME,
         disable_log_stats=False,
         gpu_memory_utilization=0.10,
         enforce_eager=True,  # reduce test time
-    ).llm
-    outputs = llm.generate(PROMPTS, sampling_params=None)
+    ) as runner:
+        outputs = runner.llm.generate(PROMPTS, sampling_params=None)
 
-    # disable_log_stats is False, every output should have metrics
-    assert all(output.metrics is not None for output in outputs)
+        # disable_log_stats is False, every output should have metrics
+        assert all(output.metrics is not None for output in outputs)

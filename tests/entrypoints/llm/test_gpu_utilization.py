@@ -4,7 +4,7 @@
 from vllm import SamplingParams
 
 
-def test_gpu_memory_utilization(vllm_runner_factory):
+def test_gpu_memory_utilization(vllm_runner):
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -15,17 +15,26 @@ def test_gpu_memory_utilization(vllm_runner_factory):
 
     # makes sure gpu_memory_utilization is per-instance limit,
     # not a global limit
-    llms = [
-        vllm_runner_factory(
+    with (
+        vllm_runner(
             "facebook/opt-125m",
             gpu_memory_utilization=0.3,
             enforce_eager=True,
-        ).llm
-        for _ in range(3)
-    ]
-    for llm in llms:
-        outputs = llm.generate(prompts, sampling_params)
-        for output in outputs:
-            prompt = output.prompt
-            generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        ) as runner_0,
+        vllm_runner(
+            "facebook/opt-125m",
+            gpu_memory_utilization=0.3,
+            enforce_eager=True,
+        ) as runner_1,
+        vllm_runner(
+            "facebook/opt-125m",
+            gpu_memory_utilization=0.3,
+            enforce_eager=True,
+        ) as runner_2,
+    ):
+        for runner in (runner_0, runner_1, runner_2):
+            outputs = runner.llm.generate(prompts, sampling_params)
+            for output in outputs:
+                prompt = output.prompt
+                generated_text = output.outputs[0].text
+                print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
