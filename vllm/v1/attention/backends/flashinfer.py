@@ -547,6 +547,8 @@ class FlashInferBackend(AttentionBackend):
             return None
         if device_capability.major != 10:
             return "fp8_k_nvfp4_v requires an SM100-family GPU"
+        if device_capability == DeviceCapability(10, 7):
+            return "fp8_k_nvfp4_v is not supported on SM107"
         if dtype != torch.bfloat16:
             return "fp8_k_nvfp4_v requires bfloat16 model activations"
         if head_size != 128:
