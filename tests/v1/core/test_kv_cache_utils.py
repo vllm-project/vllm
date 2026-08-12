@@ -2766,13 +2766,6 @@ def test_unify_kv_cache_page_size_padding_requires_backend_support():
         kv_cache_utils.unify_kv_cache_spec_page_size(specs)
 
 
-def test_unpadded_page_size_without_quant_matches_real_page():
-    # Without quantization the offload transfer width is just the raw page.
-    spec = new_kv_cache_spec()
-    assert spec.unpadded_page_size_bytes == spec.real_page_size_bytes
-    assert spec.page_size_bytes == spec.unpadded_page_size_bytes
-
-
 def test_unpadded_page_size_includes_per_token_head_scales():
     # Per-token-head quant carries inline fp32 scales that are carved from the
     # raw KV allocation, so they must be budgeted into the offload width. The

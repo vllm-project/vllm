@@ -623,14 +623,17 @@ class Attention(nn.Module, AttentionLayerBase):
             # bytes per block. Otherwise (page_size_padded is None) the smallest
             # block is fine — ``unify`` scales it up by an integer ratio.
             shared_page = vllm_config.cache_config.skip_page_size_padded
-            sw_per_token = SlidingWindowSpec(
-                block_size=1,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_size,
-                head_size_v=self.head_size_v,
-                dtype=self.kv_cache_torch_dtype,
-                kv_quant_mode=quant_mode,
-                sliding_window=self.sliding_window,
+            # The backend owns its packing
+            sw_per_token = self.attn_backend.customize_spec(
+                SlidingWindowSpec(
+                    block_size=1,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_size,
+                    head_size_v=self.head_size_v,
+                    dtype=self.kv_cache_torch_dtype,
+                    kv_quant_mode=quant_mode,
+                    sliding_window=self.sliding_window,
+                )
             ).real_page_size_bytes
             sw_block_size = _largest_kernel_block_within(
                 self.attn_backend,

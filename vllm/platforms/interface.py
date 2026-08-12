@@ -687,13 +687,15 @@ class Platform:
 
         def per_token_page_bytes(dtype: "torch.dtype", cache_dtype: str) -> int:
             """Bytes one token occupies in one layer, for the given dtype."""
-            return FullAttentionSpec(
+            spec = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=dtype,
                 kv_quant_mode=get_kv_quant_mode(cache_dtype),
-            ).page_size_bytes
+            )
+            # The backend owns its packing
+            return backend_cls.customize_spec(spec).page_size_bytes
 
         primary_dtype = (
             STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
@@ -835,12 +837,15 @@ class Platform:
             else:
                 attn_page_size_1_token = tq_page
         else:
-            attn_page_size_1_token = FullAttentionSpec(
+            attn_spec = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+            )
+            attn_page_size_1_token = backend_cls.customize_spec(
+                attn_spec
             ).page_size_bytes
 
         # Compute mamba page size
