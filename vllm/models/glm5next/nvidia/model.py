@@ -1056,6 +1056,15 @@ class Glm5NextForConditionalGeneration(
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
 
+    def get_encoder_cudagraph_config(self):
+        # The forked vision tower (multimodal.py) has no abs-pos embeddings, so its
+        # prepare_encoder_metadata does not produce "pos_embeds". Drop it from the
+        # buffer_keys inherited from Glm4vForConditionalGeneration so encoder
+        # CUDA-graph capture/replay does not expect a buffer that is never filled.
+        config = super().get_encoder_cudagraph_config()
+        config.buffer_keys = [k for k in config.buffer_keys if k != "pos_embeds"]
+        return config
+
 
 def get_spec_layer_idx_from_weight_name(
     config: Glm5NextConfig, weight_name: str
