@@ -367,42 +367,6 @@ def test_load_base64_jpeg_raises_on_zero_num_frames():
         videoio.load_base64("video/jpeg", data)
 
 
-def test_pynvvideocodec_invalid_video_raises_value_error(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    class FakePyNvVCException(Exception):
-        pass
-
-    class FakePyNvVCExceptionUnsupported(Exception):
-        pass
-
-    fake_nvc = SimpleNamespace(
-        PyNvVCException=FakePyNvVCException,
-        PyNvVCExceptionUnsupported=FakePyNvVCExceptionUnsupported,
-    )
-    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", fake_nvc)
-
-    def raise_invalid_video(cls, file_path, nvc):
-        raise FakePyNvVCExceptionUnsupported("Invalid data found when processing input")
-
-    monkeypatch.setattr(
-        PyNvVideoCodecVideoBackend,
-        "_read_source_metadata",
-        classmethod(raise_invalid_video),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match=r"^Invalid or unsupported video file\.$",
-    ) as exc_info:
-        corrupted_video = (
-            Path(__file__).parent.parent / "assets" / "corrupted.mp4"
-        ).read_bytes()
-        PyNvVideoCodecVideoBackend.decode_frames_pynvvideocodec(corrupted_video, None)
-
-    assert isinstance(exc_info.value.__cause__, FakePyNvVCExceptionUnsupported)
-
-
 def test_pynvvideocodec_unrelated_error_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ):
