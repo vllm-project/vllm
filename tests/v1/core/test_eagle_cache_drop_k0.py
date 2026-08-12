@@ -3,6 +3,7 @@
 """Opt-in disable of EAGLE last-block drop on prefix-cache hits for always-K=0 DSD."""
 
 import pytest
+import torch
 
 from tests.v1.core.test_prefix_caching import (
     make_kv_cache_config,
@@ -14,6 +15,12 @@ from tests.v1.core.utils import create_scheduler
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler, compute_drop_eagle_on_cache_hit
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.structured_output import StructuredOutputManager
 
 pytestmark = pytest.mark.cpu_test
@@ -89,6 +96,7 @@ def _make_eagle_dsd_scheduler(
     enable_prefix_caching: bool = True,
     use_kv_connector: bool = False,
     num_speculative_tokens: int | None = 3,
+    method: str = "mtp",
 ) -> Scheduler:
     """Build a scheduler with EAGLE/MTP `use_eagle()` and an optional DSD table.
 
@@ -108,7 +116,7 @@ def _make_eagle_dsd_scheduler(
     base = create_scheduler(**kwargs)
     spec = base.vllm_config.speculative_config
     if spec is not None:
-        spec.method = "mtp"
+        spec.method = method
     return Scheduler(
         vllm_config=base.vllm_config,
         kv_cache_config=base.kv_cache_config,
@@ -221,7 +229,15 @@ def test_unitary_cache_hit_keeps_last_block_when_drop_disabled():
 def test_hybrid_cache_hit_keeps_last_block_when_drop_disabled():
     block_size = 16
     kv_cache_config = make_kv_cache_config_hybrid_model(block_size, 31, 3)
-    manager = make_kv_cache_manager(
+    dropped = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+        drop_eagle_on_cache_hit=True,
+    )
+    kept = make_kv_cache_manager(
         kv_cache_config,
         max_model_len=8192,
         enable_caching=True,
@@ -232,13 +248,149 @@ def test_hybrid_cache_hit_keeps_last_block_when_drop_disabled():
 
     num_full_blocks = 6
     common_token_ids = [i for i in range(num_full_blocks) for _ in range(block_size)]
-    req0 = make_request("0", common_token_ids + [6] * 7, block_size, sha256)
-    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
-    manager.allocate_slots(
-        req0, len(req0.all_token_ids), num_computed_tokens, computed_blocks
+
+    def _hit(manager):
+        req0 = make_request("0", common_token_ids + [6] * 7, block_size, sha256)
+        computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+        manager.allocate_slots(
+            req0, len(req0.all_token_ids), num_computed_tokens, computed_blocks
+        )
+        req1 = make_request("1", common_token_ids + [6] * 5, block_size, sha256)
+        computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+        return [len(g) for g in computed_blocks.blocks], num_computed_tokens
+
+    drop_lens, drop_tokens = _hit(dropped)
+    keep_lens, keep_tokens = _hit(kept)
+
+    assert keep_tokens == num_full_blocks * block_size
+    assert keep_lens == [num_full_blocks] * len(keep_lens)
+    assert drop_tokens < keep_tokens
+    assert all(d < k for d, k in zip(drop_lens, keep_lens, strict=True))
+
+
+def _swa_eagle_hybrid_config(block_size: int = 8) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=4 * block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["swa_mtp"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=block_size,
+                ),
+                is_eagle_group=True,
+            ),
+        ],
     )
 
-    req1 = make_request("1", common_token_ids + [6] * 5, block_size, sha256)
-    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
-    assert num_computed_tokens == num_full_blocks * block_size
-    assert len(computed_blocks.blocks[0]) == num_full_blocks
+
+def test_hybrid_extra_block_not_published_when_drop_disabled():
+    """Stock EAGLE publishes the post-boundary lookahead block; opt-out must not.
+
+    Copied geometry from test_eagle_swa_boundary_caches_post_boundary_block:
+    40-token prefix, 8-token SWA blocks, 32-token alignment. hashes[4] is the
+    extra block. This fails if cache_blocks() still adds +block_size when
+    drop_eagle_on_cache_hit is False.
+    """
+    block_size = 8
+    kv_cache_config = _swa_eagle_hybrid_config(block_size)
+    stock = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+        drop_eagle_on_cache_hit=True,
+    )
+    no_drop = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+        drop_eagle_on_cache_hit=False,
+    )
+
+    token_ids = [i for i in range(5) for _ in range(block_size)]
+
+    def _prime(manager):
+        req = make_request("0", token_ids, block_size, sha256)
+        computed_blocks, _, _ = manager.get_computed_blocks(req)
+        blocks = manager.allocate_slots(
+            req,
+            len(token_ids),
+            len(computed_blocks.blocks[0]) * block_size,
+            computed_blocks,
+        )
+        assert blocks is not None
+        return req
+
+    stock_req = _prime(stock)
+    assert stock.block_pool.get_cached_block(
+        stock_req.block_hashes[3], kv_cache_group_ids=[1]
+    )
+    assert stock.block_pool.get_cached_block(
+        stock_req.block_hashes[4], kv_cache_group_ids=[1]
+    )
+    stock.free(stock_req)
+
+    no_drop_req = _prime(no_drop)
+    assert no_drop.block_pool.get_cached_block(
+        no_drop_req.block_hashes[3], kv_cache_group_ids=[1]
+    )
+    assert not no_drop.block_pool.get_cached_block(
+        no_drop_req.block_hashes[4], kv_cache_group_ids=[1]
+    )
+    no_drop.free(no_drop_req)
+
+    hit_req = make_request("1", token_ids + [999], block_size, sha256)
+    _, num_computed_tokens, _ = no_drop.get_computed_blocks(hit_req)
+    assert num_computed_tokens == 4 * block_size
+
+
+def test_scheduler_eagle3_opt_in_always_k0_disables_eagle_cache_drop():
+    scheduler = _make_eagle_dsd_scheduler(
+        ALWAYS_K0, disable_eagle_cache_drop_for_k0=True, method="eagle3"
+    )
+    assert scheduler.use_eagle is True
+    assert scheduler.drop_eagle_on_cache_hit is False
+
+
+def test_speculative_config_flag_keeps_last_block_on_lookup():
+    """Public SpeculativeConfig flag must reach an actual cache prime/lookup."""
+    scheduler = _make_eagle_dsd_scheduler(
+        ALWAYS_K0, disable_eagle_cache_drop_for_k0=True
+    )
+    block_size = scheduler.block_size
+    token_ids = [0] * (3 * block_size)
+    n_blocks, n_tokens = _prime_and_lookup(
+        scheduler.kv_cache_manager, token_ids, block_size
+    )
+    assert n_blocks == 2
+    assert n_tokens == 2 * block_size
+
+
+def test_mixed_schedule_flag_still_drops_last_block_on_lookup():
+    """Flag + mixed C3 must still drop the last block, not just the boolean."""
+    scheduler = _make_eagle_dsd_scheduler(MIXED_K, disable_eagle_cache_drop_for_k0=True)
+    assert scheduler.drop_eagle_on_cache_hit is True
+    block_size = scheduler.block_size
+    token_ids = [0] * (3 * block_size)
+    n_blocks, n_tokens = _prime_and_lookup(
+        scheduler.kv_cache_manager, token_ids, block_size
+    )
+    assert n_blocks == 1
+    assert n_tokens == 1 * block_size
