@@ -368,15 +368,18 @@ def test_pynvvideocodec_h200_recovers_after_unsupported_8k():
             hw_decoders=1,
         )
 
-        with pytest.raises(
-            nvc.PyNvVCExceptionUnsupported,
-            match="MBCount not supported",
-        ):
+        with pytest.raises(Exception) as exc_info:
             loader.load_bytes(
                 unsupported_video,
                 num_frames=1,
                 hw_decoders=1,
             )
+
+        root_cause = exc_info.value
+        while root_cause.__cause__ is not None:
+            root_cause = root_cause.__cause__
+        assert isinstance(root_cause, nvc.PyNvVCExceptionUnsupported)
+        assert "MBCount not supported" in str(root_cause)
 
         frames_after, _ = loader.load_bytes(
             valid_video,
