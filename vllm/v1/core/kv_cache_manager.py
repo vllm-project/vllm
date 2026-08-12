@@ -125,6 +125,7 @@ class KVCacheManager:
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
+        drop_eagle_on_cache_hit: bool = True,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
@@ -142,6 +143,7 @@ class KVCacheManager:
         self.enable_caching = enable_caching
         self.enable_kv_cache_events = enable_kv_cache_events
         self.use_eagle = use_eagle
+        self.drop_eagle_on_cache_hit = drop_eagle_on_cache_hit
         self.log_stats = log_stats
         self.metrics_collector = metrics_collector
         # FIXME: make prefix cache stats conditional on log_stats. We still need
@@ -154,6 +156,7 @@ class KVCacheManager:
             max_model_len=self.max_model_len,
             max_in_flight_tokens=max_in_flight_tokens,
             use_eagle=self.use_eagle,
+            drop_eagle_on_cache_hit=self.drop_eagle_on_cache_hit,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,

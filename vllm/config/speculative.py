@@ -184,6 +184,11 @@ class SpeculativeConfig:
     Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
     inclusive batch-size range.
     """
+    disable_eagle_cache_drop_for_k0: bool = False
+    """If True, skip EAGLE/MTP last-block drop on prefix-cache hits when the
+    dynamic SD lookup is always K=0. Default False preserves stock tokens.
+    Prefix caching must be on and no KV connector may be configured. Greedy
+    outputs can change when this is enabled."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore

@@ -77,12 +77,14 @@ def _split(
     request: Request,
     num_new_tokens: int,
     use_eagle: bool = True,
+    drop_eagle_on_cache_hit: bool = True,
     partial_hit: bool = False,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     stub = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
         use_eagle=use_eagle,
+        drop_eagle_on_cache_hit=drop_eagle_on_cache_hit,
         max_num_scheduled_tokens=16384,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         # `prefix_match_unit` finer than the block size (#46384).
@@ -245,3 +247,15 @@ def test_unaligned_resume_never_runs_past_its_block(
             f"intermediate chunk end {end} is neither block-aligned nor the "
             f"partial-tail boundary"
         )
+
+
+def test_mamba_split_without_eagle_drop_matches_no_eagle() -> None:
+    """Disabling cache-hit drop must not apply the EAGLE last-block backoff."""
+    (request,) = create_requests(1, num_tokens=PROMPT_LEN, block_size=ATTN_BLOCK_SIZE)
+    no_eagle = _split(request, PROMPT_LEN, use_eagle=False)
+    no_drop = _split(request, PROMPT_LEN, use_eagle=True, drop_eagle_on_cache_hit=False)
+    with_drop = _split(
+        request, PROMPT_LEN, use_eagle=True, drop_eagle_on_cache_hit=True
+    )
+    assert no_drop == no_eagle == MAMBA_BLOCK_SIZE
+    assert with_drop == PROMPT_LEN

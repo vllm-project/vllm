@@ -67,6 +67,7 @@ def create_scheduler(
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
+    disable_eagle_cache_drop_for_k0: bool = False,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
@@ -147,6 +148,8 @@ def create_scheduler(
             spec_kwargs["num_speculative_tokens_per_batch_size"] = (
                 num_speculative_tokens_per_batch_size
             )
+        if disable_eagle_cache_drop_for_k0:
+            spec_kwargs["disable_eagle_cache_drop_for_k0"] = True
         if speculative_method is not None:
             spec_kwargs["method"] = speculative_method
             spec_kwargs["prompt_lookup_max"] = num_speculative_tokens

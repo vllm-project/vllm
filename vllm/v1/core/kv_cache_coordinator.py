@@ -80,10 +80,12 @@ class KVCacheCoordinator(ABC):
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        drop_eagle_on_cache_hit: bool = True,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        self.drop_eagle_on_cache_hit = drop_eagle_on_cache_hit
         # The scheduling granularity (LCM of all group block sizes), must be a multiple
         # of the hash_block_size and the block size of each group.
         assert scheduler_block_size % hash_block_size == 0 and all(
@@ -407,6 +409,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        drop_eagle_on_cache_hit: bool = True,
     ):
         super().__init__(
             kv_cache_config,
@@ -420,6 +423,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
+            drop_eagle_on_cache_hit=drop_eagle_on_cache_hit,
         )
         self.num_single_type_manager = len(self.single_type_managers)
 
@@ -457,6 +461,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        drop_eagle_on_cache_hit: bool = True,
     ):
         super().__init__(
             kv_cache_config,
@@ -470,6 +475,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
+            drop_eagle_on_cache_hit=drop_eagle_on_cache_hit,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
         self.block_size = self.kv_cache_spec.block_size
@@ -499,7 +505,8 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
-            drop_eagle_block=0 in self.eagle_group_ids,
+            drop_eagle_block=(0 in self.eagle_group_ids)
+            and self.drop_eagle_on_cache_hit,
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
@@ -542,6 +549,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        drop_eagle_on_cache_hit: bool = True,
     ):
         super().__init__(
             kv_cache_config,
@@ -555,6 +563,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
+            drop_eagle_on_cache_hit=drop_eagle_on_cache_hit,
         )
         # hash_block_size: the block size used to compute block hashes.
         # The actual block size usually equals hash_block_size, but in cases where
@@ -687,7 +696,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             num_tokens_to_cache = aligned_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
             # it, so make that lookahead block eligible to be cached.
-            if manager.use_eagle and aligned_num_computed_tokens > 0:
+            if (
+                manager.use_eagle
+                and self.drop_eagle_on_cache_hit
+                and aligned_num_computed_tokens > 0
+            ):
                 num_tokens_to_cache = min(
                     num_computed_tokens,
                     aligned_num_computed_tokens + manager.block_size,
@@ -764,7 +777,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     )
                     continue
 
-                drop_eagle_block = use_eagle and idx not in eagle_verified
+                drop_eagle_block = (
+                    self.drop_eagle_on_cache_hit
+                    and use_eagle
+                    and idx not in eagle_verified
+                )
 
                 _max_length = curr_hit_length
                 # Eagle matches one extra drop unit (one hash unit for
@@ -858,7 +875,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 kv_cache_group_ids=group_ids,
                 block_pool=self.block_pool,
                 kv_cache_spec=spec,
-                drop_eagle_block=use_eagle,
+                drop_eagle_block=use_eagle and self.drop_eagle_on_cache_hit,
                 alignment_tokens=self._cache_hit_alignment_tokens,
             )
             for gid, blks in zip(group_ids, blocks):
@@ -880,6 +897,7 @@ def get_kv_cache_coordinator(
     scheduler_block_size: int,
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
+    drop_eagle_on_cache_hit: bool = True,
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
@@ -893,6 +911,7 @@ def get_kv_cache_coordinator(
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
+            drop_eagle_on_cache_hit=drop_eagle_on_cache_hit,
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(
@@ -907,6 +926,7 @@ def get_kv_cache_coordinator(
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
+            drop_eagle_on_cache_hit=drop_eagle_on_cache_hit,
         )
     return HybridKVCacheCoordinator(
         kv_cache_config,
@@ -920,4 +940,5 @@ def get_kv_cache_coordinator(
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
         metrics_collector=metrics_collector,
+        drop_eagle_on_cache_hit=drop_eagle_on_cache_hit,
     )

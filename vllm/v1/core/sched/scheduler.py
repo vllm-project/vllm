@@ -66,6 +66,32 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+def compute_drop_eagle_on_cache_hit(
+    *,
+    disable_eagle_cache_drop_for_k0: bool,
+    enable_prefix_caching: bool,
+    has_kv_connector: bool,
+    use_eagle: bool,
+    dynamic_sd_lookup: list[int] | None,
+) -> bool:
+    """Whether EAGLE last-block drop should run on prefix-cache hits.
+
+    Default True preserves stock behavior. The opt-in disable applies only
+    when the dynamic SD lookup is always K=0 (index 0 is unused), prefix
+    caching is on, and no KV connector is configured.
+    """
+    disable = (
+        disable_eagle_cache_drop_for_k0
+        and enable_prefix_caching
+        and not has_kv_connector
+        and use_eagle
+        and dynamic_sd_lookup is not None
+        and len(dynamic_sd_lookup) > 1
+        and max(dynamic_sd_lookup[1:]) == 0
+    )
+    return not disable
+
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -256,6 +282,18 @@ class Scheduler(SchedulerInterface):
                 )
             self.use_eagle = speculative_config.use_eagle()
 
+        disable_k0_drop = bool(
+            speculative_config is not None
+            and speculative_config.disable_eagle_cache_drop_for_k0
+        )
+        self.drop_eagle_on_cache_hit = compute_drop_eagle_on_cache_hit(
+            disable_eagle_cache_drop_for_k0=disable_k0_drop,
+            enable_prefix_caching=self.cache_config.enable_prefix_caching,
+            has_kv_connector=self.connector is not None,
+            use_eagle=self.use_eagle,
+            dynamic_sd_lookup=self.dynamic_sd_lookup,
+        )
+
         # Create the KV cache manager.
         if hash_block_size is None:
             hash_block_size = block_size
@@ -266,6 +304,7 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
+            drop_eagle_on_cache_hit=self.drop_eagle_on_cache_hit,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
@@ -378,7 +417,7 @@ class Scheduler(SchedulerInterface):
         # Eagle, FullAttn prunes the last matching block, so back off one
         # block to avoid a Mamba cache miss.
         last_cache_position = request.num_tokens - request.num_tokens % block_size
-        if self.use_eagle:
+        if self.use_eagle and self.drop_eagle_on_cache_hit:
             last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
