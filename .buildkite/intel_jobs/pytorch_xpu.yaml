@@ -5,6 +5,7 @@ steps:
 - label: PyTorch Compilation Unit Tests
   device: intel_gpu
   timeout_in_minutes: 150
+  parallelism: 4
   working_dir: .
   no_plugin: true
   env:
@@ -46,7 +47,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    find compile/ -maxdepth 1 -name '\''test_*.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
+    find compile/ -maxdepth 1 -name '\''test_*.py'\'' -not -name '\''test_dynamic_shapes_compilation.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true && 
+    pytest -s -v compile/test_dynamic_shapes_compilation.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT'  || true'
 - label: PyTorch Compilation Unit Tests (H100)
   device: intel_gpu
   timeout_in_minutes: 30

@@ -96,7 +96,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/inkling --ignore tests/models/inkling/rocm || true'
+    pytest -v -s models/inkling --ignore models/inkling/rocm || true'
 - label: Kimi K3 Unit Tests (B200)
   device: intel_gpu
   timeout_in_minutes: 40
