@@ -15,6 +15,7 @@ from vllm.multimodal.utils import (
     set_mm_embedding_modality,
 )
 from vllm.renderers.paged_shm.client import PagedShmClient
+from vllm.renderers.paged_shm.tensor_ipc import PagedShmTensorIPC
 from vllm.renderers.paged_shm.types import ShmTensor
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
@@ -45,9 +46,8 @@ class EncoderRunner:
             max_num_tokens, hidden_size, dtype=dtype, device=device
         )
 
-        self.pshm_client = PagedShmClient.from_model_config(
-            vllm_config.model_config, pin=True
-        )
+        self._pshm_tensor_ipc = PagedShmTensorIPC(vllm_config.model_config, pin=True)
+        self._pshm_tensor_ipc.connect()
 
     def prepare_mm_inputs(
         self, scheduled_encoder_inputs: dict[str, list[int]]
@@ -114,21 +114,7 @@ class EncoderRunner:
 
         stream = torch.cuda.Stream()
         with stream:
-            for modality, items in mm_kwargs:
-                if not "pixel_values" in items:
-                    continue
-
-                pixel_values = items["pixel_values"]
-                shm_object: ShmTensor | None = pixel_values.shm_object
-
-                if shm_object is not None:
-                    torch_dtype = getattr(torch, shm_object.dtype)
-                    tensor_gpu = self.pshm_client.read(
-                        shm_object.uuid, shm_object.size, shm_object.blocks, device=self.device
-                    )
-                    tensor_gpu = tensor_gpu.view(torch_dtype).view(shm_object.shape)
-                    pixel_values.data = tensor_gpu
-
+            self._pshm_tensor_ipc.read(mm_kwargs, device=self.device)
         stream.synchronize()
         print("execute_mm_encoder", time.perf_counter())
 

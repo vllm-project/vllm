@@ -9,6 +9,7 @@ from vllm.config import ModelConfig
 from vllm.inputs import MultiModalInput
 from vllm.multimodal.inputs import (
     MultiModalFieldElem,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.utils import random_uuid
@@ -125,6 +126,26 @@ class PagedShmTensorIPC:
             f"PagedShmTensorIPC.write {elapsed_time * 1000} ms",
         )
         return None
+
+    def read(
+        self,
+        mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
+        device: torch.types.Device,
+    ):
+        for modality, items in mm_kwargs:
+            if "pixel_values" not in items:
+                continue
+
+            pixel_values = items["pixel_values"]
+            shm_object: ShmTensor | None = pixel_values.shm_object
+
+            if shm_object is not None:
+                torch_dtype = getattr(torch, shm_object.dtype)
+                tensor_gpu = self.client_sync.read(
+                    shm_object.uuid, shm_object.size, shm_object.blocks, device
+                )
+                tensor_gpu = tensor_gpu.view(torch_dtype).view(shm_object.shape)
+                pixel_values.data = tensor_gpu
 
     def shutdown(self):
         if not self.is_paged_shm_enabled:
