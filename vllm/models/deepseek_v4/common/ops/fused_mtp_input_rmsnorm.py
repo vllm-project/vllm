@@ -17,9 +17,20 @@ A single grid (T, hc_mult+1) drives both norms: task 0 is enorm on
 inputs_embeds[token, :], task k+1 is hnorm on previous_hidden_states[token, k, :].
 """
 
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 @triton.jit
@@ -97,28 +108,92 @@ def _fused_mtp_input_rmsnorm_kernel(
         )
 
 
-@triton.jit
-def _mtp_shared_head_rmsnorm_kernel(
-    x_ptr,
-    weight_ptr,
-    out_ptr,
-    eps,
-    HIDDEN: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+class MtpSharedHeadRmsnormKernel(
+    VllmJitKernel["MtpSharedHeadRmsnormKernel.CompileKey"]
 ):
-    token_idx = tl.program_id(0).to(tl.int64)
-    block = tl.arange(0, BLOCK_SIZE)
-    mask = block < HIDDEN
-    x = tl.load(x_ptr + token_idx * HIDDEN + block, mask=mask, other=0.0)
-    _rmsnorm_row(
-        x,
+    """VllmJitKernel wrapper for ``_mtp_shared_head_rmsnorm_kernel``."""
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        HIDDEN: int
+        BLOCK_SIZE: int
+
+    @staticmethod
+    @triton.jit
+    def kernel(
+        x_ptr,
         weight_ptr,
-        out_ptr + token_idx * HIDDEN,
-        block,
-        mask,
+        out_ptr,
         eps,
-        HIDDEN,
-    )
+        HIDDEN: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        token_idx = tl.program_id(0).to(tl.int64)
+        block = tl.arange(0, BLOCK_SIZE)
+        mask = block < HIDDEN
+        x = tl.load(x_ptr + token_idx * HIDDEN + block, mask=mask, other=0.0)
+        _rmsnorm_row(
+            x,
+            weight_ptr,
+            out_ptr + token_idx * HIDDEN,
+            block,
+            mask,
+            eps,
+            HIDDEN,
+        )
+
+    def dispatch(self, *, HIDDEN: int) -> CompileKey:  # type: ignore[override]
+        return self.CompileKey(
+            HIDDEN=HIDDEN,
+            BLOCK_SIZE=next_power_of_2(HIDDEN),
+        )
+
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
+        hidden = vllm_config.model_config.get_hidden_size()
+        return self._trace_dispatch(self.dispatch)(
+            HIDDEN=hidden,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        bf16_ptr = TritonWarmupTensor(torch.bfloat16)
+        warmup(
+            bf16_ptr,
+            bf16_ptr,
+            bf16_ptr,
+            1e-6,
+            HIDDEN=compile_key.HIDDEN,
+            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            grid=(1,),
+        )
+
+    def __call__(
+        self,
+        hidden_states: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> torch.Tensor:
+        assert hidden_states.ndim == 2
+        assert hidden_states.is_contiguous()
+        assert weight.is_contiguous()
+        num_tokens, hidden = hidden_states.shape
+        out = torch.empty_like(hidden_states)
+        if num_tokens == 0:
+            return out
+        compile_key = self.dispatch(HIDDEN=hidden)
+        self.kernel[(num_tokens,)](
+            hidden_states,
+            weight,
+            out,
+            eps,
+            HIDDEN=compile_key.HIDDEN,
+            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+        )
+        return out
+
+
+_MTP_SHARED_HEAD_RMSNORM_KERNEL = MtpSharedHeadRmsnormKernel()
 
 
 def mtp_shared_head_rmsnorm(
@@ -131,23 +206,7 @@ def mtp_shared_head_rmsnorm(
     Uses the same ``_rmsnorm_row`` body as ``fused_mtp_input_rmsnorm`` so the
     MTP draft path runs one consistent RMSNorm implementation end to end.
     """
-    assert hidden_states.ndim == 2
-    assert hidden_states.is_contiguous()
-    assert weight.is_contiguous()
-    num_tokens, hidden = hidden_states.shape
-    out = torch.empty_like(hidden_states)
-    if num_tokens == 0:
-        return out
-    block_size = triton.next_power_of_2(hidden)
-    _mtp_shared_head_rmsnorm_kernel[(num_tokens,)](
-        hidden_states,
-        weight,
-        out,
-        eps,
-        HIDDEN=hidden,
-        BLOCK_SIZE=block_size,
-    )
-    return out
+    return _MTP_SHARED_HEAD_RMSNORM_KERNEL(hidden_states, weight, eps)
 
 
 def fused_mtp_input_rmsnorm(
