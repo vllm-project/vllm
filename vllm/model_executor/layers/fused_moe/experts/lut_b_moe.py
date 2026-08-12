@@ -8,6 +8,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
+    FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
@@ -34,6 +35,122 @@ from vllm.triton_utils import tl, triton
 
 LUT_B_BLOCK_M = 16
 LUT_B_GEMM_BLOCK_N = 64
+
+
+@triton.jit
+def _dequantize_lut_b_kernel(
+    packed_ptr,
+    codebook_ptr,
+    output_ptr,
+    stride_pe,
+    stride_pnt,
+    stride_pkt,
+    stride_pb,
+    stride_ce,
+    stride_cnt,
+    stride_ckt,
+    stride_ci,
+    stride_oe,
+    stride_on,
+    stride_ok,
+    num_n_tiles: tl.constexpr,
+    num_k_tiles: tl.constexpr,
+    LUT_BLOCK_N: tl.constexpr,
+    LUT_BLOCK_K: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    tile_id = tl.program_id(0)
+    expert = tile_id // (num_n_tiles * num_k_tiles)
+    tile_in_expert = tile_id % (num_n_tiles * num_k_tiles)
+    n_tile = tile_in_expert // num_k_tiles
+    k_tile = tile_in_expert % num_k_tiles
+
+    offsets = tl.arange(0, BLOCK_SIZE).to(tl.int64)
+    n_in_tile = offsets // LUT_BLOCK_K
+    k_in_tile = offsets % LUT_BLOCK_K
+    index_group = offsets // 8
+    bit_index = (offsets % 8) * 3
+    byte_index = index_group * 3 + bit_index // 8
+    bit_shift = bit_index % 8
+
+    packed_ptrs = (
+        packed_ptr
+        + expert * stride_pe
+        + n_tile * stride_pnt
+        + k_tile * stride_pkt
+        + byte_index * stride_pb
+    )
+    low = tl.load(packed_ptrs).to(tl.int32)
+    high = tl.load(packed_ptrs + stride_pb, mask=bit_shift > 5, other=0).to(tl.int32)
+    lut_index = ((low >> bit_shift) | (high << (8 - bit_shift))) & 0x7
+    values = tl.load(
+        codebook_ptr
+        + expert * stride_ce
+        + n_tile * stride_cnt
+        + k_tile * stride_ckt
+        + lut_index * stride_ci
+    )
+    output_ptrs = (
+        output_ptr
+        + expert * stride_oe
+        + (n_tile * LUT_BLOCK_N + n_in_tile) * stride_on
+        + (k_tile * LUT_BLOCK_K + k_in_tile) * stride_ok
+    )
+    tl.store(output_ptrs, values)
+
+
+def dequantize_lut_b_triton(
+    packed: torch.Tensor,
+    codebooks: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Dequantize stacked LUT-B expert weights with one program per tile."""
+    if packed.ndim != 4 or packed.shape[-1] != LUT_B_PACKED_TILE_BYTES:
+        raise ValueError(f"Unexpected packed LUT-B shape {packed.shape}")
+    if codebooks.shape != (*packed.shape[:3], LUT_B_CODEBOOK_SIZE):
+        raise ValueError(
+            f"Codebook shape {codebooks.shape} does not match {packed.shape}"
+        )
+    if out_dtype not in (torch.bfloat16, torch.float16):
+        raise ValueError(f"LUT-B dequantization requires BF16 or FP16, got {out_dtype}")
+
+    num_experts, num_n_tiles, num_k_tiles = packed.shape[:3]
+    output = torch.empty(
+        num_experts,
+        num_n_tiles * LUT_B_BLOCK_N,
+        num_k_tiles * LUT_B_BLOCK_K,
+        dtype=out_dtype,
+        device=packed.device,
+    )
+    num_tiles = num_experts * num_n_tiles * num_k_tiles
+    _dequantize_lut_b_kernel[(num_tiles,)](
+        packed,
+        codebooks,
+        output,
+        packed.stride(0),
+        packed.stride(1),
+        packed.stride(2),
+        packed.stride(3),
+        codebooks.stride(0),
+        codebooks.stride(1),
+        codebooks.stride(2),
+        codebooks.stride(3),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        num_n_tiles=num_n_tiles,
+        num_k_tiles=num_k_tiles,
+        LUT_BLOCK_N=LUT_B_BLOCK_N,
+        LUT_BLOCK_K=LUT_B_BLOCK_K,
+        BLOCK_SIZE=LUT_B_BLOCK_N * LUT_B_BLOCK_K,
+        num_warps=4,
+    )
+    return output
+
+
+def should_dequantize_lut_b(num_tokens: int, num_experts: int) -> bool:
+    """Use dense GEMMs once there are two source tokens per local expert."""
+    return num_tokens >= 2 * num_experts
 
 
 @triton.jit
@@ -220,6 +337,13 @@ def invoke_lut_b_grouped_gemm(
 class LutBTritonExperts(TritonExperts):
     """Routed experts backed by two fused LUT-B decode-and-GEMM launches."""
 
+    def __init__(self, moe_config, quant_config: FusedMoEQuantConfig):
+        super().__init__(moe_config, quant_config)
+        self.dense_experts = TritonExperts(
+            moe_config,
+            FUSED_MOE_UNQUANTIZED_CONFIG,
+        )
+
     @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.is_cuda_alike()
@@ -277,14 +401,36 @@ class LutBTritonExperts(TritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        del a1q_scale, a2_scale, expert_tokens_meta
+        del a1q_scale, a2_scale
         assert hidden_states.is_contiguous()
         assert w1.is_contiguous() and w2.is_contiguous()
         assert self.w1_scale is not None and self.w2_scale is not None
+        w1_codebooks = self.w1_scale
+        w2_codebooks = self.w2_scale
 
         num_experts, num_tokens, n, k, top_k = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids
         )
+        if should_dequantize_lut_b(num_tokens, num_experts):
+            self.dense_experts.apply(
+                output=output,
+                hidden_states=hidden_states,
+                w1=dequantize_lut_b_triton(w1, w1_codebooks, hidden_states.dtype),
+                w2=dequantize_lut_b_triton(w2, w2_codebooks, hidden_states.dtype),
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                a1q_scale=None,
+                a2_scale=None,
+                workspace13=workspace13,
+                workspace2=workspace2,
+                expert_tokens_meta=expert_tokens_meta,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+            return
+
         if global_num_experts == -1:
             global_num_experts = num_experts
 
@@ -311,7 +457,7 @@ class LutBTritonExperts(TritonExperts):
         invoke_lut_b_grouped_gemm(
             hidden_states,
             w1,
-            self.w1_scale,
+            w1_codebooks,
             intermediate_cache1,
             None,
             sorted_token_ids,
@@ -329,7 +475,7 @@ class LutBTritonExperts(TritonExperts):
         invoke_lut_b_grouped_gemm(
             intermediate_cache2,
             w2,
-            self.w2_scale,
+            w2_codebooks,
             intermediate_cache3,
             topk_weights,
             sorted_token_ids,

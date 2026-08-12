@@ -14,7 +14,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantDesc,
 )
 from vllm.model_executor.layers.fused_moe.experts.lut_b_moe import (
+    dequantize_lut_b_triton,
     make_lut_b_moe_kernel,
+    should_dequantize_lut_b,
 )
 from vllm.model_executor.layers.quantization.utils.lut_b_utils import (
     dequantize_lut_b,
@@ -23,14 +25,38 @@ from vllm.model_executor.layers.quantization.utils.lut_b_utils import (
 from vllm.platforms import current_platform
 
 
+def test_lut_b_dequant_heuristic_boundary() -> None:
+    assert not should_dequantize_lut_b(num_tokens=7, num_experts=4)
+    assert should_dequantize_lut_b(num_tokens=8, num_experts=4)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="The LUT-B dequantization kernel requires a CUDA-like GPU.",
+)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+def test_lut_b_triton_dequant_matches_oracle(out_dtype: torch.dtype) -> None:
+    torch.manual_seed(0)
+    weight = torch.randn(3, 16, 128, device="cuda", dtype=torch.bfloat16)
+    packed, codebooks = quantize_lut_b(weight)
+
+    actual = dequantize_lut_b_triton(packed, codebooks, out_dtype)
+    expected = dequantize_lut_b(packed, codebooks, out_dtype=out_dtype)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="The LUT-B fused MoE path requires a CUDA-like GPU.",
 )
-def test_lut_b_fused_moe_matches_dequantized_oracle(workspace_init) -> None:
-    """Decode-in-GEMM matches the same routed MoE over reconstructed weights."""
+@pytest.mark.parametrize("num_tokens", [7, 8])
+def test_lut_b_fused_moe_matches_dequantized_oracle(
+    workspace_init,
+    num_tokens: int,
+) -> None:
+    """Both execution paths match routed MoE over reconstructed weights."""
     torch.manual_seed(1)
-    num_tokens = 7
     num_experts = 4
     top_k = 2
     hidden_size = 64
@@ -62,11 +88,8 @@ def test_lut_b_fused_moe_matches_dequantized_oracle(workspace_init) -> None:
         )
         / 10
     )
-    topk_ids = torch.tensor(
-        [[0, 1], [1, 2], [2, 3], [3, 0], [0, 2], [1, 3], [2, 0]],
-        device="cuda",
-        dtype=torch.int64,
-    )
+    token_ids = torch.arange(num_tokens, device="cuda")
+    topk_ids = torch.stack((token_ids % num_experts, (token_ids + 1) % num_experts), 1)
     topk_weights = torch.rand(
         num_tokens,
         top_k,

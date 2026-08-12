@@ -54,7 +54,7 @@ vllm serve Qwen/Qwen3.6-35B-A3B --quantization lut_b_moe
 | `fp8_per_block` | fp8_e4m3 data, fp32 per-128x128-block scale | fp8_e4m3 data, fp32 per-1x128-block scale | |
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
 | `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
-| `lut_b_moe` | 3-bit indices and one eight-entry E4M3 codebook per 8x64 expert-weight tile | BF16/FP16 | Routed MoE experts only; dense linear layers remain unquantized. |
+| `lut_b_moe` | 3-bit indices and one eight-entry E4M3 codebook per 8x64 expert-weight tile | BF16/FP16 | Routed MoE experts only; dequantizes before the grouped GEMM when tokens >= twice the local experts. |
 
 ## Advanced Configuration
 
