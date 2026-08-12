@@ -34,6 +34,8 @@ def prepare_chunk_indices(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Te
 
 @tensor_cache
 def prepare_chunk_offsets(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    # `new_zeros` rather than `new_tensor([0])`: the latter stages a host list
+    # across and blocks.
     return torch.cat(
-        [cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]
+        [cu_seqlens.new_zeros(1), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]
     ).cumsum(-1)

@@ -800,7 +800,9 @@ class SiglipEncoder(nn.Module):
             [height_position_ids, width_position_ids],
             dim=-1,
         )
-        max_grid_size = pids.max() + 1
+        # The ids are built from the grids above, so `h`/`w` bound them
+        # and the table size is known on the host.
+        max_grid_size = max(max(h, w) for _, h, w in flatten_image_grid_thw)
         rope_emb_max_grid = self.rotary_pos_emb(max_grid_size)
         rotary_pos_emb = rope_emb_max_grid[pids].flatten(1)
 

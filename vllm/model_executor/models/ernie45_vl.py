@@ -534,7 +534,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         else:
             max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
-        cu_seqlens = cu_seqlens.to(device)
+        cu_seqlens = cu_seqlens.to(device, non_blocking=True)
 
         return {
             "rotary_pos_emb": rotary_pos_emb,
