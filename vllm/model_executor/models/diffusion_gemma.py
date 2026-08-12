@@ -16,6 +16,8 @@ via Gemma4MultimodalEmbedder.
 
 from __future__ import annotations
 
+import zlib
+from collections import deque
 from collections.abc import Iterable, Sequence
 from types import SimpleNamespace
 from typing import Any
@@ -29,7 +31,7 @@ from transformers import AutoModel, DiffusionGemmaConfig
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -72,6 +74,7 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import (
     SupportsMultiModal,
+    SupportsPP,
     SupportsQuant,
 )
 
@@ -140,6 +143,7 @@ class DiffusionGemmaForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsQuant,
+    SupportsPP,
 ):
     """DiffusionGemma for vLLM.
 
@@ -267,6 +271,10 @@ class DiffusionGemmaForConditionalGeneration(
             hidden_size=text_config.hidden_size,
             self_conditioning_size=sc_size,
             eps=getattr(text_config, "rms_norm_eps", 1e-6),
+        )
+
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
         )
 
     # ------------------------------------------------------------------ #
@@ -738,23 +746,41 @@ class DiffusionGemmaRequestStates:
             max_num_reqs, canvas_length, hidden_size, dtype=torch.float32, device=device
         )
 
-    def init_canvas(self, slot_indices: torch.Tensor) -> None:
-        """Initialize canvas with random tokens for the given slots.
+        # Per-request seed so every PP rank builds the same initial canvas.
+        self.canvas_seed = np.zeros(max_num_reqs, dtype=np.int64)
+        self.canvas_initialized = np.zeros(max_num_reqs, dtype=bool)
 
-        `slot_indices` must already be on device to avoid a cpu->gpu sync.
-        """
-        n = slot_indices.shape[0]
-        self.canvas[slot_indices] = torch.randint(
-            0,
-            self.vocab_size,
-            (n, self.canvas_length),
-            dtype=torch.int64,
-            device=self.device,
-        )
+    def init_canvas(self, slot_indices_np: np.ndarray) -> None:
+        """Initialize canvas with per-slot seeded random tokens."""
+        for s in slot_indices_np.tolist():
+            gen = torch.Generator().manual_seed(int(self.canvas_seed[s]))
+            tokens = torch.randint(
+                0,
+                self.vocab_size,
+                (self.canvas_length,),
+                dtype=torch.int64,
+                generator=gen,
+            )
+            self.canvas[s] = tokens.to(self.device, non_blocking=True)
 
-    def add_request(self, slot_idx: int) -> None:
+    def start_denoising(
+        self,
+        slots_np: np.ndarray,
+        slots_gpu: torch.Tensor,
+        draft_tokens: torch.Tensor,
+    ) -> None:
+        """Seed the canvas and flip the given slots into the denoise phase."""
+        self.init_canvas(slots_np)
+        self.apply_seed_canvases(slots_np, slots_gpu)
+        self.canvas_initialized[slots_np] = True
+        draft_tokens[slots_gpu, : self.canvas_length] = self.canvas[slots_gpu]
+        self.is_encoder_phase.index_fill_(0, slots_gpu, False)
+
+    def add_request(self, slot_idx: int, seed: int = 0) -> None:
+        self.canvas_seed[slot_idx] = seed
+        self.canvas_initialized[slot_idx] = False
         self.is_encoder_phase[slot_idx].fill_(True)
-        self.init_canvas(async_tensor_h2d([slot_idx], device=self.device))
+        self.init_canvas(np.array([slot_idx]))
         self.step[slot_idx].fill_(0)
         self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
@@ -837,6 +863,134 @@ class DiffusionGemmaRequestStates:
         )
 
 
+class _DiffusionPPStateHandler:
+    """Ships sampler-owned per-step diffusion state from the last PP rank
+    to the others, mirroring PPHandler's side-stream broadcast pattern."""
+
+    def __init__(
+        self,
+        canvas_length: int,
+        diffusion_states: DiffusionGemmaRequestStates,
+        model_dtype: torch.dtype,
+        device: torch.device,
+    ):
+        pp_group = get_pp_group()
+        self.is_last_rank = pp_group.is_last_rank
+        self.last_rank = pp_group.last_rank
+        self.canvas_length = canvas_length
+        self.diffusion_states = diffusion_states
+        self.model_dtype = model_dtype
+        self.device = device
+        self.main_stream = torch.cuda.current_stream(device)
+        self.stream = torch.cuda.Stream(device)
+        self.queue: deque[tuple | None] = (
+            deque() if self.is_last_rank else deque([None] * pp_group.world_size)
+        )
+        self.req_idx_gen_np = np.zeros(diffusion_states.max_num_reqs, dtype=np.int32)
+        self.group = pp_group.make_sibling_device_group(group_desc="pp_diffusion_state")
+        # Eager NCCL init: lazy init at first use can interleave with the
+        # p2p communicator's lazy init across ranks and deadlock.
+        warmup_t = torch.zeros(1, dtype=torch.int64, device=device)
+        torch.distributed.broadcast(warmup_t, src=self.last_rank, group=self.group)
+
+    def on_req_idx_freed(self, req_idx: int) -> None:
+        self.req_idx_gen_np[req_idx] += 1
+
+    def broadcast(self, input_batch: Any, req_states: Any) -> None:
+        assert self.is_last_rank
+        num_reqs = input_batch.num_reqs
+        idx = input_batch.idx_mapping[:num_reqs]
+        states = self.diffusion_states
+        with torch.cuda.stream(self.stream):
+            self.stream.wait_stream(self.main_stream)
+            tokens_phase = torch.empty(
+                num_reqs, self.canvas_length + 1, dtype=torch.int64, device=self.device
+            )
+            tokens_phase[:, : self.canvas_length] = req_states.draft_tokens[
+                idx, : self.canvas_length
+            ]
+            tokens_phase[:, self.canvas_length] = states.is_encoder_phase[idx]
+            sc = states.self_conditioning_embeds[idx].to(self.model_dtype)
+            gather_done = self.stream.record_event()
+            torch.distributed.broadcast(
+                tokens_phase, src=self.last_rank, group=self.group
+            )
+            torch.distributed.broadcast(sc, src=self.last_rank, group=self.group)
+            tokens_phase.record_stream(self.stream)
+            sc.record_stream(self.stream)
+        # Hold the main stream until the snapshot completes; the sampler
+        # overwrites these buffers in-place on the next step.
+        self.main_stream.wait_event(gather_done)
+
+    def receive(self, input_batch: Any) -> None:
+        assert not self.is_last_rank
+        num_reqs = input_batch.num_reqs
+        idx_mapping_np = input_batch.idx_mapping_np[:num_reqs]
+        gen_at_receive_np = self.req_idx_gen_np[idx_mapping_np]
+        prefill_done_np = (
+            input_batch.num_computed_prefill_tokens_np[:num_reqs]
+            + input_batch.num_scheduled_tokens[:num_reqs]
+            >= input_batch.prefill_len_np[:num_reqs]
+        )
+        with torch.cuda.stream(self.stream):
+            self.stream.wait_stream(self.main_stream)
+            tokens_phase = torch.empty(
+                num_reqs, self.canvas_length + 1, dtype=torch.int64, device=self.device
+            )
+            sc = torch.empty(
+                num_reqs,
+                self.canvas_length,
+                self.diffusion_states.self_conditioning_embeds.shape[-1],
+                dtype=self.model_dtype,
+                device=self.device,
+            )
+            torch.distributed.broadcast(
+                tokens_phase, src=self.last_rank, group=self.group
+            )
+            torch.distributed.broadcast(sc, src=self.last_rank, group=self.group)
+            event = self.stream.record_event()
+            tokens_phase.record_stream(self.main_stream)
+            sc.record_stream(self.main_stream)
+        self.queue[-1] = (
+            event,
+            tokens_phase,
+            sc,
+            input_batch.idx_mapping[:num_reqs],
+            idx_mapping_np,
+            gen_at_receive_np,
+            prefill_done_np,
+        )
+
+    def apply(self, req_states: Any) -> None:
+        """Consume the entry from pp_size steps ago, skipping freed slots."""
+        if not self.queue:
+            return
+        slot = self.queue.popleft()
+        self.queue.append(None)
+        if slot is None:
+            return
+        event, tokens_phase, sc, idx, idx_np, gen_np, prefill_done_np = slot
+        self.main_stream.wait_event(event)
+        freed = self.req_idx_gen_np[idx_np] != gen_np
+        if freed.all():
+            return
+        self.diffusion_states.canvas_initialized[idx_np[prefill_done_np & ~freed]] = (
+            True
+        )
+        if freed.any():
+            sel_np = np.nonzero(~freed)[0]
+            rows = async_tensor_h2d(sel_np, device=self.device)
+            idx = async_tensor_h2d(idx_np[sel_np], device=self.device)
+            tokens_phase = tokens_phase[rows]
+            sc = sc[rows]
+        states = self.diffusion_states
+        req_states.draft_tokens[idx, : self.canvas_length] = tokens_phase[
+            :, : self.canvas_length
+        ]
+        states.is_encoder_phase[idx] = tokens_phase[:, self.canvas_length].bool()
+        states.self_conditioning_embeds[idx] = sc.float()
+
+
 class DiffusionGemmaModelState(ModelState):
     """ModelState for DiffusionGemma.
 
@@ -884,6 +1038,15 @@ class DiffusionGemmaModelState(ModelState):
         # compute_logits reads the step's shared allowed set from here.
         self.model.diffusion_states = self.diffusion_states
         self._req_id_to_index: dict[str, int] = {}
+
+        self._pp_state_handler: _DiffusionPPStateHandler | None = None
+        if get_pp_group().world_size > 1:
+            self._pp_state_handler = _DiffusionPPStateHandler(
+                canvas_length=canvas_length,
+                diffusion_states=self.diffusion_states,
+                model_dtype=self.model_config.dtype,
+                device=device,
+            )
 
         # Persistent buffer for per-request causal flags, updated in-place
         # so FULL CUDA graph replay sees the latest values. Must be int32:
@@ -947,7 +1110,9 @@ class DiffusionGemmaModelState(ModelState):
 
     def add_request(self, req_index: int, new_req_data: Any) -> None:
         self._req_id_to_index[new_req_data.req_id] = req_index
-        self.diffusion_states.add_request(req_index)
+        self.diffusion_states.add_request(
+            req_index, seed=zlib.crc32(new_req_data.req_id.encode())
+        )
         if not new_req_data.req_id.startswith("_warmup_"):
             prompt_len = len(new_req_data.prompt_token_ids)
             self.diffusion_states.prompt_len[req_index].fill_(prompt_len)
@@ -956,6 +1121,40 @@ class DiffusionGemmaModelState(ModelState):
         idx = self._req_id_to_index.pop(req_id, None)
         if idx is not None:
             self.diffusion_states.remove_request(idx)
+            if self._pp_state_handler is not None:
+                self._pp_state_handler.on_req_idx_freed(idx)
+
+    def pp_broadcast_state(self, input_batch: Any, req_states: Any) -> None:
+        assert self._pp_state_handler is not None
+        self._pp_state_handler.broadcast(input_batch, req_states)
+
+    def pp_receive_state(self, input_batch: Any) -> None:
+        assert self._pp_state_handler is not None
+        self._pp_state_handler.receive(input_batch)
+
+    def pp_apply_state(self, req_states: Any, scheduler_output: Any) -> None:
+        assert self._pp_state_handler is not None
+        self._pp_state_handler.apply(req_states)
+        if not self._pp_state_handler.is_last_rank:
+            self._transition_finished_prefills(req_states, scheduler_output)
+
+    def _transition_finished_prefills(
+        self, req_states: Any, scheduler_output: Any
+    ) -> None:
+        # First decode step on a non-last rank: transition locally, since the
+        # last rank's sampler only emits state from this step onward.
+        states = self.diffusion_states
+        slots = [
+            slot
+            for req_id in scheduler_output.scheduled_spec_decode_tokens
+            if (slot := self._req_id_to_index.get(req_id)) is not None
+            and not states.canvas_initialized[slot]
+        ]
+        if not slots:
+            return
+        slots_np = np.array(slots, dtype=np.int64)
+        slots_gpu = async_tensor_h2d(slots_np, device=self.device)
+        states.start_denoising(slots_np, slots_gpu, req_states.draft_tokens)
 
     def prepare_inputs_embeds(
         self,
@@ -1180,10 +1379,11 @@ class DiffusionSampler:
 
         max_num_reqs = diffusion_states.max_num_reqs
         device = diffusion_states.device
+        # CL + 1 wide: matches the PP sampled-broadcast receive buffer.
         self._sampled = torch.zeros(
             max_num_reqs,
-            self.canvas_length,
-            dtype=torch.int32,
+            self.canvas_length + 1,
+            dtype=torch.int64,
             device=device,
         )
         self._num_sampled = torch.zeros(
@@ -1289,12 +1489,7 @@ class DiffusionSampler:
         ps_gpu = async_tensor_h2d(
             ps.astype(np.int64), device=states.is_encoder_phase.device
         )
-        states.init_canvas(ps_gpu)
-        states.apply_seed_canvases(ps, ps_gpu)
-        self.req_states.draft_tokens[ps_gpu, : self.canvas_length] = states.canvas[
-            ps_gpu
-        ]
-        states.is_encoder_phase.index_fill_(0, ps_gpu, False)
+        states.start_denoising(ps, ps_gpu, self.req_states.draft_tokens)
 
     def _handle_prefill(
         self,
@@ -1303,7 +1498,8 @@ class DiffusionSampler:
     ) -> SamplerOutput:
         num_reqs = input_batch.num_reqs
         self._finish_prefills(input_batch, np.arange(num_reqs))
-        sampled = self._sampled[:num_reqs, :1]
+        # Full width: matches the PP sampled-broadcast receive buffer.
+        sampled = self._sampled[:num_reqs]
         sampled.zero_()
         num_sampled = self._num_sampled[:num_reqs]
         num_sampled.zero_()
