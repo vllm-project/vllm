@@ -234,6 +234,16 @@ def validate_pynvvideocodec_hw_decoders(hw_decoders: object) -> int:
     return hw_decoders
 
 
+def _pynvvideocodec_exception_types(nvc) -> tuple[type[Exception], ...]:
+    return tuple(
+        exception_type
+        for name in dir(nvc)
+        if name.startswith("PyNvVCException")
+        and isinstance((exception_type := getattr(nvc, name)), type)
+        and issubclass(exception_type, Exception)
+    )
+
+
 class PyNvVideoCodecDecoderSlot:
     """A retained PyNv decoder slot and its CUDA stream.
 
@@ -806,10 +816,18 @@ class PyNvVideoCodecVideoBackendMixin:
         with cls._borrow_decoder_slot() as decoder_slot:
             stream = decoder_slot.stream
             with cls._torch_stream_context(stream):
-                decoder = decoder_slot.get_decoder(
-                    file_path, nvc, device_index=cls._DEVICE_INDEX
-                )
-                decoded_frames = decoder.get_batch_frames_by_index(frame_idx)
+                try:
+                    decoder = decoder_slot.get_decoder(
+                        file_path, nvc, device_index=cls._DEVICE_INDEX
+                    )
+                    decoded_frames = decoder.get_batch_frames_by_index(frame_idx)
+                except Exception as exc:
+                    if not isinstance(
+                        exc,
+                        _pynvvideocodec_exception_types(nvc) + (IndexError,),
+                    ):
+                        raise
+                    raise ValueError("Invalid or unsupported video file.") from exc
                 if len(decoded_frames) < len(frame_idx):
                     logger.warning(
                         "pynvvideocodec video loading: expected %d frames but got %d.",
@@ -854,7 +872,12 @@ class PyNvVideoCodecVideoBackendMixin:
             with os.fdopen(temp_fd, "wb") as temp_file:
                 temp_file.write(data)
 
-            gpu_source = cls._read_source_metadata(temp_path, nvc)
+            try:
+                gpu_source = cls._read_source_metadata(temp_path, nvc)
+            except Exception as exc:
+                if not isinstance(exc, _pynvvideocodec_exception_types(nvc)):
+                    raise
+                raise ValueError("Invalid or unsupported video file.") from exc
             _check_frame_pixel_limit(gpu_source.width, gpu_source.height)
             source = cls._prepare_source(gpu_source.source)
             frame_idx = cls.compute_frames_index_to_sample(
