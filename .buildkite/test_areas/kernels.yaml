@@ -176,6 +176,7 @@ steps:
       dind: false
       device: mi300_1
       timeout_in_minutes: 120
+      parallelism: 1
       source_file_dependencies:
       - csrc/quantization/
       - vllm/model_executor/layers/quantization
