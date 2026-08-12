@@ -373,11 +373,17 @@ def test_pynvvideocodec_invalid_video_raises_value_error(
     class FakePyNvVCException(Exception):
         pass
 
-    fake_nvc = SimpleNamespace(PyNvVCException=FakePyNvVCException)
+    class FakePyNvVCExceptionUnsupported(Exception):
+        pass
+
+    fake_nvc = SimpleNamespace(
+        PyNvVCException=FakePyNvVCException,
+        PyNvVCExceptionUnsupported=FakePyNvVCExceptionUnsupported,
+    )
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", fake_nvc)
 
     def raise_invalid_video(cls, file_path, nvc):
-        raise FakePyNvVCException("Invalid data found when processing input")
+        raise FakePyNvVCExceptionUnsupported("Invalid data found when processing input")
 
     monkeypatch.setattr(
         PyNvVideoCodecVideoBackend,
@@ -394,7 +400,7 @@ def test_pynvvideocodec_invalid_video_raises_value_error(
         ).read_bytes()
         PyNvVideoCodecVideoBackend.decode_frames_pynvvideocodec(corrupted_video, None)
 
-    assert isinstance(exc_info.value.__cause__, FakePyNvVCException)
+    assert isinstance(exc_info.value.__cause__, FakePyNvVCExceptionUnsupported)
 
 
 def test_pynvvideocodec_unrelated_error_propagates(

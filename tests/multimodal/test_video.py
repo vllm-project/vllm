@@ -200,6 +200,47 @@ def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
     assert metadata["frames_indices"] == [0, 9]
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_pynvvideocodec_corrupted_video_raises_value_error():
+    valid_video = create_long_gop_video(num_frames=2, width=64, height=64)
+    corrupted_video = (ASSETS_DIR / "corrupted.mp4").read_bytes()
+
+    old_slots = PyNvVideoCodecVideoBackend._decoder_slots
+    old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
+    old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
+    old_max_slots = PyNvVideoCodecVideoBackend._max_decoder_slots
+    try:
+        PyNvVideoCodecVideoBackend._decoder_slots = []
+        PyNvVideoCodecVideoBackend._active_decoder_slots = 0
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
+        PyNvVideoCodecVideoBackend._max_decoder_slots = None
+
+        loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid or unsupported video file\.$",
+        ) as exc_info:
+            loader.load_bytes(
+                corrupted_video,
+                num_frames=-1,
+                hw_decoders=1,
+            )
+
+        assert isinstance(exc_info.value.__cause__, IndexError)
+
+        frames, _ = loader.load_bytes(
+            valid_video,
+            num_frames=1,
+            hw_decoders=1,
+        )
+        assert frames.shape[0] == 1
+    finally:
+        PyNvVideoCodecVideoBackend._decoder_slots = old_slots
+        PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
+        PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
+
+
 @pytest.mark.parametrize("hw_decoders", [1, 3])
 def test_pynvvideocodec_decoder_slots_are_bounded(
     monkeypatch: pytest.MonkeyPatch,
