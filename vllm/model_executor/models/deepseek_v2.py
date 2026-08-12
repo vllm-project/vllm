@@ -626,6 +626,11 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
 
     def forward(self): ...
 
+    @property
+    def uses_shuffled_layout(self) -> bool:
+        """Whether this cache's reader expects the shuffled value layout."""
+        return False
+
     def get_attn_backend(self) -> AttentionBackend:
         return DeepseekV32IndexerBackend
 

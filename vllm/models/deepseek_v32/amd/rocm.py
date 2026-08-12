@@ -17,22 +17,30 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
 )
 
 
-# Both inherit the base [1, 64], resolving the kernel block size to 1. Declaring
-# [16, 32] gave 16, and this path corrupts past index_topk for any kernel block size
-# > 1 (10 trials at 5k tokens: 2/10 correct at 16, 0/10 at 64, 9/10 at 1). The legacy
-# path is correct at every block size, so the cause is local to this file; it is not
-# the fused cache write (both slot mappings verified byte-identical).
+# The aiter sparse kernels also handle 16 and 32, so extend rather than replace the
+# base declaration -- narrowing it to [16, 32] made select_common_block_size silently
+# downgrade a requested 64 to 32 via its largest-divisor fallback.
 class DeepseekV32MLASparseBackend(ROCMAiterMLASparseBackend):
-    pass
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list:
+        return ROCMAiterMLASparseBackend.get_supported_kernel_block_sizes() + [16, 32]
 
 
 class DeepseekV32ROCmIndexerBackend(DeepseekV32IndexerBackend):
-    pass
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list:
+        return DeepseekV32IndexerBackend.get_supported_kernel_block_sizes() + [16, 32]
 
 
 class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
     def get_attn_backend(self):
         return DeepseekV32ROCmIndexerBackend
+
+    @property
+    def uses_shuffled_layout(self) -> bool:
+        # aiter's gather/insert pair shuffles the cache above block size 1:
+        # [n_blocks, blk/16, head_dim/16, 16, 16] instead of [n_blocks, blk, head_dim].
+        return self.kv_cache.ndim == 3 and self.kv_cache.shape[1] != 1
 
 
 class DeepseekV32ROCmIndexer(DeepseekV32Indexer):
@@ -197,6 +205,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_norm_eps = self.indexer.k_norm.eps
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
             indexer_k_cache = self.indexer.k_cache.kv_cache
+            indexer_cache_shuffled = self.indexer.k_cache.uses_shuffled_layout
             indexer_softmax_scale = self.indexer.softmax_scale
             indexer_n_head_scale = self.indexer.n_head**-0.5
         else:
@@ -206,6 +215,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_norm_eps = 1e-6
             indexer_k_rope_cos_sin_cache = None
             indexer_k_cache = None
+            indexer_cache_shuffled = False
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
 
@@ -236,6 +246,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             self.topk_indices_buffer,
             slot_mapping=mla_slot,
             indexer_k_cache=indexer_k_cache,
+            indexer_cache_shuffled=indexer_cache_shuffled,
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,

@@ -11,6 +11,12 @@ from vllm.triton_utils import tl, triton
 # has_indexer=False path so the indexer args don't allocate every call.
 _DUMMY_CACHE: dict[tuple, torch.Tensor] = {}
 
+# Tile shape of the indexer-K cache's shuffled layout, used when the cache reports
+# uses_shuffled_layout. The block tile is a token count; the head tile is a byte
+# count, which the kernel converts to cache elements.
+_INDEXER_CACHE_BLOCK_TILE = 16
+_INDEXER_CACHE_HEAD_TILE_BYTES = 16
+
 
 def _dummy(shape: tuple, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     key = (shape, dtype, device)
@@ -70,6 +76,9 @@ def _fp8_quant_and_cache_write(
     cache_stride,
     offsets,
     HEAD_DIM: tl.constexpr,
+    SHUFFLE: tl.constexpr,
+    BLOCK_TILE: tl.constexpr,
+    HEAD_TILE: tl.constexpr,
 ):
     k_fp8, scale = _fp8_ue8m0_quantize(vals)
 
@@ -77,11 +86,20 @@ def _fp8_quant_and_cache_write(
     block_offset = slot_idx % cache_block_size
     block_start = block_idx * cache_block_size * cache_stride
 
-    tl.store(
-        kv_cache_ptr + block_start + block_offset * HEAD_DIM + offsets,
-        k_fp8,
-        mask=mask,
-    )
+    # Shuffled layout: [blk/BLOCK_TILE, HEAD_DIM/HEAD_TILE, BLOCK_TILE, HEAD_TILE],
+    # so one contiguous run holds BLOCK_TILE tokens x HEAD_TILE bytes and the
+    # reader's coalesced loads land on the bytes we wrote.
+    if SHUFFLE:
+        value_off = (
+            block_offset // BLOCK_TILE * BLOCK_TILE * HEAD_DIM
+            + block_offset % BLOCK_TILE * HEAD_TILE
+            + offsets // HEAD_TILE * BLOCK_TILE * HEAD_TILE
+            + offsets % HEAD_TILE
+        )
+    else:
+        value_off = block_offset * HEAD_DIM + offsets
+
+    tl.store(kv_cache_ptr + block_start + value_off, k_fp8, mask=mask)
     scale_byte_off = block_start + cache_block_size * HEAD_DIM + block_offset * 4
     tl.store(kv_cache_scale_ptr + scale_byte_off // 4, scale)
 
@@ -129,6 +147,9 @@ def _fused_norm_rope_kernel(
     indexer_cache_scale_ptr,
     indexer_cache_block_size,
     indexer_cache_stride,
+    INDEXER_CACHE_SHUFFLE: tl.constexpr,
+    INDEXER_CACHE_BLOCK_TILE: tl.constexpr,
+    INDEXER_CACHE_HEAD_TILE: tl.constexpr,
     # MLA KV cache (concat kv_c_normed + k_pe_roped, uses slot_mapping_ptr)
     mla_cache_ptr,
     mla_cache_block_stride,
@@ -279,7 +300,7 @@ def _fused_norm_rope_kernel(
             # Shared layer: no indexer K to process.
             return
         # Fused: Index K LayerNorm + RoPE + FP8 quant + cache write.
-        # Eliminates the separate indexer_k_quant_and_cache kernel launch.
+        # Eliminates the separate indexer-K quant-and-cache kernel launch.
 
         index_k_block = tl.arange(0, INDEX_K_BLOCK_SIZE)
         index_k_mask = index_k_block < INDEX_K_DIM
@@ -367,6 +388,9 @@ def _fused_norm_rope_kernel(
             indexer_cache_stride,
             index_k_block,
             INDEX_K_DIM,
+            INDEXER_CACHE_SHUFFLE,
+            INDEXER_CACHE_BLOCK_TILE,
+            INDEXER_CACHE_HEAD_TILE,
         )
 
 
@@ -389,6 +413,7 @@ def fused_norm_rope(
     # Cache params for fused writes (single slot_mapping for both caches)
     slot_mapping: torch.Tensor | None = None,
     indexer_k_cache: torch.Tensor | None = None,
+    indexer_cache_shuffled: bool = False,
     mla_kv_cache: torch.Tensor | None = None,
     mla_kv_cache_dtype: str = "auto",
     mla_k_scale: torch.Tensor | None = None,
@@ -427,6 +452,14 @@ def fused_norm_rope(
         idx_cache_scale_view = indexer_k_cache.view(torch.uint8).view(torch.float32)
         idx_cache_block_size = indexer_k_cache.shape[1]
         idx_cache_stride = indexer_k_cache.shape[2]
+        # The caller's cache reports whether its reader expects the shuffled
+        # layout; see DeepseekV32IndexerCache.uses_shuffled_layout.
+        idx_cache_shuffle = indexer_cache_shuffled
+        if idx_cache_shuffle:
+            assert idx_cache_block_size % _INDEXER_CACHE_BLOCK_TILE == 0, (
+                f"indexer K cache block size {idx_cache_block_size} must be a "
+                f"multiple of {_INDEXER_CACHE_BLOCK_TILE} for the shuffled layout"
+            )
         if indexer_k_cache.dtype == torch.uint8:
             indexer_k_cache = indexer_k_cache.view(torch.float8_e4m3fn)
     else:
@@ -436,11 +469,18 @@ def fused_norm_rope(
         indexer_k_cache = torch.empty(0, dtype=torch.float8_e4m3fn, device=device)
         idx_cache_block_size = 1
         idx_cache_stride = 1
+        idx_cache_shuffle = False
         if mla_kv_cache is None:
             # Pure profiling run (no caches at all): skip all per-token writes.
             slot_mapping = torch.full(
                 (num_tokens,), -1, dtype=torch.int64, device=device
             )
+
+    # The head tile is a byte count and the kernel indexes indexer_k_cache in
+    # elements, so convert using the dtype the kernel actually receives.
+    idx_cache_head_tile = (
+        _INDEXER_CACHE_HEAD_TILE_BYTES // indexer_k_cache.element_size()
+    )
 
     # --- MLA KV cache setup ---
     mla_cache_ds_mla = mla_kv_cache_dtype == "fp8_ds_mla"
@@ -522,6 +562,9 @@ def fused_norm_rope(
         idx_cache_scale_view,
         idx_cache_block_size,
         idx_cache_stride,
+        idx_cache_shuffle,
+        _INDEXER_CACHE_BLOCK_TILE,
+        idx_cache_head_tile,
         # MLA KV cache (uses same slot_mapping)
         mla_kv_cache,
         mla_block_stride,
