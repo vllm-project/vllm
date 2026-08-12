@@ -223,13 +223,13 @@ class SpeculativeConfig:
     """Token capacity of the append-only delta buffer that absorbs new
     responses between background suffix-array rebuilds."""
 
-    suffix_gpu_max_occurrences: int = 32
+    suffix_gpu_max_occurrences: int = 128
     """Maximum number of pattern occurrences sampled for the frequency-ranked
     draft vote. Larger samples make the vote (and hence the chain-probability
     cutoff) closer to exact occurrence counts, at the cost of wider
     [batch, occurrences, k] draft buffers."""
 
-    suffix_gpu_num_backoff: int = 4
+    suffix_gpu_num_backoff: int = 8
     """Number of candidate suffix-match lengths scored per step. The longest
     match is often a rare one-off whose continuation vote splits; shorter,
     better-supported matches draft deeper. 1 disables the backoff (longest

@@ -132,6 +132,7 @@ def test_suffix_gpu_with_async_scheduling(
 
 @single_gpu_only
 def test_suffix_gpu_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_name: str,
     vllm_runner,
@@ -143,6 +144,7 @@ def test_suffix_gpu_acceptance(
     draft-token denominator.
     """
     pytest.importorskip("suffix_gpu")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     test_prompts = get_test_prompts(mm_enabled=False)
 
     with vllm_runner(
@@ -163,12 +165,16 @@ def test_suffix_gpu_acceptance(
             # Pinned at the current defaults so the acceptance floor below
             # keeps guarding the same drafting behaviour.
             "suffix_gpu_num_backoff": 8,
-            "suffix_gpu_max_occurrences": 256,
+            "suffix_gpu_max_occurrences": 128,
         },
         max_model_len=1024,
         async_scheduling=True,
         disable_log_stats=False,
         enable_chunked_prefill=None,
+        # Warm rounds replay identical prompts; prefix-cache hits change the
+        # decode batch composition enough to depress the measured acceptance
+        # rate, so pin it off to keep the floor below meaningful.
+        enable_prefix_caching=False,
         compilation_config=CompilationConfig(),
     ) as spec_runner:
         num_draft = []
@@ -220,6 +226,7 @@ def test_suffix_gpu_acceptance(
 
 @single_gpu_only
 def test_suffix_decoding_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_name: str,
     vllm_runner,
@@ -228,6 +235,7 @@ def test_suffix_decoding_acceptance(
     Check that suffix decoding caching takes effect and improves acceptance
     lengths and acceptance rates over multiple runs of the same prompts.
     """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     test_prompts = get_test_prompts(mm_enabled=False)
 
     with vllm_runner(
@@ -242,6 +250,10 @@ def test_suffix_decoding_acceptance(
         max_model_len=1024,
         disable_log_stats=False,
         enable_chunked_prefill=None,
+        # Warm rounds replay identical prompts; prefix-cache hits change the
+        # decode batch composition enough to depress the measured acceptance
+        # rate, so pin it off to keep the floor below meaningful.
+        enable_prefix_caching=False,
         compilation_config=CompilationConfig(),
     ) as spec_runner:
         # Run several times and check that the accepted tokens increase.
