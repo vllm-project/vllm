@@ -384,7 +384,17 @@ class Lfm2ToolParser(ToolParser):
             if contains_broken_string_literal(tool_text):
                 return _content_only_or_none()
 
-            valid_and_added_text = make_valid_python(tool_text)
+            try:
+                valid_and_added_text = make_valid_python(tool_text)
+            except UnexpectedAstError:
+                # Brackets the model got structurally wrong fail at the same
+                # offset on every chunk, so an exception with a traceback per
+                # chunk buries the one line worth reading. A partial block may
+                # still be rescued by the requote recovery once its end
+                # arrives, so wait quietly until then and report the text once.
+                if has_end_in_current:
+                    logger.warning("Skipping malformed tool call block: %s", tool_text)
+                return _content_only_or_none()
             if valid_and_added_text is None:
                 return _content_only_or_none()
             valid_text, added_text = valid_and_added_text

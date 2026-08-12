@@ -738,6 +738,60 @@ def test_regex_timeout_handling(streaming: bool, lfm2_tokenizer: TokenizerLike):
         mock_regex.match.assert_called_once()
 
 
+def test_streaming_mismatched_brackets_reported_once(lfm2_tokenizer: TokenizerLike):
+    """Brackets the model got structurally wrong raise at the same offset on
+    every chunk, so the block was reported with a full traceback once per
+    chunk — twenty-five of them for a call whose arguments continue past the
+    bad bracket. It is reported once, when the block is complete."""
+    from vllm.tool_parsers import lfm2_tool_parser
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[foo(x=1])]{TOOL_CALL_END}"
+
+    with (
+        patch.object(lfm2_tool_parser.logger, "exception") as logged_exception,
+        patch.object(lfm2_tool_parser.logger, "warning") as logged_warning,
+    ):
+        _, tool_calls = run_tool_extraction(
+            cls(lfm2_tokenizer),
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert tool_calls == []
+    assert logged_exception.call_count == 0
+    assert logged_warning.call_count == 1
+
+
+def test_streaming_bad_bracket_after_a_streamed_prefix_reported_once(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """When the bad bracket arrives after a prefix that already completed to
+    a valid call, that call has been streamed and cannot be retracted, and
+    every later chunk fails at the bracket — six tracebacks here, twenty-five
+    for a longer argument list. The block is reported once instead."""
+    from vllm.tool_parsers import lfm2_tool_parser
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[bash(cmd='ls -la'], timeout=30)]{TOOL_CALL_END}"
+
+    with (
+        patch.object(lfm2_tool_parser.logger, "exception") as logged_exception,
+        patch.object(lfm2_tool_parser.logger, "warning") as logged_warning,
+    ):
+        _, tool_calls = run_tool_extraction(
+            cls(lfm2_tokenizer),
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert len(tool_calls) == 1
+    assert logged_exception.call_count == 0
+    assert logged_warning.call_count == 1
+
+
 def test_streaming_positional_call_logged_once_not_per_chunk(
     lfm2_tokenizer: TokenizerLike,
 ):
