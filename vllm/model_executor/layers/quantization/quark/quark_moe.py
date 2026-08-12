@@ -1334,7 +1334,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def _setup_kernel(self, layer: RoutedExperts):
