@@ -461,6 +461,17 @@ Supported models:
 
 Flags: `--tool-call-parser gigachat3`
 
+### Gigachat 3.5 Models (`gigachat35`)
+
+Use chat template from the Hugging Face model files. This parser targets the GigaChat 3.5 GCML tool-call format (`<｜GCML｜tool_calls>` / `invoke` / `parameter`), which is distinct from the older `gigachat3` format.
+
+Supported models:
+
+* `ai-sage/GigaChat3.5-432B-A28B`
+* `ai-sage/GigaChat3.5-432B-A28B-bf16`
+
+Flags: `--tool-call-parser gigachat35`
+
 ### Apertus Models (`apertus`)
 
 Use the chat template from the examples folder; it fixes several OpenAI compatibility issues: `--chat-template /vllm-workspace/examples/tool_chat_template_apertus.jinja`
