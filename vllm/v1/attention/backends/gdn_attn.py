@@ -171,7 +171,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         prefill_query_start_loc_cpu: torch.Tensor,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
         from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 
         if self.gdn_prefill_backend == "cutedsl":
