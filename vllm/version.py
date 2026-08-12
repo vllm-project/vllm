@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# noop: trivial edit to trigger a fresh CPU image build and validate cache reuse
 try:
     from ._version import __version__, __version_tuple__
 except Exception as e:
