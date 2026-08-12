@@ -8,6 +8,7 @@ import ctypes
 import socket
 import time
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import httpx
@@ -25,9 +26,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 
-from tests.v1.ec_connector.unit.test_ec_example_connector import (
-    mock_request_with_3_mm,
-)
+pytest_plugins = ("tests.v1.ec_connector.unit.test_ec_example_connector",)
 
 
 class CopyingFakeTransferEngine:
@@ -101,6 +100,10 @@ def patch_ec_mooncake_deps():
             CopyingFakeTransferEngine,
         ),
         patch(
+            "vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector._MOONCAKE_IMPORT_ERROR",
+            None,
+        ),
+        patch(
             "vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector.get_ip",
             return_value="127.0.0.1",
         ),
@@ -128,9 +131,7 @@ class TestECMooncakeRegistryServer:
             r = httpx.get(f"http://127.0.0.1:{port}/ec/info/hash_a", timeout=2.0)
             assert r.status_code == 200
             assert r.json() == payload
-            r404 = httpx.get(
-                f"http://127.0.0.1:{port}/ec/info/missing", timeout=2.0
-            )
+            r404 = httpx.get(f"http://127.0.0.1:{port}/ec/info/missing", timeout=2.0)
             assert r404.status_code == 404
         finally:
             registry.shutdown()
@@ -157,23 +158,25 @@ class TestECMooncakeFactory:
 
 
 class TestECMooncakeConnectorValidation:
-    def test_consumer_scheduler_requires_remote_registry(self, mock_vllm_config_consumer):
+    def test_consumer_scheduler_requires_remote_registry(
+        self, mock_vllm_config_consumer
+    ):
         mock_vllm_config_consumer.ec_transfer_config.ec_connector_extra_config = {
             "mooncake_protocol": "tcp",
         }
-        with patch_ec_mooncake_deps():
-            with pytest.raises(ValueError, match="remote_registry_url"):
-                ECMooncakeConnector(
-                    mock_vllm_config_consumer, ECConnectorRole.SCHEDULER
-                )
+        with (
+            patch_ec_mooncake_deps(),
+            pytest.raises(ValueError, match="remote_registry_url"),
+        ):
+            ECMooncakeConnector(mock_vllm_config_consumer, ECConnectorRole.SCHEDULER)
 
     def test_rejects_tensor_parallel_gt_one(self, mock_vllm_config_producer):
         mock_vllm_config_producer.parallel_config.tensor_parallel_size = 2
-        with patch_ec_mooncake_deps():
-            with pytest.raises(ValueError, match="tensor_parallel_size"):
-                ECMooncakeConnector(
-                    mock_vllm_config_producer, ECConnectorRole.WORKER
-                )
+        with (
+            patch_ec_mooncake_deps(),
+            pytest.raises(ValueError, match="tensor_parallel_size"),
+        ):
+            ECMooncakeConnector(mock_vllm_config_producer, ECConnectorRole.WORKER)
 
 
 class TestECMooncakeSchedulerMetadata:
@@ -252,6 +255,48 @@ class TestECMooncakeSchedulerMetadata:
             assert meta.loads[0].num_token == 100
             assert scheduler._mm_datas_need_loads == {}
             assert mm_hash not in scheduler._pending_specs
+
+    def test_producer_does_not_build_load_metadata(
+        self, mock_vllm_config_producer, mock_request_with_3_mm
+    ):
+        with patch_ec_mooncake_deps():
+            scheduler = ECMooncakeConnector(
+                mock_vllm_config_producer, ECConnectorRole.SCHEDULER
+            )
+            scheduler.update_state_after_alloc(mock_request_with_3_mm, 0)
+            meta = scheduler.build_connector_meta(Mock(spec=SchedulerOutput))
+
+        assert isinstance(meta, ECMooncakeConnectorMetadata)
+        assert meta.loads == []
+
+    def test_producer_reports_proxy_rewrite_metadata(self, mock_vllm_config_producer):
+        feature = SimpleNamespace(
+            identifier="image_uuid",
+            modality="image",
+            data=SimpleNamespace(
+                get_data=lambda: {
+                    "image_grid_thw": torch.tensor([1, 32, 48]),
+                    "pixel_values": torch.ones(2),
+                }
+            ),
+        )
+        request = SimpleNamespace(mm_features=[feature])
+
+        with patch_ec_mooncake_deps():
+            scheduler = ECMooncakeConnector(
+                mock_vllm_config_producer, ECConnectorRole.SCHEDULER
+            )
+            with patch.object(
+                scheduler,
+                "_placeholder_metadata_fields",
+                return_value={"image_grid_thw"},
+            ):
+                delay_free, params = scheduler.request_finished(request)
+
+        assert not delay_free
+        assert params == {
+            "ec_items": [{"mm_hash": "image_uuid", "image_grid_thw": [1, 32, 48]}]
+        }
 
 
 class TestECMooncakeWorkerTransfer:

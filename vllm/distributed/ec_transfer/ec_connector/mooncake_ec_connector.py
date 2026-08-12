@@ -23,6 +23,7 @@ import zmq
 from fastapi import FastAPI, HTTPException
 
 from vllm import envs
+from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -31,11 +32,11 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip
-from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
 
+_MOONCAKE_IMPORT_ERROR: ImportError | None
 try:
     from mooncake.engine import TransferEngine
 except ImportError as e:
@@ -153,12 +154,15 @@ class ECMooncakeConnector(ECConnectorBase):
             )
 
         self._role = role
-        self._ec_cfg = vllm_config.ec_transfer_config
-        assert self._ec_cfg is not None
+        ec_cfg = vllm_config.ec_transfer_config
+        assert ec_cfg is not None
+        self._ec_cfg = ec_cfg
         self._extra = self._ec_cfg.ec_connector_extra_config
         self._protocol: str = self._extra.get("mooncake_protocol", "rdma")
         self._remote_registry_url: str | None = self._extra.get("remote_registry_url")
         self._registry_http_port: int = int(self._extra.get("registry_http_port", 9018))
+        self._model_config = vllm_config.model_config
+        self._metadata_fields_cache: dict[str, set[str]] = {}
 
         # Scheduler (consumer): mm_hash -> pending tensor layout from registry
         self._pending_specs: dict[str, ECMooncakeLoadSpec] = {}
@@ -175,12 +179,15 @@ class ECMooncakeConnector(ECConnectorBase):
         self._tensor_lock = threading.Lock()
         self._producer_services_started = False
 
-        if role == ECConnectorRole.SCHEDULER and self.is_consumer:
-            if not self._remote_registry_url:
-                raise ValueError(
-                    "ec_consumer with ECMooncakeConnector requires "
-                    "ec_connector_extra_config['remote_registry_url']."
-                )
+        if (
+            role == ECConnectorRole.SCHEDULER
+            and self.is_consumer
+            and not self._remote_registry_url
+        ):
+            raise ValueError(
+                "ec_consumer with ECMooncakeConnector requires "
+                "ec_connector_extra_config['remote_registry_url']."
+            )
 
     def _ensure_engine(self) -> TransferEngine:
         if self._engine is None:
@@ -236,10 +243,10 @@ class ECMooncakeConnector(ECConnectorBase):
                     if (
                         ret == 0
                         and envs.VLLM_MOONCAKE_SYNC_AFTER_TRANSFER
-                        and torch.cuda.is_available()
+                        and torch.accelerator.is_available()
                         and tensor.is_cuda
                     ):
-                        torch.cuda.synchronize(device=tensor.device)
+                        torch.accelerator.synchronize()
                     sock.send_json({"ok": ret == 0, "mooncake_ret": int(ret)})
                 except Exception as e:
                     logger.exception("EC Mooncake pull handler error: %s", e)
@@ -249,7 +256,9 @@ class ECMooncakeConnector(ECConnectorBase):
                         break
 
         self._zmq_ctx = zmq.Context()
-        self._zmq_thread = threading.Thread(target=loop, name="ec-mooncake-zmq", daemon=True)
+        self._zmq_thread = threading.Thread(
+            target=loop, name="ec-mooncake-zmq", daemon=True
+        )
         self._zmq_thread.start()
         while self._zmq_listen_addr is None:
             time.sleep(0.01)
@@ -262,7 +271,9 @@ class ECMooncakeConnector(ECConnectorBase):
         self._ensure_engine()
         self._start_producer_zmq_listener()
         if is_local_first_rank():
-            self._registry = ECMooncakeRegistryServer("0.0.0.0", self._registry_http_port)
+            self._registry = ECMooncakeRegistryServer(
+                "0.0.0.0", self._registry_http_port
+            )
             self._registry.start()
         self._producer_services_started = True
 
@@ -273,13 +284,11 @@ class ECMooncakeConnector(ECConnectorBase):
         assert isinstance(metadata, ECMooncakeConnectorMetadata)
         eng = self._ensure_engine()
         raw_buf = self._ec_cfg.ec_buffer_device
-        buf = (
-            raw_buf.lower()
-            if isinstance(raw_buf, str) and raw_buf
-            else "cuda"
-        )
-        if buf == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("ECMooncakeConnector requires CUDA for ec_buffer_device=cuda")
+        buf = raw_buf.lower() if isinstance(raw_buf, str) and raw_buf else "cuda"
+        if buf == "cuda" and not torch.accelerator.is_available():
+            raise RuntimeError(
+                "ECMooncakeConnector requires CUDA for ec_buffer_device=cuda"
+            )
         device = torch.device(buf)
 
         for spec in metadata.loads:
@@ -313,11 +322,8 @@ class ECMooncakeConnector(ECConnectorBase):
                 ctx.term()
             if not resp.get("ok"):
                 raise RuntimeError(f"EC Mooncake pull failed: {resp}")
-            if (
-                envs.VLLM_MOONCAKE_SYNC_AFTER_TRANSFER
-                and device.type == "cuda"
-            ):
-                torch.cuda.synchronize(device=device)
+            if envs.VLLM_MOONCAKE_SYNC_AFTER_TRANSFER and device.type == "cuda":
+                torch.accelerator.synchronize()
             encoder_cache[spec.mm_hash] = t
             logger.debug("Loaded EC tensor for mm_hash=%s via Mooncake", spec.mm_hash)
 
@@ -354,7 +360,9 @@ class ECMooncakeConnector(ECConnectorBase):
         try:
             r = httpx.get(url, timeout=5.0)
         except httpx.HTTPError as e:
-            logger.warning("EC Mooncake registry query failed for %s: %s", identifier, e)
+            logger.warning(
+                "EC Mooncake registry query failed for %s: %s", identifier, e
+            )
             return False
         if r.status_code != 200:
             return False
@@ -373,6 +381,8 @@ class ECMooncakeConnector(ECConnectorBase):
         return True
 
     def update_state_after_alloc(self, request: Any, index: int) -> None:
+        if not self.is_consumer:
+            return
         mm_hash = request.mm_features[index].identifier
         num_encoder_token = request.get_num_encoder_embeds(index)
         self._mm_datas_need_loads[mm_hash] = num_encoder_token
@@ -399,6 +409,47 @@ class ECMooncakeConnector(ECConnectorBase):
             self._pending_specs.pop(mm_hash, None)
         self._mm_datas_need_loads.clear()
         return meta
+
+    def _placeholder_metadata_fields(self, modality: str) -> set[str]:
+        if modality in self._metadata_fields_cache:
+            return self._metadata_fields_cache[modality]
+
+        fields: set[str] = set()
+        try:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
+
+            info = MULTIMODAL_REGISTRY.create_processor(self._model_config).info
+            fields = info.data_parser.placeholder_metadata_fields(modality)
+        except Exception:
+            logger.warning(
+                "Could not determine the placeholder metadata fields for "
+                "modality %s; the consumer will preprocess the media itself.",
+                modality,
+                exc_info=True,
+            )
+
+        self._metadata_fields_cache[modality] = fields
+        return fields
+
+    def request_finished(self, request: Any) -> tuple[bool, dict[str, Any] | None]:
+        if not self.is_producer:
+            return False, None
+
+        items = []
+        for feature in request.mm_features:
+            metadata = {}
+            if feature.data is not None:
+                wanted = self._placeholder_metadata_fields(feature.modality)
+                metadata = {
+                    key: value.tolist()
+                    for key, value in feature.data.get_data().items()
+                    if key in wanted and isinstance(value, torch.Tensor)
+                }
+            items.append({"mm_hash": feature.identifier, **metadata})
+
+        if not items:
+            return False, None
+        return False, {"ec_items": items}
 
     def __del__(self) -> None:
         try:

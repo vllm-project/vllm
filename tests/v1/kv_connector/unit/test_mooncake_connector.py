@@ -350,6 +350,8 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
 def test_split_transfer_descriptors_disabled():
     src = [100, 200]
     dst = [300, 400]
@@ -387,6 +389,7 @@ def test_send_blocks_splits_when_max_transfer_bytes_set():
         _sync_after_transfer = False
         _verify_transfer_integrity = False
         device_id = 0
+        xfer_stats = MagicMock()
 
         engine = FakeMooncakeWrapper()
 
@@ -396,10 +399,17 @@ def test_send_blocks_splits_when_max_transfer_bytes_set():
             )
 
     worker = StubWorker()
-    worker.engine.batch_transfer_sync_write = (  # type: ignore[method-assign]
-        lambda _session, _src, _dst, lengths: captured.append(lengths) or 0
-    )
-    ret = worker._send_blocks("host:1", [1000], [2000], [20])
+
+    def capture_transfer(_session, _src, _dst, lengths):
+        captured.append(lengths)
+        return 0
+
+    with patch.object(
+        worker.engine,
+        "batch_transfer_sync_write",
+        side_effect=capture_transfer,
+    ):
+        ret = worker._send_blocks("host:1", [1000], [2000], [20])
     assert ret == 0
     assert captured == [[8, 8, 4]]
 

@@ -457,7 +457,15 @@ async def forward_non_stream(
         async with decode_session.post(
             f"{d_url}/v1/chat/completions", json=req_data, headers=headers
         ) as resp:
-            resp.raise_for_status()
+            if resp.status >= 400:
+                detail = await resp.text()
+                logger.error(
+                    "[%s] Decode request returned status %s: %s",
+                    req_id,
+                    resp.status,
+                    detail,
+                )
+                raise HTTPException(status_code=resp.status, detail=detail)
             out = await resp.json()
             _t3 = time.perf_counter()
             logger.info(

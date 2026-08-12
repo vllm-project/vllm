@@ -20,7 +20,7 @@
 #   TIMEOUT_SECONDS             wait_for_server timeout (default 1200)
 #   SKIP_BASELINE               set to 1 to reuse existing BASELINE_FILE
 
-set -u
+set -euo pipefail
 
 GIT_ROOT=$(git rev-parse --show-toplevel)
 cd "$GIT_ROOT" || exit 1
@@ -60,7 +60,7 @@ else
   VLLM_SERVE=(python -m vllm.entrypoints.cli.main serve)
 fi
 
-ENC_EC_JSON=$(python3 <<PY
+ENC_EC_JSON=$(python <<PY
 import json, os
 print(json.dumps({
     "ec_connector": "ECMooncakeConnector",
@@ -73,7 +73,7 @@ print(json.dumps({
 PY
 )
 
-PD_EC_JSON=$(python3 <<PY
+PD_EC_JSON=$(python <<PY
 import json, os
 print(json.dumps({
     "ec_connector": "ECMooncakeConnector",
@@ -89,7 +89,7 @@ PY
 wait_for_server() {
   local port=$1
   timeout "$TIMEOUT_SECONDS" bash -c "
-        until curl -s -o /dev/null -w '' localhost:\${port}/v1/chat/completions; do
+        until curl -s -o /dev/null -w '' localhost:${port}/v1/chat/completions; do
             sleep 2
         done" && return 0 || return 1
 }
@@ -113,7 +113,6 @@ run_baseline() {
   echo "Starting baseline on GPU $GPU_SINGLE port $PORT"
   CUDA_VISIBLE_DEVICES="$GPU_SINGLE" "${VLLM_SERVE[@]}" "$MODEL" \
     --port "$PORT" \
-    --enforce-eager \
     --gpu-memory-utilization 0.75 \
     --max-num-seqs 32 \
     --allowed-local-media-path "${GIT_ROOT}/tests/v1/ec_connector/integration" \
@@ -147,7 +146,6 @@ run_epd_mooncake() {
   echo "Starting ENCODER on GPU $GPU_E port $ENCODE_PORT"
   CUDA_VISIBLE_DEVICES="$GPU_E" "${VLLM_SERVE[@]}" "$MODEL" \
     --port "$ENCODE_PORT" \
-    --enforce-eager \
     --gpu-memory-utilization 0.35 \
     --enable-request-id-headers \
     --no-enable-prefix-caching \
@@ -161,8 +159,8 @@ run_epd_mooncake() {
   echo "Starting PD on GPU $GPU_PD port $PREFILL_DECODE_PORT"
   CUDA_VISIBLE_DEVICES="$GPU_PD" "${VLLM_SERVE[@]}" "$MODEL" \
     --port "$PREFILL_DECODE_PORT" \
-    --enforce-eager \
     --gpu-memory-utilization 0.75 \
+    --enable-mm-embeds \
     --enable-request-id-headers \
     --max-num-seqs 32 \
     --allowed-local-media-path "${GIT_ROOT}/tests/v1/ec_connector/integration" \
@@ -176,7 +174,7 @@ run_epd_mooncake() {
   wait_for_server "$PREFILL_DECODE_PORT" || { echo "PD log:"; tail -100 "${LOG_PATH}/mooncake_epd_pd.log"; return 1; }
 
   echo "Starting EPD proxy on $ENDPOINT_PORT"
-  python "${GIT_ROOT}/examples/online_serving/disaggregated_encoder/disagg_epd_proxy.py" \
+  python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
     --host "0.0.0.0" \
     --port "$ENDPOINT_PORT" \
     --encode-servers-urls "http://localhost:$ENCODE_PORT" \
