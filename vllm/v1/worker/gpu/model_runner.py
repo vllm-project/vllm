@@ -1248,12 +1248,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _merge_ec_connector_no_forward(
         self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
     ) -> ModelRunnerOutput:
-        """Merge the EC connector's output into `output` for a
-        step with no work to run.
-
-        A no-op unless this rank runs the EC connector: the connector is the
-        no-op one unless an encoder cache exists.
-        """
+        """Let the EC connector send/recv on a step with no work to run."""
         return ModelRunnerOutput.with_ec_conn_output(
             output,
             self.ec_connector.no_forward(scheduler_output).ec_connector_output,
@@ -1568,9 +1563,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Post-step KV connector related operations.
             kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
-            # This rank never has a "real" ModelRunnerOutput of its own (see the
-            # is_last_pp_rank early return in execute_model above), but may have
-            # produced ec_connector_output on the first PP rank -- pass it through.
+            # The first PP rank holds the encoder cache, so pass its EC output on.
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
@@ -1709,10 +1702,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
-            return ModelRunnerOutput.with_ec_conn_output(
-                ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output),
-                ec_connector_output,
-            )
+            output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         assert self.pooling_runner is not None
         pooler_output, finished_mask = self.pooling_runner.pool(

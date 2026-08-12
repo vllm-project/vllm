@@ -130,31 +130,19 @@ class TestLogprobsLists(TestCase):
         assert sliced.cu_num_generated_tokens is None
 
 
-def _ec_output() -> ECConnectorOutput:
-    return ECConnectorOutput(finished_sending={"mm_hash"})
-
-
-def test_with_ec_conn_output_keeps_output_when_nothing_to_report():
-    output = ModelRunnerOutput(req_ids=["r0"], req_id_to_index={"r0": 0})
-
-    assert ModelRunnerOutput.with_ec_conn_output(output, None) is output
-    assert ModelRunnerOutput.with_ec_conn_output(output, ECConnectorOutput()) is output
-    assert output.ec_connector_output is None
-
-
 def test_with_ec_conn_output_sets_field_in_place():
     output = ModelRunnerOutput(req_ids=["r0"], req_id_to_index={"r0": 0})
-    ec_output = _ec_output()
+    ec_output = ECConnectorOutput(finished_sending={"mm_hash"})
 
-    result = ModelRunnerOutput.with_ec_conn_output(output, ec_output)
-
-    assert result is output
-    assert result.ec_connector_output is ec_output
+    assert ModelRunnerOutput.with_ec_conn_output(output, ECConnectorOutput()) is output
+    assert output.ec_connector_output is None
+    assert ModelRunnerOutput.with_ec_conn_output(output, ec_output) is output
+    assert output.ec_connector_output is ec_output
 
 
 def test_with_ec_conn_output_copies_shared_empty_output():
     """The shared empty output is copied, never written to."""
-    ec_output = _ec_output()
+    ec_output = ECConnectorOutput(finished_sending={"mm_hash"})
 
     result = ModelRunnerOutput.with_ec_conn_output(EMPTY_MODEL_RUNNER_OUTPUT, ec_output)
 

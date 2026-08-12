@@ -286,7 +286,6 @@ class Executor(ABC):
         )
 
     def init_ec_output_aggregator(self) -> None:
-        """Init ECOutputAggregator"""
         self.ec_output_aggregator = ECOutputAggregator()
 
     @cached_property  # Avoid unnecessary RPC calls

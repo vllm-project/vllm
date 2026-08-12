@@ -6,11 +6,11 @@ from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
 
 
 class ECOutputAggregator:
-    """Merge every worker's EC connector output into the one ModelRunnerOutput
-    that reaches the scheduler.
+    """Merge every worker's EC connector output onto the single
+    ModelRunnerOutput that reaches the scheduler.
 
     Mirrors KVOutputAggregator: only `output_rank`'s output is returned to the
-    scheduler, but the EC connector may have run on other ranks.
+    scheduler, but the EC connector may have run on any rank.
     """
 
     def aggregate(
@@ -32,10 +32,10 @@ class ECOutputAggregator:
             finished_sending |= ec_output.finished_sending or set()
             finished_recving |= ec_output.finished_recving or set()
 
-            if worker_meta is None:
-                worker_meta = ec_output.ec_connector_worker_meta
-            elif other := ec_output.ec_connector_worker_meta:
-                worker_meta = worker_meta.aggregate(other)
+            if meta := ec_output.ec_connector_worker_meta:
+                worker_meta = (
+                    meta if worker_meta is None else worker_meta.aggregate(meta)
+                )
 
         aggregated = ECConnectorOutput(
             finished_sending=finished_sending or None,

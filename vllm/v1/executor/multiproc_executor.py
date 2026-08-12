@@ -381,8 +381,7 @@ class MultiprocExecutor(Executor):
         ec_output_aggregator: ECOutputAggregator | None = None,
     ) -> Any:
         """Returns single result if unique_reply_rank and/or an output
-        aggregator (kv_output_aggregator/ec_output_aggregator) is provided,
-        otherwise list."""
+        aggregator is provided, otherwise list."""
         assert self.rpc_broadcast_mq is not None, (
             "collective_rpc should not be called on follower node"
         )
@@ -392,22 +391,18 @@ class MultiprocExecutor(Executor):
         deadline = None if timeout is None else time.monotonic() + timeout
         kwargs = kwargs or {}
 
-        aggregators = [
-            agg
-            for agg in (kv_output_aggregator, ec_output_aggregator)
-            if agg is not None
-        ]
+        aggregators = [a for a in (kv_output_aggregator, ec_output_aggregator) if a]
         aggregate: Callable[[Any], Any]
         if aggregators:
             output_rank = None
 
             def _aggregate(outputs: Any) -> Any:
                 # Each aggregator merges its own connector's output onto
-                # outputs[output_rank] in place and returns it, so chaining
-                # them and keeping the last result is safe.
-                result = None
-                for agg in aggregators:
-                    result = agg.aggregate(outputs, output_rank=unique_reply_rank or 0)
+                # outputs[output_rank] in place and returns it, so chaining is safe.
+                rank = unique_reply_rank or 0
+                result = outputs[rank]
+                for a in aggregators:
+                    result = a.aggregate(outputs, output_rank=rank)
                 return result
 
             aggregate = _aggregate

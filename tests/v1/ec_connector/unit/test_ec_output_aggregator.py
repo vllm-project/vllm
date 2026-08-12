@@ -13,25 +13,15 @@ pytestmark = pytest.mark.cpu_test
 
 
 class FakeWorkerMeta(ECConnectorWorkerMetadata):
-    """Per-worker save/load reports, concatenated in merge order.
-
-    `aggregate` returns a new object, as the base class declares: an
-    aggregator that discarded the return value would lose the merge.
+    """Records merge order. `aggregate` returns a new object, as the base class
+    declares: an aggregator discarding the return value would lose the merge.
     """
 
-    def __init__(
-        self,
-        completed_saves: list[str] | None = None,
-        completed_loads: list[str] | None = None,
-    ):
-        self.completed_saves = completed_saves or []
-        self.completed_loads = completed_loads or []
+    def __init__(self, saves: list[str]):
+        self.saves = saves
 
     def aggregate(self, other: "FakeWorkerMeta") -> "FakeWorkerMeta":
-        return FakeWorkerMeta(
-            self.completed_saves + other.completed_saves,
-            self.completed_loads + other.completed_loads,
-        )
+        return FakeWorkerMeta(self.saves + other.saves)
 
 
 def _worker_output(ec_output: ECConnectorOutput | None) -> ModelRunnerOutput:
@@ -40,55 +30,31 @@ def _worker_output(ec_output: ECConnectorOutput | None) -> ModelRunnerOutput:
     )
 
 
-def test_aggregate_unions_finished_ids_onto_output_rank():
-    """EC work done on any rank reaches the scheduler via output_rank's output."""
+def test_aggregate_folds_every_rank_onto_output_rank():
+    """EC work done on any rank reaches the scheduler via output_rank's output.
+
+    The middle rank reports no worker metadata: it must neither seed nor clobber
+    the accumulator.
+    """
     outputs = [
         _worker_output(
-            ECConnectorOutput(finished_sending={"mm0"}, finished_recving={"mm1"})
+            ECConnectorOutput(
+                finished_sending={"mm0"},
+                ec_connector_worker_meta=FakeWorkerMeta(["mm0"]),
+            )
         ),
-        _worker_output(ECConnectorOutput(finished_sending={"mm2"})),
-    ]
-
-    result = ECOutputAggregator().aggregate(outputs, output_rank=1)
-
-    assert result is outputs[1]
-    assert result.ec_connector_output.finished_sending == {"mm0", "mm2"}
-    assert result.ec_connector_output.finished_recving == {"mm1"}
-
-
-def test_aggregate_worker_meta_folds_across_ranks():
-    """Worker metadata is folded left across ranks, keeping each merge result."""
-    outputs = [
+        _worker_output(ECConnectorOutput(finished_recving={"mm1"})),
         _worker_output(
-            ECConnectorOutput(ec_connector_worker_meta=FakeWorkerMeta(["mm0"], []))
-        ),
-        _worker_output(
-            ECConnectorOutput(ec_connector_worker_meta=FakeWorkerMeta([], ["mm1"]))
-        ),
-        _worker_output(
-            ECConnectorOutput(ec_connector_worker_meta=FakeWorkerMeta(["mm2"], ["mm3"]))
+            ECConnectorOutput(ec_connector_worker_meta=FakeWorkerMeta(["mm2"]))
         ),
     ]
 
     result = ECOutputAggregator().aggregate(outputs, output_rank=2)
 
-    worker_meta = result.ec_connector_output.ec_connector_worker_meta
-    assert worker_meta.completed_saves == ["mm0", "mm2"]
-    assert worker_meta.completed_loads == ["mm1", "mm3"]
-
-
-def test_aggregate_worker_meta_tolerates_ranks_without_meta():
-    """Ranks reporting no metadata neither seed nor clobber the accumulator."""
-    worker_meta = FakeWorkerMeta(["mm1"], [])
-    outputs = [
-        _worker_output(ECConnectorOutput(finished_sending={"mm0"})),
-        _worker_output(ECConnectorOutput(ec_connector_worker_meta=worker_meta)),
-        _worker_output(ECConnectorOutput(finished_recving={"mm2"})),
-    ]
-
-    result = ECOutputAggregator().aggregate(outputs, output_rank=0)
-
-    assert result.ec_connector_output.ec_connector_worker_meta is worker_meta
+    assert result is outputs[2]
+    assert result.ec_connector_output.finished_sending == {"mm0"}
+    assert result.ec_connector_output.finished_recving == {"mm1"}
+    assert result.ec_connector_output.ec_connector_worker_meta.saves == ["mm0", "mm2"]
 
 
 def test_aggregate_leaves_no_ec_output_when_no_worker_reported():
@@ -99,7 +65,6 @@ def test_aggregate_leaves_no_ec_output_when_no_worker_reported():
 
     assert result is outputs[0]
     assert result.ec_connector_output is None
-
     assert ECOutputAggregator().aggregate([None], output_rank=0) is None
 
 

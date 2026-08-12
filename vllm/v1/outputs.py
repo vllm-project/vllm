@@ -334,14 +334,10 @@ class ModelRunnerOutput:
     def with_ec_conn_output_only(
         ec_connector_output: ECConnectorOutput | None,
     ) -> "ModelRunnerOutput":
-        """Return ModelRunnerOutput containing the provided ECConnectorOutput,
-        otherwise empty.
-        """
-        if ec_connector_output is None or ec_connector_output.is_empty():
-            return EMPTY_MODEL_RUNNER_OUTPUT
-        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.ec_connector_output = ec_connector_output
-        return output
+        """Return an otherwise-empty output carrying `ec_connector_output`."""
+        return ModelRunnerOutput.with_ec_conn_output(
+            EMPTY_MODEL_RUNNER_OUTPUT, ec_connector_output
+        )
 
     @staticmethod
     def with_ec_conn_output(
@@ -350,9 +346,8 @@ class ModelRunnerOutput:
     ) -> "ModelRunnerOutput":
         """Return `output` carrying `ec_connector_output`.
 
-        Sets the field on `output` and returns it, except that the shared
-        empty output is copied first rather than written to. Callers must use
-        the return value.
+        The shared empty output is copied rather than written to, so callers
+        must use the return value.
         """
         if ec_connector_output is None or ec_connector_output.is_empty():
             return output
