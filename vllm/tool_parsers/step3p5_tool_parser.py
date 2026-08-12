@@ -6,9 +6,11 @@ from typing import Any
 from xml.parsers.expat import ParserCreate
 
 import regex as re
+from openai.types.responses import ToolChoiceFunction
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import (
@@ -19,6 +21,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
@@ -1365,6 +1368,18 @@ class StreamingXMLToolCallParser:
 
 class Step3p5ToolParser(ToolParser):
     supports_required_and_named = False
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        if request.tools:
+            tool_choice = request.tool_choice
+            if tool_choice == "required" or isinstance(
+                tool_choice,
+                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+            ):
+                return request
+        return super().adjust_request(request)
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)

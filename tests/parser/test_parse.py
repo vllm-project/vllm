@@ -220,14 +220,18 @@ def test_parse_tool_only(tokenizer):
     ],
     ids=["required", "named"],
 )
-def test_parse_non_json_required_and_named_uses_tool_parser(tool_choice):
+def test_step_forced_tool_choice_uses_xml_generation_and_parser(tool_choice):
     class StepParser(DelegatingParser):
         tool_parser_cls = Step3p5ToolParser
 
     parser = StepParser(SimpleNamespace(), tools=TOOLS)
     request = make_request(tools=TOOLS, tool_choice=tool_choice)
+
+    adjusted_request = parser.adjust_request(request)
+    assert adjusted_request.structured_outputs is None
+
     reasoning, content, tool_calls = parser.parse(
-        STEP_TOOL_CALL, request, enable_auto_tools=True
+        STEP_TOOL_CALL, adjusted_request, enable_auto_tools=True
     )
 
     assert reasoning is None
