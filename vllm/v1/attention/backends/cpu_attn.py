@@ -11,8 +11,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config,
+    get_layers_from_vllm_config,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
@@ -151,9 +156,8 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         )
         self.head_dim = kv_cache_spec.head_size
         self.dtype = vllm_config.model_config.dtype
-        self.window_size = getattr(kv_cache_spec, "sliding_window", -1)
-        if self.window_size is None:
-            self.window_size = -1
+        # Resolved from the layers on the first build(), once they exist.
+        self.window_size: int | None = None
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
@@ -167,12 +171,36 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             kv_cache_spec, EncoderOnlyAttentionSpec
         )
 
+    def _group_sliding_window(self) -> int:
+        """The window shared by every layer in this group, else -1 (no window).
+
+        Taken from the layers rather than the group spec: one KV cache group can
+        hold both windowed and global layers (e.g. Gemma-3 with the hybrid KV
+        cache manager disabled), and the scheduler metadata built here is shared
+        by the whole group, so it may only assume a window all of them agree on.
+        """
+        layers = get_layers_from_vllm_config(
+            self.vllm_config, Attention, self.layer_names
+        )
+        windows = {
+            layer.impl.sliding_window
+            for layer in layers.values()
+            if isinstance(layer.impl, CPUAttentionBackendImpl)
+        }
+        if len(windows) != 1:
+            return -1
+        window = windows.pop()
+        return -1 if window is None else window
+
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CPUAttentionMetadata:
+        if self.window_size is None:
+            self.window_size = self._group_sliding_window()
+
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len

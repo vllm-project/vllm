@@ -25,6 +25,16 @@ class MistralToolParser(MistralParserToolAdapter):  # type: ignore[valid-type, m
     # correctly instead of crashing or dumping the raw envelope into arguments.
     supports_required_and_named = False
 
+    @property
+    def bot_token(self) -> str:
+        """Return the Mistral tool-call marker exposed by the legacy parser."""
+        return self._parser_engine.bot_token
+
+    @property
+    def bot_token_id(self) -> int | None:
+        """Return the token id for :attr:`bot_token`."""
+        return self._parser_engine.bot_token_id
+
     def adjust_request(
         self,
         request: ChatCompletionRequest | ResponsesRequest,

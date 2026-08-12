@@ -180,7 +180,7 @@ class KernelConfig:
     # to the shared JIT warmup infrastructure.
     # https://github.com/vllm-project/vllm/pull/47451
     enable_cutedsl_warmup: bool = True
-    """If True, run CuTeDSL compile warmup during kernel warmup."""
+    """Deprecated: run legacy CuTeDSL warmup providers."""
 
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""

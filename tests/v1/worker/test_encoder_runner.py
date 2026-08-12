@@ -9,6 +9,8 @@ and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
 """
 
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
 import torch
@@ -16,6 +18,7 @@ import torch
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 pytestmark = pytest.mark.cpu_test
 
@@ -181,3 +184,59 @@ def test_gather_preserves_mixed_modalities():
     assert len(mm_embeds) == 2
     assert [e.modality for e in mm_embeds] == ["video", "audio"]
     assert int(is_mm_embed.sum()) == 8
+
+
+def test_execute_mm_encoder_caches_outputs_without_gathering():
+    """An encoder instance encodes and publishes, and must stop there.
+
+    `ModelState.execute_mm_encoder` is the half of `get_mm_embeddings` that an
+    EPD encoder instance needs: it runs no language model, so gathering would
+    build an `inputs_embeds` nobody reads -- and the gather raises
+    `Encoder cache miss` for any scheduled item absent from the local cache,
+    which on a producer takes the whole engine down (the scheduler hands it
+    items the connector already holds, and a producer has no load path).
+    """
+    cache = EncoderCache()
+    state = MagicMock()
+    state.encoder_cache = cache
+    embedding = torch.ones(2, HIDDEN)
+    # (mm_hashes, [(modality, kwargs item), ...]), as prepare_mm_inputs returns.
+    state.encoder_runner.prepare_mm_inputs.return_value = (
+        ["hash0"],
+        [("image", MagicMock())],
+    )
+    state.encoder_runner.execute_mm_encoder.return_value = [embedding]
+
+    ModelState.execute_mm_encoder(state, {"req0": [0]})
+
+    assert cache.encoder_outputs == {"hash0": embedding}
+    state.encoder_runner.gather_mm_embeddings.assert_not_called()
+
+
+def test_execute_mm_encoder_is_a_noop_without_scheduled_items():
+    """A step that schedules no encoder input must not touch the encoder."""
+    cache = EncoderCache()
+    state = MagicMock()
+    state.encoder_cache = cache
+    state.encoder_runner.prepare_mm_inputs.return_value = ([], [])
+
+    ModelState.execute_mm_encoder(state, {})
+
+    assert not cache.encoder_outputs
+    state.encoder_runner.execute_mm_encoder.assert_not_called()
+
+
+def test_encoder_timing_stats_registry():
+    runner = _make_runner([], [])
+    runner.enable_timing = True
+
+    with runner.timed_encoder_operation({"r1"}):
+        pass
+    with runner.timed_encoder_operation({"r1"}):
+        pass
+
+    stats = runner.get_encoder_timing_stats()
+    assert set(stats) == {"r1"}
+    assert stats["r1"]["num_encoder_calls"] == 2
+    assert stats["r1"]["encoder_forward_secs"] >= 0
+    assert runner.get_encoder_timing_stats() == {}

@@ -204,6 +204,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self._extra_async_saves: dict[str, int] = {}
 
     @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return bool(self._connectors) and all(
+            c.supports_divergent_local_hybrid_hits for c in self._connectors
+        )
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         if not self._connectors:
             return False

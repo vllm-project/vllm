@@ -28,6 +28,41 @@ fn bench_serve_args_parse_without_managed_engine_repartition() {
 }
 
 #[test]
+fn render_args_build_supported_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--port",
+        "8080",
+        "--max-model-len",
+        "32768",
+        "--served-model-name",
+        "qwen",
+        "--tokenizer-mode",
+        "deepseek_v32",
+        "--max-logprobs",
+        "-1",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
+    assert_eq!(config.host, "127.0.0.1");
+    assert_eq!(config.port, 8080);
+    assert_eq!(config.max_model_len, 32768);
+    assert_eq!(config.served_model_name, ["qwen"]);
+    assert_eq!(config.tool_call_parser, ParserSelection::Auto);
+    assert_eq!(config.reasoning_parser, ParserSelection::Auto);
+    assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
+    assert_eq!(config.max_logprobs, Some(-1));
+}
+
+#[test]
 fn serve_args_forward_python_flags_with_separator() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -750,6 +785,7 @@ fn frontend_args_accept_json() {
                     ),
                     engine_start_index: 0,
                     engine_count: 1,
+                    data_parallel_size: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 600,
@@ -811,6 +847,8 @@ fn frontend_args_json_applies_defaults() {
         "ipc:///tmp/input.sock",
         "--output-address",
         "ipc:///tmp/output.sock",
+        "--engine-count",
+        "4",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
     ])
@@ -826,6 +864,7 @@ fn frontend_args_json_applies_defaults() {
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
     assert_eq!(args.runtime.max_logprobs, None);
     assert_eq!(args.runtime.shutdown_timeout, 0);
+    assert_eq!(args.into_config().data_parallel_size, 4);
 }
 
 #[test]
@@ -1482,6 +1521,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                     "<ipc output>",
                 ),
             },
+            data_parallel_size: 4,
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             served_model_name: [],
@@ -1567,6 +1607,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 local_input_address: None,
                 local_output_address: None,
             },
+            data_parallel_size: 4,
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             served_model_name: [],
@@ -1650,6 +1691,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
         "3",
         "--engine-count",
         "1",
+        "--data-parallel-size",
+        "4",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
     ])
@@ -1669,6 +1712,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 engine_count: 1,
                 ready_timeout: 600s,
             },
+            data_parallel_size: 4,
             coordinator_mode: External {
                 address: "tcp://127.0.0.1:7000",
             },

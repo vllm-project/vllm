@@ -26,6 +26,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import ClassVar
 
 import torch
 from torch import nn
@@ -342,7 +343,7 @@ class LlamaDecoderLayer(nn.Module):
     },
 )
 class LlamaModel(nn.Module, EagleModelMixin):
-    hf_to_vllm_mapper = WeightsMapper(
+    hf_to_vllm_mapper: ClassVar[WeightsMapper] = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
             ".q_proj": (".qkv_proj", "q"),

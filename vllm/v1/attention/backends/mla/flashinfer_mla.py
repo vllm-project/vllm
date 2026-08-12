@@ -309,9 +309,11 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         return_lse = self.need_to_return_lse_for_decode
         workspace_buffer = _get_workspace_buffer(return_lse)
+        # Parallel gathers can change the runtime Q heads from TP-local num_heads.
+        runtime_num_heads = q.shape[-2]
         # trtllm-gen rejects MLA head counts it can't tile (e.g. 96);
         # fall back to cute-dsl for those.
-        decode_backend = _select_mla_decode_backend(self.num_heads)
+        decode_backend = _select_mla_decode_backend(runtime_num_heads)
         extra_kwargs = {}
         if decode_backend:
             extra_kwargs["backend"] = decode_backend
@@ -326,7 +328,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             if self._mla_counter_bytes is None:
                 self._mla_counter_bytes = get_trtllm_gen_multi_ctas_kv_counter_bytes(
                     self._mla_counter_max_batch,
-                    self.num_heads,
+                    runtime_num_heads,
                     get_device_sm_count(q.device),
                 )
             extra_kwargs["multi_ctas_kv_counter_buffer"] = (

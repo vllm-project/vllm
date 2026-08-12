@@ -290,7 +290,7 @@ class VocabParallelEmbedding(PluggableLayer):
         # If we are making an embedding layer, then our quantization linear
         # method must implement the embedding operation. If we are another
         # layer type like ParallelLMHead, this is not important.
-        is_embedding_layer = type(self) is VocabParallelEmbedding
+        is_embedding_layer = not isinstance(self, ParallelLMHead)
         quant_method_implements_embedding = method_has_implemented_embedding(
             type(quant_method)
         )
@@ -507,7 +507,8 @@ class VocabParallelEmbedding(PluggableLayer):
         return output_parallel
 
     def extra_repr(self) -> str:
-        s = f"num_embeddings={self.num_embeddings_per_partition}"
+        s = f"num_embeddings={self.num_embeddings}"
+        s += f", num_embeddings_per_partition={self.num_embeddings_per_partition}"
         s += f", embedding_dim={self.embedding_dim}"
         s += f", org_vocab_size={self.org_vocab_size}"
         s += f", num_embeddings_padded={self.num_embeddings_padded}"

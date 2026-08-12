@@ -54,6 +54,34 @@ EMPTY_LIST_FUNCTION_CALL = FunctionCall(
     name="do_something_cool",
     arguments='{"steps": []}',
 )
+SET_ARG_FUNCTION_OUTPUT = "label(tags={'urgent', 'bug'})"
+SET_ARG_FUNCTION_CALL = FunctionCall(
+    name="label",
+    arguments='{"tags": ["urgent", "bug"]}',
+)
+LEADING_ZERO_FUNCTION_OUTPUT = "set_date(month=07, day=05)"
+LEADING_ZERO_FUNCTION_CALL = FunctionCall(
+    name="set_date",
+    arguments='{"month": 7, "day": 5}',
+)
+NESTED_QUOTE_FUNCTION_OUTPUT = (
+    "bash(command='sed -n '360,450p' /testbed/sympy/matrices/common.py')"
+)
+NESTED_QUOTE_FUNCTION_CALL = FunctionCall(
+    name="bash",
+    arguments=('{"command": "sed -n \'360,450p\' /testbed/sympy/matrices/common.py"}'),
+)
+NESTED_PYTHON_C_FUNCTION_OUTPUT = (
+    "bash(command='cd /testbed && python3 -c \"from sympy import latex\n"
+    "print(latex(3*x, mul_symbol='\\,'))\"')"
+)
+NESTED_PYTHON_C_FUNCTION_CALL = FunctionCall(
+    name="bash",
+    arguments=(
+        '{"command": "cd /testbed && python3 -c \\"from sympy import latex\\n'
+        "print(latex(3*x, mul_symbol='\\\\,'))\\\"\"}"
+    ),
+)
 ESCAPED_STRING_FUNCTION_OUTPUT = (
     r"get_weather(city='Martha\'s Vineyard', metric='\"cool units\"')"
 )
@@ -73,6 +101,29 @@ DOTTED_NAME_FUNCTION_CALL = FunctionCall(
         '{"name": "Lasagna noodles", "amount": 250, "unit": "g"}], '
         '"deliveryAddress": "845 Willow Lane, Springfield, IL 62704"}'
     ),
+)
+# Agentic shell commands: a bracket inside a string argument must not corrupt
+# the streaming bracket tracker.
+BRACKET_IN_STRING_FUNCTION_OUTPUT = "exec(command='grep -F \"]\" log.txt')"
+BRACKET_IN_STRING_FUNCTION_CALL = FunctionCall(
+    name="exec",
+    arguments='{"command": "grep -F \\"]\\" log.txt"}',
+)
+# A raw newline inside a string argument (multi-line shell command) is invalid
+# Python; the parser must recover the full value instead of dropping the call.
+MULTILINE_FUNCTION_OUTPUT = (
+    "exec(command='cat > f.py << EOF\nimport csv\nprint(1)\nEOF')"
+)
+MULTILINE_FUNCTION_CALL = FunctionCall(
+    name="exec",
+    arguments='{"command": "cat > f.py << EOF\\nimport csv\\nprint(1)\\nEOF"}',
+)
+# A NUL byte inside a string argument makes ast.parse raise ValueError (not
+# SyntaxError) for the whole source; the escape path must recover the call.
+NUL_BYTE_FUNCTION_OUTPUT = "exec(command='printf a\x00b')"
+NUL_BYTE_FUNCTION_CALL = FunctionCall(
+    name="exec",
+    arguments='{"command": "printf a\\u0000b"}',
 )
 
 
@@ -227,6 +278,112 @@ TEST_CASES = [
         None,
         id="dotted_name_nonstreaming",
     ),
+    # Messy agentic shell commands: literal bracket inside a string argument
+    pytest.param(
+        True,
+        _wrap(BRACKET_IN_STRING_FUNCTION_OUTPUT),
+        [BRACKET_IN_STRING_FUNCTION_CALL],
+        None,
+        id="bracket_in_string_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(BRACKET_IN_STRING_FUNCTION_OUTPUT),
+        [BRACKET_IN_STRING_FUNCTION_CALL],
+        None,
+        id="bracket_in_string_nonstreaming",
+    ),
+    # Multi-line string argument (raw newlines in a shell command)
+    pytest.param(
+        True,
+        _wrap(MULTILINE_FUNCTION_OUTPUT),
+        [MULTILINE_FUNCTION_CALL],
+        None,
+        id="multiline_string_arg_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(MULTILINE_FUNCTION_OUTPUT),
+        [MULTILINE_FUNCTION_CALL],
+        None,
+        id="multiline_string_arg_nonstreaming",
+    ),
+    # Set argument decoded as a list (JSON has no set type)
+    pytest.param(
+        True,
+        _wrap(SET_ARG_FUNCTION_OUTPUT),
+        [SET_ARG_FUNCTION_CALL],
+        None,
+        id="set_arg_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(SET_ARG_FUNCTION_OUTPUT),
+        [SET_ARG_FUNCTION_CALL],
+        None,
+        id="set_arg_nonstreaming",
+    ),
+    # Unescaped same-style quotes nested in a shell command argument
+    pytest.param(
+        True,
+        _wrap(NESTED_QUOTE_FUNCTION_OUTPUT),
+        [NESTED_QUOTE_FUNCTION_CALL],
+        None,
+        id="nested_quote_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(NESTED_QUOTE_FUNCTION_OUTPUT),
+        [NESTED_QUOTE_FUNCTION_CALL],
+        None,
+        id="nested_quote_nonstreaming",
+    ),
+    # Doubly nested: multi-line python -c payload with its own inner quotes
+    pytest.param(
+        True,
+        _wrap(NESTED_PYTHON_C_FUNCTION_OUTPUT),
+        [NESTED_PYTHON_C_FUNCTION_CALL],
+        None,
+        id="nested_python_c_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(NESTED_PYTHON_C_FUNCTION_OUTPUT),
+        [NESTED_PYTHON_C_FUNCTION_CALL],
+        None,
+        id="nested_python_c_nonstreaming",
+    ),
+    # Zero-padded integer arguments (SyntaxError: leading zeros)
+    pytest.param(
+        True,
+        _wrap(LEADING_ZERO_FUNCTION_OUTPUT),
+        [LEADING_ZERO_FUNCTION_CALL],
+        None,
+        id="leading_zero_int_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(LEADING_ZERO_FUNCTION_OUTPUT),
+        [LEADING_ZERO_FUNCTION_CALL],
+        None,
+        id="leading_zero_int_nonstreaming",
+    ),
+    # NUL byte in a string argument (ValueError from ast.parse, not
+    # SyntaxError)
+    pytest.param(
+        True,
+        _wrap(NUL_BYTE_FUNCTION_OUTPUT),
+        [NUL_BYTE_FUNCTION_CALL],
+        None,
+        id="nul_byte_string_arg_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(NUL_BYTE_FUNCTION_OUTPUT),
+        [NUL_BYTE_FUNCTION_CALL],
+        None,
+        id="nul_byte_string_arg_nonstreaming",
+    ),
 ]
 
 
@@ -253,6 +410,47 @@ def test_tool_call(
     for actual, expected in zip(tool_calls, expected_tool_calls):
         assert actual.type == "function"
         assert actual.function == expected
+
+
+@pytest.mark.parametrize("body", ["", " "])
+def test_empty_tool_call_block(body: str, lfm2_tokenizer: TokenizerLike):
+    """An empty block ([] or [ ]) means the model called no tools; it must
+    not report tools_called=True with zero tool calls (the invariant
+    run_tool_extraction asserts)."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[{body}]{TOOL_CALL_END}"
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer), model_output, streaming=False
+    )
+    assert len(tool_calls) == 0
+
+    reconstructor = run_tool_extraction_streaming(
+        cls(lfm2_tokenizer), [model_output], assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 0
+
+
+def test_whitespace_after_start_token(lfm2_tokenizer: TokenizerLike):
+    """Whitespace between <|tool_call_start|> and the opening bracket must
+    not break parsing. The streaming path used to feed the indented text to
+    ast.parse verbatim, so every completion candidate raised
+    IndentationError and the call was silently dropped (non-streaming
+    stripped it and succeeded)."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START} [{SIMPLE_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer), model_output, streaming=False
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+    reconstructor = run_tool_extraction_streaming(
+        cls(lfm2_tokenizer), [model_output], assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
 
 
 def test_streaming_tool_call_with_large_steps(lfm2_tokenizer: TokenizerLike):

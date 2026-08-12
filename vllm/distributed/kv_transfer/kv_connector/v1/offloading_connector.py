@@ -49,7 +49,8 @@ from vllm.v1.request import Request
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
-        return True
+        # Cross-layer slabs have no per-layer refs to certify canonical mappings
+        return not self._canonical_layout
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -66,6 +67,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
 
         offloading_config = build_offloading_config(vllm_config, kv_cache_config)
+        self._canonical_layout = offloading_config.canonical_layout
         spec = OffloadingSpecFactory.create_spec(offloading_config)
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None

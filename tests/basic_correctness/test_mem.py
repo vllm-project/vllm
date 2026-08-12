@@ -210,6 +210,99 @@ def test_deep_sleep():
 
 
 @create_new_process_for_each_test()
+def test_deep_sleep_lora():
+    """Level-2 sleep/wake/reload with enable_lora=True.
+
+    LoRA wrapping moves parameters under base_layer and adds LoRA
+    stacked tensors that are plain attributes, not restored by the
+    reload machinery — reload must forward checkpoint weights through
+    the wrappers and reset the LoRA state afterwards.
+    """
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(
+        model,
+        enable_sleep_mode=True,
+        enable_lora=True,
+        max_lora_rank=8,
+        enforce_eager=True,
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    # Level-2 sleep discards all GPU memory
+    llm.sleep(level=2)
+
+    # Reload weights from checkpoint
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+    llm.wake_up(tags=["kv_cache"])
+    output2 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+    # Multiple cycles should not accumulate corruption
+    for _ in range(3):
+        llm.sleep(level=2)
+        llm.wake_up(tags=["weights"])
+        llm.collective_rpc("reload_weights")
+        llm.wake_up(tags=["kv_cache"])
+    output3 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output3[0].outputs[0].text
+
+
+def _lora_logits_mapping_present(model) -> bool:
+    from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
+
+    return any(
+        isinstance(m, LogitsProcessorWithLoRA)
+        and m.sharded_to_full_mapping_gpu is not None
+        for m in model.modules()
+    )
+
+
+@create_new_process_for_each_test()
+def test_deep_sleep_lora_tp2(num_gpus_available, monkeypatch):
+    """Level-2 sleep/wake/reload with enable_lora=True and TP=2.
+
+    With TP > 1 the LoRA logits processor carries
+    ``sharded_to_full_mapping_gpu``, a permanent index mapping used to
+    reorder gathered logits. Like the LoRA stacked tensors it is a plain
+    attribute allocated in the sleep-mode pool, so level-2 sleep destroys
+    its contents — it must be restored after reload.
+    """
+    if num_gpus_available < 2:
+        pytest.skip("Requires at least 2 GPUs")
+
+    # Needed for apply_model to reach the multiproc TP workers below.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(
+        model,
+        enable_sleep_mode=True,
+        enable_lora=True,
+        max_lora_rank=8,
+        tensor_parallel_size=2,
+        enforce_eager=True,
+    )
+
+    # Guard against this test silently not exercising the TP>1 reindex
+    # path (e.g. if lm_head wrapping conditions change).
+    assert all(llm.apply_model(_lora_logits_mapping_present))
+
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    llm.sleep(level=2)
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+    llm.wake_up(tags=["kv_cache"])
+    output2 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@create_new_process_for_each_test()
 def test_deep_sleep_async():
     async def test():
         model = "hmellor/tiny-random-LlamaForCausalLM"

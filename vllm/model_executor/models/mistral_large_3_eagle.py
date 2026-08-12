@@ -22,7 +22,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.mistral_large_3 import MistralLarge3ForCausalLM
 
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsMultiModalEmbeddings
 from .utils import WeightsMapper, make_empty_intermediate_tensors_factory, maybe_prefix
 
 logger = init_logger(__name__)
@@ -107,7 +107,9 @@ class EagleMistralLarge3Model(DeepseekV2Model):
         return output
 
 
-class EagleMistralLarge3ForCausalLM(MistralLarge3ForCausalLM):
+class EagleMistralLarge3ForCausalLM(
+    MistralLarge3ForCausalLM, SupportsMultiModalEmbeddings
+):
     hf_to_vllm_mapper = MistralLarge3ForCausalLM.hf_to_vllm_mapper | WeightsMapper(
         orig_to_new_regex={
             regex.compile(r"\Aeagle_linear\.weight\Z"): r"model.fc.weight",

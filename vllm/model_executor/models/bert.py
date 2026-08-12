@@ -97,6 +97,7 @@ class BertPooler(SequencePooler):
     def __init__(self, model_config: ModelConfig):
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
+        assert pooler_config.seq_pooling_type is not None
 
         config: BertConfig = model_config.hf_config
 

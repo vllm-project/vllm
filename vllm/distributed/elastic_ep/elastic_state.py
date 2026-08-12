@@ -214,7 +214,6 @@ class ElasticEPScalingState:
             self.engine_core.available_gpu_memory_for_kv_cache = (
                 ParallelConfig.sync_kv_cache_memory_size(self.new_dp_group, -1)
             )
-            self._collective_rpc("elastic_ep_execute", args=("prepare_new_worker",))
             self.state = ScaleUpNewEngineState.PREPARE
             return True
 

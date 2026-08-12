@@ -28,6 +28,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.utils.async_utils import make_async
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 
@@ -73,6 +74,13 @@ class InputProcessor:
             mm_registry=mm_registry,
         )
 
+        # Raw-prompt preprocessing (tokenization and multimodal processing)
+        # is blocking, so async callers should run it on the renderer's
+        # thread pool to keep their event loop responsive.
+        self.process_inputs_async = make_async(
+            self.process_inputs, executor=self.renderer._executor
+        )
+
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.renderer.tokenizer
@@ -100,22 +108,15 @@ class InputProcessor:
                 self.tokenizer,
             )
 
-            if params.thinking_token_budget is not None:
-                if (
-                    self.vllm_config.reasoning_config is None
-                    or not self.vllm_config.reasoning_config.enabled
-                ):
-                    raise VLLMValidationError(
-                        "thinking_token_budget is set but reasoning_config is "
-                        "not configured. Please set --reasoning-parser "
-                        "and/or --reasoning-config to use thinking_token_budget."
-                    )
-                if self.use_v2_model_runner:
-                    raise VLLMValidationError(
-                        "thinking_token_budget is not yet supported by the V2 "
-                        "model runner. Run vLLM with VLLM_USE_V2_MODEL_RUNNER=0 "
-                        "to use thinking_token_budget."
-                    )
+            if params.thinking_token_budget is not None and (
+                self.vllm_config.reasoning_config is None
+                or not self.vllm_config.reasoning_config.enabled
+            ):
+                raise VLLMValidationError(
+                    "thinking_token_budget is set but reasoning_config is "
+                    "not configured. Please set --reasoning-parser "
+                    "and/or --reasoning-config to use thinking_token_budget."
+                )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
@@ -253,6 +254,7 @@ class InputProcessor:
         priority: int = 0,
         data_parallel_rank: int | None = None,
         resumable: bool = False,
+        session_id: str | None = None,
     ) -> EngineCoreRequest:
         self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
@@ -383,6 +385,7 @@ class InputProcessor:
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
             resumable=resumable,
+            session_id=session_id,
         )
 
     def _validate_prompt_len(

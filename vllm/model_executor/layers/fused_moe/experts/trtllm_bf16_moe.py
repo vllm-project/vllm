@@ -11,6 +11,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -33,6 +36,28 @@ class TrtLlmBf16ExpertsBase:
     BF16 unquantized TRTLLM-Gen MoE kernels. Shared base for modular and
     monolithic interfaces.
     """
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        supported, reason = mk.FusedMoEExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+        if not supported or moe_config.num_experts <= 2048:
+            return supported, reason
+        return False, (
+            "FlashInfer TRTLLM routing supports at most 2048 experts, "
+            f"but got {moe_config.num_experts}"
+        )
 
     def supports_routing_replay_capture(self) -> bool:
         return True
@@ -244,13 +269,18 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
+        num_tokens = hidden_states.shape[0]
+        # The runner divides by the token count on the host, so an idle rank's
+        # dummy 0-token forward has to keep the finalized (empty) form.
+        defer = self.moe_config.use_deferred_moe_finalize and num_tokens > 0
+
         routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=hidden_states.shape[0],
+            num_tokens=num_tokens,
             device=hidden_states.device,
         )
         out = flashinfer.fused_moe.trtllm_bf16_moe(
@@ -271,8 +301,19 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             activation_type=activation_to_flashinfer_int(activation),
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
+            do_finalize=not defer,
         )
-        self._maybe_dispatch_routing_replay(
-            routing_replay_out, num_tokens=hidden_states.shape[0]
-        )
-        return out
+        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
+        if defer:
+            # flashinfer returns a flat permute map; the protocol wants
+            # [num_tokens, top_k] so consumers can read top_k from its shape.
+            return UnfinalizedMoEOutput(
+                gemm2_permuted=out[0],
+                expert_weights=out[1],
+                expanded_idx_to_permuted_idx=out[2]
+                .to(torch.int32)
+                .view(num_tokens, self.topk),
+            )
+        # do_finalize=True yields the finalized states (a bare tensor on some
+        # FlashInfer versions, a single-element list on others).
+        return out[0] if isinstance(out, (list, tuple)) else out

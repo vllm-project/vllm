@@ -501,7 +501,7 @@ class InklingMoE(nn.Module):
         weights, ids = self.gate.select_experts(gating_output)
         return weights[:, :topk].contiguous(), ids[:, :topk].contiguous()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor | None:
+    def forward_partials(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         router_logits = self.gate.compute_logits(x)
         num_tokens = x.shape[0]
         # One gate select per layer: the routed slice is stashed for the
@@ -527,6 +527,10 @@ class InklingMoE(nn.Module):
         )
         self._routed_sel = None
 
+        return out, sink_out
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, sink_out = self.forward_partials(x)
         return out.add_(sink_out)
 
     # -- weight loading ----------------------------------------------------

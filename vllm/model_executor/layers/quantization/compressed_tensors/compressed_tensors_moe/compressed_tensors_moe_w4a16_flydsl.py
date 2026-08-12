@@ -8,7 +8,6 @@ from compressed_tensors.quantization import (
     QuantizationArgs,
 )
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
@@ -309,13 +308,6 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
             w2_zp=None,
             block_shape=[0, self.group_size],
         )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: torch.nn.Module,
-    ) -> mk.FusedMoEExpertsModular:
-        raise NotImplementedError
 
     def apply(
         self,

@@ -20,7 +20,10 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 
@@ -51,9 +54,10 @@ class CausalMixin(VllmModelForTextGeneration):
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(
-                    self.model.get_input_embeddings()
-                )
+                for module in self.model.get_input_embeddings().modules():
+                    if isinstance(module, VocabParallelEmbedding):
+                        self.lm_head = self.lm_head.tie_weights(module)
+                        break
 
             logit_scale = getattr(self.text_config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(

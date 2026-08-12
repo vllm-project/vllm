@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 from typing_extensions import override
 
@@ -120,37 +120,36 @@ class ARCCachePolicy(CachePolicy):
         candidates: list[
             tuple[OffloadKey, BlockStatus, bool]
         ] = []  # (key, block, from_t1)
-        already_selected: set[OffloadKey] = set()
         virtual_t1_size = len(self.t1)
+        # Keep the scans monotonic: restarting from the LRU end after every
+        # selection makes a batch eviction quadratic in the number of blocks.
+        t1_iter = iter(self.t1.items())
+        t2_iter = iter(self.t2.items())
+
+        def next_candidate(
+            entries: Iterator[tuple[OffloadKey, BlockStatus]],
+        ) -> tuple[OffloadKey, BlockStatus] | None:
+            for key, block in entries:
+                if block.ref_cnt == 0 and key not in protected:
+                    return key, block
+            return None
 
         for _ in range(n):
             candidate: tuple[OffloadKey, BlockStatus, bool] | None = None
 
             if virtual_t1_size >= int(self.target_t1_size):
-                for key, block in self.t1.items():
-                    if (
-                        block.ref_cnt == 0
-                        and key not in protected
-                        and key not in already_selected
-                    ):
-                        candidate = (key, block, True)
-                        virtual_t1_size -= 1
-                        break
+                entry = next_candidate(t1_iter)
+                if entry is not None:
+                    candidate = (*entry, True)
+                    virtual_t1_size -= 1
 
             if candidate is None:
-                for key, block in self.t2.items():
-                    if (
-                        block.ref_cnt == 0
-                        and key not in protected
-                        and key not in already_selected
-                    ):
-                        candidate = (key, block, False)
-                        break
-                if candidate is None:
+                entry = next_candidate(t2_iter)
+                if entry is None:
                     return None
+                candidate = (*entry, False)
 
             candidates.append(candidate)
-            already_selected.add(candidate[0])
 
         # Apply all evictions now that we know n candidates exist.
         result: list[tuple[OffloadKey, BlockStatus]] = []

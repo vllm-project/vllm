@@ -82,7 +82,7 @@ jobs:
                   '',
                   'PRs do not trigger a full CI run by default. Reviewers with write access and configured trusted contributors can comment `/ci run` whenever CI signals are needed.',
                   '',
-                  'Once the PR is approved or has the `ready` label, the PR author can also use `/ci run` or `/ci retry`. New commits do not start CI automatically.',
+                  'Once the PR is approved or has the `ready` label, the PR author can also use `/ci run`, `/ci retry`, or `/ci cancel`. New commits do not start CI automatically.',
                   '',
                   'If you have any questions, please reach out to us on Slack at https://slack.vllm.ai.',
                   '',

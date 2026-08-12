@@ -8,7 +8,10 @@ from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
@@ -133,7 +136,17 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is maybe_get_oot_by_class(VocabParallelEmbedding)
+        # Accept both the in-tree and any OOT class, because layers built on top of
+        # `VocabParallelEmbedding` (e.g. by the Transformers modelling backend) use the
+        # former while `PluggableLayer.__new__` instantiates the latter
+        embedding_classes = (
+            VocabParallelEmbedding,
+            maybe_get_oot_by_class(VocabParallelEmbedding),
+        )
+        lm_head_classes = (ParallelLMHead, maybe_get_oot_by_class(ParallelLMHead))
+        return isinstance(source_layer, embedding_classes) and not isinstance(
+            source_layer, lm_head_classes
+        )
 
     @property
     def weight(self):

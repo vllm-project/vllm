@@ -218,7 +218,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
         Returns:
             Output tensor after MoE computation
         """
-        from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             select_experts,
         )
 

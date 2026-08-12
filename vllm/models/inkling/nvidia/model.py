@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, TypeAlias
 
 import regex as re
 import torch
@@ -57,6 +57,8 @@ from .ops.norm import add_rmsnorm, embed_rmsnorm
 from .sconv_swa_attn import _ATTN, _MLP, InklingConvState, InklingSconvMetadata
 from .short_conv import InklingShortConv
 
+InklingDelta: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+
 
 def _layer_id(name: str) -> int | None:
     m = re.search(r"\.layers\.(\d+)\.", name)
@@ -64,7 +66,7 @@ def _layer_id(name: str) -> int | None:
 
 
 def _sconv_add_norm(
-    delta: torch.Tensor,
+    delta: InklingDelta,
     hidden: torch.Tensor,
     sconv: InklingShortConv,
     norm: InklingRMSNorm | None,
@@ -84,6 +86,10 @@ def _sconv_add_norm(
     off_s, ws = sconv.owner.stream_ranges[sconv.stream_idx]
     norm_w = norm.weight if norm is not None else None
     eps = norm.variance_epsilon if norm is not None else 0.0
+    if isinstance(delta, tuple):
+        delta, shared_delta = delta
+    else:
+        shared_delta = None
 
     mm = get_lamport_rs_conv(hidden.shape[-1], sconv.kernel_size)
     if mm is not None and mm.usable(delta.shape[0]) and m is not None:
@@ -103,9 +109,12 @@ def _sconv_add_norm(
             off_s,
             ws,
             sconv.owner.block_size,
+            shared_tensor=shared_delta,
         )
 
     # Fallback: NCCL RS -> shard sconv -> AG -> fused add(+rmsnorm).
+    if shared_delta is not None:
+        delta.add_(shared_delta)
     shard = tensor_model_parallel_reduce_scatter(delta, dim=-1)
     shard = sconv(shard.contiguous(), positions)
     full = tensor_model_parallel_all_gather(shard, dim=-1)
@@ -194,7 +203,7 @@ class InklingDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        pending: tuple[torch.Tensor | None, InklingShortConv] | None = None,
+        pending: tuple[InklingDelta, InklingShortConv] | None = None,
         defer_mlp_add: bool = False,
         attn_in: torch.Tensor | None = None,
         log_scaling: torch.Tensor | None = None,
@@ -217,7 +226,11 @@ class InklingDecoderLayer(nn.Module):
         mlp_in, hidden_states = _sconv_add_norm(
             attn_output, hidden_states, self.attn_sconv, self.mlp_norm, positions
         )
-        mlp_output = self.mlp(mlp_in)
+        mlp_output = (
+            self.mlp.forward_partials(mlp_in)
+            if isinstance(self.mlp, InklingMoE)
+            else self.mlp(mlp_in)
+        )
         if defer_mlp_add:
             # Caller folds mlp_output (pre-reduce, pre-sconv) into the next
             # fused sconv+add+rmsnorm.
@@ -326,7 +339,7 @@ class InklingModel(nn.Module):
                 self.config.log_scaling_alpha,
             )
 
-        pending: tuple[torch.Tensor | None, InklingShortConv] | None = None
+        pending: tuple[InklingDelta, InklingShortConv] | None = None
         for layer in self.layers[self.start_layer : self.end_layer]:
             hidden_states, pending = layer(
                 positions,

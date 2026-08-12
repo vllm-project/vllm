@@ -121,7 +121,7 @@ def _resolve_fi_ar_backend() -> tuple[str, bool]:
     """
     backend = envs.VLLM_FLASHINFER_ALLREDUCE_BACKEND
     if backend != "auto":
-        logger.info_once(f"Using flashinfer allreduce backend: {backend}")
+        logger.debug_once("Using flashinfer allreduce backend: %s", backend)
         return backend, False
 
     # Default to mnnvl for both single- and multi-node setups. The mnnvl
@@ -134,7 +134,7 @@ def _resolve_fi_ar_backend() -> tuple[str, bool]:
     backend = "mnnvl"
     allow_trtllm_fallback = get_node_count() == 1
 
-    logger.info_once(f"Auto-selected flashinfer allreduce backend: {backend}")
+    logger.debug_once("Auto-selected flashinfer allreduce backend: %s", backend)
     return backend, allow_trtllm_fallback
 
 

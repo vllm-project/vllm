@@ -43,6 +43,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
@@ -257,10 +258,9 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
       modeling the DSv3.2 indexer fan-out)
       -> ``AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern``
 
-    The chain feeds the next AllReduce by dequantizing the FP8 output (FP8
-    cast back to bf16 multiplied by the per-group scale), which is enough to
-    keep the matmul chain bf16 without depending on a real FP8 block-scaled
-    GEMM kernel.
+    Each site starts from the same bf16 activation and is returned separately.
+    This avoids compounding four quantize/dequantize errors while still testing
+    all four pattern firings without depending on a real FP8 block-scaled GEMM.
     """
 
     quant_group_size = 128
@@ -276,6 +276,7 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
+        self.dtype = dtype
         assert hidden_size % self.quant_group_size == 0, (
             f"hidden_size ({hidden_size}) must be a multiple of "
             f"quant_group_size ({self.quant_group_size}) for per-group FP8 quant"
@@ -291,44 +292,39 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
             rms, self.quant_group_size
         )
 
-    def _dequantize_to_bf16(
-        self, q: torch.Tensor, s: torch.Tensor, ref: torch.Tensor
-    ) -> torch.Tensor:
+    def _dequantize_to_bf16(self, q: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
         # Broadcast the per-group scale across each group of `quant_group_size`
-        # so we can chain the FP8 output back into a bf16 matmul. This avoids
-        # depending on a real FP8 block-scaled GEMM kernel in the test.
-        s_full = s.repeat_interleave(self.quant_group_size, dim=-1).to(ref.dtype)
-        return q.to(ref.dtype) * s_full
+        # to validate the quantized result without depending on a real FP8
+        # block-scaled GEMM kernel in the test.
+        s_full = s.repeat_interleave(self.quant_group_size, dim=-1).to(self.dtype)
+        return q.to(self.dtype) * s_full
 
     def forward(self, hidden_states):
         z = torch.relu(hidden_states)
-        x = resid = tensor_model_parallel_all_reduce(z)
-        rms = self.norm[0](x)
-        q0, s0 = self._group_quant(rms)
-        y = self._dequantize_to_bf16(q0, s0, rms)
+        x0 = tensor_model_parallel_all_reduce(z)
+        rms0 = self.norm[0](x0)
+        q0, s0 = self._group_quant(rms0)
+        y0 = self._dequantize_to_bf16(q0, s0)
 
-        z2 = torch.mm(y, self.w[0])
-        x2 = tensor_model_parallel_all_reduce(z2)
-        rms2, resid = self.norm[1](x2, resid)
-        q1, s1 = self._group_quant(rms2)
-        y2 = self._dequantize_to_bf16(q1, s1, rms2)
+        x1 = tensor_model_parallel_all_reduce(torch.mm(z, self.w[0]))
+        rms1, resid1 = self.norm[1](x1, z.clone())
+        q1, s1 = self._group_quant(rms1)
+        y1 = self._dequantize_to_bf16(q1, s1)
 
-        z3 = torch.mm(y2, self.w[1])
-        x3 = tensor_model_parallel_all_reduce(z3)
-        rms3, resid = self.norm[2](x3, resid)
-        q2, s2 = self._group_quant(rms3)
+        x2 = tensor_model_parallel_all_reduce(torch.mm(z, self.w[1]))
+        rms2, resid2 = self.norm[2](x2, z.clone())
+        q2, s2 = self._group_quant(rms2)
+        # Second consumer of ``rms2``: forces the with-indexer pattern.
+        idx2 = torch.ops.vllm.rocm_unquantized_gemm(rms2, self.indexer_w[0], None)
+        y2 = self._dequantize_to_bf16(q2, s2)
+
+        x3 = tensor_model_parallel_all_reduce(torch.mm(z, self.w[2]))
+        rms3, resid3 = self.norm[3](x3, z.clone())
+        q3, s3 = self._group_quant(rms3)
         # Second consumer of ``rms3``: forces the with-indexer pattern.
-        idx2 = torch.ops.vllm.rocm_unquantized_gemm(rms3, self.indexer_w[0], None)
-        y3 = self._dequantize_to_bf16(q2, s2, rms3)
-
-        z4 = torch.mm(y3, self.w[2])
-        x4 = tensor_model_parallel_all_reduce(z4)
-        rms4, resid = self.norm[3](x4, resid)
-        q3, s3 = self._group_quant(rms4)
-        # Second consumer of ``rms4``: forces the with-indexer pattern.
-        idx3 = torch.ops.vllm.rocm_unquantized_gemm(rms4, self.indexer_w[1], None)
-        y4 = self._dequantize_to_bf16(q3, s3, rms4)
-        return y4, idx2, idx3
+        idx3 = torch.ops.vllm.rocm_unquantized_gemm(rms3, self.indexer_w[1], None)
+        y3 = self._dequantize_to_bf16(q3, s3)
+        return y0, y1, y2, y3, resid1, resid2, resid3, idx2, idx3
 
     def ops_in_model_before(self):
         return [
@@ -505,10 +501,12 @@ def test_all_reduce_fusion_pass_replace(
         )
 
     def run_torch_spawn(fn, nprocs):
+        master_port = get_open_port()
         torch.multiprocessing.spawn(
             fn,
             args=(
                 num_processes,
+                master_port,
                 test_model,
                 batch_size,
                 seq_len,
@@ -529,6 +527,7 @@ def test_all_reduce_fusion_pass_replace(
 def all_reduce_fusion_pass_on_test_model(
     local_rank: int,
     world_size: int,
+    master_port: int,
     test_model_cls: torch.nn.Module,
     batch_size: int,
     seq_len: int,
@@ -553,7 +552,7 @@ def all_reduce_fusion_pass_on_test_model(
             "LOCAL_RANK": str(local_rank),
             "WORLD_SIZE": str(world_size),
             "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "12345",
+            "MASTER_PORT": str(master_port),
             "VLLM_FLASHINFER_ALLREDUCE_BACKEND": flashinfer_allreduce_backend,
             "VLLM_ROCM_USE_AITER": str(int(use_aiter)),
             "VLLM_ROCM_USE_AITER_CUSTOM_AR": str(int(use_aiter)),
@@ -681,10 +680,12 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
     num_processes = 2
 
     def run_torch_spawn(fn, nprocs):
+        master_port = get_open_port()
         torch.multiprocessing.spawn(
             fn,
             args=(
                 num_processes,
+                master_port,
                 TestAiterAllReduceRMSNormGroupQuantFP8Model,
                 batch_size,
                 seq_len,
@@ -702,6 +703,7 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
 def rocm_aiter_group_quant_fusion_pass_on_test_model(
     local_rank: int,
     world_size: int,
+    master_port: int,
     test_model_cls: torch.nn.Module,
     batch_size: int,
     seq_len: int,
@@ -723,7 +725,7 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
             "LOCAL_RANK": str(local_rank),
             "WORLD_SIZE": str(world_size),
             "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "12345",
+            "MASTER_PORT": str(master_port),
             "VLLM_ROCM_USE_AITER": "1",
             "VLLM_ROCM_USE_AITER_CUSTOM_AR": "1",
         }
@@ -775,17 +777,29 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
 
         results_unfused = model(hidden_states)
         results_fused = compiled_model(hidden_states)
-        # The fused per-group AR+RMS+QUANT op is bit-equivalent to the unfused
-        # chain modulo the small AllReduce + RMSNorm reordering inside aiter.
-        # Per-group FP8 quant introduces step noise <=1 per group; use the
-        # same tolerance as the sibling FP8 static test.
-        torch.testing.assert_close(results_unfused, results_fused, atol=1e-2, rtol=1e-2)
+        # AITER's kernel-level oracle permits up to 5% isolated FP8 values to
+        # fall outside a 5% allclose envelope after collective reordering.
+        for site, (reference, actual) in enumerate(
+            zip(results_unfused[:4], results_fused[:4])
+        ):
+            close = torch.isclose(reference, actual, atol=5e-2, rtol=5e-2)
+            mismatch_ratio = float((~close).float().mean().item())
+            assert mismatch_ratio <= 0.05, (
+                f"FP8 site {site} mismatch ratio {mismatch_ratio:.2%} exceeds 5%"
+            )
+
+        # Residual and bf16 indexer outputs do not incur FP8 quantization noise.
+        torch.testing.assert_close(
+            results_unfused[4:], results_fused[4:], atol=1e-2, rtol=1e-2
+        )
 
         # Four pattern firings: norm[0] (no-add quant), norm[1] (add quant,
         # single ``rms`` consumer), norm[2..3] (add quant + indexer fan-out).
         assert all_reduce_fusion_pass.matched_count == 4, (
             f"{all_reduce_fusion_pass.matched_count=}"
         )
-        backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
-        backend.check_after_ops(model.ops_in_model_after())
+        backend.check_before_ops(model.ops_in_model_before(), fully_replaced=True)
+        fused_quant_op, fused_indexer_op = model.ops_in_model_after()
+        assert backend.op_count(fused_quant_op) == 2
+        assert backend.op_count(fused_indexer_op) == 2
         del all_reduce_fusion_pass

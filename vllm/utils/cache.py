@@ -182,10 +182,6 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
 
         self.popitem(remove_pinned=remove_pinned)
 
-    def _remove_old_if_needed(self) -> None:
-        while self.currsize > self.capacity:
-            self.remove_oldest()
-
     def popitem(self, remove_pinned: bool = False):
         """Remove and return the `(key, value)` pair least recently used."""
         if not remove_pinned:

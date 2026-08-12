@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
 
 from .utils import supports_pdl, supports_tma
 
@@ -866,7 +866,7 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     tensor_ptrs = []
     for lora_weight in lora_weights:
         tensor_ptrs.append(lora_weight.data_ptr())
-    ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
+    ptr_tensor = async_tensor_h2d(tensor_ptrs, dtype=torch.uint64, device=device)
 
     _LORA_PTR_DICT[key] = ptr_tensor
     return _LORA_PTR_DICT.get(key)

@@ -88,15 +88,106 @@ def test_amd_attn_res_matches_reference(
 
     actual = attn_res(
         prefix,
+        None,
         blocks,
         norm_weight,
         qk_weight,
+        None,
         num_blocks,
+        -1,
         eps,
+        0.0,
     )
 
     torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
     torch.testing.assert_close(prefix, original_prefix, atol=0, rtol=0)
     torch.testing.assert_close(blocks, original_blocks, atol=0, rtol=0)
     assert actual.shape == prefix.shape
+    assert actual.is_contiguous()
+
+
+@pytest.mark.parametrize(
+    (
+        "num_tokens",
+        "num_blocks",
+        "hidden_size",
+        "has_delta",
+        "write_block",
+        "apply_output_norm",
+    ),
+    [
+        pytest.param(1, 0, 128, False, True, True, id="empty-write-norm"),
+        pytest.param(7, 1, 1024, True, False, True, id="single-add-norm"),
+        pytest.param(17, 5, 7168, True, True, True, id="padded-write-add"),
+        pytest.param(3, 8, 7168, True, False, True, id="full-add-norm"),
+        pytest.param(320, 4, 7168, True, False, False, id="prefill-add"),
+    ],
+)
+def test_amd_attn_res_fused_contract(
+    num_tokens: int,
+    num_blocks: int,
+    hidden_size: int,
+    has_delta: bool,
+    write_block: bool,
+    apply_output_norm: bool,
+) -> None:
+    torch.manual_seed(42)
+    eps = 1e-5
+    output_eps = 2e-5
+    block_capacity = 9
+    prefix = _randn_with_row_padding(num_tokens, hidden_size, padding=7)
+    delta = (
+        _randn_with_row_padding(num_tokens, hidden_size, padding=11)
+        if has_delta
+        else None
+    )
+    blocks = _randn_with_row_padding(
+        num_tokens, block_capacity, hidden_size, padding=13
+    )
+    norm_weight = 1 + 0.1 * torch.randn(
+        hidden_size, device="cuda", dtype=torch.bfloat16
+    )
+    qk_weight = (
+        torch.randn(hidden_size, device="cuda", dtype=torch.bfloat16) / hidden_size**0.5
+    )
+    output_norm_weight = (
+        1 + 0.1 * torch.randn(hidden_size, device="cuda", dtype=torch.bfloat16)
+        if apply_output_norm
+        else None
+    )
+    expected_prefix = prefix.clone()
+    if delta is not None:
+        expected_prefix = expected_prefix + delta
+    values = torch.cat(
+        (blocks[:, :num_blocks].clone(), expected_prefix.unsqueeze(1)), dim=1
+    )
+    keys = F.rms_norm(values.float(), (hidden_size,), norm_weight.float(), eps)
+    probs = (keys @ qk_weight.float()).softmax(dim=-1)
+    expected = torch.matmul(probs.unsqueeze(1), values.float()).squeeze(1)
+    if output_norm_weight is not None:
+        expected = F.rms_norm(
+            expected, (hidden_size,), output_norm_weight.float(), output_eps
+        )
+    expected = expected.to(prefix.dtype)
+    original_blocks = blocks.clone()
+    block_write_idx = num_blocks if write_block else -1
+
+    actual = attn_res(
+        prefix,
+        delta,
+        blocks,
+        norm_weight,
+        qk_weight,
+        output_norm_weight,
+        num_blocks,
+        block_write_idx,
+        eps,
+        output_eps,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
+    torch.testing.assert_close(prefix, expected_prefix, atol=0, rtol=0)
+    if write_block:
+        original_blocks[:, block_write_idx].copy_(expected_prefix)
+    torch.testing.assert_close(blocks, original_blocks, atol=0, rtol=0)
     assert actual.is_contiguous()

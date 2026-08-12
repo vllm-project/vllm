@@ -162,6 +162,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             ..EngineCoreSamplingParams::for_test()
         }),
         arrival_time: 42.5,
+        session_id: Some("session-1".to_string()),
         ..EngineCoreRequest::default()
     }
 }
@@ -222,18 +223,8 @@ fn request_output(
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
-        new_logprobs: None,
-        new_prompt_logprobs_tensors: None,
-        pooling_output: None,
         finish_reason,
-        stop_reason: None,
-        events: None,
-        kv_transfer_params: None,
-        ec_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -2606,6 +2597,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         prefill_stats: None,
                         routed_experts: None,
                         num_nans_in_logits: 0,
+                        mm_cache_miss_hashes: None,
                     },
                 ],
                 scheduler_stats: None,

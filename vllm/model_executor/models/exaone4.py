@@ -31,7 +31,7 @@ from transformers import Exaone4Config
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -70,6 +70,7 @@ class Exaone4GatedMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         bias: bool = False,
+        swiglu_limit: float | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -95,7 +96,9 @@ class Exaone4GatedMLP(nn.Module):
             raise ValueError(
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
-        self.act_fn = SiluAndMul()
+        self.act_fn = (
+            SiluAndMul() if swiglu_limit is None else SiluAndMulWithClamp(swiglu_limit)
+        )
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)

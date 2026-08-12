@@ -48,7 +48,7 @@ echo "Image not found, proceeding with build..."
 # --- CUDA 13.0 for nightly builds ---
 # Nightly CI uses CUDA 13.0 while regular CI stays on CUDA 12.9
 NIGHTLY_CUDA_VERSION="13.0.2"
-NIGHTLY_BUILD_BASE_IMAGE="nvidia/cuda:${NIGHTLY_CUDA_VERSION}-devel-ubuntu22.04"
+NIGHTLY_BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.0"
 NIGHTLY_FINAL_BASE_IMAGE="nvidia/cuda:${NIGHTLY_CUDA_VERSION}-base-ubuntu22.04"
 
 echo "--- :docker: Building torch nightly image (CUDA ${NIGHTLY_CUDA_VERSION})"

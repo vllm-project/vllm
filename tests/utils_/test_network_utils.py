@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import socket
+import threading
 
 import pytest
 import zmq
 
+from vllm.utils import network_utils
 from vllm.utils.network_utils import (
+    get_file_store_init_method,
     get_open_port,
     get_open_ports_list,
     get_tcp_uri,
@@ -15,6 +18,33 @@ from vllm.utils.network_utils import (
     split_host_port,
     split_zmq_path,
 )
+
+
+def test_get_file_store_init_method_is_unique():
+    init_methods = {get_file_store_init_method() for _ in range(2)}
+
+    assert len(init_methods) == 2
+    assert all(method.startswith("file://") for method in init_methods)
+
+
+def _call_with_timeout(func, timeout: float = 10.0):
+    """Run func in a daemon thread so a livelock regression fails the test
+    quickly instead of hanging the suite."""
+    result: dict = {}
+
+    def target():
+        try:
+            result["value"] = func()
+        except BaseException as e:
+            result["error"] = e
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    assert not thread.is_alive(), f"call did not finish within {timeout}s"
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
 
 
 def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
@@ -27,6 +57,20 @@ def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
                 s2.bind(("localhost", get_open_port()))
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
                     s3.bind(("localhost", get_open_port()))
+
+
+def test_get_open_port_vllm_port_in_dp_reserved_range(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # VLLM_PORT falling inside the data-parallel reserved window used to make
+    # get_open_port() loop forever (issue #50024). It must instead return a
+    # port outside the reserved range.
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_DP_MASTER_PORT", "5680")
+        # 5682 is inside [5680, 5690).
+        m.setenv("VLLM_PORT", "5682")
+        port = _call_with_timeout(get_open_port)
+        assert port not in range(5680, 5690)
 
 
 def test_get_open_ports_list_with_vllm_port(monkeypatch: pytest.MonkeyPatch):
@@ -46,6 +90,67 @@ def test_get_open_ports_list_with_vllm_port(monkeypatch: pytest.MonkeyPatch):
         finally:
             for s in sockets:
                 s.close()
+
+
+def test_get_open_port_skips_reserved_dp_master_ports(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """VLLM_PORT == VLLM_DP_MASTER_PORT must not livelock by returning the
+    same free-but-reserved port forever (upstream issue #50024)."""
+    base = 42123
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_PORT", str(base))
+        m.setenv("VLLM_DP_MASTER_PORT", str(base))
+        port = _call_with_timeout(get_open_port)
+        assert port >= base + 10
+
+
+def test_get_open_ports_list_skips_reserved_dp_master_ports(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The VLLM_PORT band scan must not hand out ports inside the window
+    reserved for the data parallel master process."""
+    base = 42223
+    reserved = range(base, base + 10)
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_PORT", str(base))
+        m.setenv("VLLM_DP_MASTER_PORT", str(base))
+        ports = _call_with_timeout(lambda: get_open_ports_list(5))
+        assert len(ports) == 5
+        assert len(set(ports)) == 5, "ports must be unique"
+        assert all(p not in reserved for p in ports)
+
+
+def test_get_open_port_ephemeral_skips_reserved_range(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An ephemeral port that happens to fall in the reserved range is
+    replaced by a rescan starting past the range."""
+    base = 42323
+    with monkeypatch.context() as m:
+        m.delenv("VLLM_PORT", raising=False)
+        m.setenv("VLLM_DP_MASTER_PORT", str(base))
+        m.setattr(
+            network_utils,
+            "_get_open_port",
+            lambda start_port=None, max_attempts=None: (
+                base if start_port is None else start_port
+            ),
+        )
+        assert _call_with_timeout(get_open_port) == base + 10
+
+
+def test_get_open_port_ephemeral_without_dp_master_port(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Without VLLM_PORT and VLLM_DP_MASTER_PORT, an ephemeral port is
+    returned as before."""
+    with monkeypatch.context() as m:
+        m.delenv("VLLM_PORT", raising=False)
+        m.delenv("VLLM_DP_MASTER_PORT", raising=False)
+        port = _call_with_timeout(get_open_port)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("localhost", port))
 
 
 @pytest.mark.parametrize(

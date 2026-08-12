@@ -3,8 +3,8 @@
 
 //! DeepSeek V4 prompt renderer.
 //!
-//! Original Python implementation:
-//! <https://github.com/vllm-project/vllm/blob/main/vllm/tokenizers/deepseek_v4_encoding.py>
+//! Official Python reference:
+//! <https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/encoding/encoding_dsv4.py>
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -24,10 +24,15 @@ const THINKING_END_TOKEN: &str = "</think>";
 const DSML_TOKEN: &str = "｜DSML｜";
 const USER_SP_TOKEN: &str = "<｜User｜>";
 const ASSISTANT_SP_TOKEN: &str = "<｜Assistant｜>";
-const REASONING_EFFORT_MAX: &str = concat!(
+const REASONING_EFFORT_HIGH: &str = concat!(
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n",
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n",
     "Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n",
+);
+const REASONING_EFFORT_MAX: &str = concat!(
+    "Reasoning Effort: Beyond maximum — exhaustive, relentless, and uncompromising.\n",
+    "You MUST reason with the utmost depth and rigor, leaving absolutely nothing to chance: exhaustively decompose the problem into its most fundamental components, trace every causal chain to its root, and resolve the underlying cause rather than any surface symptom.\n",
+    "Do not stop reasoning until you have independently verified the solution from multiple angles and are certain that no assumption remains unchecked and no error remains undiscovered.\n\n",
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +52,7 @@ struct RenderedToolSchema<'a> {
 
 /// Render one chat request into the final prompt string.
 pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
-    let (thinking_mode, max_reasoning_effort) = resolve_thinking_options(request)?;
+    let (thinking_mode, reasoning_effort_prompt) = resolve_thinking_options(request)?;
     let request_tools = request_tools(request);
     let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
@@ -55,8 +60,8 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
     let last_user_render_index =
         find_last_user_render_index(request.messages.as_slice(), synthetic_tool_system);
     let mut out = String::from(BOS_TOKEN);
-    if thinking_mode == ThinkingMode::Thinking && max_reasoning_effort {
-        out.push_str(REASONING_EFFORT_MAX);
+    if thinking_mode == ThinkingMode::Thinking {
+        out.push_str(reasoning_effort_prompt);
     }
 
     let mut request_tools_attached = false;
@@ -124,26 +129,34 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
 /// wrapper, the Rust renderer only consumes the typed top-level
 /// `reasoning_effort`; the generic template-kwargs map is left for HF
 /// templates.
-fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, bool)> {
-    let mut thinking_mode = match request.enable_thinking()?.unwrap_or(false) {
+fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, &'static str)> {
+    let mut thinking_mode = match request.enable_thinking()?.unwrap_or(true) {
         true => ThinkingMode::Thinking,
         false => ThinkingMode::Chat,
     };
-    let mut max_reasoning_effort = false;
+    let mut reasoning_effort_prompt = REASONING_EFFORT_HIGH;
 
     match request.chat_options.reasoning_effort {
         Some(ReasoningEffort::None) => thinking_mode = ThinkingMode::Chat,
-        Some(ReasoningEffort::Max | ReasoningEffort::XHigh) => max_reasoning_effort = true,
-        Some(_) | None => {}
+        Some(ReasoningEffort::Max) => {
+            reasoning_effort_prompt = REASONING_EFFORT_MAX;
+        }
+        Some(ReasoningEffort::XHigh | ReasoningEffort::High) => {
+            reasoning_effort_prompt = REASONING_EFFORT_HIGH;
+        }
+        Some(ReasoningEffort::Minimal | ReasoningEffort::Medium | ReasoningEffort::Low) => {
+            reasoning_effort_prompt = "";
+        }
+        None => {}
     }
 
-    Ok((thinking_mode, max_reasoning_effort))
+    Ok((thinking_mode, reasoning_effort_prompt))
 }
 
 /// Return request-level tools only when native tool parsing is enabled.
 fn request_tools(request: &ChatRequest) -> &[ChatTool] {
     if request.tool_parsing_enabled() {
-        request.tools.as_slice()
+        request.initial_tools()
     } else {
         &[]
     }

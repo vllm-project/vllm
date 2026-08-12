@@ -258,7 +258,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
             model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.conv",
+            prefix=f"{prefix}.short_conv",
         )
 
         self.feed_forward = Lfm2MLP(

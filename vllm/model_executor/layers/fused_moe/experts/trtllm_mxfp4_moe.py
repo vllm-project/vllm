@@ -14,7 +14,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
+from vllm.model_executor.layers.fused_moe.utils import (
+    fi_moe_largest_bucket,
+    trtllm_moe_pack_topk_ids_weights,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
     has_flashinfer_situ_activation,
@@ -112,8 +115,6 @@ class TrtLlmMxfp4ExpertsBase:
                 device=device,
             )
             self.gemm1_clamp_limit = None
-
-        self.max_capture_size = moe_config.max_capture_size
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -263,7 +264,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             activation_type=self._flashinfer_activation_type(activation),
-            tune_max_num_tokens=max(self.max_capture_size, 1),
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             output=output,
             routing_replay_out=routing_replay_out,
         )
@@ -382,7 +383,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             enable_pdl=True,
             activation_type=self._flashinfer_activation_type(activation),
             output=output,
-            tune_max_num_tokens=max(self.max_capture_size, 1),
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
 
     def apply(

@@ -266,9 +266,10 @@ class Phi3HDImageEmbedding(nn.Module):
         )
 
         batch_image_features_proj = []
+        image_sizes_list = image_sizes.tolist()
         # need a for loop to process each image because of different image sizes
         # (patch arrangement is different for each image)
-        for i, img_size in enumerate(image_sizes):
+        for i, img_size in enumerate(image_sizes_list):
             h, w = img_size
             h_crop = h // 336
             w_crop = w // 336
@@ -426,7 +427,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 

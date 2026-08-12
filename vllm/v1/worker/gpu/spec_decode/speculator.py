@@ -13,6 +13,8 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.models import supports_multimodal_embeddings
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -129,13 +131,16 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
+            # Pre-temperature logits, cached from the previous decode step.
             self.draft_logits = torch.zeros(
                 self.max_num_reqs,
                 self.num_speculative_steps,
                 self.vocab_size,
-                dtype=torch.float32,
+                dtype=vllm_config.model_config.head_dtype,
                 device=device,
             )
+
+        self.supports_mm_inputs = False
 
     @abstractmethod
     def load_draft_model(
@@ -163,6 +168,19 @@ class DraftModelSpeculator(BaseSpeculator):
             ).keys()
         )
         self.draft_attn_layer_names = all_attn_layers - target_attn_layer_names
+
+        target_supports_mm = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
+            self.vllm_config.model_config
+        )
+        draft_supports_mm = supports_multimodal_embeddings(self.model)
+        self.supports_mm_inputs = target_supports_mm and draft_supports_mm
+        if target_supports_mm and not draft_supports_mm:
+            logger.warning_once(
+                "Draft model %s does not support external multimodal embeddings. "
+                "Embeddings from the target model will not be passed to the "
+                "drafter; using text-only draft inputs instead.",
+                type(self.model).__name__,
+            )
 
     def set_eplb_state(self, eplb_state: EplbState) -> None:
         """Inject EPLB state after construction."""
@@ -315,8 +333,8 @@ class DraftModelSpeculator(BaseSpeculator):
                 seeds,
                 positions + 1,
                 apply_temperature=True,
-                output_processed_logits=draft_logits,
-                output_processed_logits_col=draft_step,
+                logits_cache=draft_logits,
+                logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
         return self._greedy_sample_draft(hidden_states)

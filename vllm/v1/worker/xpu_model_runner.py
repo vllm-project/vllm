@@ -60,4 +60,5 @@ def _torch_cuda_wrapper():
         torch.cuda.graph = partial(torch.xpu.graph)
         torch.cuda.CUDAGraph = torch.xpu.XPUGraph
         torch.cuda.graph_pool_handle = partial(torch.xpu.graph_pool_handle)
+        torch.cuda.is_current_stream_capturing = torch.xpu.is_current_stream_capturing
     yield

@@ -8,7 +8,6 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
-from vllm.utils import is_moe_layer
 
 logger = init_logger(__name__)
 
@@ -357,17 +356,6 @@ class DeviceCommunicatorBase:
 
     def destroy(self):
         pass
-
-    def prepare_communication_buffer_for_model(self, model: torch.nn.Module) -> None:
-        """
-        Prepare the communication buffer for the model.
-        """
-        if not self.is_ep_communicator:
-            return
-
-        moe_modules = [module for module in model.modules() if is_moe_layer(module)]
-        for module in moe_modules:
-            module.maybe_init_modular_kernel()
 
     def dispatch_router_logits(
         self,

@@ -75,6 +75,7 @@ class EngineCoreRequest(
     reasoning_ended: bool | None = None
     reasoning_parser_kwargs: dict[str, object] | None = None
     abort_immediately: bool = False
+    session_id: str | None = None
 
 
 class EngineCoreOutput(
@@ -96,6 +97,7 @@ class EngineCoreOutput(
     prefill_stats: object | None = None
     routed_experts: object | None = None
     num_nans_in_logits: int = 0
+    mm_cache_miss_hashes: list[str] | None = None
 
 
 class EngineCoreOutputs(
@@ -137,6 +139,7 @@ request = EngineCoreRequest(
     pooling_params=None,
     arrival_time=42.5,
     client_index=0,
+    session_id="session-1",
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.

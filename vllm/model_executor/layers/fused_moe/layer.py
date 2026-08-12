@@ -130,6 +130,7 @@ def FusedMoEFactory(
     is_sequence_parallel: bool = False,
     reduce_results: bool = True,
     ckpt_names: tuple[str, str, str] = ("gate_proj", "down_proj", "up_proj"),
+    is_fused_checkpoint_transposed: bool = False,
     n_shared_experts: int | None = None,
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
@@ -193,6 +194,8 @@ def FusedMoEFactory(
             the late-AR path.
         ckpt_names: Checkpoint parameter name tuple (gate_proj, down_proj,
             up_proj) used for weight loading
+        is_fused_checkpoint_transposed: Whether fused checkpoint weights and
+            block scales use transposed storage.
         n_shared_experts: Number of shared experts to fuse into the routed
             grouped GEMM (ROCm; requires aiter FSE or the router-append path)
         router_logits_dtype: Data type for router logits buffers
@@ -378,6 +381,7 @@ def FusedMoEFactory(
         ckpt_gate_proj_name=ckpt_names[0],
         ckpt_down_proj_name=ckpt_names[1],
         ckpt_up_proj_name=ckpt_names[2],
+        is_fused_checkpoint_transposed=is_fused_checkpoint_transposed,
         # Extra params that are needed by quant_methods, pass along for now
         # Prefer getting these from other sources, e.g. moe_config or
         # router object

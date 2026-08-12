@@ -303,8 +303,8 @@ def get_xpu_runtime_version():
 def get_pkg_version(run_lambda, pkg):
     assert get_platform() == "linux"
 
-    if pkg == "vllm_xpu_kernels":
-        rc, out, _ = run_lambda("pip show vllm-xpu-kernels")
+    if pkg in ["vllm_xpu_kernels", "oneccl"]:
+        rc, out, _ = run_lambda(f"pip show {pkg}")
         if rc == 0:
             match = re.search(r"Version: (.*)", out)
             return match.group(1).strip() if match else None
@@ -314,7 +314,6 @@ def get_pkg_version(run_lambda, pkg):
         "igc": ["intel-igc-core", "libigc2", "libigc1"],
         "level_zero_loader": ["level-zero", "libze1"],
         "level_zero_driver": ["libze-intel-gpu1", "intel-level-zero-gpu"],
-        "oneccl": ["intel-oneapi-ccl", "oneccl"],
         "libigdgmm": ["libigdgmm12", "libigdgmm"],
     }
 

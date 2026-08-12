@@ -35,7 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.llama4 import Llama4DecoderLayer, Llama4ForCausalLM
 from vllm.model_executor.models.utils import extract_layer_index
 
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsMultiModalEmbeddings
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -152,7 +152,7 @@ class LlamaModel(nn.Module):
             }
 
 
-class EagleLlama4ForCausalLM(Llama4ForCausalLM):
+class EagleLlama4ForCausalLM(Llama4ForCausalLM, SupportsMultiModalEmbeddings):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config

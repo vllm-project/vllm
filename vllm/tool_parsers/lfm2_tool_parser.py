@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import json
 from collections.abc import Sequence
 
 import regex as re
@@ -24,8 +25,14 @@ from vllm.tool_parsers.abstract_tool_parser import (
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     compute_tool_delta,
+    contains_broken_string_literal,
+    escape_ctrl_chars_in_strings,
+    escape_nested_quotes_in_strings,
     handle_single_tool,
     make_valid_python,
+    normalize_leading_zero_ints,
+    rename_reserved_kwargs,
+    restore_reserved_kwarg_names,
 )
 
 logger = init_logger(__name__)
@@ -93,6 +100,15 @@ class Lfm2ToolParser(ToolParser):
     @current_tool_index.setter
     def current_tool_index(self, value: int) -> None:
         self.current_tool_id = value
+
+    @staticmethod
+    def _restore_reserved(tool_call):
+        """Restore parameter names renamed by ``rename_reserved_kwargs``."""
+        arguments = json.loads(tool_call.function.arguments)
+        restored = restore_reserved_kwarg_names(arguments)
+        if restored != arguments:
+            tool_call.function.arguments = json.dumps(restored, ensure_ascii=False)
+        return tool_call
 
     @staticmethod
     def _strip_echo(raw_after: str) -> str:
@@ -171,17 +187,53 @@ class Lfm2ToolParser(ToolParser):
             )
 
         try:
-            module = ast.parse(tool_text)
+            kw_renamed = False
+            try:
+                module = ast.parse(tool_text)
+            except (SyntaxError, ValueError):
+                # Progressive rewrites, each a no-op on already-valid text:
+                # escape raw control chars / NUL bytes inside string literals,
+                # strip leading zeros from int literals (month=07), close
+                # unambiguous nested quotes (command='sed -n '1,9p' f.py'),
+                # and rename reserved-keyword parameters (from=1; restored
+                # below). The first rewrite whose result parses wins.
+                escaped = escape_ctrl_chars_in_strings(
+                    normalize_leading_zero_ints(tool_text)
+                )
+                candidates = [escaped]
+                requoted, requote_changed = escape_nested_quotes_in_strings(escaped)
+                if requote_changed:
+                    # Requoting can move raw control chars (newlines beyond
+                    # the phantom close) inside the string; escape again.
+                    candidates.append(escape_ctrl_chars_in_strings(requoted))
+                renamed, kw_renamed = rename_reserved_kwargs(candidates[-1])
+                if kw_renamed:
+                    candidates.append(renamed)
+                for candidate in candidates:
+                    try:
+                        module = ast.parse(candidate)
+                        break
+                    except (SyntaxError, ValueError):
+                        continue
+                else:
+                    raise
             parsed = getattr(module.body[0], "value", None)
-            if isinstance(parsed, ast.List) and all(
-                isinstance(e, ast.Call) for e in parsed.elts
+            # An empty block ([]) must not report tools_called=True with zero
+            # calls, so require at least one element.
+            if (
+                isinstance(parsed, ast.List)
+                and parsed.elts
+                and all(isinstance(e, ast.Call) for e in parsed.elts)
             ):
+                tool_calls = [
+                    handle_single_tool(e)  # type: ignore
+                    for e in parsed.elts
+                ]
+                if kw_renamed:
+                    tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
                 return ExtractedToolCallInformation(
                     tools_called=True,
-                    tool_calls=[
-                        handle_single_tool(e)  # type: ignore
-                        for e in parsed.elts
-                    ],
+                    tool_calls=tool_calls,
                     content=content,
                 )
             else:
@@ -261,6 +313,9 @@ class Lfm2ToolParser(ToolParser):
         # Strip the end token if present (entire call arrived at once).
         if TOOL_CALL_END in tool_text:
             tool_text = tool_text.split(TOOL_CALL_END, 1)[0]
+        # Leading whitespace after the start token would make every completion
+        # candidate an IndentationError (the non-streaming path strips it too).
+        tool_text = tool_text.lstrip()
 
         def _content_only_or_none() -> DeltaMessage | None:
             """Return a content-only delta if any content arrived in this
@@ -271,6 +326,41 @@ class Lfm2ToolParser(ToolParser):
             return DeltaMessage(content=combined) if combined else None
 
         try:
+            # A raw control char inside a string argument would make every
+            # completion candidate a SyntaxError; escape them here rather than
+            # inside make_valid_python so the shared helper keeps its upstream
+            # behavior for the other pythonic parsers. Leading zeros in int
+            # literals (month=07) and parameters named after Python keywords
+            # (`from=1`) can never parse; rewrite those too. All rewrites are
+            # deterministic, so successive chunks stay consistent; keyword
+            # names are restored after decoding.
+            tool_text = escape_ctrl_chars_in_strings(
+                normalize_leading_zero_ints(tool_text)
+            )
+            if has_end_in_current:
+                # Nested-quote recovery needs the final text (which quote
+                # closes a partial string is not stable across chunks) and
+                # must never touch text that already parses.
+                try:
+                    ast.parse(tool_text)
+                except (SyntaxError, ValueError):
+                    requoted_text, requote_changed = escape_nested_quotes_in_strings(
+                        tool_text
+                    )
+                    if requote_changed:
+                        tool_text = escape_ctrl_chars_in_strings(requoted_text)
+            renamed_tool_text, kw_renamed = rename_reserved_kwargs(tool_text)
+            if kw_renamed:
+                tool_text = renamed_tool_text
+
+            # A broken string (its first closing quote cannot close it —
+            # nested-quote text mid-arrival) makes every completion-based
+            # partial parse an implicit-concatenation misreading whose
+            # streamed prefix could never be retracted. Withhold deltas
+            # until the requote recovery above has produced sane text.
+            if contains_broken_string_literal(tool_text):
+                return _content_only_or_none()
+
             valid_and_added_text = make_valid_python(tool_text)
             if valid_and_added_text is None:
                 return _content_only_or_none()
@@ -286,6 +376,8 @@ class Lfm2ToolParser(ToolParser):
                 handle_single_tool(e)  # type: ignore
                 for e in parsed.elts
             ]
+            if kw_renamed:
+                tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):

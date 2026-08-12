@@ -276,7 +276,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         w13_qweight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // bit8_pack_factor,
                 dtype=torch.uint8,
             ),
@@ -301,7 +301,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         w13_scales = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // group_size,
                 dtype=params_dtype,
             ),
@@ -326,7 +326,9 @@ class MoeWNA16Method(FusedMoEMethodBase):
             w13_qzeros = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition // bit8_pack_factor,
+                    self.moe.w13_num_shards
+                    * intermediate_size_per_partition
+                    // bit8_pack_factor,
                     hidden_size // group_size,
                     dtype=torch.uint8,
                 ),
@@ -368,7 +370,12 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 get_humming_moe_quant_config,
             )
 
-            return get_humming_moe_quant_config(layer)
+            return get_humming_moe_quant_config(
+                layer,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            )
 
         has_zp = self.quant_config.has_zp
         return make_wna16_moe_quant_config(
@@ -389,7 +396,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.wna16_backend,
-            layer=layer,
             routing_tables=layer._expert_routing_tables(),
         )
 

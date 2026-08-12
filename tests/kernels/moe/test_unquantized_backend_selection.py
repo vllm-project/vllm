@@ -3,19 +3,124 @@
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
+    backend_to_kernel_cls,
     select_unquantized_moe_backend,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 
 skipif_not_cuda_rocm = pytest.mark.skipif(
     not (current_platform.is_cuda() or current_platform.is_rocm()),
     reason="Only supported on CUDA/ROCm platforms.",
 )
+
+
+@pytest.mark.parametrize(
+    ("amx_supported", "in_dtype", "expect_amx_kernel"),
+    [
+        (True, torch.bfloat16, True),
+        (False, torch.bfloat16, False),
+        (True, torch.float16, False),
+    ],
+)
+def test_x86_cpu_unquantized_kernel_selection(
+    amx_supported: bool,
+    in_dtype: torch.dtype,
+    expect_amx_kernel: bool,
+):
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        CPUUnquantizedExperts,
+        X86CPUUnquantizedExperts,
+    )
+
+    with (
+        patch.object(current_platform, "is_cpu", return_value=True),
+        patch.object(
+            current_platform,
+            "get_cpu_architecture",
+            return_value=CpuArchEnum.X86,
+        ),
+        patch("torch.cpu._is_amx_tile_supported", return_value=amx_supported),
+    ):
+        moe_config = make_dummy_moe_config(
+            hidden_dim=128,
+            intermediate_size=128,
+            in_dtype=in_dtype,
+        )
+        kernel_cls = next(
+            cls
+            for cls in backend_to_kernel_cls(UnquantizedMoeBackend.CPU)
+            if cls.is_supported_config(
+                cls,
+                moe_config,
+                None,
+                None,
+                CPUUnquantizedExperts.activation_format(),
+            )[0]
+        )
+
+    expected_kernel_cls = (
+        X86CPUUnquantizedExperts if expect_amx_kernel else CPUUnquantizedExperts
+    )
+    assert kernel_cls is expected_kernel_cls
+
+
+@pytest.mark.parametrize(
+    ("platform", "in_dtype", "expect_arm_kernel"),
+    [
+        ("linux", torch.bfloat16, True),
+        ("linux", torch.float16, False),
+        ("darwin", torch.bfloat16, False),
+    ],
+)
+def test_arm_cpu_unquantized_kernel_selection(
+    platform: str,
+    in_dtype: torch.dtype,
+    expect_arm_kernel: bool,
+):
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        ArmCPUUnquantizedExperts,
+        CPUUnquantizedExperts,
+    )
+
+    with (
+        patch.object(current_platform, "is_cpu", return_value=True),
+        patch.object(
+            current_platform,
+            "get_cpu_architecture",
+            return_value=CpuArchEnum.ARM,
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.experts.cpu_moe.sys.platform",
+            platform,
+        ),
+    ):
+        moe_config = make_dummy_moe_config(
+            hidden_dim=128,
+            intermediate_size=128,
+            in_dtype=in_dtype,
+        )
+        kernel_cls = next(
+            cls
+            for cls in backend_to_kernel_cls(UnquantizedMoeBackend.CPU)
+            if cls.is_supported_config(
+                cls,
+                moe_config,
+                None,
+                None,
+                CPUUnquantizedExperts.activation_format(),
+            )[0]
+        )
+
+    expected_kernel_cls = (
+        ArmCPUUnquantizedExperts if expect_arm_kernel else CPUUnquantizedExperts
+    )
+    assert kernel_cls is expected_kernel_cls
 
 
 @pytest.mark.parametrize(
@@ -69,14 +174,20 @@ def test_select_default_backend_by_platform(
         patch.object(current_platform, "is_out_of_tree", return_value=False),
         patch.object(current_platform, platform_method, return_value=True),
     ):
-        moe_config = make_dummy_moe_config()
+        # CPU's grouped-gemm kernels require hidden/intermediate sizes
+        # aligned to 32; the size-1 defaults only work for backends that
+        # don't check shapes at selection time.
+        moe_config = (
+            make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+            if expected_backend == UnquantizedMoeBackend.CPU
+            else make_dummy_moe_config()
+        )
         selected_backend, expert_cls = select_unquantized_moe_backend(
             moe_config=moe_config
         )
 
         assert selected_backend == expected_backend
         if expected_backend in [
-            UnquantizedMoeBackend.CPU,
             UnquantizedMoeBackend.OOT,
             UnquantizedMoeBackend.TPU,
         ]:

@@ -171,10 +171,6 @@ def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
         "requirements/common.txt",
         "requirements/rocm.txt",
         "requirements/test/rocm.txt",
-        "docker/Dockerfile.rocm_base",
         "docker/Dockerfile.rocm",
-        "docker/ci-rocm.hcl",
-        "docker/docker-bake-rocm.hcl",
-        ".buildkite/scripts/ci-bake-rocm.sh",
     ):
         assert expected in ci_bake
