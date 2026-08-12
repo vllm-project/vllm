@@ -1059,7 +1059,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
 
-        if self.adaptive_verification is not None:
+        if self.adaptive_verification is not None and draft_tokens:
             num_toks = self.adaptive_verification.get_num_tokens(
                 num_tokens_per_req, draft_tokens
             )

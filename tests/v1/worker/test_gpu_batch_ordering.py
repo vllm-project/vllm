@@ -87,6 +87,33 @@ def test_spec_decode_batch_is_uniform_decode():
     assert _uniform_token_count(decodes, 8) == 8
 
 
+def test_adaptive_verification_sizes_only_batches_with_drafts():
+    decodes = {"d0": (16, 16), "d1": (16, 16)}
+    runner = _make_runner(decodes, decode_query_len=8)
+    manager = SimpleNamespace(
+        get_num_tokens=lambda _num_tokens_per_req, _draft_tokens: 12
+    )
+    runner.adaptive_verification = manager
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={req_id: 8 for req_id in decodes},
+        total_num_scheduled_tokens=16,
+        scheduled_spec_decode_tokens={},
+    )
+
+    state, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, False)
+    assert state is not None
+    assert state.num_tokens == 16
+    assert uniform_tok_count == 8
+
+    scheduler_output.scheduled_spec_decode_tokens = {
+        req_id: [1, 2] for req_id in decodes
+    }
+    state, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, False)
+    assert state is not None
+    assert state.num_tokens == 12
+    assert uniform_tok_count is None
+
+
 def test_prompt_chunk_of_decode_query_len_is_not_uniform_decode():
     # Two prompt chunks whose query length coincides with the K+1 spec-decode
     # query length must reject the batch (issue #49918).
