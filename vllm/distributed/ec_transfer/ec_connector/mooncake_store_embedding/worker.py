@@ -315,6 +315,7 @@ class EmbeddingStoreWorker:
         *,
         device: torch.device | str | None = None,
     ) -> None:
+        load_items: list[MMMeta] = []
         for item in items:
             load_spec = item.load_spec
             if load_spec is None or not load_spec.can_load:
@@ -326,70 +327,111 @@ class EmbeddingStoreWorker:
                     item.identifier,
                 )
                 continue
+            load_items.append(item)
+        if not load_items:
+            return
 
-            started = time.perf_counter()
-            pool_key = self.make_pool_key(item.identifier)
-            tensor_meta = None
-            load_stage = "metadata"
-            try:
-                tensor_meta = self.store_client.get_tensor_meta(pool_key)
+        pool_keys = [self.make_pool_key(item.identifier) for item in load_items]
+        started = time.perf_counter()
+        try:
+            tensor_metas = self.store_client.get_tensor_metas(pool_keys)
+            for index, tensor_meta in enumerate(tensor_metas):
                 if tensor_meta is None:
                     raise EmbeddingStoreLoadError(
                         "failed to load embedding tensor metadata for "
-                        f"{pool_key.to_string()}"
+                        f"{pool_keys[index].to_string()}"
                     )
+        except Exception as e:
+            self._record_operation(
+                "load_get",
+                time.perf_counter() - started,
+                len(load_items),
+                status="error",
+                num_failed_keys=len(load_items),
+            )
+            logger.exception(
+                "embedding_store_load_failed stage=metadata num_items=%d error=%s",
+                len(load_items),
+                e,
+            )
+            raise
 
-                load_stage = "allocate"
-                target_device = device
-                if target_device is None:
-                    target_device = "cuda" if torch.cuda.is_available() else None
-                target = torch.empty(
-                    tensor_meta.shape,
-                    dtype=_resolve_torch_dtype(tensor_meta.dtype),
-                    device=target_device,
-                )
-                _data_key, addrs, sizes = self.tensor_database.prepare_value(
-                    pool_key,
-                    target,
-                )
-                load_stage = "payload"
-                self.store_client.get_tensor_payload(
-                    pool_key,
-                    addrs[0],
-                    sizes[0],
-                    tensor_meta.data_offset,
-                )
-                load_stage = "validate"
+        target_device = device
+        if target_device is None:
+            target_device = "cuda" if torch.cuda.is_available() else None
+        targets = [
+            torch.empty(
+                tensor_meta.shape,
+                dtype=_resolve_torch_dtype(tensor_meta.dtype),
+                device=target_device,
+            )
+            for tensor_meta in tensor_metas
+        ]
+        addrs: list[int] = []
+        sizes: list[int] = []
+        for pool_key, target in zip(pool_keys, targets, strict=True):
+            _data_key, item_addrs, item_sizes = self.tensor_database.prepare_value(
+                pool_key,
+                target,
+            )
+            addrs.extend(item_addrs)
+            sizes.extend(item_sizes)
+        data_offsets = [tensor_meta.data_offset for tensor_meta in tensor_metas]
+
+        try:
+            self.store_client.get_tensor_payloads(
+                pool_keys,
+                addrs,
+                sizes,
+                data_offsets,
+            )
+        except Exception as e:
+            self._record_operation(
+                "load_get",
+                time.perf_counter() - started,
+                len(load_items),
+                num_bytes=sum(meta.nbytes for meta in tensor_metas),
+                status="error",
+                num_failed_keys=len(load_items),
+            )
+            logger.exception(
+                "embedding_store_load_failed stage=payload num_items=%d error=%s",
+                len(load_items),
+                e,
+            )
+            raise
+
+        for item, tensor_meta, target, pool_key in zip(
+            load_items,
+            tensor_metas,
+            targets,
+            pool_keys,
+            strict=True,
+        ):
+            try:
                 validate_loaded_tensor(target, tensor_meta)
             except Exception as e:
                 self._record_operation(
                     "load_get",
                     time.perf_counter() - started,
                     1,
-                    num_bytes=tensor_meta.nbytes if tensor_meta is not None else 0,
+                    num_bytes=tensor_meta.nbytes,
                     status="error",
                     num_failed_keys=1,
                 )
                 logger.exception(
-                    "embedding_store_load_failed identifier=%s embedding_pool_key=%s "
-                    "stage=%s shape=%s dtype=%s nbytes=%s error=%s",
+                    "embedding_store_load_failed identifier=%s "
+                    "embedding_pool_key=%s stage=validate shape=%s dtype=%s "
+                    "nbytes=%s error=%s",
                     item.identifier,
                     pool_key.to_string(),
-                    load_stage,
-                    tensor_meta.shape if tensor_meta is not None else None,
-                    tensor_meta.dtype if tensor_meta is not None else None,
-                    tensor_meta.nbytes if tensor_meta is not None else 0,
+                    tensor_meta.shape,
+                    tensor_meta.dtype,
+                    tensor_meta.nbytes,
                     e,
                 )
                 raise
             encoder_cache[item.identifier] = target
-            self._record_operation(
-                "load_get",
-                time.perf_counter() - started,
-                1,
-                num_bytes=tensor_meta.nbytes,
-                status="ok",
-            )
             logger.info(
                 "embedding_store_get identifier=%s embedding_pool_key=%s nbytes=%d "
                 "embedding_store_get_ms=%.3f",
@@ -398,6 +440,14 @@ class EmbeddingStoreWorker:
                 tensor_meta.nbytes,
                 (time.perf_counter() - started) * 1000.0,
             )
+
+        self._record_operation(
+            "load_get",
+            time.perf_counter() - started,
+            len(load_items),
+            num_bytes=sum(tensor_meta.nbytes for tensor_meta in tensor_metas),
+            status="ok",
+        )
 
 
 def _resolve_torch_dtype(dtype: str) -> torch.dtype:

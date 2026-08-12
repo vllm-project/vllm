@@ -244,6 +244,56 @@ class MooncakeEmbeddingStoreClient:
             )
             return None
 
+    def get_tensor_metas(
+        self,
+        pool_keys: list[EmbeddingPoolKey],
+    ) -> list[TensorMeta | None]:
+        """Batch read tensor metadata for multiple pool keys.
+
+        Reads all metadata headers into one contiguous host buffer with a
+        single ``get_into_ranges`` call, then decodes them individually.
+        A failed read or decode yields ``None`` for that key (matching the
+        single-key ``get_tensor_meta`` semantics).
+        """
+        if not pool_keys:
+            return []
+
+        keys = [make_embedding_data_key(pool_key) for pool_key in pool_keys]
+        num_keys = len(pool_keys)
+        metadata_nbytes = MOONCAKE_TENSOR_METADATA_NBYTES
+        buffer = (ctypes.c_ubyte * (num_keys * metadata_nbytes))()
+        buffer_ptr = ctypes.addressof(buffer)
+        self.register_tensor(buffer_ptr, len(buffer))
+        try:
+            results = self.store.get_into_ranges(
+                [buffer_ptr],
+                [keys],
+                [[[i * metadata_nbytes for i in range(num_keys)]]],
+                [[[0] * num_keys]],
+                [[[metadata_nbytes] * num_keys]],
+            )
+        finally:
+            self.unregister_tensor(buffer_ptr)
+
+        tensor_metas: list[TensorMeta | None] = []
+        for index, pool_key in enumerate(pool_keys):
+            if _range_result(results, 0, index) != metadata_nbytes:
+                tensor_metas.append(None)
+                continue
+            start = index * metadata_nbytes
+            metadata = bytes(buffer[start:start + metadata_nbytes])
+            try:
+                tensor_metas.append(
+                    _decode_mooncake_tensor_metadata(pool_key, metadata)
+                )
+            except EmbeddingStoreLoadError:
+                logger.exception(
+                    "failed to decode embedding Mooncake tensor metadata for %s",
+                    pool_key.to_string(),
+                )
+                tensor_metas.append(None)
+        return tensor_metas
+
     def put_tensor(
         self,
         pool_key: EmbeddingPoolKey,
@@ -422,6 +472,53 @@ class MooncakeEmbeddingStoreClient:
         finally:
             self.unregister_tensor(addr)
 
+    def get_tensor_payloads(
+        self,
+        pool_keys: list[EmbeddingPoolKey],
+        addrs: list[int],
+        sizes: list[int],
+        data_offsets: list[int],
+    ) -> None:
+        """Batch read tensor payloads for multiple pool keys.
+
+        Registers all target buffers, issues a single ``get_into_ranges``
+        call for every key, then unregisters. Raises ``EmbeddingStoreLoadError``
+        naming the failed keys if any range does not return the expected size.
+        """
+        if not pool_keys:
+            return
+
+        for addr, size in zip(addrs, sizes, strict=True):
+            self.register_tensor(addr, size)
+        try:
+            keys = [make_embedding_data_key(pool_key) for pool_key in pool_keys]
+            results = self.store.get_into_ranges(
+                addrs,
+                [[key] for key in keys],
+                [[[0]] for _ in keys],
+                [[[offset]] for offset in data_offsets],
+                [[[size]] for size in sizes],
+            )
+        finally:
+            for addr in addrs:
+                self.unregister_tensor(addr)
+
+        failed: list[tuple[EmbeddingPoolKey, int, int]] = []
+        for index, (pool_key, size) in enumerate(
+            zip(pool_keys, sizes, strict=True)
+        ):
+            got = _range_result(results, index)
+            if got != size:
+                failed.append((pool_key, size, got))
+        if failed:
+            raise EmbeddingStoreLoadError(
+                "failed to get embedding tensor payloads: "
+                + "; ".join(
+                    f"{pool_key.to_string()} expected={expected} got={got}"
+                    for pool_key, expected, got in failed[:3]
+                )
+            )
+
     def _read_range(
         self,
         pool_key: EmbeddingPoolKey,
@@ -449,8 +546,17 @@ class MooncakeEmbeddingStoreClient:
 
 
 def _single_range_result(results: Any) -> int:
+    return _range_result(results, 0, 0, 0)
+
+
+def _range_result(
+    results: Any,
+    buffer_index: int,
+    key_index: int = 0,
+    range_index: int = 0,
+) -> int:
     try:
-        return int(results[0][0][0])
+        return int(results[buffer_index][key_index][range_index])
     except Exception:
         return -1
 
