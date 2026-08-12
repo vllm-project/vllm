@@ -1704,14 +1704,24 @@ class Scheduler(SchedulerInterface):
         draft_kv_materialized_req_ids = (
             model_runner_output.draft_kv_materialized_req_ids or set()
         )
-        publishable_prefix_tokens = (
-            {
+        if self.use_eagle_prefix_cache_hashing:
+            publishable_prefix_tokens = {
                 req.req_id: req.num_computed_tokens
                 for req in scheduler_output.scheduled_new_reqs
             }
-            if self.use_eagle_prefix_cache_hashing
-            else {}
-        )
+            # These are per-step snapshots; live request counters may already
+            # include a later async-scheduled chunk.
+            materialized_token_starts = publishable_prefix_tokens.copy()
+            materialized_token_starts.update(
+                zip(
+                    scheduler_output.scheduled_cached_reqs.req_ids,
+                    scheduler_output.scheduled_cached_reqs.num_computed_tokens,
+                    strict=True,
+                )
+            )
+        else:
+            publishable_prefix_tokens = {}
+            materialized_token_starts = {}
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -1870,14 +1880,17 @@ class Scheduler(SchedulerInterface):
                 and status_before_stop == RequestStatus.RUNNING
                 and not output_is_stale
             ):
-                num_publishable_tokens = (
-                    request.num_computed_tokens - request.num_output_placeholders
-                )
-                self._mark_eagle_hashes_publishable(request, num_publishable_tokens)
-                self.kv_cache_manager.cache_blocks(
-                    request,
-                    num_publishable_tokens,
-                )
+                materialized_start = materialized_token_starts[req_id]
+                if materialized_start <= request.num_materialized_eagle_tokens:
+                    num_publishable_tokens = min(
+                        request.num_computed_tokens - request.num_output_placeholders,
+                        materialized_start + num_tokens_scheduled,
+                    )
+                    self._mark_eagle_hashes_publishable(request, num_publishable_tokens)
+                    self.kv_cache_manager.cache_blocks(
+                        request,
+                        num_publishable_tokens,
+                    )
 
             if new_token_ids and self.structured_output_manager.should_advance(
                 request, new_token_ids=new_token_ids
@@ -2921,6 +2934,7 @@ class Scheduler(SchedulerInterface):
                 request.invalidate_eagle_hash_publication(
                     request.num_computed_tokens
                     // self.kv_cache_manager.block_pool.hash_block_size,
+                    request.num_computed_tokens,
                 )
 
                 affected_req_ids.add(request.request_id)

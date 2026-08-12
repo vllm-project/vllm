@@ -207,6 +207,9 @@ class Request:
         # Leading successor-aware hashes whose target and draft KV are ready
         # for content-addressed publication.
         self.num_publishable_block_hashes = 0
+        # Exact contiguous token frontier covered by those materialized KVs.
+        # Unlike the hash count, this preserves sub-block progress.
+        self.num_materialized_eagle_tokens = 0
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -286,6 +289,10 @@ class Request:
             self.num_publishable_block_hashes,
             num_hashes,
         )
+        self.num_materialized_eagle_tokens = min(
+            self.num_materialized_eagle_tokens,
+            num_tokens,
+        )
 
     def mark_eagle_hashes_publishable(
         self,
@@ -294,6 +301,10 @@ class Request:
     ) -> None:
         """Advance the successor-hash publication fence after worker ACK."""
         acknowledged_tokens = min(self.num_tokens, num_tokens)
+        self.num_materialized_eagle_tokens = max(
+            self.num_materialized_eagle_tokens,
+            acknowledged_tokens,
+        )
         num_hashes = min(
             len(self.block_hashes),
             acknowledged_tokens // hash_block_size,
@@ -306,11 +317,16 @@ class Request:
     def invalidate_eagle_hash_publication(
         self,
         num_hashes: int = 0,
+        num_materialized_tokens: int = 0,
     ) -> None:
         """Lower the publication fence to a surviving resident prefix."""
         self.num_publishable_block_hashes = min(
             self.num_publishable_block_hashes,
             num_hashes,
+        )
+        self.num_materialized_eagle_tokens = min(
+            self.num_materialized_eagle_tokens,
+            num_materialized_tokens,
         )
 
     @property

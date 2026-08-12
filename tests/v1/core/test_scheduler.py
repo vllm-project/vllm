@@ -269,11 +269,14 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         [request], {block_ids[0]}, {}, evict_blocks=False
     )
     assert request.num_publishable_block_hashes == 0
+    assert request.num_materialized_eagle_tokens == 0
 
     request.mark_eagle_hashes_publishable(4, block_size)
+    assert request.num_materialized_eagle_tokens == 4
     scheduler.running.remove(request)
     scheduler._preempt_request(request, timestamp=0.0)
     assert request.num_publishable_block_hashes == 0
+    assert request.num_materialized_eagle_tokens == 0
 
 
 def test_scheduler_does_not_publish_eagle_blocks_without_worker_acknowledgement():
