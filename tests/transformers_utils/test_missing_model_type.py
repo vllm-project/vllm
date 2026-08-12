@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from vllm.engine.arg_utils import EngineArgs
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.maple import MapleConfig
 
@@ -46,3 +47,30 @@ def test_model_type_recovered_from_architectures():
     # Defaults only the vLLM config class knows about must still be filled in.
     assert config.swiglu_limit == 7.0
     assert len(config.layer_types) == 4
+
+
+@pytest.mark.cpu_test
+def test_interleaved_maple_does_not_set_a_global_sliding_window():
+    """Full-attention layers must not inherit the local window from the cache.
+
+    `Attention` falls back to `cache_config.sliding_window` when a layer has no
+    per-layer value. Setting it for Maple would silently turn every fourth,
+    full-attention layer into a sliding-window layer.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        config_path = Path(tmp_dir) / "config.json"
+        config_path.write_text(json.dumps(_CONFIG_WITHOUT_MODEL_TYPE))
+
+        vllm_config = EngineArgs(
+            model=tmp_dir,
+            tokenizer=tmp_dir,
+            max_model_len=64,
+        ).create_engine_config()
+
+    assert vllm_config.model_config.hf_config.layer_types == [
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "full_attention",
+    ]
+    assert vllm_config.cache_config.sliding_window is None
