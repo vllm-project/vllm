@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import vllm.envs as envs
-from vllm.connections import HTTPConnection
+from vllm.connections import HTTPConnection, HTTPResponseSizeExceededError
 
 _ONE_MIB = 1024 * 1024
 _SMALL_BODY = b"a" * (_ONE_MIB // 2)
@@ -54,6 +54,7 @@ class _SyncResponse:
         self.headers: dict[str, str] = {}
         self._chunks = chunks
         self.content_accessed = False
+        self.iterated = 0
 
     @property
     def content(self) -> bytes:
@@ -62,7 +63,9 @@ class _SyncResponse:
 
     def iter_content(self, chunk_size: int):
         del chunk_size
-        yield from self._chunks
+        for chunk in self._chunks:
+            self.iterated += 1
+            yield chunk
 
     def raise_for_status(self) -> None:
         return
@@ -77,10 +80,12 @@ class _SyncResponse:
 class _AsyncContent:
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = chunks
+        self.iterated = 0
 
     async def iter_chunked(self, chunk_size: int):
         del chunk_size
         for chunk in self._chunks:
+            self.iterated += 1
             yield chunk
 
 
@@ -103,7 +108,7 @@ class _AsyncResponse:
 
 
 def test_get_bytes_with_limit_streams_instead_of_materializing() -> None:
-    response = _SyncResponse([b"abcd", b"efgh"])
+    response = _SyncResponse([b"abcd", b"efgh", b"ijkl"])
     connection = HTTPConnection()
 
     with (
@@ -112,7 +117,7 @@ def test_get_bytes_with_limit_streams_instead_of_materializing() -> None:
             "get_response",
             return_value=response,
         ) as get_response,
-        pytest.raises(ValueError, match="maximum size"),
+        pytest.raises(HTTPResponseSizeExceededError, match="maximum size"),
     ):
         connection.get_bytes("http://example.com/media", max_bytes=4)
 
@@ -123,11 +128,12 @@ def test_get_bytes_with_limit_streams_instead_of_materializing() -> None:
         allow_redirects=True,
     )
     assert response.content_accessed is False
+    assert response.iterated == 2
 
 
 @pytest.mark.asyncio
 async def test_async_get_bytes_with_limit_streams_instead_of_materializing() -> None:
-    response = _AsyncResponse([b"abcd", b"efgh"])
+    response = _AsyncResponse([b"abcd", b"efgh", b"ijkl"])
     connection = HTTPConnection()
 
     with (
@@ -136,11 +142,12 @@ async def test_async_get_bytes_with_limit_streams_instead_of_materializing() -> 
             "get_async_response",
             new=AsyncMock(return_value=response),
         ),
-        pytest.raises(ValueError, match="maximum size"),
+        pytest.raises(HTTPResponseSizeExceededError, match="maximum size"),
     ):
         await connection.async_get_bytes("http://example.com/media", max_bytes=4)
 
     response.read.assert_not_awaited()
+    assert response.content.iterated == 2
 
 
 def test_get_bytes_rejects_content_length_over_limit(
