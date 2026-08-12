@@ -221,7 +221,7 @@ steps:
     TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py || true &&
     TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py || true &&
     pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp || true &&
-    pytest -v -s distributed/test_utils.py || true'
+    pytest -v -s distributed/test_utils.py --deselect="distributed/test_utils.py::test_cuda_device_count_stateless" || true'
 - label: Distributed Compile + Comm (4 GPUs)
   device: intel_gpu
   timeout_in_minutes: 70
