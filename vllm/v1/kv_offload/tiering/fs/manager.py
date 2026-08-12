@@ -199,6 +199,7 @@ class FileSystemTierManager(SecondaryTierManager):
         for key, bid in zip(job_metadata.keys, job_metadata.block_ids):
             yield Task(
                 key=key,
+                path=self.file_mapper.get_file_name(key),
                 offset=int(bid) * self._block_size,
             )
 
@@ -222,7 +223,7 @@ class FileSystemTierManager(SecondaryTierManager):
         def make_io_fn(batch: list[Task]) -> Callable[[], None]:
             return functools.partial(
                 batch_store_block,
-                paths=[self.file_mapper.get_file_name(t.key) for t in batch],
+                paths=[t.path for t in batch],
                 offsets=[t.offset for t in batch],
                 view=self._primary_kv_view,
                 block_size=self._block_size,
@@ -247,7 +248,7 @@ class FileSystemTierManager(SecondaryTierManager):
         def make_io_fn(batch: list[Task]) -> Callable[[], None]:
             return functools.partial(
                 batch_load_block,
-                paths=[self.file_mapper.get_file_name(t.key) for t in batch],
+                paths=[t.path for t in batch],
                 offsets=[t.offset for t in batch],
                 view=self._primary_kv_view,
                 block_size=self._block_size,

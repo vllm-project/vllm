@@ -24,6 +24,7 @@ logger = init_logger(__name__)
 @dataclass
 class Task:
     key: OffloadKey
+    path: str
     offset: int
 
 
