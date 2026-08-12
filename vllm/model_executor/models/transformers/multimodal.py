@@ -334,7 +334,19 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         """
         Run the HF processor, drop the inputs the model would reject and unpad inputs.
         """
-        hf_inputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        try:
+            hf_inputs = super()._call_hf_processor(
+                prompt, mm_data, mm_kwargs, tok_kwargs
+            )
+        except ValueError:
+            if any(mm_data.values()):
+                raise
+            # Some processors reject a prompt holding placeholders with
+            # no data to go with them, so tokenize it without them
+            prompt_ids = self.info.get_tokenizer().encode(prompt, **tok_kwargs)
+            hf_inputs = transformers.BatchFeature(
+                dict(input_ids=[prompt_ids]), tensor_type="pt"
+            )
         hf_inputs.pop("mm_token_type_ids", None)
         hf_inputs.pop("token_type_ids", None)
         self._unpad_images(hf_inputs)
