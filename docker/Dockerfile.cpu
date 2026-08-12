@@ -173,7 +173,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
-        export RUSTC_WRAPPER=sccache SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
+        export RUSTC_WRAPPER=sccache; \
+        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
         sccache --show-stats; \
     fi && \
     bash build_rust.sh && \
@@ -225,7 +226,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
-        export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
+        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
         sccache --show-stats; \
     fi && \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 && \
@@ -257,7 +258,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         cd triton-cpu; \
         git checkout "270e696d"; \
         if [ "$USE_SCCACHE" = "1" ]; then \
-            export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
+            if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
             export TRITON_APPEND_CMAKE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache"; \
             sccache --show-stats; \
         fi; \
