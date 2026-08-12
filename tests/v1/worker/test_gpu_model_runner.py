@@ -28,6 +28,9 @@ from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.models.cosmos3_edge import (
+    Cosmos3EdgeForConditionalGeneration,
+)
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -449,6 +452,108 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     assert connector_mapping.type is LoRAMappingType.CONNECTOR
     assert connector_mapping.prompt_mapping == (7, 7, 0)
     assert connector_mapping.index_mapping == ((7,) * 14 + (7,) * 13 + (0,) * 12)
+
+
+def _cosmos3_edge_token_counters(spatial_merge_size: int = 2):
+    """Both helpers bound to a stub carrying only the attribute they read."""
+    stub = SimpleNamespace(
+        visual=SimpleNamespace(spatial_merge_size=spatial_merge_size)
+    )
+    model_cls = Cosmos3EdgeForConditionalGeneration
+    return (
+        lambda n: model_cls.get_num_mm_encoder_tokens(stub, n),
+        lambda n: model_cls.get_num_mm_connector_tokens(stub, n),
+    )
+
+
+def test_cosmos3_edge_mm_lora_mapping_covers_every_row():
+    """Every tower and connector row is covered, for images and for video.
+
+    Driven through the production mapping builder rather than asserting the
+    arithmetic alone: an undercount does not raise, it leaves rows reading a
+    stale adapter index from the previous forward pass.
+    """
+    rows_per_token = 2**2
+    encoder_tokens, connector_tokens = _cosmos3_edge_token_counters()
+
+    model = Mock()
+    model.get_num_mm_encoder_tokens.side_effect = encoder_tokens
+    model.get_num_mm_connector_tokens.side_effect = connector_tokens
+    model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
+
+    lora_manager = Mock()
+    lora_manager.supports_tower_connector_lora.return_value = True
+
+    # Observed on a 1300x876 image and a 2-frame video. The video placeholder
+    # spans 456 positions but only 440 are embeddings: the per-frame timestamp
+    # and delimiter tokens are masked out, so get_num_embeds() < length. Sizing
+    # the mapping from length instead would over-cover video by 8 rows a frame.
+    image_embeds = 1107
+    video_embeds, video_length = 440, 456
+    encoder_cache = EncoderCache()
+    encoder_cache.mm_features["req"] = [
+        MultiModalFeatureSpec(
+            data=Mock(),
+            modality="image",
+            identifier="img-0",
+            mm_position=PlaceholderRange(offset=0, length=image_embeds),
+        ),
+        MultiModalFeatureSpec(
+            data=Mock(),
+            modality="video",
+            identifier="vid-0",
+            mm_position=PlaceholderRange(
+                offset=image_embeds,
+                length=video_length,
+                is_embed=torch.tensor(
+                    [True] * video_embeds + [False] * (video_length - video_embeds)
+                ),
+            ),
+        ),
+    ]
+
+    lora_state = LoraState(max_num_reqs=2)
+    lora_request = LoRARequest("vision-lora", 7, "/tmp/vision-lora")
+    lora_state.add_request("req", 0, lora_request)
+
+    set_active_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_cache=encoder_cache,
+        req_id_to_index={"req": 0},
+        lora_state=lora_state,
+        scheduled_encoder_inputs={"req": [0, 1]},
+    )
+
+    _, tower_mapping = lora_manager.set_active_adapters.call_args_list[0].args
+    _, connector_mapping = lora_manager.set_active_adapters.call_args_list[1].args
+
+    total_embeds = image_embeds + video_embeds
+    assert len(tower_mapping.index_mapping) == total_embeds * rows_per_token
+    assert len(connector_mapping.index_mapping) == total_embeds
+    assert set(tower_mapping.index_mapping) == {lora_request.lora_int_id}
+    assert set(connector_mapping.index_mapping) == {lora_request.lora_int_id}
+
+
+def test_cosmos3_edge_token_counters_tolerate_boundary_inputs():
+    """The helpers accept inputs the mapping path cannot itself produce.
+
+    Engine init calls the encoder helper once with a whole-batch budget that
+    carries no divisibility guarantee, and a negative count would floor-divide
+    below zero into a silently empty mapping rather than an error.
+    """
+    rows_per_token = 2**2
+    encoder_tokens, connector_tokens = _cosmos3_edge_token_counters()
+
+    assert connector_tokens(encoder_tokens(1107)) == 1107
+    assert encoder_tokens(4097) == 4097 * rows_per_token
+    assert encoder_tokens(0) == 0
+    assert connector_tokens(0) == 0
+    assert encoder_tokens(-5) == 0
+    assert connector_tokens(-5) == 0
+    # The mapping multiplies a list by the result, so it must be a plain int.
+    assert type(encoder_tokens(7)) is int
+    assert type(connector_tokens(7)) is int
 
 
 def test_update_states_new_request(model_runner, dist_init):
