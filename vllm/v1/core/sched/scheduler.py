@@ -2237,6 +2237,11 @@ class Scheduler(SchedulerInterface):
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
 
+    def get_forward_pass_metrics_request_state(
+        self,
+    ) -> tuple[dict[str, Request], RequestQueue, RequestQueue]:
+        return self.requests, self.waiting, self.skipped_waiting
+
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:

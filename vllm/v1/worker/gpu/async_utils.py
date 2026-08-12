@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -17,6 +18,9 @@ from vllm.v1.outputs import (
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.utils import raise_if_nan_logits
 
+if TYPE_CHECKING:
+    from vllm.v1.metrics.forward_pass_metrics import ForwardPassMetricsTimer
+
 
 class AsyncOutput(AsyncModelRunnerOutput):
     def __init__(
@@ -28,11 +32,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool = False,
         routed_experts: RoutedExpertsTensors | None = None,
+        forward_pass_metrics_timer: "ForwardPassMetricsTimer | None" = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
         # the one where the tensors were created.
         self.model_runner_output = model_runner_output
+        self.forward_pass_metrics_timer = forward_pass_metrics_timer
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.routed_experts = routed_experts
@@ -99,7 +105,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 f"Mask: {mask.cpu().tolist()}"
             )
 
-        return self.model_runner_output
+        timer = self.forward_pass_metrics_timer
+        if timer is None:
+            return self.model_runner_output
+        return timer.drain_into(self.model_runner_output)
 
 
 class AsyncPoolingOutput(AsyncModelRunnerOutput):

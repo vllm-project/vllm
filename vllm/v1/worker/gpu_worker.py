@@ -70,6 +70,10 @@ from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.metrics.forward_pass_metrics import (
+    is_forward_pass_metrics_output_rank,
+    make_forward_pass_metrics_timer,
+)
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -422,6 +426,13 @@ class Worker(WorkerBase):
             )
 
             self.model_runner = GPUModelRunnerV1(self.vllm_config, self.device)
+
+        self.model_runner.forward_pass_metrics_timer = make_forward_pass_metrics_timer(
+            self.vllm_config,
+            is_output_rank=is_forward_pass_metrics_output_rank(
+                self.vllm_config, self.rank
+            ),
+        )
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -1019,7 +1030,9 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        output = self.model_runner.sample_tokens(grammar_output)
+        timer = self.model_runner.forward_pass_metrics_timer
+        return output if timer is None else timer.drain_into(output)
 
     @torch.inference_mode()
     @with_gpu_sync_check
@@ -1083,9 +1096,21 @@ class Worker(WorkerBase):
             )
 
         with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
-            )
+            timer = self.model_runner.forward_pass_metrics_timer
+            if timer is None:
+                output = self.model_runner.execute_model(
+                    scheduler_output, intermediate_tensors
+                )
+            else:
+                timer.start(scheduler_output)
+                try:
+                    output = self.model_runner.execute_model(
+                        scheduler_output, intermediate_tensors
+                    )
+                except Exception:
+                    timer.cancel()
+                    raise
+                timer.finish()
             if (
                 self.use_v2_model_runner
                 and self.model_runner.is_pooling_model
@@ -1095,6 +1120,8 @@ class Worker(WorkerBase):
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
+                if timer is not None and isinstance(output, ModelRunnerOutput):
+                    output = timer.drain_into(output)
                 return output
 
         assert isinstance(output, IntermediateTensors)
@@ -1112,6 +1139,14 @@ class Worker(WorkerBase):
         )
 
         return None
+
+    def drain_forward_pass_timing(
+        self, wait: bool = False
+    ) -> tuple[tuple[int, float], ...]:
+        """Drain output-rank CUDA timings, optionally waiting for completion."""
+
+        timer = self.model_runner.forward_pass_metrics_timer
+        return () if timer is None else timer.drain_samples(wait=wait)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()

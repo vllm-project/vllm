@@ -85,6 +85,7 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
     fault_tolerant_wrapper,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
+from vllm.v1.metrics.forward_pass_metrics import ForwardPassMetricsEmitter
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -166,6 +167,9 @@ class EngineCore:
             log_stats=self.log_stats,
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+        )
+        self.forward_pass_metrics_emitter = ForwardPassMetricsEmitter.from_vllm_config(
+            vllm_config, self.scheduler
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
@@ -588,8 +592,13 @@ class EngineCore:
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
+            self._flush_forward_pass_metrics()
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        if self.forward_pass_metrics_emitter is not None:
+            self.forward_pass_metrics_emitter.begin_iteration(
+                self.scheduler, scheduler_output
+            )
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -606,6 +615,10 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if self.forward_pass_metrics_emitter is not None:
+            self.forward_pass_metrics_emitter.complete_iteration(
+                self.scheduler, scheduler_output, model_output
+            )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
@@ -648,6 +661,10 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            if self.forward_pass_metrics_emitter is not None:
+                self.forward_pass_metrics_emitter.begin_iteration(
+                    self.scheduler, scheduler_output
+                )
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -687,6 +704,7 @@ class EngineCore:
             # Queue is empty. We should not reach here since this method should
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
+            self._flush_forward_pass_metrics()
             return None, False
 
         # Block until the next result is available.
@@ -708,6 +726,10 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if self.forward_pass_metrics_emitter is not None:
+            self.forward_pass_metrics_emitter.complete_iteration(
+                self.scheduler, scheduler_output, model_output
+            )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
@@ -735,6 +757,15 @@ class EngineCore:
 
         return engine_core_outputs, model_executed
 
+    def _flush_forward_pass_metrics(self) -> None:
+        """Finish the final timing before EngineCore enters its idle wait."""
+
+        emitter = self.forward_pass_metrics_emitter
+        if emitter is None or not emitter.has_pending_timing():
+            return
+        samples = self.model_executor.drain_forward_pass_timing(wait=True)
+        emitter.complete_timing_samples(samples)
+
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
             request_ids = []
@@ -748,6 +779,9 @@ class EngineCore:
     def shutdown(self):
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
         self.structured_output_manager.clear_backend()
+        if self.forward_pass_metrics_emitter is not None:
+            self._flush_forward_pass_metrics()
+            self.forward_pass_metrics_emitter.shutdown()
         if self.model_executor:
             self.model_executor.shutdown()
         if self.scheduler:
@@ -1401,6 +1435,10 @@ class EngineCoreProc(EngineCore):
 
         waited = False
         while not self.has_work() and self.is_running():
+            # This is the actual transition to the blocking idle state. Finish
+            # any CUDA timing that could not ride back on the final model
+            # output before waiting indefinitely for the next request.
+            self._flush_forward_pass_metrics()
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():

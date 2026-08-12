@@ -249,6 +249,7 @@ from .utils import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+    from vllm.v1.metrics.forward_pass_metrics import ForwardPassMetricsTimer
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
@@ -299,8 +300,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         routed_experts: RoutedExpertsTensors | None = None,
         check_ep_fault: bool = False,
         num_nans: torch.Tensor | None = None,
+        forward_pass_metrics_timer: "ForwardPassMetricsTimer | None" = None,
     ):
         self._model_runner_output = model_runner_output
+        self._forward_pass_metrics_timer = forward_pass_metrics_timer
         self._invalid_req_indices = invalid_req_indices
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
@@ -393,7 +396,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 f"Mask: {mask.cpu().tolist()}"
             )
 
-        return output
+        timer = self._forward_pass_metrics_timer
+        return output if timer is None else timer.drain_into(output)
 
 
 def _copy_pooler_output_to_cpu(
@@ -515,6 +519,8 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        # Initialized by GPUWorker only on the model-output rank.
+        self.forward_pass_metrics_timer: ForwardPassMetricsTimer | None = None
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -4923,6 +4929,7 @@ class GPUModelRunner(
                 routed_experts=routed_experts_snapshot,
                 check_ep_fault=self.check_ep_fault,
                 num_nans=num_nans_device,
+                forward_pass_metrics_timer=self.forward_pass_metrics_timer,
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"

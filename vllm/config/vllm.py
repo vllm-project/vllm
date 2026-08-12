@@ -1682,6 +1682,24 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
+        fpm_port = self.observability_config.forward_pass_metrics_port
+        if fpm_port:
+            if self.device_config.device_type != "cuda":
+                raise ValueError("Forward-pass metrics currently require a CUDA device")
+            if self.model_config.runner_type != "generate":
+                raise ValueError(
+                    "Forward-pass metrics currently support generative models only"
+                )
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "Forward-pass metrics do not yet support pipeline parallelism"
+                )
+            max_fpm_port = fpm_port + self.parallel_config.data_parallel_size - 1
+            if max_fpm_port > 65535:
+                raise ValueError(
+                    "forward-pass-metrics-port plus data-parallel size exceeds 65535"
+                )
+
         if self.reasoning_config is not None and self.model_config is not None:
             self.reasoning_config.initialize_token_ids(self.model_config)
             if not self.reasoning_config.enabled:
