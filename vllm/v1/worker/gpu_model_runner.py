@@ -3909,6 +3909,25 @@ class GPUModelRunner(
             **model_kwargs,
         )
 
+    def _all_reqs_past_prompt(self, num_reqs: int) -> bool:
+        """True when every scheduled request has finished its prompt.
+
+        ``num_computed_tokens_cpu`` holds the count from *before* this step, so
+        a request still inside a chunked prefill compares strictly less than its
+        prompt length. Cheap numpy compare over ``num_reqs`` entries; safe for
+        ``num_reqs == 0`` (vacuously true) and on the dummy-run path, where the
+        result is discarded in favour of ``force_uniform_decode``.
+        """
+        if num_reqs <= 0:
+            return True
+        batch = self.input_batch
+        return bool(
+            np.all(
+                batch.num_computed_tokens_cpu[:num_reqs]
+                >= batch.num_prompt_tokens[:num_reqs]
+            )
+        )
+
     @staticmethod
     def _is_uniform_decode(
         max_num_scheduled_tokens: int,
@@ -3916,15 +3935,28 @@ class GPUModelRunner(
         num_tokens: int,
         num_reqs: int,
         force_uniform_decode: bool | None = None,
+        all_reqs_past_prompt: bool = True,
     ) -> bool:
         """
         Checks if it's a decode batch with same amount scheduled tokens
         across all requests.
+
+        ``all_reqs_past_prompt`` guards against a *prefill* whose trailing
+        chunk happens to be decode-shaped. With speculative decoding
+        ``uniform_decode_query_len == num_spec + 1``, so a chunked prefill
+        whose remainder is exactly that long satisfies both token-count
+        conditions and would be dispatched to a FULL cudagraph captured for
+        spec-verify. A graph replay does not re-run the Python layer, so the
+        prefill chunk would execute the captured decode kernels against
+        capture-time state -- producing garbage that also leaks the previously
+        served request. Requests still inside their prompt are therefore never
+        eligible for uniform-decode dispatch.
         """
         return (
             (
                 (max_num_scheduled_tokens == uniform_decode_query_len)
                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
+                and all_reqs_past_prompt
             )
             if force_uniform_decode is None
             else force_uniform_decode
@@ -3958,6 +3990,7 @@ class GPUModelRunner(
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             force_uniform_decode=force_uniform_decode,
+            all_reqs_past_prompt=self._all_reqs_past_prompt(num_reqs),
         )
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.

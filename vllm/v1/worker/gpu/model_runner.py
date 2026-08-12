@@ -1082,6 +1082,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.kv_cache_block_copies,
             )
 
+    def _any_req_still_prefilling(
+        self, num_scheduled_tokens: dict[str, int], num_reqs: int
+    ) -> bool:
+        """True if any scheduled request has prompt tokens left to process.
+
+        Mirrors the ``is_prefilling`` test in :meth:`prepare_inputs`
+        (``num_computed_prefill_tokens < prefill_len``), but is evaluated at
+        cudagraph-dispatch time, which runs before ``prepare_inputs``.
+        """
+        if num_reqs <= 0:
+            return False
+        states = self.req_states
+        # Dummy/profile runs synthesize req_ids that were never registered; they
+        # are decode-shaped by construction, so treat unknown ids as not
+        # prefilling rather than failing the lookup.
+        idx = np.fromiter(
+            (states.req_id_to_index.get(rid, -1) for rid in num_scheduled_tokens),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        idx = idx[idx >= 0]
+        if idx.size == 0:
+            return False
+        return bool(
+            np.any(states.num_computed_prefill_tokens[idx] < states.prefill_len.np[idx])
+        )
+
     def prepare_inputs(
         self, scheduler_output: SchedulerOutput, batch_desc: BatchExecutionDescriptor
     ) -> InputBatch:
@@ -1385,6 +1412,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
+        if (
+            not dummy_run
+            and uniform_tok_count is not None
+            and self._any_req_still_prefilling(
+                scheduler_output.num_scheduled_tokens, num_reqs
+            )
+        ):
+            # A chunked prefill whose trailing chunk happens to be decode-shaped
+            # is NOT a decode batch. With spec decode the uniform decode length
+            # is num_spec+1, so a prefill remainder of exactly that many tokens
+            # passes the token-count test above and would be dispatched to a
+            # FULL cudagraph captured for spec-verify. Replaying that graph
+            # skips the Python layer entirely, so the prefill chunk executes the
+            # captured decode kernels against capture-time state -- garbage
+            # output that also leaks the previously served request. Fall back to
+            # the mixed (non-uniform) dispatch for these batches.
+            uniform_tok_count = None
 
         num_active_loras = 0
         if self.lora_config:
