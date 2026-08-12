@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import numpy as np
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -17,9 +18,7 @@ from vllm.multimodal.utils import (
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
 )
-from vllm.renderers.paged_shm.client import PagedShmClient
 from vllm.renderers.paged_shm.tensor_ipc import PagedShmTensorIPC
-from vllm.renderers.paged_shm.types import ShmTensor
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
@@ -33,12 +32,12 @@ class EncoderRunner:
     def __init__(
         self,
         model: SupportsMultiModal,
+        vllm_config: VllmConfig,
         max_num_tokens: int,
         hidden_size: int,
         encoder_cache: EncoderCache,
         dtype: torch.dtype,
         device: torch.device,
-        vllm_config
         enable_timing: bool = False,
     ):
         self.model = model
