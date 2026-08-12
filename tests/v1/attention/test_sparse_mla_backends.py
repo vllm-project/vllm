@@ -1157,7 +1157,9 @@ def test_sparse_backend_prefill_correctness(
             q=query_cat,
             kv_c_normed=kv_c_cat,
             k_pe=k_pe_cat,
-            kv_c_and_k_pe_cache=kv_cache,
+            # Impls receive the bind-time-squeezed [B, N, C] cache; mirror
+            # mla_attention.py's bind_kv_cache squeeze here.
+            kv_c_and_k_pe_cache=kv_cache.squeeze(1),
             attn_metadata=metadata,
             k_scale=torch.tensor(1.0, device=device),
             output=out_buffer,

@@ -39,12 +39,13 @@ from vllm.config import (
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
+    get_kv_cache_layout,
     initialize_kv_cache_layout,
-    resolve_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
+    layer_kv_cache_strides,
     reshape_kv_cache,
 )
 
@@ -357,13 +358,25 @@ def _create_kv_cache(
         head_size=config.head_dim,
         dtype=cache_dtype,
     )
-    layout = resolve_kv_cache_layout()
+    layout = get_kv_cache_layout()
     total_bytes = (
         prod(compute_layer_kv_cache_shape_bytes(spec, max_num_blocks))
         * config.num_layers
     )
     buf = torch.zeros(total_bytes, device=device, dtype=torch.int8)
-    return reshape_kv_cache(buf, spec, max_num_blocks, config.num_layers, layout)
+    layer_stride, block_stride = layer_kv_cache_strides(
+        spec, max_num_blocks, config.num_layers, layout
+    )
+    return reshape_kv_cache(
+        buf,
+        spec,
+        max_num_blocks,
+        config.num_layers,
+        layout,
+        offset=0,
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
 
 
 # ============================================================================
