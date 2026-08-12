@@ -41,10 +41,10 @@ def _assert_close(out, ref, *, min_cos_sim=0.99, context=""):
 
 def _gemm(a, b, output_dtype=torch.float32):
     from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
-        ll_fp32w_gemm,
+        LL_FP32W_GEMM_KERNEL,
     )
 
-    return ll_fp32w_gemm(a, b, output_dtype)
+    return LL_FP32W_GEMM_KERNEL(a, b, output_dtype)
 
 
 SHAPES = [
@@ -411,7 +411,7 @@ def test_gate_linear_uses_ll_fp32w_for_fp32_weight_fast_path(monkeypatch, x_dtyp
         )
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.LL_FP32W_GEMM_KERNEL",
         fake_ll_fp32w_gemm,
     )
     out, bias = gate(x)
@@ -453,7 +453,7 @@ def test_gate_linear_uses_ll_fp32w_when_cpp_tier_disabled(
         )
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.LL_FP32W_GEMM_KERNEL",
         fake_ll_fp32w_gemm,
     )
     out, _ = gate(x)
@@ -480,7 +480,7 @@ def test_gate_linear_uses_cpp_fp32_router_for_supported_cpp_shape(monkeypatch, M
         )
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.LL_FP32W_GEMM_KERNEL",
         fail_ll_fp32w_gemm,
     )
     out, _ = gate(x)
@@ -497,7 +497,7 @@ def test_gate_linear_bf16_weight_skips_ll_fp32w(monkeypatch):
         raise AssertionError("ll_fp32w_gemm should not run for bf16 weights")
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.LL_FP32W_GEMM_KERNEL",
         fail_ll_fp32w_gemm,
     )
     out, _ = gate(x)
@@ -530,7 +530,7 @@ def test_gate_linear_m_gt_32_skips_ll_fp32w(monkeypatch):
         raise AssertionError("ll_fp32w_gemm should not run for M > 32")
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.ll_fp32w_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w.LL_FP32W_GEMM_KERNEL",
         fail_ll_fp32w_gemm,
     )
     out, _ = gate(x)

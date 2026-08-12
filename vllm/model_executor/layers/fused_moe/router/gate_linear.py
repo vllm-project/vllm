@@ -157,6 +157,17 @@ class GateLinear(ReplicatedLinear):
                 and self.out_dtype == torch.float32
             )
 
+        if self.allow_ll_fp32w_gemm and vllm_config is not None:
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+                LL_FP32W_GEMM_KERNEL,
+            )
+
+            LL_FP32W_GEMM_KERNEL.register_warmup(
+                shapes=((input_size, output_size),),
+                m_values=range(1, self.FP32_MAX_TOKENS + 1),
+                a_dtypes=(vllm_config.model_config.dtype,),
+            )
+
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
 
@@ -196,6 +207,17 @@ class GateLinear(ReplicatedLinear):
                 and self.weight.dtype == torch.float32
                 and out_dtype == torch.float32
             )
+            vllm_config = get_current_vllm_config_or_none()
+            if self.allow_ll_fp32w_gemm and vllm_config is not None:
+                from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+                    LL_FP32W_GEMM_KERNEL,
+                )
+
+                LL_FP32W_GEMM_KERNEL.register_warmup(
+                    shapes=((self.weight.shape[1], self.weight.shape[0]),),
+                    m_values=range(1, self.FP32_MAX_TOKENS + 1),
+                    a_dtypes=(vllm_config.model_config.dtype,),
+                )
 
     def forward(
         self, x: torch.Tensor
@@ -238,10 +260,10 @@ class GateLinear(ReplicatedLinear):
             and x.dtype in (torch.bfloat16, torch.float16, torch.float32)
         ):
             from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
-                ll_fp32w_gemm,
+                LL_FP32W_GEMM_KERNEL,
             )
 
-            output = ll_fp32w_gemm(x, self.weight)
+            output = LL_FP32W_GEMM_KERNEL(x, self.weight)
             return output, None
 
         # Tier 5: experimental bf16x3 CuteDSL kernel for fp32 router weights
