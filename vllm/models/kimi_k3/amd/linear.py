@@ -594,9 +594,10 @@ class KimiDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         prefix_delta: torch.Tensor | None = None,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor
-    ]:
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ):
         if self.use_attn_residuals:
             assert residual is not None
             return self.forward_attn_residual(
