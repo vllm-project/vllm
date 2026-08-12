@@ -31,6 +31,8 @@ endif()
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
+option(VLLM_SKIP_OPTIONAL_EXTERNAL_PROJECTS
+  "Skip package-only external projects for targeted extension builds" OFF)
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
@@ -1565,13 +1567,16 @@ if (VLLM_GPU_LANG STREQUAL "HIP")
   vllm_finalize_hipify_target()
 endif()
 
-# For CUDA and HIP builds also build the triton_kernels external package.
-if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
+# For CUDA and HIP builds also build the Python-only external packages. Targeted
+# extension builds can skip these because no native extension links against them.
+if(NOT VLLM_SKIP_OPTIONAL_EXTERNAL_PROJECTS AND
+   (VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP"))
     include(cmake/external_projects/triton_kernels.cmake)
 endif()
 
 # For CUDA we also build and ship some external projects.
-if (VLLM_GPU_LANG STREQUAL "CUDA")
+if (VLLM_GPU_LANG STREQUAL "CUDA" AND
+    NOT VLLM_SKIP_OPTIONAL_EXTERNAL_PROJECTS)
     include(cmake/external_projects/deepgemm.cmake)
     include(cmake/external_projects/fmha_sm100.cmake)
     include(cmake/external_projects/flashmla.cmake)
