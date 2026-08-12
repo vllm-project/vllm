@@ -45,7 +45,7 @@ if current_platform.is_cuda():
         # Falcon-H1: parallel hybrid (every layer has both attention and SSM).
         # The mamba and attention groups end up with different GPU block sizes
         # after page-size unification, so we leave cpu_block_size=None
-        # (block_size_factor stays 1).
+        # (blocks_per_chunk stays 1).
         ("tiiuae/Falcon-H1-0.5B-Instruct", None, None, True),
     ]
 
@@ -138,6 +138,10 @@ def _wait_for_prefix_cache_reset(llm: LLM) -> None:
 
 
 def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
+    # TODO: Reintroduce latency test on ROCm once MRV2 supports cross
+    # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947
+    if current_platform.is_rocm():
+        return
     sampling_params = SamplingParams(max_tokens=1)
 
     num_times_cpu_better_than_cold = 0
@@ -247,23 +251,19 @@ def test_cpu_offloading(
         kv_connector_extra_config=extra_config,
     )
 
-    # KV events are incompatible with HMA (setting kv_events_config
-    # would force HMA off), so only enable them for non-HMA models.
     subscriber: MockSubscriber | None = None
-    kv_events_config: KVEventsConfig | None = None
-    if not uses_hma:
-        port: int
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("0.0.0.0", 0))
-            port = s.getsockname()[1]
+    port: int
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("0.0.0.0", 0))
+        port = s.getsockname()[1]
 
-        events_endpoint = f"tcp://*:{port}"
-        kv_events_config = KVEventsConfig(
-            enable_kv_cache_events=True,
-            publisher="zmq",
-            endpoint=events_endpoint,
-            topic="test",
-        )
+    events_endpoint = f"tcp://*:{port}"
+    kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint=events_endpoint,
+        topic="test",
+    )
 
     # Attention-free / hybrid models disable prefix caching by default
     # (ModelConfig.is_prefix_caching_supported returns False).  Without it,
@@ -285,9 +285,8 @@ def test_cpu_offloading(
         **({"max_num_seqs": 1} if current_platform.is_rocm() else {}),
     )
 
-    if kv_events_config is not None:
-        events_endpoint = events_endpoint.replace("*", "127.0.0.1")
-        subscriber = MockSubscriber(events_endpoint, topic=kv_events_config.topic)
+    events_endpoint = events_endpoint.replace("*", "127.0.0.1")
+    subscriber = MockSubscriber(events_endpoint, topic=kv_events_config.topic)
 
     try:
         _latency_test(llm, subscriber)
@@ -543,10 +542,13 @@ def test_fs_tiering_offloading(tmp_path) -> None:
     [
         # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
         # ("tiiuae/falcon-mamba-7b", 16, 1),
-        ("state-spaces/mamba-1.4b-hf", 16, 1)
+        ("state-spaces/mamba-1.4b-hf", 16, 1),
     ],
 )
-def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
+@pytest.mark.parametrize("mamba_cache_mode", ["align", "all"])
+def test_mamba_cpu_offload_boundary(
+    model: str, block_size: int, tp_size: int, mamba_cache_mode: str
+):
     kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
@@ -563,7 +565,11 @@ def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
         kv_transfer_config=kv_transfer_config,
         language_model_only=True,
         enable_prefix_caching=True,
-        mamba_cache_mode="align",
+        mamba_cache_mode=mamba_cache_mode,
+        # Use lossless state storage so this exact-equality regression isolates
+        # offload boundary selection from low-precision Mamba checkpointing.
+        mamba_cache_dtype="float32",
+        mamba_ssm_cache_dtype="float32",
         disable_hybrid_kv_cache_manager=False,
     )
 
@@ -600,12 +606,10 @@ def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
             )
 
     try:
-        # Mamba has only a single state. The CPU cache stores are triggered
-        # at offload block boundaries. When the prompt is exactly at the boundary,
-        # The CPU offload should not load the cached block.
-        # This is because we'd use that state to recompute the last token. This
-        # does not work for mamba as there is only one KV value and that is for
-        # for the token at the boundary.
+        # A cached Mamba entry is a point state. CPU cache stores are triggered
+        # at offload block boundaries. When the prompt is exactly at a boundary,
+        # CPU offload must not load that boundary's cached state because it already
+        # includes the last token that must be recomputed.
         # This is fine for other attention types as we have all the necessary
         # token KV values in the hit blocks.
         prompt = TokensPrompt(prompt_token_ids=initial_ids)

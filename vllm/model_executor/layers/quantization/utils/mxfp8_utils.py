@@ -41,8 +41,8 @@ def _mxfp8_e4m3_quantize_torch(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Naive MXFP8 quantization.
     For each block of 32 elements along the last dimension, compute a
-    shared e8m0 scale (the biased exponent of the block-wise amax)
-    and quantize each element to float8_e4m3fn.
+    shared e8m0 scale that fits the block-wise amax into the finite
+    float8_e4m3fn range, and quantize each element to float8_e4m3fn.
 
     Returns (quantized_values [same shape, fp8], scales uint8).
     Scale shape depends on is_sf_swizzled_layout:
@@ -58,7 +58,8 @@ def _mxfp8_e4m3_quantize_torch(
 
     amax = x_blocked.abs().amax(dim=-1)
     amax = amax.clamp(min=torch.finfo(torch.float32).tiny)
-    scale_biased = torch.floor(torch.log2(amax)) + 127.0
+    fp8_max = torch.finfo(MXFP8_VALUE_DTYPE).max
+    scale_biased = torch.ceil(torch.log2(amax / fp8_max)) + 127.0
     scale_biased = scale_biased.clamp(0, 254)
     scales_uint8 = scale_biased.to(torch.uint8)
 
@@ -184,6 +185,7 @@ def _mxfp8_e4m3_quantize_impl(
             x,
             is_sf_swizzled_layout=is_sf_swizzled_layout,
             alignment=alignment if alignment > 0 else 32,
+            backend="cute-dsl",
         )
         if x_scales.ndim == 1 and x.ndim == 2 and not is_sf_swizzled_layout:
             x_scales = x_scales.view(x.size(0), -1)

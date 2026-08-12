@@ -9,7 +9,7 @@ import pytest_asyncio
 from transformers import AutoProcessor
 
 from tests.entrypoints.multimodal.conftest import TEST_IMAGE_ASSETS
-from tests.utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
+from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.platforms import current_platform
@@ -92,7 +92,6 @@ def server():
     # ROCm: Increase timeouts to handle potential network delays and slower
     # video processing when downloading multiple videos from external sources
     env_overrides = {
-        **ROCM_ENV_OVERRIDES,
         **(
             {
                 "VLLM_VIDEO_FETCH_TIMEOUT": "120",

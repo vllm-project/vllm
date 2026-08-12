@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    amax_for_moe_activation_quant,
     get_fp8_min_max,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -33,7 +34,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     transform_sf_into_required_layout,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
 
@@ -42,39 +43,6 @@ def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):
         x = x.dtype
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
-
-
-def _triton_per_token_group_quant_fp8_impl(
-    x: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return per_token_group_quant_fp8(
-        x, group_size, column_major_scales=False, use_ue8m0=False
-    )
-
-
-def _triton_per_token_group_quant_fp8_fake(
-    x: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    M, N = x.shape
-    x_fp8 = torch.empty((M, N), dtype=current_platform.fp8_dtype(), device=x.device)
-    out_bs = torch.empty(
-        (
-            M,
-            (N + group_size - 1) // group_size,
-        ),
-        dtype=torch.float32,
-        device=x.device,
-    )
-    return x_fp8, out_bs
-
-
-direct_register_custom_op(
-    "triton_per_token_group_quant_fp8",
-    _triton_per_token_group_quant_fp8_impl,
-    fake_impl=_triton_per_token_group_quant_fp8_fake,
-)
 
 
 def input_to_float8(
@@ -864,7 +832,7 @@ def get_w8a8_block_fp8_configs(
 
     # First look up if an optimized configuration is available in the configs
     # directory
-    device_name = current_platform.get_device_name().replace(" ", "_")
+    device_name = get_device_name_as_file_name()
     json_file_name = f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8,block_shape=[{block_n},{block_k}].json"  # noqa: E501
 
     config_file_path = os.path.join(
@@ -912,6 +880,36 @@ def w8a8_triton_block_scaled_mm(
     Returns:
         torch.Tensor: The result of matmul.
     """
+
+    from vllm.platforms.rocm import on_gfx1250
+
+    if on_gfx1250():
+        # Torch upcast reference: dequantize A,B to fp32 and matmul in fp32.
+        # Avoids the gfx1250 native-fp8 block GEMM NaN bug. Correct but slow.
+        _bn, _bk = block_size[0], block_size[1]
+        _As = (
+            _upcast_e8m0_to_fp32(As)
+            if As.dtype == torch.float8_e8m0fnu
+            else As.to(torch.float32)
+        )
+        _Bs = (
+            _upcast_e8m0_to_fp32(Bs)
+            if Bs.dtype == torch.float8_e8m0fnu
+            else Bs.to(torch.float32)
+        )
+        _K = A.shape[-1]
+        _N = B.shape[0]
+        _Af = A.to(torch.float32).reshape(-1, _K)
+        _Asf = (
+            _As.to(torch.float32)
+            .reshape(-1, _As.shape[-1])
+            .repeat_interleave(_bk, dim=1)[:, :_K]
+        )
+        _Bf = B.to(torch.float32)
+        _Bsf = _Bs.repeat_interleave(_bn, dim=0).repeat_interleave(_bk, dim=1)[:_N, :_K]
+        _out = (_Af * _Asf) @ (_Bf * _Bsf).t()
+        return _out.to(output_dtype).reshape(*A.shape[:-1], _N)
+
     assert len(block_size) == 2
     block_n, block_k = block_size[0], block_size[1]
 
@@ -1058,6 +1056,34 @@ def _upcast_e8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:
     return fp32_bits.view(torch.float32)
 
 
+def deepgemm_post_process_weight_scale_block(
+    ws: torch.Tensor,
+    mn: int,
+    k: int,
+    quant_block_shape: tuple[int, ...],
+    num_groups: int,
+    is_sfa: bool = False,
+) -> torch.Tensor:
+    if ws.dtype in (torch.float8_e8m0fnu, torch.uint8):
+        # Scales already in E8M0 from checkpoint; upcast to fp32 and let
+        # DeepGEMM pack the layout expected by the target architecture.
+        ws = _upcast_e8m0_to_fp32(ws)
+    else:
+        assert ws.dtype == torch.float32, (
+            f"Expected tensor scales dtype to be torch.float32 or "
+            f"torch.float8_e8m0fnu or torch.uint8, got {ws.dtype} instead"
+        )
+
+    return transform_sf_into_required_layout(
+        sf=ws,
+        mn=mn,
+        k=k,
+        recipe=(1, quant_block_shape[0], quant_block_shape[1]),
+        num_groups=num_groups,
+        is_sfa=is_sfa,
+    )
+
+
 def deepgemm_post_process_fp8_weight_block(
     wq: torch.Tensor,
     ws: torch.Tensor,
@@ -1073,13 +1099,13 @@ def deepgemm_post_process_fp8_weight_block(
 
     if ws.dtype in (torch.float8_e8m0fnu, torch.uint8):
         # Scales already in E8M0 from checkpoint (float8_e8m0fnu, or raw E8M0
-        # bits as uint8 for MXFP8) — upcast to fp32 and skip requantization
+        # bits as uint8 for MXFP8) - upcast to fp32 and skip requantization
         # (weights already have power-of-two scales).
         ws = _upcast_e8m0_to_fp32(ws)
     else:
         assert ws.dtype == torch.float32, (
             f"Expected tensor scales dtype to be torch.float32 or "
-            f"torch.float8_e8m0fnu, got {ws.dtype} instead"
+            f"torch.float8_e8m0fnu or torch.uint8, got {ws.dtype} instead"
         )
         if use_e8m0:
             requant_weight_ue8m0_inplace(wq, ws, block_size=quant_block_shape)
@@ -1094,16 +1120,12 @@ def deepgemm_post_process_fp8_weight_block(
         r = wq.size(0) // g
         wq = wq.view(g, r, d)
         ws = ws.view(g, r // quant_block_shape[0], d // quant_block_shape[1])
-        # Pre-transform scale with recipe=(1, 128, 128) to broadcast + pack
-        # into TMA-aligned UE8M0 (INT32) layout. At runtime fp8_einsum uses
-        # recipe=(1, 1, 128) which sees INT dtype and skips re-transform.
-        dg_ws = transform_sf_into_required_layout(
-            sf=ws,
+        dg_ws = deepgemm_post_process_weight_scale_block(
+            ws=ws,
             mn=r,
             k=d,
-            recipe=(1, quant_block_shape[0], quant_block_shape[1]),
+            quant_block_shape=quant_block_shape,
             num_groups=g,
-            is_sfa=False,
         )
         return wq, dg_ws
 
@@ -1113,22 +1135,12 @@ def deepgemm_post_process_fp8_weight_block(
         wq = wq.unsqueeze(0)
         ws = ws.unsqueeze(0)
 
-    # From https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/utils/layout.hpp#L46
-    # (1, block_n, block_k): (1, 128, 128) for FP8 block, (1, 1, 32) for MXFP8.
-    recipe = (1, quant_block_shape[0], quant_block_shape[1])
-
-    # Ref : https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/apis/gemm.hpp
-    # DeepGemm uses the `transform_sf_into_required_layout` function to
-    # represent scales in the correct format.
-    dg_ws = transform_sf_into_required_layout(
-        sf=ws,
+    dg_ws = deepgemm_post_process_weight_scale_block(
+        ws=ws,
         mn=wq.size(1),
         k=wq.size(2),
-        recipe=recipe,
+        quant_block_shape=quant_block_shape,
         num_groups=wq.size(0),
-        # is the scale factors for A in (Refers to the argument A in A @ B).
-        # Weights are B.
-        is_sfa=False,
     )
 
     if original_ndim == 2:
@@ -1426,6 +1438,7 @@ def process_fp8_weight_tensor_strategy_moe(
 def process_fp8_input_tensor_strategy_moe(
     w13_input_scale: torch.Tensor,
     w2_input_scale: torch.Tensor,
+    enable_eplb: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Process moe input scales for tensor-wise quantization strategy."""
 
@@ -1436,4 +1449,7 @@ def process_fp8_input_tensor_strategy_moe(
             "for each layer."
         )
 
-    return w13_input_scale.max(), w2_input_scale.max()
+    return (
+        amax_for_moe_activation_quant(w13_input_scale, enable_eplb),
+        amax_for_moe_activation_quant(w2_input_scale, enable_eplb),
+    )
