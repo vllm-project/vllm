@@ -259,7 +259,7 @@ class FileSystemTierManager(SecondaryTierManager):
                         block_size=self._block_size,
                         use_o_direct=self._use_o_direct,
                     )
-                except OSError as exc:
+                except Exception as exc:
                     # Record number of successful loads.
                     num_succeeded = getattr(exc, "num_succeeded", 0)
                     failed_q = self._load_job_failed_keys[job_id]
