@@ -447,6 +447,9 @@ class Ernie4_5_VisionTransformer(nn.Module):
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+        # `pos_ids` is built on the host; stage it over non-blocking so the
+        # gather below doesn't index a device tensor with a CPU one.
+        pos_ids = pos_ids.to(rotary_pos_emb_full.device, non_blocking=True)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 

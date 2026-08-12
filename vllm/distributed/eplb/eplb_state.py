@@ -818,15 +818,17 @@ class EplbState:
             self.model_states.values(), global_expert_load_windows
         ):
             if not self.is_async or is_profile:
-                # Get new expert mappings for the model
-                new_physical_to_logical_map = self.policy.rebalance_experts(
-                    global_expert_load_window.cpu(),
-                    num_replicas,
-                    num_groups,
-                    num_nodes,
-                    num_gpus,
-                    eplb_model_state.physical_to_logical_map.cpu(),
-                )
+                # Get new expert mappings for the model. The policy runs on the
+                # host, so the load window and current map have to come back.
+                with gpu_sync_allowed():
+                    new_physical_to_logical_map = self.policy.rebalance_experts(
+                        global_expert_load_window.cpu(),
+                        num_replicas,
+                        num_groups,
+                        num_nodes,
+                        num_gpus,
+                        eplb_model_state.physical_to_logical_map.cpu(),
+                    )
 
                 skip_rearrange = False
                 if (
@@ -1241,7 +1243,9 @@ def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
     src_padding = dst.shape[-1] - src.shape[-1]
     assert src_padding >= 0
     new_src = torch.nn.functional.pad(src, (0, src_padding), value=-1)
-    dst.copy_(new_src)
+    # The map is committed from the host once per layer per rearrangement.
+    with gpu_sync_allowed():
+        dst.copy_(new_src)
 
 
 def _commit_eplb_maps_for_layer(

@@ -54,6 +54,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -306,7 +307,10 @@ def _flatten_valid_audio_embeddings(
         < output_lengths[:, None]
     )
 
-    return audio_embeddings[valid_mask], output_lengths
+    # Boolean-mask indexing has a data-dependent output shape, so the count
+    # has to come back to the host.
+    with gpu_sync_allowed():
+        return audio_embeddings[valid_mask], output_lengths
 
 
 def _count_audio_tokens_from_mask(

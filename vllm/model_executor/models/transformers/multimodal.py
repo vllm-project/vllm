@@ -727,9 +727,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         kwargs.pop("token_type_ids", None)
         kwargs.pop("mm_token_type_ids", None)
 
-        audio_output = self.model.get_audio_features(
-            input_features, return_dict=True, **kwargs
-        )
+        # HuggingFace's `get_audio_features` implementations branch on
+        # per-sample feature lengths internally.
+        with gpu_sync_allowed():
+            audio_output = self.model.get_audio_features(
+                input_features, return_dict=True, **kwargs
+            )
         audio_embeddings = audio_output.pooler_output
 
         # Per-audio token counts are needed as Python ints to split.

@@ -59,6 +59,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -1307,13 +1308,17 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
             )
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            # These are all built on the host, so stage them over
+            # non-blocking rather than forcing a sync per transfer.
             siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
-                pixel_values.device
+                pixel_values.device, non_blocking=True
             )
-            cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32).to(
-                pixel_values.device
+            cu_seqlens = async_tensor_h2d(
+                cu_seqlens, dtype=torch.int32, device=pixel_values.device
             )
-            sample_indices = torch.concat(sample_indices, dim=0).to(pixel_values.device)
+            sample_indices = torch.concat(sample_indices, dim=0).to(
+                pixel_values.device, non_blocking=True
+            )
 
             image_embeds = self.visual(
                 pixel_values=pixel_values,

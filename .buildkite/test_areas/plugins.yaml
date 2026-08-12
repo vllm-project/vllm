@@ -75,6 +75,9 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/plugins_tests/bitsandbytes
   commands:
+    # bitsandbytes' int8 quant syncs internally, and it is out-of-tree, so
+    # there is nothing to wrap on the vLLM side.
+    - export VLLM_GPU_SYNC_CHECK=
     - pip install "vllm-bnb-plugin >= 0.0.1"
     - pytest -v -s plugins_tests/bitsandbytes -m 'not distributed'
 
@@ -89,5 +92,8 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/plugins_tests/bitsandbytes
   commands:
+    # bitsandbytes' int8 quant syncs internally, and it is out-of-tree, so
+    # there is nothing to wrap on the vLLM side.
+    - export VLLM_GPU_SYNC_CHECK=
     - pip install "vllm-bnb-plugin >= 0.0.1"
     - pytest -v -s plugins_tests/bitsandbytes -m 'distributed(num_gpus=2)'

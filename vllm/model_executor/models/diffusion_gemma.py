@@ -864,7 +864,8 @@ class DiffusionGemmaModelState(ModelState):
         self.diffusion_states.add_request(req_index)
         if not new_req_data.req_id.startswith("_warmup_"):
             prompt_len = len(new_req_data.prompt_token_ids)
-            self.diffusion_states.prompt_len[req_index] = prompt_len
+            # `fill_` on the slice avoids the sync a scalar store would force.
+            self.diffusion_states.prompt_len[req_index].fill_(prompt_len)
 
     def remove_request(self, req_id: str) -> None:
         idx = self._req_id_to_index.pop(req_id, None)
