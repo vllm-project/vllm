@@ -7,12 +7,52 @@ import torch
 
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 from vllm.utils.platform_utils import num_compute_units
 
+# Global per-test cleanup costs more than the tests themselves.
+# These tests can just cleanup once at the end
+pytestmark = pytest.mark.skip_global_cleanup
+
+SEEDS = [0]
+
+# These options are independent in the kernels, so the sets below cover every
+# pair of them instead of the full product. bias_mode: 0 = none, 1 = (m,),
+# 2 = (n, m).
+OPTIONS_WVSPLITKRC = [
+    # dtype, padded_a, bias_mode, xnorm
+    (torch.float16, False, 0, False),
+    (torch.float16, True, 1, True),
+    (torch.float16, True, 2, False),
+    (torch.bfloat16, True, 0, True),
+    (torch.bfloat16, False, 1, False),
+    (torch.bfloat16, False, 2, True),
+]
+
+OPTIONS_WVSPLITK = [
+    # dtype, padded_a, padded_b, bias_mode, xnorm
+    (torch.float16, False, False, 0, False),
+    (torch.float16, False, True, 1, True),
+    (torch.float16, True, False, 2, True),
+    (torch.bfloat16, True, True, 0, True),
+    (torch.bfloat16, True, False, 1, False),
+    (torch.bfloat16, False, True, 2, False),
+]
+
+OPTIONS_WVSPLITK_FP8 = [
+    # dtype, padded_a, padded_b, biased, xnorm
+    (torch.float16, False, False, True, True),
+    (torch.bfloat16, True, False, False, True),
+    (torch.bfloat16, False, True, True, True),
+    (torch.float16, True, False, True, False),
+    (torch.float16, False, True, False, False),
+    (torch.bfloat16, True, True, False, False),
+]
+
 DTYPES = [torch.bfloat16, torch.float16]
-BIAS_MODES = [0, 1, 2]
+
 # Specific (N, K, M) combinations for targeted testing
 NKM_FACTORS_LLMM1 = [
     # Small, medium, large cases
@@ -52,6 +92,7 @@ NKM_FACTORS_WVSPLITK = [
     (4, 256, 8),
 ]
 
+# N is bucketed up to its next ^2 (16/32/64/128) and the remainder is masked
 N_FACTORS_WVSPLITKRC = [
     13,
     16,
@@ -70,7 +111,9 @@ N_FACTORS_WVSPLITKRC = [
     117,
     128,
 ]
+# K shards are 512 wide, evenly divided or not, +8 for a partial 8-element load
 K_FACTORS_WVSPLITKRC = [2880, 2880 + 8, 3072, 3072 + 8]
+# M tiles are 64 rows, +16 for a partial tile
 M_FACTORS_WVSPLITKRC = [128, 128 + 16, 256, 256 + 16, 640, 640 + 16]
 
 NKM_FACTORS_WVSPLITK_FP8 = [
@@ -106,7 +149,11 @@ NKM_FACTORS_WVSPLITK_FP8 = [
     (4, 32768 * 2 + 16, 28672 + 16),
 ]
 
-SEEDS = [0]
+
+@pytest.fixture(scope="module", autouse=True)
+def cleanup_after_all_tests():
+    yield
+    cleanup_dist_env_and_memory()
 
 
 def pad_fp8(weight):
@@ -116,17 +163,21 @@ def pad_fp8(weight):
     return F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
 
 
-@pytest.mark.parametrize("xnorm", [False, True])
+def make_bias(bias_mode, n, m, dtype):
+    if bias_mode == 0:
+        return None
+    shape = (m,) if bias_mode == 1 else (n, m)
+    return torch.rand(shape, dtype=dtype, device="cuda") * 2 - 1
+
+
 @pytest.mark.parametrize("n", N_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("k", K_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("m", M_FACTORS_WVSPLITKRC)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype,padded_a,bias_mode,xnorm", OPTIONS_WVSPLITKRC)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("padded_a", [False, True])
-@pytest.mark.parametrize("bias_mode", BIAS_MODES)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
-def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode):
+def test_rocm_wvsplitkrc_kernel(n, k, m, dtype, padded_a, bias_mode, xnorm, seed):
     torch.manual_seed(seed)
     cu_count = num_compute_units()
 
@@ -155,13 +206,7 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
     if padded_a:
         A = pad_fp8(A)
 
-    BIAS = None
-    if bias_mode == 1:
-        BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
-    elif bias_mode == 2:
-        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
-    elif bias_mode == 3:
-        BIAS = torch.rand(1, m, dtype=dtype, device="cuda") * 2 - 1
+    BIAS = make_bias(bias_mode, n, m, dtype)
 
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitKrc(A, B, cu_count, BIAS)
@@ -197,16 +242,15 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
     torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
 
 
-@pytest.mark.parametrize("xnorm", [False, True])
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize(
+    "dtype,padded_a,padded_b,bias_mode,xnorm",
+    OPTIONS_WVSPLITK,
+)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-@pytest.mark.parametrize("bias_mode", BIAS_MODES)
-@pytest.mark.parametrize("padded_a", [False, True])
-@pytest.mark.parametrize("padded_b", [False, True])
 def test_rocm_wvsplitk_kernel(
-    xnorm, n, k, m, dtype, seed, bias_mode, padded_a, padded_b
+    n, k, m, dtype, padded_a, padded_b, bias_mode, xnorm, seed
 ):
     torch.manual_seed(seed)
     cu_count = num_compute_units()
@@ -217,11 +261,7 @@ def test_rocm_wvsplitk_kernel(
     A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
     B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
 
-    BIAS = None
-    if bias_mode == 1:
-        BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
-    elif bias_mode == 2:
-        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
+    BIAS = make_bias(bias_mode, n, m, dtype)
 
     if padded_a:
         A = pad_fp8(A)
@@ -236,19 +276,18 @@ def test_rocm_wvsplitk_kernel(
     torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
 
 
-@pytest.mark.parametrize("xnorm", [False, True])
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize(
+    "dtype,padded_a,padded_b,biased,xnorm",
+    OPTIONS_WVSPLITK_FP8,
+)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("padded_a", [False, True])
-@pytest.mark.parametrize("padded_b", [False, True])
-@pytest.mark.parametrize("biased", [False, True])
 @pytest.mark.skipif(
     not (current_platform.is_rocm() and current_platform.supports_fp8()),
     reason="only test for rocm fp8",
 )
 def test_rocm_wvsplitk_fp8_kernel(
-    xnorm, n, k, m, dtype, seed, padded_a, padded_b, biased
+    n, k, m, dtype, padded_a, padded_b, biased, xnorm, seed
 ):
     torch.manual_seed(seed)
 

@@ -77,7 +77,15 @@ class WeightSource(ABC):
 
     @abstractmethod
     def metadata(self) -> list[ParamMeta]:
-        """Declare what iteration will yield, without transferring anything."""
+        """Declare what iteration will yield, without transferring anything.
+
+        Must agree with iteration element for element: the same parameters, in
+        the same order, with the same dtypes and shapes. Backends may read both
+        channels and trust that they match (dense NCCL sizes the worker's receive
+        buffers and its packed chunk boundaries from this, then sends the bytes
+        from iteration), so a source that disagrees between the two splits the
+        stream differently on each side.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -339,32 +347,6 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         Shutdown the weight transfer engine.
         This should be called when the worker is shutting down.
-        """
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def trainer_send_weights(
-        iterator: Iterator[Any],
-        trainer_args: dict[str, Any] | Any,
-    ) -> None:
-        """
-        Send weights from trainer to inference workers.
-
-        This is a static method that can be called from the trainer process
-        to send weights to all inference workers.
-
-        Args:
-            iterator: Iterator of backend-specific items to send.
-            trainer_args: Dictionary containing backend-specific arguments needed
-                         to send weights. The structure depends on the backend:
-                         - NCCL: Contains 'group', 'src', 'packed', etc.
-                         - IPC: Contains 'mode' ('http' or 'ray'),
-                                'llm_handle' (for Ray), 'url' (for HTTP), etc.
-
-        Example:
-            >>> param_iter = ((n, p) for n, p in model.named_parameters())
-            >>> engine.trainer_send_weights(param_iter, trainer_args)
         """
         raise NotImplementedError
 
