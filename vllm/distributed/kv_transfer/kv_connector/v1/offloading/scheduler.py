@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     Locality,
@@ -217,18 +218,13 @@ class SchedulerOffloadConfig(NamedTuple):
                 return None
             return per_segment
 
-        eagle_groups = {
-            idx
-            for idx, g in enumerate(kv_cache_config.kv_cache_groups)
-            if g.is_eagle_group
-        }
-
         use_eagle = (
             vllm_config.speculative_config is not None
             and vllm_config.speculative_config.use_eagle()
         )
-        if use_eagle and not eagle_groups:
-            eagle_groups = set(range(len(kv_cache_config.kv_cache_groups)))
+        eagle_groups = KVCacheSpecRegistry.get_eagle_cache_peek_group_ids(
+            kv_cache_config.kv_cache_groups, use_eagle
+        )
 
         if eagle_groups:
             logger.info(

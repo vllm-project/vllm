@@ -41,6 +41,7 @@ class SingleTypeKVCacheManager(ABC):
     """
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
+    supports_eagle_cache_peek: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -675,6 +676,7 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
+    supports_eagle_cache_peek: ClassVar[bool] = True
 
     @classmethod
     def find_longest_cache_hit(
@@ -874,6 +876,8 @@ class RSWAManager(FullAttentionManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
+    supports_eagle_cache_peek: ClassVar[bool] = True
+
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
@@ -1289,6 +1293,9 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
+        )
+        assert not drop_eagle_block, (
+            "MambaManager cannot drop an EAGLE/MTP cache-peek state"
         )
         assert dcp_world_size == 1, "DCP not support mamba now."
         assert pcp_world_size == 1, "PCP not support mamba now."
