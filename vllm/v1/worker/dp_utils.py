@@ -204,7 +204,25 @@ def _synchronize_dp_ranks(
         # OR-reduced profiler start request: latch it so the worker starts
         # capture on the same step across all DP ranks.
         if profiler_sync is not None:
-            profiler_sync.observe(bool(tensor[4].any().item()))
+            consensus = bool(tensor[4].any().item())
+            # DEBUG (multinode profiler propagation): fires only during a
+            # profiling window (this rank pending, or the OR-reduce carried a
+            # start bit), so it cannot spam steady-state serving. Shows the
+            # actual reduce group size -- if reduce_group_size == 1 the DP
+            # all-reduce is per-engine and the start bit cannot cross engines
+            # under external-LB.
+            if profiler_sync._pending or consensus:
+                _, dbg_group = _get_device_and_group(parallel_config)
+                logger.info(
+                    "[dp-prof-debug] dp_rank=%s reduce_group_size=%s pending=%s "
+                    "consensus=%s tensor4=%s",
+                    parallel_config.data_parallel_rank,
+                    dist.get_world_size(group=dbg_group),
+                    profiler_sync._pending,
+                    consensus,
+                    tensor[4].tolist(),
+                )
+            profiler_sync.observe(consensus)
 
         # Synchronize cudagraph_mode across ranks first (take min).
         # This is needed before DP padding decision since we use the synced

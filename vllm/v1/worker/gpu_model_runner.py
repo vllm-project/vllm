@@ -529,6 +529,14 @@ class GPUModelRunner(
             )
             else None
         )
+        logger.info(
+            "[dp-prof-debug] DPProfilerSync created=%s multinode_env=%s dp_size=%s "
+            "dp_rank=%s",
+            self.dp_profiler_sync is not None,
+            envs.VLLM_ENABLE_MULTINODE_PROFILING,
+            self.parallel_config.data_parallel_size,
+            self.parallel_config.data_parallel_rank,
+        )
 
         model_config = self.model_config
         cache_config = self.cache_config
