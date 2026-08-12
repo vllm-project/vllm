@@ -405,7 +405,7 @@ def test_max_logprobs():
         runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
 
         bad_sampling_params = SamplingParams(logprobs=2)
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             runner.generate(["Hello world"], sampling_params=bad_sampling_params)
 
 
@@ -562,6 +562,44 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
         del llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+
+
+def test_prompt_logprobs_mode():
+    """prompt_logprobs must respect logprobs_mode: *_logits and *_logprobs
+    must return different values. Prompt tokens skip sampling processors,
+    so processed_* == raw_* on the prompt side."""
+    from vllm import LLM
+
+    values: dict[str, float] = {}
+    for mode in get_args(LogprobsMode):
+        llm = LLM(
+            "facebook/opt-125m",
+            enable_prefix_caching=False,
+            gpu_memory_utilization=0.05,
+            max_model_len=16,
+            logprobs_mode=mode,
+        )
+        try:
+            results = llm.generate(
+                ["Hello world"],
+                sampling_params=SamplingParams(
+                    max_tokens=1, prompt_logprobs=0, temperature=0
+                ),
+            )
+            assert results[0].prompt_logprobs is not None
+            assert results[0].prompt_logprobs[1] is not None
+            tok_id = results[0].prompt_token_ids[1]
+            values[mode] = results[0].prompt_logprobs[1][tok_id].logprob
+        finally:
+            del llm
+            torch.accelerator.empty_cache()
+            cleanup_dist_env_and_memory()
+
+    assert values["raw_logprobs"] <= 0
+    assert values["processed_logprobs"] <= 0
+    assert values["raw_logits"] != values["raw_logprobs"]
+    assert values["processed_logits"] == values["raw_logits"]
+    assert values["processed_logprobs"] == values["raw_logprobs"]
 
 
 class TestCorrectDecodedToken:
@@ -1076,7 +1114,6 @@ def test_correct_decoded_token_preserves_valid_tokens():
 def test_spec_decode_logprobs(
     logprobs_mode: LogprobsMode,
     model_setup: tuple[str, str, dict, int],
-    monkeypatch,
 ):
     """Spec decode logprobs should match those of the base model.
 
@@ -1089,19 +1126,8 @@ def test_spec_decode_logprobs(
         logprobs_mode: logprobs mode.
         model_setup: Tuple of (method, base model name,
             speculative_config dict, top_logprobs).
-        monkeypatch: pytest fixture for setting env vars.
     """
     from vllm import LLM
-
-    # The ROCm skinny GEMM kernels (gemm_kernels.cu) are
-    # non-deterministic across LLM instantiations due to persistent
-    # workgroup scheduling and wave-level shuffle reductions, which
-    # causes logprob differences that get misattributed to spec decode.
-    # Disable them so this test isolates spec decode correctness only.
-    # TODO(akaratza): Remove this workaround once the follow-up to
-    # https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
-    # lands with a determinism fix for wvSplitK kernels.
-    monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
 
     method, model_name, spec_config, top_logprobs = model_setup
 

@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::Path;
 
+use thiserror_ext::AsReport as _;
 use tokenizers::Tokenizer;
 
 use crate::error::{BenchError, Result};
@@ -18,7 +20,8 @@ pub enum TokenizerKind {
 
 /// Server-side tokenizer using vLLM's /tokenize and /detokenize endpoints.
 pub struct ServerTokenizer {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
+    runtime: tokio::runtime::Handle,
     tokenize_url: String,
     detokenize_url: String,
     model: String,
@@ -27,8 +30,8 @@ pub struct ServerTokenizer {
 
 impl ServerTokenizer {
     /// Create a new server tokenizer and verify connectivity.
-    pub fn new(base_url: &str, model: &str) -> Result<Self> {
-        let client = reqwest::blocking::Client::builder()
+    pub async fn new(base_url: &str, model: &str) -> Result<Self> {
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| BenchError::Tokenizer(format!("Failed to build HTTP client: {e}")))?;
@@ -38,6 +41,7 @@ impl ServerTokenizer {
 
         let st = Self {
             client,
+            runtime: tokio::runtime::Handle::current(),
             tokenize_url,
             detokenize_url,
             model: model.to_string(),
@@ -45,7 +49,7 @@ impl ServerTokenizer {
         };
 
         // Probe the endpoint to verify it works and discover vocab size
-        let test_tokens = st.encode_inner("test")?;
+        let test_tokens = st.encode_async("test").await?;
         let max_id = test_tokens.iter().copied().max().unwrap_or(0);
         let estimated_vocab = (max_id * 2).max(131072);
 
@@ -56,6 +60,10 @@ impl ServerTokenizer {
     }
 
     fn encode_inner(&self, text: &str) -> Result<Vec<u32>> {
+        self.block_on(self.encode_async(text))
+    }
+
+    async fn encode_async(&self, text: &str) -> Result<Vec<u32>> {
         let payload = serde_json::json!({
             "model": self.model,
             "prompt": text,
@@ -66,6 +74,7 @@ impl ServerTokenizer {
             .post(&self.tokenize_url)
             .json(&payload)
             .send()
+            .await
             .map_err(|e| BenchError::Tokenizer(format!("Server tokenize failed: {e}")))?;
 
         if !resp.status().is_success() {
@@ -75,7 +84,7 @@ impl ServerTokenizer {
             )));
         }
 
-        let data: serde_json::Value = resp.json().map_err(|e| {
+        let data: serde_json::Value = resp.json().await.map_err(|e| {
             BenchError::Tokenizer(format!("Failed to parse tokenize response: {e}"))
         })?;
 
@@ -95,6 +104,10 @@ impl ServerTokenizer {
     }
 
     fn decode_inner(&self, ids: &[u32]) -> Result<String> {
+        self.block_on(self.decode_async(ids))
+    }
+
+    async fn decode_async(&self, ids: &[u32]) -> Result<String> {
         let payload = serde_json::json!({
             "model": self.model,
             "tokens": ids,
@@ -105,6 +118,7 @@ impl ServerTokenizer {
             .post(&self.detokenize_url)
             .json(&payload)
             .send()
+            .await
             .map_err(|e| BenchError::Tokenizer(format!("Server detokenize failed: {e}")))?;
 
         if !resp.status().is_success() {
@@ -114,7 +128,7 @@ impl ServerTokenizer {
             )));
         }
 
-        let data: serde_json::Value = resp.json().map_err(|e| {
+        let data: serde_json::Value = resp.json().await.map_err(|e| {
             BenchError::Tokenizer(format!("Failed to parse detokenize response: {e}"))
         })?;
 
@@ -122,6 +136,26 @@ impl ServerTokenizer {
             .and_then(|p| p.as_str())
             .map(|s| s.to_string())
             .ok_or_else(|| BenchError::Tokenizer("Missing 'prompt' in detokenize response".into()))
+    }
+
+    fn block_on<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
+        if matches!(
+            self.runtime.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::CurrentThread
+        ) {
+            return Err(BenchError::Tokenizer(
+                "Server tokenizer fallback requires a multi-thread Tokio runtime".into(),
+            ));
+        }
+
+        // Sync tokenizer calls can come from a Tokio worker or a Rayon worker.
+        // Tokio workers must enter a blocking region before re-entering the runtime;
+        // Rayon workers can drive the future directly with the saved runtime handle.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| self.runtime.block_on(future))
+        } else {
+            self.runtime.block_on(future)
+        }
     }
 }
 
@@ -192,7 +226,7 @@ impl TokenizerKind {
 /// 3. Server-side /tokenize + /detokenize endpoints
 ///
 /// `server_info` is `Some((base_url, model))` to enable server-side fallback.
-pub fn load_tokenizer(
+pub async fn load_tokenizer(
     model_id: &str,
     _trust_remote_code: bool,
     server_info: Option<(&str, &str)>,
@@ -212,31 +246,48 @@ pub fn load_tokenizer(
     }
 
     // 1. Try local HuggingFace tokenizer (tokenizer.json)
-    match try_load_local(model_id) {
+    match try_load_local(model_id).await {
         Ok(tok) => {
-            println!("Tokenizer: Local (vocab_size={})", tok.get_vocab_size(true));
+            tracing::info!(
+                model = model_id,
+                kind = "local",
+                vocab_size = tok.get_vocab_size(true),
+                "loaded tokenizer"
+            );
             Ok(TokenizerKind::Local(Box::new(tok)))
         }
         Err(local_err) => {
             // 2. Try tiktoken format
-            println!("No tokenizer.json for '{model_id}', trying tiktoken format...");
-            match crate::tiktoken::try_load_tiktoken(model_id) {
+            tracing::info!(
+                model = model_id,
+                error = %local_err.as_report(),
+                "local tokenizer unavailable; trying tiktoken"
+            );
+            match crate::tiktoken::try_load_tiktoken(model_id).await {
                 Ok(tok) => {
-                    println!("Tokenizer: Tiktoken (vocab_size={})", tok.vocab_size());
+                    tracing::info!(
+                        model = model_id,
+                        kind = "tiktoken",
+                        vocab_size = tok.vocab_size(),
+                        "loaded tokenizer"
+                    );
                     Ok(TokenizerKind::Tiktoken(tok))
                 }
                 Err(tiktoken_err) => {
                     // 3. Try server-side fallback
                     if let Some((base_url, model)) = server_info {
-                        println!(
-                            "Tiktoken also not available ({tiktoken_err}), \
-                             trying server-side tokenization..."
+                        tracing::info!(
+                            model = model_id,
+                            error = %tiktoken_err.as_report(),
+                            "tiktoken unavailable; trying server-side tokenization"
                         );
-                        match ServerTokenizer::new(base_url, model) {
+                        match ServerTokenizer::new(base_url, model).await {
                             Ok(srv) => {
-                                println!(
-                                    "Tokenizer: Server (vocab_size≈{})",
-                                    srv.cached_vocab_size
+                                tracing::info!(
+                                    model = model_id,
+                                    kind = "server",
+                                    vocab_size = srv.cached_vocab_size,
+                                    "loaded tokenizer"
                                 );
                                 return Ok(TokenizerKind::Server(srv));
                             }
@@ -264,7 +315,7 @@ pub fn load_tokenizer(
 }
 
 /// Try loading tokenizer.json from local path or HuggingFace Hub.
-fn try_load_local(model_id: &str) -> Result<Tokenizer> {
+async fn try_load_local(model_id: &str) -> Result<Tokenizer> {
     // 1. Try local directory with tokenizer.json
     let local_path = Path::new(model_id).join("tokenizer.json");
     if local_path.exists() {
@@ -290,11 +341,37 @@ fn try_load_local(model_id: &str) -> Result<Tokenizer> {
     }
 
     // 4. Download from HuggingFace Hub (hf-hub handles auth via HF_TOKEN / cached token)
-    let repo = crate::hub::HubRepo::model(model_id.to_string());
+    let repo = crate::hub::HubRepo::model(model_id.to_string()).map_err(BenchError::Tokenizer)?;
     let tokenizer_path = repo
         .get("tokenizer.json")
+        .await
         .map_err(|e| BenchError::Tokenizer(format!("No tokenizer.json for '{model_id}': {e}")))?;
 
     Tokenizer::from_file(&tokenizer_path)
         .map_err(|e| BenchError::Tokenizer(format!("Failed to load downloaded tokenizer: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_server_tokenizer_sync_bridge() {
+        let tokenizer = std::sync::Arc::new(ServerTokenizer {
+            client: reqwest::Client::new(),
+            runtime: tokio::runtime::Handle::current(),
+            tokenize_url: String::new(),
+            detokenize_url: String::new(),
+            model: String::new(),
+            cached_vocab_size: 0,
+        });
+
+        assert_eq!(tokenizer.block_on(async { Ok(1) }).unwrap(), 1);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        rayon::spawn(move || {
+            let _ = tx.send(tokenizer.block_on(async { Ok(2) }));
+        });
+        assert_eq!(rx.await.unwrap().unwrap(), 2);
+    }
 }

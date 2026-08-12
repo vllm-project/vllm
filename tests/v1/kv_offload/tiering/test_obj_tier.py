@@ -21,6 +21,7 @@ import torch
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
+    Medium,
     OffloadingKVEventsConfig,
     OffloadKey,
     ReqContext,
@@ -33,7 +34,11 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
+from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+from vllm.v1.kv_offload.tiering.manager import (
+    CPUPrimaryTierOffloadingManager,
+    TieringOffloadingManager,
+)
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
 
@@ -42,7 +47,17 @@ from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManag
 # ---------------------------------------------------------------------------
 
 
-def _make_offloading_config(enable_kv_cache_events: bool) -> OffloadingConfig:
+def _make_offloading_config(
+    enable_kv_cache_events: bool,
+    *,
+    tp_size: int = 1,
+    rank: int = 0,
+    world_size: int | None = None,
+    replicated_layout: bool = False,
+    is_parallelism_agnostic: bool = False,
+) -> OffloadingConfig:
+    if world_size is None:
+        world_size = tp_size
     return OffloadingConfig(
         groups=(),
         worker_kv_bytes_per_block=0,
@@ -52,15 +67,16 @@ def _make_offloading_config(enable_kv_cache_events: bool) -> OffloadingConfig:
         model=OffloadingModelConfig(name="test/model", dtype="float16"),
         cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
         parallel=OffloadingParallelConfig(
-            rank=0,
-            world_size=1,
-            tp_size=1,
+            rank=rank,
+            world_size=world_size,
+            tp_size=tp_size,
             pp_size=1,
             pcp_size=1,
             dcp_size=1,
             data_parallel_index=0,
-            is_parallelism_agnostic=False,
+            is_parallelism_agnostic=is_parallelism_agnostic,
         ),
+        replicated_layout=replicated_layout,
     )
 
 
@@ -89,10 +105,10 @@ def make_job(
     job_id: int,
     keys: list[OffloadKey],
     block_ids: list[int] | None = None,
-) -> JobMetadata:
+) -> TransferJob:
     if block_ids is None:
         block_ids = list(range(len(keys)))
-    return JobMetadata(
+    return TransferJob(
         job_id=job_id,
         keys=keys,
         block_ids=np.array(block_ids, dtype=np.int64),
@@ -185,6 +201,9 @@ class MockNixlAgent:
     def release_dlist_handle(self, handle):
         pass
 
+    def get_xfer_telemetry(self, handle):
+        return SimpleNamespace(xferDuration=1000)
+
     def _query_memory(self, queries, mem_type, agent_name):
         return [object() if q[3] in self._stored_obj_keys else None for q in queries]
 
@@ -208,12 +227,14 @@ def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:
 def _make_tier(
     num_blocks: int = 4,
     offloading_spec: SimpleNamespace = _OFFLOADING_SPEC,
+    primary_kv_view: memoryview | None = None,
     **tier_kwargs,
 ) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
     """Create a tier backed by a fresh MockNixlAgent."""
     mock_agent = MockNixlAgent()
-    tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
-    view = memoryview(tensor.numpy())
+    if primary_kv_view is None:
+        tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
+        primary_kv_view = memoryview(tensor.numpy())
     with (
         patch("vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config"),
         patch(
@@ -223,7 +244,7 @@ def _make_tier(
     ):
         tier = ObjectStoreSecondaryTierManager(
             offloading_spec=offloading_spec,
-            primary_kv_view=view,
+            primary_kv_view=primary_kv_view,
             tier_type="obj",
             store_config=_STORE_CONFIG,
             prefix=_RUN_PREFIX,
@@ -315,6 +336,32 @@ class TestMockObjTierBasic:
         results = drain(self.tier)
         assert len(results) == 1
         assert not results[0].success
+
+    def test_failed_load_marks_verdict_negative(self):
+        """Regression for the failed-load livelock on the obj tier: a
+        cached HIT must not survive a failed load of the same key. On the
+        failed promotion the tier marks the verdict False from
+        get_finished_jobs() (drained here) on the scheduler thread; otherwise
+        the scheduler would re-issue the same doomed promotion every step for
+        the life of the request. The mark is served from cache with no
+        re-probe, so even though the mock object is still 'present' the SAME
+        request now resolves to MISS."""
+        ctx = ReqContext(req_id="obj-livelock")
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        assert all(r.success for r in drain(self.tier))
+        # Cache a positive verdict: the object is present, so lookup is a HIT.
+        assert lookup_and_wait(self.tier, [key(1)], ctx=ctx) == [LookupResult.HIT]
+
+        # The promotion the HIT triggered fails.
+        self.agent.check_xfer_state = lambda h: "ERR"
+        self.tier.submit_load(make_job(2, [key(1)], [0]))
+        results = drain(self.tier)
+        assert len(results) == 1 and not results[0].success
+
+        # After the failed promotion the SAME request's lookup must resolve to
+        # MISS (verdict marked False) instead of serving the stale HIT — even
+        # though the object itself is still present in the mock store.
+        assert lookup_and_wait(self.tier, [key(1)], ctx=ctx) == [LookupResult.MISS]
 
     def test_pending_transfer_not_returned_until_done(self):
         # First poll returns PROC; second poll returns DONE.
@@ -437,6 +484,105 @@ class TestMockObjTierFailures:
         assert not by_id[1].success
         assert by_id[2].success
 
+    def test_release_xfer_failure_retries_without_losing_result(self, monkeypatch):
+        tier, agent = _make_tier(num_blocks=4)
+        agent.check_xfer_state = MagicMock(side_effect=RuntimeError("poll failed"))
+        release_xfer = MagicMock(
+            side_effect=[RuntimeError("transfer is still active"), None]
+        )
+        monkeypatch.setattr(agent, "release_xfer_handle", release_xfer)
+
+        tier.submit_store(make_job(1, [key(1)], [0]))
+
+        # The transfer handle could not be released safely, so the job must
+        # remain tracked and must not be finalized yet.
+        assert list(tier.get_finished_jobs()) == []
+        assert 1 in tier._transfers
+
+        # Cleanup is retried without polling again or changing the failure
+        # verdict. The completion is then returned exactly once.
+        results = list(tier.get_finished_jobs())
+        assert len(results) == 1
+        assert results[0].job_id == 1
+        assert not results[0].success
+        assert agent.check_xfer_state.call_count == 2
+        assert release_xfer.call_count == 2
+        assert not tier._transfers
+        assert list(tier.get_finished_jobs()) == []
+
+    @pytest.mark.parametrize(
+        "cleanup_method", ["release_dlist_handle", "deregister_memory"]
+    )
+    def test_post_transfer_cleanup_failure_does_not_lose_result(
+        self, monkeypatch, cleanup_method
+    ):
+        tier, agent = _make_tier(num_blocks=4)
+        monkeypatch.setattr(
+            agent,
+            cleanup_method,
+            MagicMock(side_effect=RuntimeError("cleanup failed")),
+        )
+
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = list(tier.get_finished_jobs())
+
+        assert len(results) == 1
+        assert results[0].job_id == 1
+        assert results[0].success
+        assert not tier._transfers
+        assert list(tier.get_finished_jobs()) == []
+
+    def test_xfer_cleanup_retry_finalizes_parent_job_and_primary_pin(self, monkeypatch):
+        num_blocks = 4
+        tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
+        primary_kv_view = memoryview(tensor.numpy())
+        mmap_region = MagicMock()
+        mmap_region.create_kv_memoryview.return_value = primary_kv_view
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=num_blocks, mmap_region=mmap_region
+        )
+        obj_tier, agent = _make_tier(
+            num_blocks=num_blocks, primary_kv_view=primary_kv_view
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier, secondary_tiers=[obj_tier]
+        )
+
+        keys = [key(1)]
+        primary_result = primary_tier.prepare_store(keys, _CTX)
+        assert primary_result is not None
+        primary_tier.complete_store(keys, _CTX, success=True)
+        job = manager.create_store_job(keys, _CTX)
+        obj_tier.submit_store(job)
+
+        block = primary_tier._policy.get(keys[0])
+        assert block is not None
+        assert block.ref_cnt == 1
+        assert len(manager._transfer_jobs) == 1
+
+        agent.check_xfer_state = MagicMock(side_effect=RuntimeError("poll failed"))
+        release_xfer = MagicMock(
+            side_effect=[RuntimeError("transfer is still active"), None]
+        )
+        monkeypatch.setattr(agent, "release_xfer_handle", release_xfer)
+        schedule_context = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+
+        manager.on_schedule_end(schedule_context)
+
+        assert len(manager._transfer_jobs) == 1
+        assert block.ref_cnt == 1
+        assert len(obj_tier._transfers) == 1
+        assert manager.has_pending_work()
+
+        manager.on_schedule_end(schedule_context)
+
+        assert manager._transfer_jobs == {}
+        assert block.ref_cnt == 0
+        assert obj_tier._transfers == {}
+        assert not manager.has_pending_work()
+        assert agent.check_xfer_state.call_count == 2
+        assert release_xfer.call_count == 2
+
 
 class TestMockObjTierShutdown:
     def test_shutdown_clears_in_flight_transfers(self):
@@ -473,8 +619,7 @@ class TestObjTierKVEvents:
         events = list(self.tier.take_events())
         assert len(events) == 1
         assert events[0].keys == keys
-        # Literal medium pins the wire contract, not just the constant choice.
-        assert events[0].medium == "OBJ"
+        assert events[0].medium == Medium.STORAGE
         assert events[0].locality is Locality.REMOTE
         assert not events[0].removed
         # take_events drains the buffer.
@@ -617,3 +762,37 @@ class TestObjStoreConfig:
         params = cfg.to_nixl_params()
         assert params["ca_bundle"] == "/path/to/ca.pem"
         assert "access_key" not in params
+
+
+def test_obj_tier_replicated_layout_collapses_mapper_identity():
+    """TP=2 and TP=4 replicated configs share the obj FileMapper namespace."""
+    tp2_spec = SimpleNamespace(
+        config=_make_offloading_config(
+            False, tp_size=2, world_size=2, rank=1, replicated_layout=True
+        ),
+        kv_events_config=OffloadingKVEventsConfig(
+            enable_kv_cache_events=False,
+            self_describing_kv_events=False,
+        ),
+    )
+    tp4_spec = SimpleNamespace(
+        config=_make_offloading_config(
+            False, tp_size=4, world_size=4, rank=3, replicated_layout=True
+        ),
+        kv_events_config=OffloadingKVEventsConfig(
+            enable_kv_cache_events=False,
+            self_describing_kv_events=False,
+        ),
+    )
+    tp2_tier, _ = _make_tier(offloading_spec=tp2_spec)
+    tp4_tier, _ = _make_tier(offloading_spec=tp4_spec)
+    try:
+        assert tp2_tier._file_mapper.base_path == tp4_tier._file_mapper.base_path
+        assert tp2_tier._file_mapper.rank == 0
+        assert tp4_tier._file_mapper.rank == 0
+        assert tp2_tier._file_mapper.get_run_config() == (
+            tp4_tier._file_mapper.get_run_config()
+        )
+    finally:
+        tp2_tier.shutdown()
+        tp4_tier.shutdown()

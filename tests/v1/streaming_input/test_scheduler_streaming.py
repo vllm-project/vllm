@@ -53,6 +53,8 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
+    vllm_config.model_config.is_encoder_decoder = False
+    vllm_config.model_config.is_diffusion = False
     vllm_config.model_config.max_model_len = 1024
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
@@ -496,7 +498,9 @@ class TestStreamingScheduler(unittest.TestCase):
         eco_cycle2 = eco_dict_cycle2[session.client_index].outputs[0]
         assert eco_cycle2.finish_reason == FinishReason.STOP
         assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-        assert session in scheduler.waiting
+        # Sessions paused for streaming input are blocked-waiting, so they
+        # live in the skipped_waiting queue rather than the main waiting queue.
+        assert session in scheduler.skipped_waiting
         assert session._all_token_ids == [1, 2, 3, 10, STOP_TOKEN]
 
         # CRITICAL ASSERTION: Cached prompt_token_ids STILL must not have changed

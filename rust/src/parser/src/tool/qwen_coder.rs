@@ -9,8 +9,8 @@ use winnow::token::{literal, take_until};
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
-use super::{Result, StructuralTagModel, ToolCallDelta, ToolParser, ToolParserOutput};
-use crate::tool::Tool;
+use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use crate::tool::{StructuralTagBuilder, Tool};
 
 const TOOL_CALL_START: &str = "<tool_call>";
 const TOOL_CALL_END: &str = "</tool_call>";
@@ -146,8 +146,8 @@ impl ToolParser for Qwen3CoderToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::Qwen3Coder)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::Qwen3Coder.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -294,7 +294,7 @@ mod tests {
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
 
-    use super::{Qwen3CoderToolParser, StructuralTagModel, ToolParser};
+    use super::{Qwen3CoderToolParser, ToolParser};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::{ToolParserOutput, ToolParserTestExt as _};
 
@@ -308,13 +308,10 @@ mod tests {
     }
 
     #[test]
-    fn qwen_coder_exposes_structural_tag_model() {
+    fn qwen_coder_exposes_structural_tag_builder() {
         let parser = Qwen3CoderToolParser::new(&test_tools());
 
-        assert_eq!(
-            parser.structural_tag_model(),
-            Some(StructuralTagModel::Qwen3Coder)
-        );
+        assert!(parser.structural_tag_builder().is_some());
     }
 
     #[test]
