@@ -166,6 +166,7 @@ def create_configured_kernel_with_configs(
     configs,
     platform="nvidia_h200",
     helion_settings=None,
+    single_configs=None,
 ):
     """Helper to create ConfiguredHelionKernel with real config objects."""
     mock_config_manager = Mock(spec=ConfigManager)
@@ -190,6 +191,7 @@ def create_configured_kernel_with_configs(
             config_picker=config_picker,
             raw_kernel_func=kernel_func,
             helion_settings=helion_settings,
+            single_configs=single_configs,
         )
 
 
@@ -221,6 +223,60 @@ class TestConfiguredHelionKernel:
                 raw_kernel_func=sample_kernel,
                 helion_settings=None,
             )
+
+    @pytest.mark.parametrize("use_single_config", [False, True])
+    def test_single_config_selection(
+        self,
+        sample_kernel,
+        sample_configs,
+        use_single_config,
+    ):
+        single_config = helion.Config(
+            block_sizes=[1024],
+            num_warps=4,
+            num_stages=2,
+        )
+
+        with patch(
+            "vllm.kernels.helion.register.envs.VLLM_HELION_USE_SINGLE_CONFIG",
+            use_single_config,
+        ):
+            kernel = create_configured_kernel_with_configs(
+                op_name="test_kernel",
+                config_picker=lambda args, keys: keys[0],
+                kernel_func=sample_kernel,
+                configs=sample_configs,
+                single_configs={"nvidia_h200": single_config},
+            )
+
+        if use_single_config:
+            assert all(config is single_config for config in kernel.configs.values())
+        else:
+            assert kernel.configs == sample_configs
+
+    def test_single_config_unsupported_platform_keeps_per_shape_configs(
+        self,
+        sample_kernel,
+        sample_configs,
+    ):
+        with (
+            patch(
+                "vllm.kernels.helion.register.envs.VLLM_HELION_USE_SINGLE_CONFIG",
+                True,
+            ),
+            patch("vllm.kernels.helion.register.logger") as mock_logger,
+        ):
+            kernel = create_configured_kernel_with_configs(
+                op_name="test_kernel",
+                config_picker=lambda args, keys: keys[0],
+                kernel_func=sample_kernel,
+                configs=sample_configs,
+                platform="nvidia_h200",
+                single_configs={"nvidia_h100": helion.Config(num_warps=4)},
+            )
+
+        assert kernel.configs == sample_configs
+        mock_logger.warning.assert_called_once()
 
     def test_config_selector_validates_picker_result(
         self, sample_kernel, sample_configs

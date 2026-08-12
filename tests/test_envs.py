@@ -49,6 +49,14 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+def test_helion_single_config_defaults_off(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("VLLM_HELION_USE_SINGLE_CONFIG", raising=False)
+    assert not envs.VLLM_HELION_USE_SINGLE_CONFIG
+
+    monkeypatch.setenv("VLLM_HELION_USE_SINGLE_CONFIG", "1")
+    assert envs.VLLM_HELION_USE_SINGLE_CONFIG
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
