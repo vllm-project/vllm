@@ -5,6 +5,7 @@
 import copy
 import json as json_mod
 import math
+from contextlib import suppress
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -1022,6 +1023,16 @@ class SamplingParams(
         ):
             raise VLLMValidationError(
                 "structured_outputs.json cannot be an empty string"
+            )
+        json_schema = self.structured_outputs.json
+        if isinstance(json_schema, str):
+            with suppress(json_mod.JSONDecodeError):
+                json_schema = json_mod.loads(json_schema)
+        if json_schema == {}:
+            raise VLLMValidationError(
+                "structured_outputs.json cannot be an empty JSON schema; "
+                "provide a non-empty schema, or use json_object=True when "
+                "JSON object output is intended"
             )
         # Reject json_object=False early to avoid engine-side crashes
         if self.structured_outputs.json_object is False:

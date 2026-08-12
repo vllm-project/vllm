@@ -85,6 +85,12 @@ For this we can use the `json` parameter in two different ways:
 - Using directly a [JSON Schema](https://json-schema.org/)
 - Defining a [Pydantic model](https://docs.pydantic.dev/latest/) and then extracting the JSON Schema from it (which is normally an easier option).
 
+vLLM requires a non-empty schema for the `json` parameter. Although the empty
+schema `{}` is valid JSON Schema and accepts any JSON value, vLLM rejects it
+because it leaves number generation unconstrained and may continue until
+`max_tokens`. Provide a concrete schema instead, or use `json_object=True` only
+when any JSON object matches the intended output.
+
 The next example shows how to use the `response_format` parameter with a Pydantic model:
 
 ??? code
