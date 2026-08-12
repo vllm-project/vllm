@@ -29,21 +29,25 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-)
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
-from .exaone4 import Exaone4Attention as ExaoneMoeAttention
 from .exaone4 import Exaone4GatedMLP as ExaoneMoeGatedMLP
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
@@ -61,6 +65,7 @@ class ExaoneMoe(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        swiglu_limit: float | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
@@ -71,7 +76,6 @@ class ExaoneMoe(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -108,11 +112,6 @@ class ExaoneMoe(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
         if getattr(config, "num_shared_experts", 0) > 0:
             intermediate_size = config.moe_intermediate_size * config.num_shared_experts
             self.shared_experts = ExaoneMoeGatedMLP(
@@ -121,12 +120,13 @@ class ExaoneMoe(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                swiglu_limit=swiglu_limit,
                 prefix=f"{prefix}.shared_experts",
             )
         else:
             self.shared_experts = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=self.n_routed_experts,
@@ -135,6 +135,8 @@ class ExaoneMoe(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
+            activation="silu",
+            swiglu_limit=swiglu_limit,
             use_grouped_topk=True,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
@@ -159,13 +161,138 @@ class ExaoneMoe(nn.Module):
         return final_hidden_states.view(orig_shape)
 
 
+class ExaoneMoeAttention(nn.Module):
+    def __init__(
+        self,
+        config,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position_embeddings: int = 8192,
+        quant_config: QuantizationConfig | None = None,
+        bias: bool = False,
+        cache_config: CacheConfig | None = None,
+        prefix: str = "",
+        is_mtp: bool = False,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        # MistralConfig has an optional head_dim introduced by Mistral-Nemo
+        self.head_dim = getattr(config, "head_dim", None)
+        if self.head_dim is None:
+            self.head_dim = self.hidden_size // self.total_num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.max_position_embeddings = max_position_embeddings
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+
+        self.o_proj = RowParallelLinear(
+            input_size=self.total_num_heads * self.head_dim,
+            output_size=hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+
+        is_neox_style = True
+        if quant_config is not None and quant_config.get_name() == "gguf":
+            is_neox_style = False
+
+        layer_idx = extract_layer_index(prefix)
+
+        if config.sliding_windows is not None:
+            self.sliding_window_size = config.sliding_windows[layer_idx]
+
+        if config.layer_types[layer_idx] == "full_attention":
+            self.sliding_window_size = None
+
+        if is_mtp:
+            self.sliding_window = (
+                config.mtp_layer_types[layer_idx] == "sliding_attention"
+            )
+            if config.mtp_sliding_windows is not None:
+                self.sliding_window_size = config.mtp_sliding_windows[layer_idx]
+
+            if config.mtp_layer_types[layer_idx] == "full_attention":
+                self.sliding_window_size = None
+
+        # apply rotary embeddings to every layer in full attention models
+        self.apply_rope_all_layers = "sliding_attention" not in config.layer_types
+
+        set_default_rope_theta(config, default_theta=1000000)
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=max_position_embeddings,
+            rope_parameters=config.rope_parameters,
+            is_neox_style=is_neox_style,
+        )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            per_layer_sliding_window=self.sliding_window_size,
+            prefix=f"{prefix}.attn",
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        q = q.unflatten(-1, (self.num_heads, self.head_dim))
+        q = self.q_norm(q)
+        q = q.flatten(-2, -1)
+        k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+        k = self.k_norm(k)
+        k = k.flatten(-2, -1)
+
+        if self.sliding_window_size or self.apply_rope_all_layers:
+            q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output
+
+
 class ExaoneMoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        mtp_layer: bool = None,
+        is_mtp: bool = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -189,17 +316,29 @@ class ExaoneMoeDecoderLayer(nn.Module):
             bias=attention_bias,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
+            is_mtp=is_mtp,
         )
 
-        if config.is_moe_layer[layer_idx] and not mtp_layer:
+        swiglu_limits = getattr(config, "swiglu_limits", None)
+        if swiglu_limits is not None:
+            swiglu_limit = swiglu_limits[layer_idx]
+            swiglu_limit = swiglu_limit if swiglu_limit > 0 else None
+        else:
+            swiglu_limit = None
+
+        if config.mlp_layer_types[layer_idx] == "sparse" and not is_mtp:
             self.mlp = ExaoneMoe(
-                config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+                config=config,
+                swiglu_limit=swiglu_limit,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
             )
         else:
             self.mlp = ExaoneMoeGatedMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
+                swiglu_limit=swiglu_limit,
                 quant_config=quant_config,
                 bias=getattr(config, "mlp_bias", False),
                 prefix=f"{prefix}.mlp",

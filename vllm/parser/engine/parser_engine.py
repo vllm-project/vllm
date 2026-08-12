@@ -110,6 +110,8 @@ class ParserEngine(Parser):
 
         self._has_reasoning = (
             "THINK_END" in parser_engine_config.token_id_terminals
+            or "THINK_START" in parser_engine_config.terminals
+            or "THINK_END" in parser_engine_config.terminals
             or parser_engine_config.initial_state == ParserState.REASONING
         )
         self._reasoning_ended: bool = not self._has_reasoning
@@ -401,6 +403,9 @@ class ParserEngine(Parser):
         if not self._tools:
             return True
         return find_tool_name(self._tools, name)
+
+    def _accept_tool_name(self, name: str) -> bool:
+        return bool(name) and self._is_valid_tool_name(name)
 
     # ── Private helpers ─────────────────────────────────────────────
 
@@ -821,7 +826,7 @@ class ParserEngine(Parser):
         deltas: list[DeltaToolCall],
         name: str | None,
     ) -> None:
-        if not name or not self._is_valid_tool_name(name):
+        if name is None or not self._accept_tool_name(name):
             return
         slot = self._tool_slots[idx]
         slot.name = name
@@ -880,8 +885,8 @@ class ParserEngine(Parser):
         slot = self._tool_slots[idx]
 
         if not slot.name_sent:
-            name = slot.name or self._try_extract_name(idx)
-            if name and self._is_valid_tool_name(name):
+            name = slot.name or self._try_extract_name(idx) or ""
+            if self._accept_tool_name(name):
                 slot.name = name
                 slot.name_sent = True
                 slot.string_keys = self._streamable_string_keys(
@@ -1056,7 +1061,7 @@ class ParserEngine(Parser):
             else:
                 args_json = "{}"
 
-            if name and self._is_valid_tool_name(name):
+            if self._accept_tool_name(name):
                 self._ensure_tool_id(slot, name)
                 args_json = self._fix_arg_types(args_json, name)
                 tool_calls.append(

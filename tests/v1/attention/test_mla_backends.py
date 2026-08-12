@@ -40,9 +40,17 @@ from vllm.v1.attention.backends.mla.prefill import (
     MLAPrefillBackendEnum,
     get_mla_prefill_backend,
 )
+from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
+from vllm.v1.attention.backends.mla.prefill.selector import (
+    MLAPrefillSelectorConfig,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    KVQuantMode,
+    MLAAttentionSpec,
+)
+from vllm.v1.worker.block_table import get_block_table_width
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
@@ -54,6 +62,35 @@ BACKENDS_TO_TEST = [
 ]
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    ("cache_dtype", "expected_quant_mode"),
+    [
+        ("auto", KVQuantMode.NONE),
+        ("fp8_ds_mla", KVQuantMode.FP8_PER_TENSOR),
+    ],
+)
+def test_mla_kv_cache_spec_uses_layer_cache_dtype(
+    cache_dtype: str, expected_quant_mode: KVQuantMode
+):
+    layer = SimpleNamespace(
+        kv_cache_dtype=cache_dtype,
+        head_size=576,
+        non_causal_multi_token_decode=False,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=64), model_config=None
+    )
+
+    spec = MLAAttention.get_kv_cache_spec(layer, vllm_config)
+
+    assert isinstance(spec, MLAAttentionSpec)
+    assert spec.cache_dtype_str == cache_dtype
+    assert spec.kv_quant_mode == expected_quant_mode
+    if cache_dtype == "fp8_ds_mla":
+        assert spec.page_size_bytes == 64 * 656
+
 
 # Remove sm100 backends from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
@@ -77,13 +114,106 @@ if AttentionBackendEnum.TOKENSPEED_MLA in BACKENDS_TO_TEST:
         BACKENDS_TO_TEST.remove(AttentionBackendEnum.TOKENSPEED_MLA)
 
 
-# Filtered per-test via validate_configuration (capability/deps/dims).
+def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.kv_lora_rank = 2
+    layer.num_heads = 2
+    layer.qk_nope_head_dim = 3
+    layer.v_head_dim = 4
+    layer.kv_b_proj = torch.nn.Module()
+    layer.kv_b_proj.weight = torch.nn.Parameter(
+        torch.arange(28.0, dtype=torch.float16).reshape(14, 2)
+    )
+    layer.kv_b_proj.quant_method = None
+    layer.is_aiter_triton_fp4_bmm_enabled = False
+    layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.dcp_q_replicate = False
+    layer.quant_config = None
+    layer.layer_name = "test"
+
+    monkeypatch.setattr(
+        mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
+    )
+
+    with torch.no_grad():
+        layer.process_weights_after_loading(torch.float32)
+        assert isinstance(layer.W_UV, torch.nn.Parameter)
+        assert isinstance(layer.W_UK_T, torch.nn.Parameter)
+        w_uv_ptr = layer.W_UV.data_ptr()
+        w_uk_t_ptr = layer.W_UK_T.data_ptr()
+        old_w_uv = layer.W_UV.clone()
+        old_w_uk_t = layer.W_UK_T.clone()
+
+        layer.kv_b_proj.weight.add_(100)
+        layer.process_weights_after_loading(torch.float32)
+
+    assert layer.W_UV.data_ptr() == w_uv_ptr
+    assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
+    torch.testing.assert_close(layer.W_UV, old_w_uv + 100)
+    torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
+
+
+# Validate parameter combinations during collection, before GPU fixtures run.
 PREFILL_BACKENDS_TO_TEST = [
+    MLAPrefillBackendEnum.ROCM_AITER_FA,
     MLAPrefillBackendEnum.FLASH_ATTN,
     MLAPrefillBackendEnum.FLASHINFER,
     MLAPrefillBackendEnum.TRTLLM_RAGGED,
     MLAPrefillBackendEnum.TOKENSPEED_MLA,
 ]
+
+MLA_DIMENSIONS_TO_TEST = [
+    ("deepseek", 128, 128),
+    ("glm", 192, 256),
+]
+
+
+def _prefill_backend_dimension_params():
+    device_capability = current_platform.get_device_capability()
+    params = []
+    for prefill_backend in PREFILL_BACKENDS_TO_TEST:
+        for dimensions_id, qk_nope_head_dim, v_head_dim in MLA_DIMENSIONS_TO_TEST:
+            if device_capability is None:
+                invalid_reasons = ["device capability unavailable"]
+            else:
+                try:
+                    invalid_reasons = (
+                        prefill_backend.get_class().validate_configuration(
+                            device_capability,
+                            MLAPrefillSelectorConfig(
+                                dtype=torch.bfloat16,
+                                mla_dimensions=MLADimensions(
+                                    qk_nope_head_dim=qk_nope_head_dim,
+                                    qk_rope_head_dim=64,
+                                    v_head_dim=v_head_dim,
+                                ),
+                            ),
+                        )
+                    )
+                except ImportError:
+                    invalid_reasons = ["ImportError"]
+
+            marks = []
+            if invalid_reasons:
+                marks.append(
+                    pytest.mark.skip(
+                        reason=(
+                            f"Prefill backend {prefill_backend.name} unavailable: "
+                            f"{invalid_reasons}"
+                        )
+                    )
+                )
+            params.append(
+                pytest.param(
+                    prefill_backend,
+                    qk_nope_head_dim,
+                    v_head_dim,
+                    id=f"{dimensions_id}-{prefill_backend}",
+                    marks=marks,
+                )
+            )
+    return params
 
 
 SPEC_DECODE_BACKENDS = []
@@ -149,6 +279,10 @@ BATCH_SPECS = {
     ),
     "spec_decode_medium": BatchSpec(
         seq_lens=[512, 1024, 2048, 512, 1024, 2048], query_lens=[8, 8, 8, 8, 8, 8]
+    ),
+    "chunked_context_prefill": BatchSpec(
+        seq_lens=[1568, 520, 8, 80, 96, 8],
+        query_lens=[32, 8, 8, 16, 16, 8],
     ),
 }
 
@@ -697,13 +831,25 @@ def test_mock_mla_dcp_fp8_decode_gathers_quantized_query(
     )
 
 
-def test_tokenspeed_mla_dcp_single_token_decode_contract(monkeypatch):
+def test_tokenspeed_mla_noncausal_capability():
+    builder = tokenspeed_mla_module.TokenspeedMLAMetadataBuilder
+    assert builder.supports_non_causal_multi_token_decode
+    assert tokenspeed_mla_module.TokenspeedMLABackend.supports_non_causal()
+
+
+@pytest.mark.parametrize(
+    ("causal", "tokens_per_decode", "dcp_world_size", "dcp_rank"),
+    [
+        pytest.param(True, 1, 2, 1, id="causal-dcp"),
+        pytest.param(False, 3, 1, 0, id="noncausal-multi-token"),
+    ],
+)
+def test_tokenspeed_mla_decode_contract(
+    monkeypatch, causal, tokens_per_decode, dcp_world_size, dcp_rank
+):
     decode_call = None
     num_decodes = 2
-    tokens_per_decode = 1
     num_decode_tokens = num_decodes * tokens_per_decode
-    dcp_world_size = 2
-    dcp_rank = 1
     num_heads = 128
     kv_lora_rank = 512
     qk_rope_head_dim = 64
@@ -749,6 +895,7 @@ def test_tokenspeed_mla_dcp_single_token_decode_contract(monkeypatch):
         num_decodes=num_decodes,
         num_decode_tokens=num_decode_tokens,
         max_seq_len=max_seq_len,
+        causal=causal,
         decode=SimpleNamespace(
             block_table=torch.empty((num_decodes, 1), dtype=torch.int32),
             seq_lens=torch.tensor([16, max_seq_len], dtype=torch.int32),
@@ -783,9 +930,13 @@ def test_tokenspeed_mla_dcp_single_token_decode_contract(monkeypatch):
     )
     torch.testing.assert_close(decode_call["seq_lens"], metadata.decode.seq_lens)
     torch.testing.assert_close(decode_call["block_tables"], metadata.decode.block_table)
-    torch.testing.assert_close(
-        decode_call["causal_seqs"], metadata.decode.dcp_tot_seq_lens
-    )
+    if dcp_world_size > 1:
+        torch.testing.assert_close(
+            decode_call["causal_seqs"], metadata.decode.dcp_tot_seq_lens
+        )
+    else:
+        assert decode_call["causal_seqs"] is None
+    assert decode_call["causal_mask"] is causal
     assert decode_call["return_lse"] is True
     assert decode_call["cp_world"] == dcp_world_size
     assert decode_call["cp_rank"] == dcp_rank
@@ -902,6 +1053,7 @@ def run_attention_backend(
     k_scale: float,
     kv_cache_dtype: str = "auto",
     prefill_backend: MLAPrefillBackendEnum | None = None,
+    chunked_prefill_workspace_size: int | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -990,6 +1142,13 @@ def run_attention_backend(
 
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
+        if chunked_prefill_workspace_size is not None:
+            builder.chunked_prefill_workspace_size = chunked_prefill_workspace_size
+            builder.chunked_prefill_workspace = (
+                builder.chunked_prefill_workspace.new_empty(
+                    chunked_prefill_workspace_size, head_size
+                )
+            )
         attn_metadata = builder.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
@@ -1009,34 +1168,7 @@ def run_attention_backend(
         return output
 
 
-@pytest.mark.parametrize(
-    "batch_spec_name",
-    [
-        "small_decode",
-        "small_prefill",
-        "mixed_small",
-        "medium_decode",
-        "medium_prefill",
-        "mixed_medium",
-        "large_decode",
-        "large_prefill",
-        "single_decode",
-        "single_prefill",
-        "spec_decode_small",
-        "spec_decode_medium",
-    ],
-)
-@pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
-@pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
-@pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
-@pytest.mark.parametrize("prefill_backend", PREFILL_BACKENDS_TO_TEST)
-@pytest.mark.parametrize(
-    ("qk_nope_head_dim", "v_head_dim"),
-    [(128, 128), (192, 256)],
-    ids=["deepseek", "glm"],
-)
-def test_backend_correctness(
+def _run_backend_correctness(
     default_vllm_config,
     dist_init,
     workspace_init,
@@ -1049,6 +1181,7 @@ def test_backend_correctness(
     prefill_backend: MLAPrefillBackendEnum,
     qk_nope_head_dim: int,
     v_head_dim: int,
+    chunked_prefill_workspace_size: int | None = None,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -1084,32 +1217,6 @@ def test_backend_correctness(
         backends_to_test.remove(AttentionBackendEnum.CUTLASS_MLA)
     if not backends_to_test:
         pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
-
-    # Skip prefill backends that can't satisfy capability/deps/dimension constraints.
-    from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
-    from vllm.v1.attention.backends.mla.prefill.selector import (
-        MLAPrefillSelectorConfig,
-    )
-
-    try:
-        prefill_invalid_reasons = prefill_backend.get_class().validate_configuration(
-            current_platform.get_device_capability(),
-            MLAPrefillSelectorConfig(
-                dtype=torch.bfloat16,
-                mla_dimensions=MLADimensions(
-                    qk_nope_head_dim=qk_nope_head_dim,
-                    qk_rope_head_dim=64,
-                    v_head_dim=v_head_dim,
-                ),
-            ),
-        )
-    except ImportError:
-        prefill_invalid_reasons = ["ImportError"]
-    if prefill_invalid_reasons:
-        pytest.skip(
-            f"Prefill backend {prefill_backend.name} unavailable: "
-            f"{prefill_invalid_reasons}"
-        )
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
@@ -1394,16 +1501,9 @@ def test_backend_correctness(
             batch_spec, block_size, device
         )
 
-        # Pad block table to meet requirement:
-        # block_num % (128 / block_size) == 0
-        required_divisor = int(128 / block_size)
         current_block_num = common_attn_metadata.block_table_tensor.shape[1]
-        if current_block_num % required_divisor != 0:
-            # Pad to next multiple of required_divisor
-            padded_block_num = (
-                (current_block_num + required_divisor - 1) // required_divisor
-            ) * required_divisor
-            padding_cols = padded_block_num - current_block_num
+        padded_block_num = get_block_table_width(current_block_num, block_size)
+        if padding_cols := padded_block_num - current_block_num:
             padding = torch.zeros(
                 (common_attn_metadata.block_table_tensor.shape[0], padding_cols),
                 dtype=torch.int32,
@@ -1480,6 +1580,7 @@ def test_backend_correctness(
             q_scale=q_scale,
             k_scale=k_scale,
             kv_cache_dtype=kv_cache_dtype,
+            chunked_prefill_workspace_size=chunked_prefill_workspace_size,
         )
 
         # Use backend_idx to get the correct SDPA output for this backend
@@ -1531,3 +1632,90 @@ def test_backend_correctness(
         summary = f"{len(failures)} backend(s) failed: {', '.join(backend_names)}"
         detailed_msg = "\n".join(failures)
         pytest.fail(f"{summary}\n{detailed_msg}")
+
+
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    [
+        "small_decode",
+        "small_prefill",
+        "mixed_small",
+        "medium_decode",
+        "medium_prefill",
+        "mixed_medium",
+        "large_decode",
+        "large_prefill",
+        "single_decode",
+        "single_prefill",
+        "spec_decode_small",
+        "spec_decode_medium",
+    ],
+)
+@pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
+@pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
+@pytest.mark.parametrize(
+    ("prefill_backend", "qk_nope_head_dim", "v_head_dim"),
+    _prefill_backend_dimension_params(),
+)
+def test_backend_correctness(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
+    kv_cache_dtype: str,
+    q_scale: float,
+    k_scale: float,
+    prefill_backend: MLAPrefillBackendEnum,
+    qk_nope_head_dim: int,
+    v_head_dim: int,
+):
+    _run_backend_correctness(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        batch_spec_name,
+        model,
+        tensor_parallel_size,
+        kv_cache_dtype,
+        q_scale,
+        k_scale,
+        prefill_backend,
+        qk_nope_head_dim,
+        v_head_dim,
+    )
+
+
+@pytest.mark.parametrize(
+    ("prefill_backend", "qk_nope_head_dim", "v_head_dim"),
+    _prefill_backend_dimension_params(),
+)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_chunked_context_backend_correctness(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    prefill_backend: MLAPrefillBackendEnum,
+    qk_nope_head_dim: int,
+    v_head_dim: int,
+    kv_cache_dtype: str,
+):
+    """Split, packed, and context-free requests match the SDPA reference."""
+    _run_backend_correctness(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        batch_spec_name="chunked_context_prefill",
+        model="deepseek-ai/DeepSeek-R1",
+        tensor_parallel_size=16,
+        kv_cache_dtype=kv_cache_dtype,
+        q_scale=1.0,
+        k_scale=1.0,
+        prefill_backend=prefill_backend,
+        qk_nope_head_dim=qk_nope_head_dim,
+        v_head_dim=v_head_dim,
+        chunked_prefill_workspace_size=1024,
+    )

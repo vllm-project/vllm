@@ -16,7 +16,6 @@ use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
 use self::template::{CompiledChatTemplate, TemplateContext};
-use self::value::{TemplateValue, to_template_value};
 use super::{ChatRenderer, RenderedPrompt, effective_template_kwargs};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
@@ -28,7 +27,6 @@ mod error;
 mod format;
 mod template;
 mod tojson;
-mod value;
 
 pub use template::{load_chat_template, resolve_chat_template};
 
@@ -42,6 +40,7 @@ pub use self::format::ChatTemplateContentFormatOption;
 pub struct MultimodalRenderInfo {
     pub image_token: Option<String>,
     pub video_token: Option<String>,
+    pub audio_token: Option<String>,
 }
 
 /// Hugging Face chat-template renderer backed by the local Jinja chat-template
@@ -180,7 +179,7 @@ impl HfChatRenderer {
             None
         };
 
-        let tools = request.tool_parsing_enabled().then(|| to_template_tools(&request.tools));
+        let tools = request.tool_parsing_enabled().then(|| to_template_tools(request.tools()));
         trace!(
             message_count = messages.len(),
             content_format = ?effective_template.content_format(),
@@ -263,6 +262,7 @@ enum TemplateContentPart {
     Text { text: String },
     Image,
     Video,
+    Audio,
 }
 
 #[derive(Debug, Serialize)]
@@ -275,7 +275,7 @@ struct TemplateToolCall {
 #[derive(Debug, Serialize)]
 struct TemplateToolFunction {
     name: String,
-    arguments: TemplateValue,
+    arguments: JsonValue,
 }
 
 #[derive(Debug, Serialize)]
@@ -289,7 +289,7 @@ pub(super) struct TemplateTool {
 struct TemplateToolDefinition {
     name: String,
     description: Option<String>,
-    parameters: TemplateValue,
+    parameters: JsonValue,
     strict: Option<bool>,
 }
 
@@ -382,8 +382,6 @@ fn to_template_tool_calls(
                 error.as_report()
             ))
         })?;
-        let arguments = to_template_value(arguments);
-
         tool_calls.push(TemplateToolCall {
             id: tool_call.id.clone(),
             r#type: "function",
@@ -437,6 +435,12 @@ fn to_template_openai_content(
                         .ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
                     Ok(TemplateContentPart::Video)
                 }
+                ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
+                    multimodal
+                        .and_then(|multimodal| multimodal.audio_token.as_ref())
+                        .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
+                    Ok(TemplateContentPart::Audio)
+                }
             })
             .collect(),
     }
@@ -465,6 +469,12 @@ fn to_template_string_content(
                             .ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
                         out.push_str(video_token);
                     }
+                    ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
+                        let audio_token = multimodal
+                            .and_then(|multimodal| multimodal.audio_token.as_ref())
+                            .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
+                        out.push_str(audio_token);
+                    }
                 }
             }
             Ok(out)
@@ -492,7 +502,9 @@ fn append_continue_final_message_tag(message: &mut TemplateMessage) -> Result<St
         // Pick the last text part in the message.
         TemplateContent::OpenAi(parts) => parts.iter_mut().rev().find_map(|part| match part {
             TemplateContentPart::Text { text } => Some(text),
-            TemplateContentPart::Image | TemplateContentPart::Video => None,
+            TemplateContentPart::Image
+            | TemplateContentPart::Video
+            | TemplateContentPart::Audio => None,
         }),
     };
     let text = text.ok_or_else(|| {
@@ -548,7 +560,7 @@ fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
             function: TemplateToolDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: to_template_value(tool.parameters.clone()),
+                parameters: tool.parameters.clone(),
                 strict: tool.strict,
             },
         })
@@ -567,7 +579,7 @@ mod tests {
     use super::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
-        GenerationPromptMode, ReasoningEffort,
+        GenerationPromptMode, ReasoningEffort, ResolvedToolContext,
     };
     use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
 
@@ -575,11 +587,46 @@ mod tests {
     const QWEN3_5_0_8B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen35.jinja");
 
     fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
+        let tool_context = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap();
         ChatRequest {
             messages,
+            tool_context,
             request_id: "render-test".to_string(),
             ..ChatRequest::for_test()
         }
+    }
+
+    #[test]
+    fn dynamic_tools_are_exposed_as_effective_template_tools() {
+        let messages = vec![
+            ChatMessage::developer(
+                "",
+                Some(vec![ChatTool {
+                    name: "lookup".to_string(),
+                    description: None,
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                }]),
+            ),
+            ChatMessage::user("hello"),
+        ];
+        let tool_context = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap();
+        let request = ChatRequest {
+            messages,
+            tool_context,
+            request_id: "render-test".to_string(),
+            ..ChatRequest::for_test()
+        };
+
+        let rendered = render(
+            Some("{{ messages|length }}:{{ messages[0].role }}:{{ messages[0].tools[0].function.name }}:{{ tools[0].function.name }}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "2:developer:lookup:lookup");
+        assert_eq!(request.tool_choice(), &ChatToolChoice::Auto);
+        assert_eq!(request.tools().len(), 1);
     }
 
     fn render(template: Option<&str>, request: &ChatRequest) -> Result<String> {
@@ -603,6 +650,7 @@ mod tests {
             .with_multimodal(Some(MultimodalRenderInfo {
                 image_token: Some("<image>".to_string()),
                 video_token: Some("<video>".to_string()),
+                audio_token: Some("<audio>".to_string()),
             }))
             .render(request)
     }
@@ -619,6 +667,15 @@ mod tests {
         sample_request(vec![ChatMessage::user(vec![
             ChatContentPart::text("a"),
             ChatContentPart::video_url("https://example.com/demo.mp4"),
+            ChatContentPart::text("b"),
+        ])])
+    }
+
+    fn audio_request() -> ChatRequest {
+        sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("a"),
+            ChatContentPart::input_audio("dGVzdA==", Some("wav".to_string())),
+            ChatContentPart::audio_url("https://example.com/demo.mp3"),
             ChatContentPart::text("b"),
         ])])
     }
@@ -648,6 +705,21 @@ mod tests {
     }
 
     #[test]
+    fn string_content_format_replaces_audio_with_placeholder_text() {
+        let rendered = render_mm(
+            "{{ messages[0].content }}",
+            &audio_request(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered.prompt,
+            Prompt::Text("a<audio><audio>b".to_string())
+        );
+    }
+
+    #[test]
     fn openai_content_format_normalizes_image_url_for_template() {
         let rendered = render_mm(
             "{% for item in messages[0].content %}{% if item.type == 'image' %}<|image_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
@@ -672,6 +744,21 @@ mod tests {
     }
 
     #[test]
+    fn openai_content_format_normalizes_audio_for_template() {
+        let rendered = render_mm(
+            "{% for item in messages[0].content %}{% if item.type == 'audio' %}<|audio_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
+            &audio_request(),
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered.prompt,
+            Prompt::Text("a<|audio_pad|><|audio_pad|>b".to_string())
+        );
+    }
+
+    #[test]
     fn video_parts_are_rejected_when_model_lacks_video_support() {
         let error = HfChatRenderer::new(
             Some("{{ messages[0].content }}".to_string()),
@@ -682,6 +769,7 @@ mod tests {
         .with_multimodal(Some(MultimodalRenderInfo {
             image_token: Some("<image>".to_string()),
             video_token: None,
+            audio_token: None,
         }))
         .render(&video_request())
         .unwrap_err();
@@ -844,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_template_exposes_developer_tools() {
+    fn chat_template_preserves_developer_tools() {
         let request = sample_request(vec![ChatMessage::developer(
             "policy",
             Some(vec![ChatTool {
@@ -951,7 +1039,7 @@ mod tests {
         .apply_chat_template(&request)
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("<bos>|true".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("<bos>|True".to_string()));
     }
 
     #[test]
@@ -1036,7 +1124,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap().prompt;
 
-        assert_eq!(rendered, Prompt::Text("true|x".to_string()));
+        assert_eq!(rendered, Prompt::Text("True|x".to_string()));
     }
 
     #[test]
@@ -1089,7 +1177,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("none|true".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("none|True".to_string()));
         assert_eq!(
             rendered.effective_template_kwargs.get("reasoning_effort"),
             Some(&Value::String("none".to_string()))
@@ -1165,7 +1253,7 @@ mod tests {
     #[test]
     fn chat_template_exposes_tools_to_templates_when_auto_enabled() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        request.tools = vec![ChatTool {
+        let tools = vec![ChatTool {
             name: "get_weather".to_string(),
             description: Some("Get weather".to_string()),
             parameters: serde_json::json!({
@@ -1175,7 +1263,13 @@ mod tests {
             }),
             strict: None,
         }];
-        request.tool_choice = ChatToolChoice::Auto;
+        request.tool_context = crate::request::ResolvedToolContext::new(
+            &request.messages,
+            tools,
+            Some(ChatToolChoice::Auto),
+            true,
+        )
+        .expect("tool context should resolve");
 
         let rendered = render(
             Some("{{ tools[0].function.name }}|{{ tools[0].function.parameters.required[0] }}"),
@@ -1250,6 +1344,26 @@ mod tests {
             <think>
         "#]]
         .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn qwen35_template_auto_detects_openai_multimodal_content() {
+        let mut request = image_request();
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+        let rendered = render_mm(
+            QWEN3_5_0_8B_TEMPLATE,
+            &request,
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        expect![[r#"
+            Text(
+                "<|im_start|>user\na<|vision_start|><|image_pad|><|vision_end|>b<|im_end|>\n",
+            )
+        "#]]
+        .assert_debug_eq(&rendered.prompt);
     }
 
     #[test]
