@@ -18,6 +18,12 @@ S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
 source .buildkite/scripts/lib/select-python.sh
 select_python
 
+# Keep the stdlib-re copy under the repository so select-python.sh's Docker
+# fallback can access it through the repository mount.
+index_generator=$(mktemp "$PWD/.generate-nightly-index.XXXXXX")
+index_generator=${index_generator#"$PWD"/}
+trap 'rm -f "$index_generator"' EXIT
+
 # ======== generate and upload indices ========
 
 # list all wheels in the commit directory
@@ -36,10 +42,11 @@ if [[ -n "$DEFAULT_VARIANT_ALIAS" ]]; then
     alias_args=(--alias-to-default "$DEFAULT_VARIANT_ALIAS")
 fi
 
-# HACK: we do not need regex module here, but it is required by pre-commit hook
-# To avoid any external dependency, we simply replace it back to the stdlib re module
-sed -i 's/import regex as re/import re/g' .buildkite/scripts/generate-nightly-index.py
-$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "commit $BUILDKITE_COMMIT" "${alias_args[@]}"
+# HACK: we do not need regex here, but it is required by the pre-commit hook.
+# Generate a temporary stdlib-re copy without modifying the tracked source.
+sed 's/import regex as re/import re/' \
+    .buildkite/scripts/generate-nightly-index.py > "$index_generator"
+$PYTHON "$index_generator" --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "commit $BUILDKITE_COMMIT" "${alias_args[@]}"
 
 # copy indices to /<commit>/ unconditionally
 echo "Uploading indices to $S3_COMMIT_PREFIX"
@@ -53,11 +60,11 @@ if [[ "${UPDATE_NIGHTLY_INDEX:-1}" == "1" && \
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/nightly/"
 fi
 
-# detect version from any wheel in the commit directory
-# download the first wheel we find to extract version metadata
-first_wheel_key=$($PYTHON -c "import json; obj=json.load(open('$obj_json')); print(next((c['Key'] for c in obj.get('Contents', []) if c['Key'].endswith('.whl')), ''))")
+# Detect the vLLM version from the vLLM wheel. The directory can also contain
+# supplemental wheels, such as the XPU Triton shim, with unrelated versions.
+first_wheel_key=$($PYTHON -c "import json; obj=json.load(open('$obj_json')); print(next((c['Key'] for c in obj.get('Contents', []) if c['Key'].rsplit('/', 1)[-1].startswith('vllm-') and c['Key'].endswith('.whl')), ''))")
 if [[ -z "$first_wheel_key" ]]; then
-    echo "Error: No wheels found in $S3_COMMIT_PREFIX"
+    echo "Error: No vLLM wheel found in $S3_COMMIT_PREFIX"
     exit 1
 fi
 first_wheel=$(basename "$first_wheel_key")
@@ -74,6 +81,6 @@ if [[ "${UPDATE_VERSION_INDEX:-1}" == "1" && "$version" != *"dev"* ]]; then
     rm -rf "${INDICES_OUTPUT_DIR:?}"
     mkdir -p "$INDICES_OUTPUT_DIR"
     # wheel-dir is overridden to be the commit directory, so that the indices point to the correct wheel path
-    $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$pure_version" --wheel-dir "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "version $pure_version" "${alias_args[@]}"
+    $PYTHON "$index_generator" --version "$pure_version" --wheel-dir "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "version $pure_version" "${alias_args[@]}"
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/$pure_version/"
 fi

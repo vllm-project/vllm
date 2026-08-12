@@ -164,6 +164,20 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+      - label: "Build wheel - x86_64 - XPU"
+        depends_on: ~
+        id: build-wheel-x86-xpu
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag vllm-ci:build-image --target vllm-build --progress plain -f docker/Dockerfile.xpu ."
+          - "mkdir artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "s3://vllm-wheels/$$BUILDKITE_COMMIT/$(cd artifacts/dist && echo *.whl)" release-wheels'
+        env:
+          DOCKER_BUILDKIT: "1"
+
   - label: "Publish XPU Triton shim index"
     key: publish-xpu-triton-shim
     depends_on: ~
@@ -171,6 +185,16 @@ steps:
       queue: cpu_queue_release
     commands:
       - "bash .buildkite/scripts/xpu/publish-triton-shim.sh"
+
+  - label: "Stage XPU Triton shim for commit"
+    key: stage-xpu-triton-shim
+    depends_on:
+      - build-wheel-x86-xpu
+      - publish-xpu-triton-shim
+    agents:
+      queue: cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/xpu/stage-triton-shim.sh"
 
   - label: "Generate and upload wheel indices"
     key: generate-wheel-indices
@@ -188,6 +212,7 @@ steps:
       - build-wheels
       - build-additional-wheels
       - generate-wheel-indices
+      - stage-xpu-triton-shim
     allow_dependency_failure: true
     agents:
       queue: cpu_queue_release

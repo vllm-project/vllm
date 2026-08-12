@@ -31,7 +31,8 @@ objects_path="$work_dir/objects.json"
 index_output_dir="$work_dir/$PREFIX"
 index_generator="$work_dir/generate-nightly-index.py"
 
-curl --fail --location --retry 3 --output "$wheel_path" "$WHEEL_URL"
+curl --fail --location --retry 3 --connect-timeout 30 --max-time 300 \
+    --output "$wheel_path" "$WHEEL_URL"
 
 if command -v sha256sum >/dev/null 2>&1; then
     actual_sha=$(sha256sum "$wheel_path")
@@ -70,9 +71,9 @@ sed 's/import regex as re/import re/' \
 # shellcheck disable=SC2086
 $PYTHON "$index_generator" \
     --version "$PREFIX" \
-    --wheel-dir "$PREFIX" \
+    --wheel-dir "$work_dir/$PREFIX" \
     --current-objects "$objects_path" \
-    --output-dir "$index_output_dir" \
+    --output-dir "$work_dir" \
     --comment "XPU Triton shim"
 
 grep -Fq 'href="triton/"' "$index_output_dir/index.html"
