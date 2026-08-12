@@ -63,6 +63,29 @@ _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
+
+@functools.cache
+def _flash_attn_supports_window() -> bool:
+    """Whether the installed flash_attn_varlen_func accepts ``window_size``.
+
+    Guards the sliding-window prefill path against FA builds (some FA4 /
+    alternative variants) that do not expose the kwarg. Detected once via
+    signature inspection; **kwargs-style signatures are assumed to support it.
+    """
+    if not _HAS_FLASH_ATTN:
+        return False
+    import inspect
+
+    try:
+        sig = inspect.signature(flash_attn_varlen_func)
+    except (TypeError, ValueError):
+        return True
+    params = sig.parameters
+    if "window_size" in params:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 # Continuation prefill: for small continuation chunks (q_len ≤ threshold),
 # use the TQ decode kernel directly instead of full-dequant + flash_attn.
 # do_kv_cache_update already stored all tokens to TQ cache, so the decode
@@ -121,6 +144,10 @@ class TurboQuantAttentionBackend(AttentionBackend):
     @classmethod
     def supports_per_head_quant_scales(cls) -> bool:
         return False
+
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
 
     @staticmethod
     def get_impl_cls() -> type["TurboQuantAttentionImpl"]:
@@ -310,6 +337,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.num_kv_groups = num_heads // self.num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
+        # Sliding-window size in tokens (None => full attention). Stored as an
+        # int (0 = disabled) for the Triton decode kernel; the SDPA/flash paths
+        # use the original None-or-int form.
+        self.sliding_window = sliding_window
+        self._sliding_window_int = sliding_window if sliding_window is not None else 0
 
         from vllm.model_executor.layers.quantization.turboquant.config import (
             TurboQuantConfig,
@@ -347,21 +379,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         max_seqlen_q: int,
         max_seqlen_k: int,
     ) -> torch.Tensor:
-        # fa_utils.get_flash_attn_version() returns None on backends that
-        # should not pass an explicit fa_version kwarg.
-        if self.fa_version is None:
-            return flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=True,
-            )
-        return flash_attn_varlen_func(
+        kwargs: dict[str, Any] = dict(
             q=q,
             k=k,
             v=v,
@@ -371,8 +389,20 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
             causal=True,
-            fa_version=self.fa_version,
         )
+        # fa_utils.get_flash_attn_version() returns None on backends that
+        # should not pass an explicit fa_version kwarg (e.g. ROCm).
+        if self.fa_version is not None:
+            kwargs["fa_version"] = self.fa_version
+        # Sliding-window: FA's window_size=(left, right). Causal local attention
+        # uses (sliding_window - 1, 0). Only pass when the installed FA build
+        # accepts the kwarg; older/alternative builds silently omit it (the
+        # in-window boundary is still correct for short seqs, but long-context
+        # eviction relies on the SlidingWindowManager freeing out-of-window
+        # blocks — see MI325 validation note).
+        if self.sliding_window is not None and _flash_attn_supports_window():
+            kwargs["window_size"] = (self.sliding_window - 1, 0)
+        return flash_attn_varlen_func(**kwargs)
 
     def _ensure_on_device(self, layer, device):
         """One-time derivation of TQ buffers (rotation matrix, midpoints).
@@ -701,14 +731,30 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     q_t = q_seq.transpose(0, 1).contiguous()
                     k_t = k_seq.transpose(0, 1).contiguous()
                     v_t = v_seq.transpose(0, 1).contiguous()
-                    out = F.scaled_dot_product_attention(
-                        q_t,
-                        k_t,
-                        v_t,
-                        is_causal=True,
-                        scale=self.scale,
-                        enable_gqa=use_gqa,
-                    ).transpose(0, 1)
+                    if self.sliding_window is not None:
+                        # Causal + sliding-window mask: query p attends to key j
+                        # with p - (W - 1) <= j <= p.
+                        pos = torch.arange(q_len, device=query.device)
+                        mask = (pos[:, None] >= pos[None, :]) & (
+                            pos[None, :] > pos[:, None] - self.sliding_window
+                        )
+                        out = F.scaled_dot_product_attention(
+                            q_t,
+                            k_t,
+                            v_t,
+                            attn_mask=mask,
+                            scale=self.scale,
+                            enable_gqa=use_gqa,
+                        ).transpose(0, 1)
+                    else:
+                        out = F.scaled_dot_product_attention(
+                            q_t,
+                            k_t,
+                            v_t,
+                            is_causal=True,
+                            scale=self.scale,
+                            enable_gqa=use_gqa,
+                        ).transpose(0, 1)
                 output[q_start:q_end] = out.to(query.dtype)
             else:
                 # Continuation chunk: tokens already stored to TQ cache
@@ -736,6 +782,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         key_fp8=self.tq_config.key_fp8,
                         norm_correction=self.tq_config.norm_correction,
                         PiT=PiT,
+                        sliding_window=self._sliding_window_int,
                     )
                 else:
                     # Large continuation: dequant cached K/V and use
@@ -889,6 +936,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             q_pos = torch.arange(q_len, device=device).unsqueeze(1) + cached_len
             k_pos = torch.arange(seq_len, device=device).unsqueeze(0)
             mask = k_pos <= q_pos  # (q_len, seq_len)
+            if self.sliding_window is not None:
+                # Sliding-window: query p attends only to the last W keys.
+                mask = mask & (k_pos > q_pos - self.sliding_window)
             out = F.scaled_dot_product_attention(
                 q_t,
                 k_t,
@@ -949,5 +999,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             lse_buf=lse_buf,
             buf_holder=layer,
             max_num_kv_splits=self.max_num_kv_splits,
+            sliding_window=self._sliding_window_int,
         )
         return result

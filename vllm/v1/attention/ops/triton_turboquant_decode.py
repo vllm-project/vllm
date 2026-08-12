@@ -83,6 +83,7 @@ def _tq_decode_stage1(
     KEY_FP8: tl.constexpr,  # 1 if K is stored as FP8
     NORM_CORRECTION: tl.constexpr = 0,  # 1 = re-normalize centroids
     FP8_E4B15: tl.constexpr = 0,  # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
+    SLIDING_WINDOW: tl.constexpr = 0,  # >0 = local window size (0 = full attn)
 ):
     bid = tl.program_id(0)  # batch index
     hid = tl.program_id(1)  # q_head index
@@ -100,6 +101,19 @@ def _tq_decode_stage1(
 
     if split_start >= split_end:
         return
+
+    # Sliding-window attention: a decode query at position seq_len-1 attends
+    # only to keys in [seq_len - SLIDING_WINDOW, seq_len-1]. Clamp this split's
+    # loop to the window start so tiles entirely before the window are skipped.
+    # A split fully before the window runs zero iterations and falls through to
+    # the store below with the empty (acc=0, lse=-inf) sentinel, which stage2's
+    # reduction (unaware of the window) treats as a no-op. The boundary tile is
+    # handled by the per-key window mask combined into kv_mask below.
+    loop_start = split_start
+    if SLIDING_WINDOW > 0:
+        window_start = seq_len - SLIDING_WINDOW
+        win_tile = (window_start // BLOCK_KV) * BLOCK_KV
+        loop_start = tl.maximum(split_start, win_tile)
 
     # Dimension offsets
     d_offs = tl.arange(0, BLOCK_D)
@@ -133,9 +147,11 @@ def _tq_decode_stage1(
     # ================================================================
     # TILED LOOP: process BLOCK_KV tokens per iteration
     # ================================================================
-    for start_n in range(split_start, split_end, BLOCK_KV):
+    for start_n in range(loop_start, split_end, BLOCK_KV):
         kv_offs = start_n + kv_range
         kv_mask = kv_offs < split_end
+        if SLIDING_WINDOW > 0:
+            kv_mask = kv_mask & (kv_offs >= window_start)
 
         page_idx = kv_offs // BLOCK_SIZE
         page_off = kv_offs % BLOCK_SIZE
@@ -503,6 +519,7 @@ def triton_turboquant_decode_attention(
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
     max_num_kv_splits: int = 32,  # fixed split count (must be constant for cudagraph)
+    sliding_window: int = 0,  # >0 = local window size (0 = full attention)
 ) -> torch.Tensor:
     """Launch fused TQ decode attention (Triton stage1 + stage2).
 
@@ -583,6 +600,7 @@ def triton_turboquant_decode_attention(
         KEY_FP8=1 if key_fp8 else 0,
         NORM_CORRECTION=1 if norm_correction else 0,
         FP8_E4B15=fp8_e4b15,
+        SLIDING_WINDOW=sliding_window,
         num_warps=1,
         num_stages=1,
     )
