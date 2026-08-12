@@ -1221,6 +1221,15 @@ class Worker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        # Advance the profiler on idle (dummy) steps too. An idle DP rank still
+        # runs the DP coordination collective in lockstep with busy ranks, so a
+        # rank that started capture via the OR-reduced synced start but then only
+        # services dummy batches must still count these iterations -- otherwise
+        # its profiler never reaches max_iterations, never stops, and never dumps
+        # a trace, silently degrading multi-node capture to the busy ranks only
+        # (see DPProfilerSync / VLLM_ENABLE_MULTINODE_PROFILING).
+        if self.profiler is not None:
+            self.profiler.step()
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
         self._maybe_start_synced_profile()
 

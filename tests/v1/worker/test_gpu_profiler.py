@@ -416,6 +416,42 @@ class TestWorkerSyncedProfileStart:
         worker._create_profiler.assert_not_called()
 
 
+class TestWorkerExecuteDummyBatch:
+    """execute_dummy_batch must advance the profiler on idle steps so a DP rank
+    that started capture via the OR-reduced synced start but then only services
+    dummy batches still counts these iterations, reaches max_iterations, stops,
+    and dumps its trace. Regression: dummy batches started the profiler (via
+    _maybe_start_synced_profile) but never stepped it (step runs only in
+    execute_model's annotate_profile), so idle ranks never exported and
+    multi-node capture silently degraded to the busy ranks only."""
+
+    def _worker(self, profiler):
+        worker = MagicMock()
+        worker.profiler = profiler
+        worker.model_runner.uniform_decode_query_len = 1
+        return worker
+
+    def test_steps_profiler_on_dummy_batch(self):
+        profiler = MagicMock()
+        worker = self._worker(profiler)
+
+        Worker.execute_dummy_batch(worker)
+
+        profiler.step.assert_called_once()
+        worker.model_runner._dummy_run.assert_called_once()
+        worker._maybe_start_synced_profile.assert_called_once()
+
+    def test_no_step_when_profiler_absent(self):
+        worker = self._worker(profiler=None)
+
+        # Must not raise when there is no profiler yet, and must still run the
+        # dummy batch and check for a synced start.
+        Worker.execute_dummy_batch(worker)
+
+        worker.model_runner._dummy_run.assert_called_once()
+        worker._maybe_start_synced_profile.assert_called_once()
+
+
 def test_profiler_entered_during_capture():
     """Profiler is used as a context manager in _warmup_and_capture,
     confirming it is active during the actual graph capture run."""
