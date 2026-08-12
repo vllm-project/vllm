@@ -110,6 +110,21 @@ def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -
     return any((N, K, M) in configs for M in l_m)
 
 
+@functools.cache
+def _load_blockscale_bpreshuffle_tuned_shapes(
+    csv_path: str, gfx: str, cu_num: int
+) -> set[tuple[int, int]]:
+    try:
+        df = pd.read_csv(csv_path).drop_duplicates()
+        if "gfx" in df.columns:
+            df = df[df["gfx"] == gfx]
+        if "cu_num" in df.columns:
+            df = df[df["cu_num"].astype(int) == cu_num]
+        return set(zip(df["N"].astype(int), df["K"].astype(int)))
+    except Exception:
+        return set()
+
+
 def if_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if
     ROCm AITER package is supported and enabled on gfx9 archs.
@@ -2900,6 +2915,28 @@ class rocm_aiter_ops:
 
         csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_FILE
         return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
+
+    @staticmethod
+    def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
+        """Whether (N, K) has a tuned aiter blockscale bpreshuffle config.
+
+        Untuned shapes fall back to aiter's default CK kernel, which can be
+        numerically wrong or fault (e.g. memory access fault on q_b_proj), so
+        only route a shape through the bpreshuffle GEMM when it is tuned.
+        """
+        if not current_platform.is_rocm():
+            return False
+        try:
+            import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+            csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+            gfx = aiter_gemm_a8w8_ops.get_gfx()
+            cu_num = aiter_gemm_a8w8_ops.get_cu_num()
+        except Exception:
+            return False
+        return (n, k) in _load_blockscale_bpreshuffle_tuned_shapes(
+            csv_path, gfx, cu_num
+        )
 
     @staticmethod
     def shuffle_weight(
