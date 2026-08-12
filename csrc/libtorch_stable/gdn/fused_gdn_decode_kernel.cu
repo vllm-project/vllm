@@ -198,8 +198,8 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   StateT* source_state =
       state + static_cast<int64_t>(source_slot) * strides.state_slot +
       value_head * kDimV * kDimK;
-  copy_state_chunk<StateT, kChunkV, kDimK, 2>(
-      &shared_state[0][0][0], source_state, 0, tid, kThreads);
+  copy_state_chunk<StateT, kChunkV, kDimK, 2>(&shared_state[0][0][0],
+                                              source_state, 0, tid, kThreads);
 
   if (warp < num_tokens) {
     const int t = warp;
@@ -265,8 +265,8 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     float h[kRowsPerWarp][4];
 #pragma unroll
     for (int row = 0; row < kRowsPerWarp; ++row) {
-      const float4 state_value = load_state4(
-          &shared_state[chunk & 1][rows[row]][k_base]);
+      const float4 state_value =
+          load_state4(&shared_state[chunk & 1][rows[row]][k_base]);
       h[row][0] = state_value.x;
       h[row][1] = state_value.y;
       h[row][2] = state_value.z;
@@ -329,9 +329,8 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
 #pragma unroll
         for (int row = 0; row < kRowsPerWarp; ++row) {
           const int value = chunk * kChunkV + rows[row];
-          store_state4(
-              destination_state + value * kDimK + k_base,
-              make_float4(h[row][0], h[row][1], h[row][2], h[row][3]));
+          store_state4(destination_state + value * kDimK + k_base,
+                       make_float4(h[row][0], h[row][1], h[row][2], h[row][3]));
         }
       }
     }
