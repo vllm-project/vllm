@@ -65,7 +65,7 @@ class EncoderCacheManager:
         freed: List of mm_hash strings that were actually evicted since the
             last call to get_freed_mm_hashes(). This list is cleared on return.
     """
-    
+
     @classmethod
     def create_manager(
         cls, *, cache_size: int, vllm_config: "VllmConfig"
