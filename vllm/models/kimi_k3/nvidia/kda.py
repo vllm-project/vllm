@@ -305,6 +305,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
+        run_gemm_rs: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
@@ -470,7 +471,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        self.run_gemm_rs = run_gemm_rs
+        if self.run_gemm_rs:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
 
+            self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj.weight)
+            if not self.run_gemm_rs:
+                logger.warning_once(
+                    "GEMM-RS is disabled for %s due to an incompatible projection.",
+                    prefix,
+                )
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -511,6 +521,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
+        if self.run_gemm_rs:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+
+            gemm_rs = get_gemm_rs()
+            if gemm_rs.should_run(core_attn_out):
+                return gemm_rs(core_attn_out, self.o_proj.weight)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
