@@ -9,6 +9,7 @@ mod grpc;
 mod listener;
 mod lora;
 mod middleware;
+mod render;
 mod routes;
 mod runtime;
 mod server_info;
@@ -35,6 +36,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
+pub use render::{RenderConfig, serve_render};
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
@@ -139,6 +141,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
             .with_server_info(ServerInfoSnapshot::from_config(config))
+            .with_data_parallel_size(config.data_parallel_size)
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_profiler(config.profiler.clone()),
