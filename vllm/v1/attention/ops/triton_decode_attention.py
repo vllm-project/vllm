@@ -284,6 +284,8 @@ def _fwd_grouped_kernel_stage1(
     Req_to_tokens,
     B_Seqlen,
     Att_Out,
+    Out,
+    LSE,
     stride_req_to_tokens_b,
     stride_qbs,
     stride_qh,
@@ -296,6 +298,9 @@ def _fwd_grouped_kernel_stage1(
     stride_mid_ob,
     stride_mid_oh,
     stride_mid_os,
+    stride_obs,
+    stride_oh,
+    stride_lse_bs,
     k_scale,
     v_scale,
     kv_group_num: tl.constexpr,
@@ -311,7 +316,10 @@ def _fwd_grouped_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
+    WRITE_DIRECT: tl.constexpr = False,
 ):
+    if WRITE_DIRECT:
+        tl.static_assert(NUM_KV_SPLITS == 1)
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
     cur_kv_head = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H)
@@ -440,29 +448,61 @@ def _fwd_grouped_kernel_stage1(
             e_sum = e_sum * re_scale + tl.sum(p, 1)
             e_max = n_e_max
 
-        offs_mid_o = (
-            cur_batch * stride_mid_ob
-            + cur_head[:, None] * stride_mid_oh
-            + split_kv_id * stride_mid_os
-            + offs_dv[None, :]
+        result = acc / e_sum[:, None]
+        lse_val = e_max + tl.log(e_sum)
+        if WRITE_DIRECT:
+            offs_o = (
+                cur_batch * stride_obs
+                + cur_head[:, None] * stride_oh
+                + offs_dv[None, :]
+            )
+            tl.store(
+                Out + offs_o,
+                result,
+                mask=(mask_h[:, None]) & (mask_dv[None, :]),
+            )
+            tl.store(
+                LSE + cur_batch * stride_lse_bs + cur_head,
+                lse_val,
+                mask=mask_h,
+            )
+        else:
+            offs_mid_o = (
+                cur_batch * stride_mid_ob
+                + cur_head[:, None] * stride_mid_oh
+                + split_kv_id * stride_mid_os
+                + offs_dv[None, :]
+            )
+            tl.store(
+                Att_Out + offs_mid_o,
+                result,
+                mask=(mask_h[:, None]) & (mask_dv[None, :]),
+            )
+            offs_mid_o_1 = (
+                cur_batch * stride_mid_ob
+                + cur_head * stride_mid_oh
+                + split_kv_id * stride_mid_os
+                + Lv
+            )
+            tl.store(
+                Att_Out + offs_mid_o_1,
+                lse_val,
+                mask=mask_h,
+            )
+    elif WRITE_DIRECT:
+        # Empty/padded rows contribute zero weight to a later DCP merge.
+        # Keep their output neutral instead of reproducing stage2's 0 / 0 NaN.
+        offs_o = (
+            cur_batch * stride_obs + cur_head[:, None] * stride_oh + offs_dv[None, :]
         )
-
         tl.store(
-            Att_Out + offs_mid_o,
-            acc / e_sum[:, None],
+            Out + offs_o,
+            0.0,
             mask=(mask_h[:, None]) & (mask_dv[None, :]),
         )
-
-        offs_mid_o_1 = (
-            cur_batch * stride_mid_ob
-            + cur_head * stride_mid_oh
-            + split_kv_id * stride_mid_os
-            + Lv
-        )
-
         tl.store(
-            Att_Out + offs_mid_o_1,
-            e_max + tl.log(e_sum),
+            LSE + cur_batch * stride_lse_bs + cur_head,
+            -float("inf"),
             mask=mask_h,
         )
 
@@ -481,7 +521,13 @@ def _decode_grouped_att_m_fwd(
     k_scale,
     v_scale,
     is_mla=False,
+    o=None,
+    lse=None,
+    write_direct=False,
 ):
+    if write_direct:
+        assert o is not None and lse is not None
+        assert num_kv_splits == 1
     # with is_mla there is only a single c_kv in smem.
     # could increase BLOCK or num_stages.
     Lk = k_buffer.shape[-1]
@@ -539,6 +585,8 @@ def _decode_grouped_att_m_fwd(
         Req_to_tokens,
         B_Seqlen,
         att_out,
+        o if o is not None else att_out,
+        lse if lse is not None else att_out,
         Req_to_tokens.stride(0),
         q.stride(0),
         q.stride(1),
@@ -551,6 +599,9 @@ def _decode_grouped_att_m_fwd(
         att_out.stride(0),
         att_out.stride(1),
         att_out.stride(2),
+        o.stride(0) if o is not None else 0,
+        o.stride(1) if o is not None else 0,
+        lse.stride(0) if lse is not None else 0,
         k_scale,
         v_scale,
         kv_group_num=kv_group_num,
@@ -568,6 +619,7 @@ def _decode_grouped_att_m_fwd(
         Lk=Lk,
         Lv=Lv,
         IS_MLA=is_mla,
+        WRITE_DIRECT=write_direct,
         **extra_kargs,
     )
 
@@ -732,7 +784,9 @@ def decode_attention_fwd_grouped(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    write_direct=False,
 ):
+    write_direct = write_direct and is_mla and num_kv_splits == 1
     _decode_grouped_att_m_fwd(
         q,
         k_buffer,
@@ -747,10 +801,14 @@ def decode_attention_fwd_grouped(
         k_scale,
         v_scale,
         is_mla=is_mla,
+        o=o,
+        lse=lse,
+        write_direct=write_direct,
     )
-    _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
-    )
+    if not write_direct:
+        _decode_softmax_reducev_fwd(
+            attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
+        )
 
 
 def decode_attention_fwd(
@@ -769,6 +827,7 @@ def decode_attention_fwd(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    write_direct=False,
 ):
     assert num_kv_splits == attn_logits.shape[2]
 
@@ -778,7 +837,6 @@ def decode_attention_fwd(
         v_scale = torch.tensor(1.0, dtype=torch.float32, device=q.device)
 
     kv_group_num = q.shape[1] // v_buffer.shape[-2]
-
     if kv_group_num == 1:
         # MHA
         decode_attention_fwd_normal(
@@ -815,4 +873,5 @@ def decode_attention_fwd(
             k_scale,
             v_scale,
             is_mla=is_mla,
+            write_direct=write_direct,
         )

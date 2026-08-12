@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+import vllm.v1.attention.ops.triton_decode_attention as triton_decode_attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
@@ -111,6 +112,203 @@ def _quantize_to_fp8(tensor: torch.Tensor):
         (tensor.to(torch.float32) / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
     )
     return fp8_tensor, scale
+
+
+def _make_mla_single_split_case(dtype, fp8_kv=False):
+    batch, heads = 2, 16
+    # Existing 576/512 FP8 exceeds SM120's shared-memory limit, so exercise the
+    # other production MLA geometry for FP8.
+    d_qk, d_v = (288, 256) if fp8_kv else (576, 512)
+    page_size, seq_len = 16, 129
+    pages_per_batch = cdiv(seq_len, page_size)
+    num_pages = batch * pages_per_batch
+
+    q = torch.randn(batch, heads, d_qk, dtype=dtype, device=DEVICE_TYPE)
+    kv = torch.randn(num_pages, page_size, 1, d_qk, dtype=dtype, device=DEVICE_TYPE)
+    if fp8_kv:
+        kv, scale = _quantize_to_fp8(kv)
+    else:
+        scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE_TYPE)
+    v = kv[..., :d_v]
+    block_table = torch.arange(num_pages, device=DEVICE_TYPE, dtype=torch.int32).view(
+        batch, pages_per_batch
+    )
+    seq_lens = torch.tensor([seq_len, 0], device=DEVICE_TYPE, dtype=torch.int32)
+    o = torch.empty(batch, heads, d_v, dtype=dtype, device=DEVICE_TYPE)
+    lse = torch.empty(batch, heads, dtype=dtype, device=DEVICE_TYPE)
+    attn_logits = torch.empty(
+        batch, heads, 1, d_v + 1, dtype=torch.float32, device=DEVICE_TYPE
+    )
+    return {
+        "q": q,
+        "kv": kv,
+        "v": v,
+        "block_table": block_table,
+        "seq_lens": seq_lens,
+        "o": o,
+        "lse": lse,
+        "attn_logits": attn_logits,
+        "scale": scale,
+        "page_size": page_size,
+        "d_qk": d_qk,
+        "seq_len": seq_len,
+    }
+
+
+def _run_mla_single_split_legacy(case):
+    """Run the pre-optimization two-stage path as an exact oracle."""
+    o_ref = torch.empty_like(case["o"])
+    lse_ref = torch.empty_like(case["lse"])
+    ref_logits = torch.empty_like(case["attn_logits"])
+    triton_decode_attention._decode_grouped_att_m_fwd(
+        case["q"],
+        case["kv"],
+        case["v"],
+        ref_logits,
+        case["block_table"],
+        case["seq_lens"],
+        1,
+        case["d_qk"] ** -0.5,
+        case["page_size"],
+        0.0,
+        case["scale"],
+        case["scale"],
+        is_mla=True,
+        o=o_ref,
+        lse=lse_ref,
+        write_direct=False,
+    )
+    triton_decode_attention._decode_softmax_reducev_fwd(
+        ref_logits,
+        case["q"],
+        o_ref,
+        lse_ref,
+        case["v"],
+        case["seq_lens"],
+        1,
+    )
+    return o_ref, lse_ref
+
+
+def _run_mla_single_split_direct(case):
+    decode_attention_fwd(
+        case["q"],
+        case["kv"],
+        case["v"],
+        case["o"],
+        case["lse"],
+        case["block_table"],
+        case["seq_lens"],
+        case["attn_logits"],
+        num_kv_splits=1,
+        sm_scale=case["d_qk"] ** -0.5,
+        page_size=case["page_size"],
+        k_scale=case["scale"],
+        v_scale=case["scale"],
+        is_mla=True,
+        write_direct=True,
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("fp8_kv", [False, True])
+def test_mla_single_split_skips_stage2(monkeypatch, dtype, fp8_kv):
+    """A single MLA split needs no second-stage identity reduction."""
+    if fp8_kv and not current_platform.has_device_capability(89):
+        pytest.skip("FP8 KV cache requires compute capability 8.9 or newer")
+    case = _make_mla_single_split_case(dtype, fp8_kv)
+    o_ref, lse_ref = _run_mla_single_split_legacy(case)
+
+    stage2_calls = 0
+    original_stage2 = triton_decode_attention._decode_softmax_reducev_fwd
+
+    def count_stage2(*args, **kwargs):
+        nonlocal stage2_calls
+        stage2_calls += 1
+        return original_stage2(*args, **kwargs)
+
+    monkeypatch.setattr(
+        triton_decode_attention, "_decode_softmax_reducev_fwd", count_stage2
+    )
+    _run_mla_single_split_direct(case)
+
+    assert stage2_calls == 0
+    assert torch.equal(case["o"][0], o_ref[0])
+    assert torch.equal(case["lse"][0], lse_ref[0])
+    assert torch.count_nonzero(case["o"][1]) == 0
+    assert torch.isneginf(case["lse"][1]).all()
+    assert torch.isfinite(case["o"]).all()
+    assert torch.isfinite(case["lse"][0]).all()
+
+
+def test_mla_single_split_cuda_graph_replay():
+    """Replay reads dynamic sequence lengths and rewrites all output rows."""
+    case = _make_mla_single_split_case(torch.bfloat16)
+    case["seq_lens"].copy_(torch.tensor([1, 0], device=DEVICE_TYPE, dtype=torch.int32))
+    _run_mla_single_split_direct(case)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _run_mla_single_split_direct(case)
+
+    for lengths in ([case["seq_len"], 17], [64, 0]):
+        case["seq_lens"].copy_(
+            torch.tensor(lengths, device=DEVICE_TYPE, dtype=torch.int32)
+        )
+        case["o"].fill_(float("nan"))
+        case["lse"].fill_(float("nan"))
+        graph.replay()
+        torch.accelerator.synchronize()
+        ref_o, ref_lse = _run_mla_single_split_legacy(case)
+        assert torch.equal(case["o"][0], ref_o[0])
+        assert torch.equal(case["lse"][0], ref_lse[0])
+        if lengths[1] > 0:
+            assert torch.equal(case["o"][1], ref_o[1])
+            assert torch.equal(case["lse"][1], ref_lse[1])
+        else:
+            assert torch.count_nonzero(case["o"][1]) == 0
+            assert torch.isneginf(case["lse"][1]).all()
+
+
+def test_mla_multi_split_keeps_stage2(monkeypatch):
+    """A caller cannot enable direct output for multiple MLA splits."""
+    case = _make_mla_single_split_case(torch.bfloat16)
+    num_splits = 2
+    case["attn_logits"] = torch.empty(
+        *case["attn_logits"].shape[:2],
+        num_splits,
+        case["attn_logits"].shape[-1],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    stage2_calls = 0
+    original_stage2 = triton_decode_attention._decode_softmax_reducev_fwd
+
+    def count_stage2(*args, **kwargs):
+        nonlocal stage2_calls
+        stage2_calls += 1
+        return original_stage2(*args, **kwargs)
+
+    monkeypatch.setattr(
+        triton_decode_attention, "_decode_softmax_reducev_fwd", count_stage2
+    )
+    decode_attention_fwd(
+        case["q"],
+        case["kv"],
+        case["v"],
+        case["o"],
+        case["lse"],
+        case["block_table"],
+        case["seq_lens"],
+        case["attn_logits"],
+        num_splits,
+        case["d_qk"] ** -0.5,
+        case["page_size"],
+        k_scale=case["scale"],
+        v_scale=case["scale"],
+        is_mla=True,
+        write_direct=True,
+    )
+    assert stage2_calls == 1
 
 
 @pytest.mark.parametrize("B", [3])

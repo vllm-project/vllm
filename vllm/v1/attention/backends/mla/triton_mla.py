@@ -266,6 +266,14 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             num_kv_splits = _compute_num_kv_splits(
                 attn_metadata.max_seq_len, self._sm_count
             )
+        # Direct output removes an identity second-stage reduction, but only
+        # helps when the regular performance heuristic also selects one split.
+        # Batch invariance may force one split for much longer contexts where
+        # the direct specialization is not faster.
+        write_direct = (
+            num_kv_splits == 1
+            and _compute_num_kv_splits(attn_metadata.max_seq_len, self._sm_count) == 1
+        )
 
         # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
         # merge partial attention outputs across splits. The scratch is served
@@ -317,6 +325,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             k_scale=layer._k_scale,
             v_scale=layer._k_scale,
             is_mla=True,
+            write_direct=write_direct,
         )
 
         return o, lse
