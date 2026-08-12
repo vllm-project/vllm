@@ -728,12 +728,12 @@ def test_stop_via_update_from_output():
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
         scheduled_cached_reqs=CachedRequestData.make_empty(),
-        num_scheduled_tokens={requests[0].request_id: 3, requests[1].request_id: 2},
-        total_num_scheduled_tokens=5,
+        num_scheduled_tokens={requests[0].request_id: 3, requests[1].request_id: 3},
+        total_num_scheduled_tokens=6,
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={
             requests[0].request_id: [10, 42],
-            requests[1].request_id: [13],
+            requests[1].request_id: [13, 99],
         },
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
@@ -765,7 +765,7 @@ def test_stop_via_update_from_output():
     assert outputs_by_id[requests[0].request_id].num_accepted_spec_tokens == 2
     assert outputs_by_id[requests[0].request_id].num_rejected_spec_tokens == 0
     assert outputs_by_id[requests[1].request_id].num_accepted_spec_tokens == 1
-    assert outputs_by_id[requests[1].request_id].num_rejected_spec_tokens == 0
+    assert outputs_by_id[requests[1].request_id].num_rejected_spec_tokens == 1
 
     # Test case 3: Stop on max tokens
     scheduler = create_scheduler(num_speculative_tokens=2)

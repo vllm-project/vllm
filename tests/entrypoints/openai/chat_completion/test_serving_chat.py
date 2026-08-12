@@ -786,6 +786,69 @@ async def test_chat_completion_prediction_token_details():
 
 
 @pytest.mark.asyncio
+async def test_chat_completion_omits_prediction_details_without_spec_decode():
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    response = await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=False,
+        ),
+        _single_request_output(_make_metrics_request_output()),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    )
+
+    assert response.usage is not None
+    assert response.usage.completion_tokens_details is None
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_sums_prediction_details_across_choices():
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    request_output = _make_metrics_request_output(
+        accepted_prediction_tokens=3,
+        rejected_prediction_tokens=2,
+    )
+    request_output.outputs.append(
+        CompletionOutput(
+            index=1,
+            text="World",
+            token_ids=[102],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+            num_accepted_spec_tokens=1,
+            num_rejected_spec_tokens=4,
+        )
+    )
+    response = await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=False,
+            n=2,
+        ),
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    )
+
+    assert response.usage is not None
+    assert response.usage.completion_tokens_details is not None
+    assert response.usage.completion_tokens_details.accepted_prediction_tokens == 4
+    assert response.usage.completion_tokens_details.rejected_prediction_tokens == 6
+
+
+@pytest.mark.asyncio
 async def test_chat_streaming_prediction_token_details():
     serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
     request = ChatCompletionRequest(
@@ -798,11 +861,44 @@ async def test_chat_streaming_prediction_token_details():
     chunks: list[dict[str, Any]] = []
     async for line in serving.chat_completion_stream_generator(
         request,
-        _single_request_output(
-            _make_metrics_request_output(
-                accepted_prediction_tokens=3,
-                rejected_prediction_tokens=2,
-            )
+        _stream_request_outputs(
+            RequestOutput(
+                request_id="test-id",
+                prompt="Test prompt",
+                prompt_token_ids=[1, 2, 3],
+                prompt_logprobs=None,
+                outputs=[
+                    CompletionOutput(
+                        index=0,
+                        text="Hel",
+                        token_ids=[100],
+                        cumulative_logprob=None,
+                        logprobs=None,
+                        num_accepted_spec_tokens=2,
+                        num_rejected_spec_tokens=1,
+                    )
+                ],
+                finished=False,
+            ),
+            RequestOutput(
+                request_id="test-id",
+                prompt="Test prompt",
+                prompt_token_ids=[1, 2, 3],
+                prompt_logprobs=None,
+                outputs=[
+                    CompletionOutput(
+                        index=0,
+                        text="lo",
+                        token_ids=[101],
+                        cumulative_logprob=None,
+                        logprobs=None,
+                        finish_reason="stop",
+                        num_accepted_spec_tokens=3,
+                        num_rejected_spec_tokens=2,
+                    )
+                ],
+                finished=True,
+            ),
         ),
         "chatcmpl-test-id",
         "test-model",
