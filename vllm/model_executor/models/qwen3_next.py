@@ -51,6 +51,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
     sp_reduce_scatter,
+    sp_restore_outputs,
     sp_shard,
 )
 from vllm.platforms import current_platform
@@ -593,28 +594,6 @@ def _all_gather_hidden_and_residual(
     return hidden_states, residual
 
 
-def _restore_sequence_parallel_outputs(
-    tensors: list[torch.Tensor],
-    sequence_parallel: list[bool],
-    full_num_tokens: int,
-) -> list[torch.Tensor]:
-    assert len(tensors) == len(sequence_parallel)
-    sharded_indices = [
-        idx for idx, is_sharded in enumerate(sequence_parallel) if is_sharded
-    ]
-    if not sharded_indices:
-        return tensors
-
-    sharded_tensors = [tensors[idx] for idx in sharded_indices]
-    split_sizes = [tensor.shape[-1] for tensor in sharded_tensors]
-    packed = sp_all_gather(torch.cat(sharded_tensors, dim=-1))[:full_num_tokens]
-    for idx, tensor in zip(
-        sharded_indices, packed.split(split_sizes, dim=-1), strict=True
-    ):
-        tensors[idx] = tensor
-    return tensors
-
-
 @support_torch_compile
 class Qwen3NextModel(nn.Module, EagleModelMixin):
     hf_to_vllm_mapper = WeightsMapper(
@@ -725,7 +704,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
-        outputs = _restore_sequence_parallel_outputs(
+        outputs = sp_restore_outputs(
             [hidden_states, *aux_hidden_states],
             [states_are_sequence_parallel, *aux_states_are_sequence_parallel],
             full_num_tokens,

@@ -60,6 +60,29 @@ def sp_all_gather(x: torch.Tensor) -> torch.Tensor:
     return tensor_model_parallel_all_gather(x, 0)
 
 
+def sp_restore_outputs(
+    tensors: list[torch.Tensor],
+    sequence_parallel: list[bool],
+    full_num_tokens: int,
+) -> list[torch.Tensor]:
+    """Restore sequence-sharded outputs with a single packed all-gather."""
+    assert len(tensors) == len(sequence_parallel)
+    sharded_indices = [
+        idx for idx, is_sharded in enumerate(sequence_parallel) if is_sharded
+    ]
+    if not sharded_indices:
+        return tensors
+
+    sharded_tensors = [tensors[idx] for idx in sharded_indices]
+    split_sizes = [tensor.shape[-1] for tensor in sharded_tensors]
+    packed = sp_all_gather(torch.cat(sharded_tensors, dim=-1))[:full_num_tokens]
+    for idx, tensor in zip(
+        sharded_indices, packed.split(split_sizes, dim=-1), strict=True
+    ):
+        tensors[idx] = tensor
+    return tensors
+
+
 def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
     assert x.ndim == 2
     tp_size = get_tensor_model_parallel_world_size()
