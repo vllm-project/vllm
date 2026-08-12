@@ -29,7 +29,7 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_file_store_init_method
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
@@ -266,7 +266,7 @@ def test_async_tp_pass_replace(
     dynamic: bool,
 ):
     num_processes = 2
-    master_port = str(get_open_port())
+    distributed_init_method = get_file_store_init_method()
 
     def run_torch_spawn(fn, nprocs):
         # need to use torch.mp.spawn otherwise will have problems with
@@ -281,7 +281,7 @@ def test_async_tp_pass_replace(
                 hidden_size,
                 dtype,
                 dynamic,
-                master_port,
+                distributed_init_method,
             ),
             nprocs=nprocs,
         )
@@ -314,7 +314,7 @@ def async_tp_pass_on_test_model(
     hidden_size: int,
     dtype: torch.dtype,
     dynamic: bool,
-    master_port: str = "0",
+    distributed_init_method: str,
 ):
     set_random_seed(0)
 
@@ -328,13 +328,16 @@ def async_tp_pass_on_test_model(
             "RANK": str(local_rank),
             "LOCAL_RANK": str(local_rank),
             "WORLD_SIZE": str(world_size),
-            "MASTER_ADDR": "localhost",
-            "MASTER_PORT": master_port,
         }
     )
 
     # initialize distributed
-    init_distributed_environment()
+    init_distributed_environment(
+        world_size=world_size,
+        rank=local_rank,
+        distributed_init_method=distributed_init_method,
+        local_rank=local_rank,
+    )
 
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
