@@ -36,6 +36,7 @@ logger = init_logger(__name__)
 
 MTPModelTypes = Literal[
     "deepseek_mtp",
+    "dots3_note_mtp",
     "mimo_mtp",
     "mimo_v2_mtp",
     "glm4_moe_mtp",
@@ -237,6 +238,10 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
+    enable_adaptive_verification: bool = False
+    """Whether to adaptively size the draft-verification budget from per-request
+    confidence. Currently only supported for method="dspark"."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -336,6 +341,21 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
+        if hf_config.model_type == "dots3_note":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            mtp_layer_types = getattr(hf_config, "mtp_layer_types", None)
+            if mtp_layer_types is None:
+                mtp_layer_types = ["sliding_attention"] * n_predict
+            if len(mtp_layer_types) != n_predict:
+                raise ValueError(
+                    "mtp_layer_types must have one entry per MTP layer: "
+                    f"got {len(mtp_layer_types)} for {n_predict} layers"
+                )
+            hf_config.layer_types = [*hf_config.layer_types, *mtp_layer_types]
+            hf_config.model_type = "dots3_note_mtp"
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Dots3NoteMTPModel"]}
+            )
         if hf_config.model_type in (
             "deepseek_v3",
             "deepseek_v32",
@@ -998,6 +1018,9 @@ class SpeculativeConfig:
                     self.draft_model_config.hf_config.architectures = [
                         "DSparkDraftModel"
                     ]
+                    self.draft_model_config.quantization = (
+                        self.target_model_config.quantization
+                    )
                     self.update_arch_()
                 elif (
                     self.method == "dspark"
@@ -1143,6 +1166,10 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        if self.method != "dspark" and self.enable_adaptive_verification:
+            raise ValueError("Adaptive verification only supported with DSpark")
+
         return self
 
     def _validate_suffix_decoding(self):
