@@ -87,6 +87,7 @@ class RemoteAllocInfo:
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
+    remote_dp_size_local: int = 0
     completion_request_id: str | None = None
     completion_remote_notify_port: int | None = None
     completion_remote_ip: str | None = None
