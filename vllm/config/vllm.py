@@ -2394,6 +2394,34 @@ class VllmConfig:
             ):
                 unsupported.append("EAGLE3 with pipeline parallelism")
 
+            if (
+                speculative_config.enable_adaptive_verification
+                and self.lora_config is not None
+            ):
+                # The per-token LoRA mapping is built from CPU placeholder boundaries,
+                # while the trimmed batch's true boundaries are decided on the GPU.
+                unsupported.append("adaptive verification with LoRA")
+
+            if (
+                speculative_config.enable_adaptive_verification
+                and self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+            ):
+                # The draft budget divides by step costs profiled from captured
+                # cudagraphs; eager execution captures none.
+                unsupported.append(
+                    "adaptive verification with enforce_eager/cudagraph_mode=none"
+                )
+
+            if (
+                speculative_config.enable_adaptive_verification
+                and self.parallel_config.pipeline_parallel_size > 1
+            ):
+                # Cost curves and confidences currently only exist on the last PP rank;
+                # earlier ranks would diverge on the trimmed batch shape.
+                # TODO: we should be able to support adaptive verification with PP by
+                # broadcasting the cost curves and confidences to all ranks.
+                unsupported.append("adaptive verification with pipeline parallelism")
+
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
 
