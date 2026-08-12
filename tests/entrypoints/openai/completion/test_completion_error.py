@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -109,6 +111,7 @@ def _build_minimal_metrics_serving_completion(
 ) -> OpenAIServingCompletion:
     serving = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
     serving.enable_prompt_tokens_details = False
+    serving.enable_force_include_usage = False
     serving.system_fingerprint = None
     serving.enable_per_request_metrics = enable_per_request_metrics
     return serving
@@ -139,6 +142,12 @@ def _make_metrics_request_output(
         finished=True,
         metrics=metrics,
     )
+
+
+async def _single_indexed_request_output(
+    request_output: RequestOutput,
+) -> AsyncIterator[tuple[int, RequestOutput]]:
+    yield 0, request_output
 
 
 def _build_renderer(model_config: MockModelConfig):
@@ -204,6 +213,45 @@ def test_completion_prediction_token_details():
     assert response.usage.completion_tokens_details is not None
     assert response.usage.completion_tokens_details.accepted_prediction_tokens == 3
     assert response.usage.completion_tokens_details.rejected_prediction_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_completion_streaming_prediction_token_details():
+    serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=False
+    )
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    chunks: list[dict[str, Any]] = []
+    async for line in serving.completion_stream_generator(
+        request=request,
+        engine_inputs=[{"type": "tokens", "prompt_token_ids": [1, 2, 3]}],
+        result_generator=_single_indexed_request_output(
+            _make_metrics_request_output(
+                accepted_prediction_tokens=3,
+                rejected_prediction_tokens=2,
+            )
+        ),
+        request_id="cmpl-test-id",
+        created_time=0,
+        model_name=MODEL_NAME,
+        num_prompts=1,
+        tokenizer=None,
+        request_metadata=RequestResponseMetadata(request_id="cmpl-test-id"),
+    ):
+        if line.startswith("data: {"):
+            chunks.append(json.loads(line[len("data: ") :]))
+
+    usage = [chunk["usage"] for chunk in chunks if chunk.get("usage")][-1]
+    assert usage["completion_tokens_details"] == {
+        "accepted_prediction_tokens": 3,
+        "rejected_prediction_tokens": 2,
+    }
 
 
 def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
