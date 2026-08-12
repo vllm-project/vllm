@@ -2918,12 +2918,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
-        """Whether (N, K) has a tuned aiter blockscale bpreshuffle config.
-
-        Untuned shapes fall back to aiter's default CK kernel, which can be
-        numerically wrong or fault (e.g. memory access fault on q_b_proj), so
-        only route a shape through the bpreshuffle GEMM when it is tuned.
-        """
+        """Whether (N, K) has a tuned aiter blockscale bpreshuffle config."""
         if not current_platform.is_rocm():
             return False
         try:

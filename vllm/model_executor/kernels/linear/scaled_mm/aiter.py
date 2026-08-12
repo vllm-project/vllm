@@ -384,9 +384,8 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
         )
 
-        # bpreshuffle GEMM requires an fp8 2D weight with N and K divisible by 128,
-        # and a tuned config: untuned shapes fall back to aiter's default CK kernel,
-        # which can be numerically wrong or fault.
+        # bpreshuffle GEMM requires an fp8 2D weight with N and K divisible by 128.
+        # Require tuned config as fallback can trigger faults or numerical errors.
         self._is_bpreshuffled = (
             rocm_aiter_ops.is_linear_fp8_enabled()
             and n % 128 == 0
@@ -483,8 +482,6 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         )
 
         x_2d = x.view(-1, x.shape[-1])
-        # aiter's bpreshuffle GEMM consumes the transposed (column-major) group
-        # scale that transpose_scale=True writes (matches ATOM's per_1x128 path).
         A, As = rocm_aiter_ops.group_fp8_quant(x_2d, transpose_scale=True)
         output = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
             A, params.weight, As, Bs, output_dtype=self.config.out_dtype
