@@ -467,7 +467,6 @@ class Attention(nn.Module, AttentionLayerBase):
             and (
                 self.kv_cache_dtype.startswith("fp8")
                 or self.kv_cache_dtype.startswith("nvfp4")
-                or self.kv_cache_dtype == "fp8_k_nvfp4_v"
             )
             and not self.kv_cache_dtype.endswith("per_token_head")
         ):
