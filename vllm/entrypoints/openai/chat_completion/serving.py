@@ -726,11 +726,6 @@ class OpenAIServingChat(GenerateBaseServing):
                             token_ids=(
                                 as_list(output.token_ids) if include_token_ids else None
                             ),
-                            routed_experts=(
-                                numpy2base64(output.routed_experts)
-                                if output.routed_experts is not None
-                                else None
-                            ),
                         )
 
                         finish_reason_sent[i] = True

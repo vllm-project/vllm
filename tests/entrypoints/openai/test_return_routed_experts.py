@@ -64,39 +64,3 @@ async def test_routed_experts(server):
 
         assert choice["token_ids"] is not None
         assert_valid_routed_experts(choice["routed_experts"])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("endpoint", ["completions", "chat.completions"])
-async def test_streaming_routed_experts(server, endpoint):
-    """Streaming endpoints return R3 exactly once on the terminal choice."""
-    async with server.get_async_client() as client:
-        if endpoint == "completions":
-            stream = await client.completions.create(
-                model=MODEL_NAME,
-                prompt="Hello, world",
-                max_tokens=10,
-                temperature=0,
-                stream=True,
-            )
-        else:
-            stream = await client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[{"role": "user", "content": "Hello, world"}],
-                max_tokens=10,
-                temperature=0,
-                stream=True,
-            )
-
-        terminal_choices = []
-        routed_experts = []
-        async for chunk in stream:
-            for choice in chunk.model_dump()["choices"]:
-                if choice.get("finish_reason") is not None:
-                    terminal_choices.append(choice)
-                if choice.get("routed_experts") is not None:
-                    routed_experts.append(choice["routed_experts"])
-
-        assert len(terminal_choices) == 1
-        assert len(routed_experts) == 1
-        assert_valid_routed_experts(routed_experts[0])

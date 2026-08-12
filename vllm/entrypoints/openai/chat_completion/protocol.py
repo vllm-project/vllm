@@ -161,8 +161,6 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     stop_reason: int | str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     token_ids: list[int] | None = None
-    # Complete routed-experts data, returned on the terminal chunk only.
-    routed_experts: str | None = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
