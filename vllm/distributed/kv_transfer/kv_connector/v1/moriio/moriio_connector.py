@@ -39,12 +39,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     WriteTask,
     fold_local_rank,
     get_moriio_mode,
+    get_moriio_remote_tp_rank,
     get_peer_zmq_from_request_id,
     get_port_offset,
     get_role,
     parse_moriio_zmq_address,
     pod_index,
     resolve_host_ip,
+    resolve_peer_tp_size,
     set_role,
     zmq_ctx,
 )
@@ -101,32 +103,6 @@ except ImportError:
 
 def is_moriio_available() -> bool:
     return MoRIIO_enabled
-
-
-def get_moriio_remote_tp_rank(
-    local_tp_rank: int, local_tp_size: int, remote_tp_size: int
-) -> int:
-    if local_tp_size <= 0 or remote_tp_size <= 0:
-        raise ValueError("TP sizes must be positive")
-    if local_tp_rank < 0 or local_tp_rank >= local_tp_size:
-        raise ValueError(
-            f"local_tp_rank {local_tp_rank} must be in [0, {local_tp_size})"
-        )
-    if remote_tp_size == local_tp_size:
-        return local_tp_rank
-    if remote_tp_size > local_tp_size:
-        if remote_tp_size % local_tp_size != 0:
-            raise ValueError(
-                f"remote tp_size {remote_tp_size} must be a multiple of local "
-                f"tp_size {local_tp_size} for heterogeneous-TP P/D"
-            )
-        return local_tp_rank * (remote_tp_size // local_tp_size)
-    if local_tp_size % remote_tp_size != 0:
-        raise ValueError(
-            f"local tp_size {local_tp_size} must be a multiple of remote "
-            f"tp_size {remote_tp_size} for heterogeneous-TP P/D"
-        )
-    return local_tp_rank // (local_tp_size // remote_tp_size)
 
 
 def validate_moriio_heterogeneous_tp_kv_heads(
@@ -589,8 +565,12 @@ class MoRIIOConnectorScheduler:
                 return
 
         remote_notify_port = int(remote_notify_port)
-        for tp_index in range(self.tp_size):
-            target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
+        # Address the producer's TP port layout, not the decoder's.
+        producer_tp_size = resolve_peer_tp_size(params, self.tp_size)
+        for tp_index in range(producer_tp_size):
+            target_port = remote_notify_port + get_port_offset(
+                int(remote_dp_rank), tp_index, producer_tp_size
+            )
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
@@ -785,9 +765,12 @@ class MoRIIOConnectorScheduler:
                         _pod_idx = pod_index(remote_dp_rank, _dp_local)
                         if 0 <= _pod_idx < len(_remote_hosts):
                             _notify_host = _remote_hosts[_pod_idx]
-                    for tp_index in range(self.tp_size):
+                    # Producer's TP degree, not ours: its ranks bind at
+                    # base + dp_local * producer_tp + tp.
+                    _producer_tp_size = resolve_peer_tp_size(_kvp, self.tp_size)
+                    for tp_index in range(_producer_tp_size):
                         target_port = remote_notify_port + get_port_offset(
-                            _remote_dp_rank_for_port, tp_index
+                            _remote_dp_rank_for_port, tp_index, _producer_tp_size
                         )
 
                         self.send_notify_block(
@@ -1217,7 +1200,7 @@ class MoRIIOConnectorWorker:
 
         self.side_channel_port: int = (
             self.moriio_config.handshake_port
-            + get_port_offset(self.dp_rank, self.tp_rank)
+            + get_port_offset(self.dp_rank, self.tp_rank, self.moriio_config.tp_size)
         )
         self.engine_id: EngineId = engine_id
 
@@ -1307,6 +1290,7 @@ class MoRIIOConnectorWorker:
         kv_layer: torch.Tensor,
         remote_notify_port: int,
         remote_ip: str,
+        remote_tp_size: int = 0,
     ) -> None:
         """Schedule a block write operation.
 
@@ -1320,6 +1304,7 @@ class MoRIIOConnectorWorker:
             kv_layer: KV cache tensor
             remote_notify_port: Port for completion notification
             remote_ip: IP address of remote node
+            remote_tp_size: Decode TP degree; 0 means assume homogeneous
         """
 
         # synchronization to prevent dirty reads between
@@ -1341,6 +1326,7 @@ class MoRIIOConnectorWorker:
             event=event,
             remote_notify_port=remote_notify_port,
             remote_ip=remote_ip,
+            remote_tp_size=remote_tp_size,
         )
         self._writer.schedule_write(task)
 
@@ -1529,12 +1515,15 @@ class MoRIIOConnectorWorker:
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
 
+        # 0/unknown remote TP == homogeneous (as _remote_tp_rank does);
+        # forwarding the raw sentinel would drop the DP term from the offset.
+        peer_tp_size = int(remote_tp_size) or self.world_size
         dial_tp_rank = (
-            self._remote_tp_rank(remote_tp_size)
+            self._remote_tp_rank(peer_tp_size)
             if remote_tp_rank is None
             else int(remote_tp_rank)
         )
-        port_offset = get_port_offset(remote_dp_rank, dial_tp_rank, remote_tp_size)
+        port_offset = get_port_offset(remote_dp_rank, dial_tp_rank, peer_tp_size)
         path = make_zmq_path("tcp", host, port + port_offset)
         logger.debug("handshake Querying metadata on path: %s", path)
 
@@ -2407,6 +2396,7 @@ class MoRIIOConnectorWorker:
             kv_layer=kv_layer,
             remote_notify_port=meta.remote_notify_port,
             remote_ip=meta.remote_host,
+            remote_tp_size=int(meta.tp_size),
         )
 
     def merge_contiguous_blocks(
@@ -2565,6 +2555,9 @@ class MoRIIOConnectorWorker:
         # per (dp, tp); other configs use the fixed local-rank mapping (eff_tp ==
         # _remote_tp_rank), byte-identical to before. This key MUST match the one
         # the eager handshake stored the session under.
+        # 0/unknown remote TP == homogeneous (see _remote_tp_rank); resolve it
+        # before any rank or port arithmetic.
+        remote_tp_size = int(remote_tp_size) or self.world_size
         eff_tp = (
             int(chosen_tp)
             if chosen_tp is not None

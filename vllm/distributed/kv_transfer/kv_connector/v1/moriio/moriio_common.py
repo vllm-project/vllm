@@ -4,7 +4,7 @@ import contextlib
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -59,6 +59,8 @@ class WriteTask:
     event: torch.cuda.Event
     remote_notify_port: int
     remote_ip: str
+    # Decode TP degree for completion-port addressing; 0 means homogeneous.
+    remote_tp_size: int = 0
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
 
@@ -88,6 +90,7 @@ class RemoteAllocInfo:
     completion_request_id: str | None = None
     completion_remote_notify_port: int | None = None
     completion_remote_ip: str | None = None
+    completion_decode_tp_size: int = 0
     completion_notified: bool = False
     transfer_statuses: list[Any] = field(default_factory=list)
     transfer_offsets: dict[
@@ -187,8 +190,56 @@ def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
         return MoRIIOMode.WRITE
 
 
-def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
+def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int) -> int:
+    # tp_size is the OWNER's TP degree: a rank binds at
+    # base + own_dp_local * own_tp_size + own_tp_rank.
+    if tp_size <= 0:
+        raise ValueError(f"tp_size must be positive for port offsets, got {tp_size}")
     return (dp_rank) * tp_size + tp_rank
+
+
+def get_moriio_remote_tp_rank(
+    local_tp_rank: int, local_tp_size: int, remote_tp_size: int
+) -> int:
+    if local_tp_size <= 0 or remote_tp_size <= 0:
+        raise ValueError("TP sizes must be positive")
+    if local_tp_rank < 0 or local_tp_rank >= local_tp_size:
+        raise ValueError(
+            f"local_tp_rank {local_tp_rank} must be in [0, {local_tp_size})"
+        )
+    if remote_tp_size == local_tp_size:
+        return local_tp_rank
+    if remote_tp_size > local_tp_size:
+        if remote_tp_size % local_tp_size != 0:
+            raise ValueError(
+                f"remote tp_size {remote_tp_size} must be a multiple of local "
+                f"tp_size {local_tp_size} for heterogeneous-TP P/D"
+            )
+        return local_tp_rank * (remote_tp_size // local_tp_size)
+    if local_tp_size % remote_tp_size != 0:
+        raise ValueError(
+            f"local tp_size {local_tp_size} must be a multiple of remote "
+            f"tp_size {remote_tp_size} for heterogeneous-TP P/D"
+        )
+    return local_tp_rank // (local_tp_size // remote_tp_size)
+
+
+def resolve_peer_tp_size(params: Mapping[str, Any], fallback: int) -> int:
+    """Peer TP degree advertised in ``kv_transfer_params``.
+
+    Args:
+        params: Peer-provided transfer params.
+        fallback: TP degree to assume when the peer advertises none.
+
+    Returns:
+        The peer's TP degree, or ``fallback`` when it is missing or invalid
+        (0 is the "unknown" sentinel and means homogeneous TP).
+    """
+    try:
+        peer_tp_size = int(params.get("remote_tp_size") or params.get("tp_size") or 0)
+    except (TypeError, ValueError):
+        peer_tp_size = 0
+    return peer_tp_size if peer_tp_size > 0 else fallback
 
 
 def fold_local_rank(global_dp_rank: int, dp_size_local: int) -> int:
@@ -305,7 +356,7 @@ class MoRIIOConfig:
         dp_rank = fold_local_rank(pc.data_parallel_rank, pc.data_parallel_size_local)
         base_notify_port = int(extra_config["notify_port"])
         tp_size = get_tensor_model_parallel_world_size()
-        port_offset = get_port_offset(dp_rank, tp_rank)
+        port_offset = get_port_offset(dp_rank, tp_rank, tp_size)
         backend = str(extra_config.get("backend", "rdma")).lower()
         if backend not in ("rdma", "xgmi"):
             raise ValueError(

@@ -2,20 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOMode,
     MoRIIOTransferAck,
+    RemoteAllocInfo,
+    WriteTask,
+    get_port_offset,
+    resolve_peer_tp_size,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnector,
+    MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
     get_moriio_expected_ack_count,
     get_moriio_remote_tp_rank,
     resolve_moriio_transfer_ack,
     validate_moriio_heterogeneous_tp_kv_heads,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+    MoRIIOWriter,
 )
 
 
@@ -25,6 +34,145 @@ def test_remote_tp_rank_same_tp_maps_to_self():
         1,
         2,
         3,
+    ]
+
+
+@pytest.mark.parametrize(("dp_size", "tp_size"), [(2, 2), (2, 4), (4, 2)])
+def test_dp_tp_port_offsets_are_injective(dp_size, tp_size):
+    offsets = {
+        get_port_offset(dp_rank, tp_rank, tp_size)
+        for dp_rank in range(dp_size)
+        for tp_rank in range(tp_size)
+    }
+
+    assert len(offsets) == dp_size * tp_size
+
+
+def test_port_offset_rejects_unknown_tp_size():
+    """0 is the "unknown peer TP" sentinel; it must not silently drop the DP term."""
+    with pytest.raises(ValueError, match="tp_size must be positive"):
+        get_port_offset(1, 0, 0)
+
+
+def test_resolve_peer_tp_size_falls_back_when_unadvertised():
+    assert resolve_peer_tp_size({}, 4) == 4
+    assert resolve_peer_tp_size({"tp_size": 0}, 4) == 4
+    assert resolve_peer_tp_size({"tp_size": 2}, 4) == 2
+    assert resolve_peer_tp_size({"remote_tp_size": 8, "tp_size": 2}, 4) == 8
+
+
+def test_early_write_release_uses_producer_tp_size():
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.tp_size = 4
+    sent = []
+    scheduler._send_transfer_release = lambda *args: sent.append(args)
+
+    scheduler._release_write_prefill_blocks(
+        "req",
+        {
+            "transfer_id": "tx",
+            "remote_dp_rank": 1,
+            "remote_host": "producer",
+            "remote_notify_port": 7000,
+            "tp_size": 2,
+        },
+    )
+
+    assert sent == [
+        ("tx", "producer", 7000 + get_port_offset(1, 0, 2)),
+        ("tx", "producer", 7000 + get_port_offset(1, 1, 2)),
+    ]
+
+
+def _writer_with_stub_worker(tp_rank, world_size):
+    sent = []
+    wrapper = SimpleNamespace(
+        lock=threading.Lock(),
+        done_req_ids=[],
+        done_remote_allocate_req_dict={},
+        waiting_for_transfer_complete=lambda _: None,
+        send_notify=lambda _, host, port, **kwargs: sent.append((host, port)),
+        _mark_transfer_terminal_locked=lambda _: None,
+    )
+    worker = SimpleNamespace(
+        moriio_wrapper=wrapper,
+        tp_rank=tp_rank,
+        world_size=world_size,
+    )
+    writer = MoRIIOWriter.__new__(MoRIIOWriter)
+    writer._worker_ref = lambda: worker
+    writer._write_state_lock = threading.Lock()
+    writer._sealed_writes = {}
+    writer._clear_transfer_state = lambda _: None
+    return writer, worker, sent
+
+
+def _complete_write(
+    writer,
+    worker,
+    transfer_id,
+    decode_dp_rank,
+    notify_port,
+    decode_tp_size,
+    remote_ip="127.0.0.1",
+):
+    info = RemoteAllocInfo(block_ids=None)  # type: ignore[arg-type]
+    info.decode_dp_rank = decode_dp_rank
+    worker.moriio_wrapper.done_remote_allocate_req_dict[transfer_id] = info
+    writer._execute_write_task(
+        WriteTask(
+            request_id="req",
+            transfer_id=transfer_id,
+            dst_engine_id="decode",
+            local_block_ids=[0],
+            remote_block_ids_hint=None,
+            layer_name="layer",
+            event=None,  # type: ignore[arg-type]
+            remote_notify_port=notify_port,
+            remote_ip=remote_ip,
+            remote_tp_size=decode_tp_size,
+        )
+    )
+    info.block_ids = [0]
+    info.writes_expected = 1
+    info.writes_done = 1
+    writer._finalize_if_complete(transfer_id, info)
+
+
+@pytest.mark.parametrize("decode_dp_rank", [0, 1])
+def test_write_done_targets_the_exact_decode_rank_that_bound_the_port(decode_dp_rank):
+    base, producer_tp, decode_tp = 7000, 4, 2
+    bound = {
+        base + get_port_offset(dp, tp, decode_tp): (dp, tp)
+        for dp in range(2)
+        for tp in range(decode_tp)
+    }
+
+    for producer_rank in range(producer_tp):
+        writer, worker, sent = _writer_with_stub_worker(producer_rank, producer_tp)
+        _complete_write(
+            writer,
+            worker,
+            f"tx-{producer_rank}",
+            decode_dp_rank,
+            base,
+            decode_tp,
+        )
+        ((_, port),) = sent
+        expected_tp = get_moriio_remote_tp_rank(producer_rank, producer_tp, decode_tp)
+        assert bound[port] == (decode_dp_rank, expected_tp)
+
+
+def test_write_done_uses_per_request_decode_tp_size():
+    base = 7000
+    writer, worker, sent = _writer_with_stub_worker(tp_rank=0, world_size=8)
+
+    _complete_write(writer, worker, "tx-a", 1, base, 2, remote_ip="host-a")
+    _complete_write(writer, worker, "tx-b", 1, base, 4, remote_ip="host-b")
+
+    assert sent == [
+        ("host-a", base + get_port_offset(1, 0, 2)),
+        ("host-b", base + get_port_offset(1, 0, 4)),
     ]
 
 

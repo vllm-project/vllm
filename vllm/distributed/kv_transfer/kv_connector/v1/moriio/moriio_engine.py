@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferError,
     TransferId,
     WriteTask,
+    get_moriio_remote_tp_rank,
     get_port_offset,
     get_role,
     zmq_ctx,
@@ -311,6 +312,7 @@ class MoRIIOWriter:
         with self._write_state_lock:
             request_info.completion_request_id = task.request_id
             request_info.completion_remote_notify_port = task.remote_notify_port
+            request_info.completion_decode_tp_size = task.remote_tp_size
             # Wide-EP multi-pod: task.remote_ip addresses only the first pod,
             # so resolve the per-rank host from multi_pod_hosts (falls back to
             # task.remote_ip for single-pod or on any indexing miss).
@@ -455,6 +457,9 @@ class MoRIIOWriter:
             request_id = request_info.completion_request_id
             remote_notify_port = request_info.completion_remote_notify_port
             remote_ip = request_info.completion_remote_ip
+            decode_tp_size = (
+                request_info.completion_decode_tp_size or self.worker.world_size
+            )
             if request_id is None or remote_notify_port is None or remote_ip is None:
                 return
             transfer_statuses = list(request_info.transfer_statuses)
@@ -471,8 +476,15 @@ class MoRIIOWriter:
         _decode_dp_rank_for_port = int(request_info.decode_dp_rank)
         if _dp_local > 0:
             _decode_dp_rank_for_port = _decode_dp_rank_for_port % _dp_local
+        # Address the DECODE's port layout: its TP degree and the decode TP
+        # rank this producer rank maps to.
+        _decode_tp_rank = get_moriio_remote_tp_rank(
+            self.worker.tp_rank, self.worker.world_size, decode_tp_size
+        )
         remote_port = remote_notify_port + get_port_offset(
-            _decode_dp_rank_for_port, self.worker.tp_rank
+            _decode_dp_rank_for_port,
+            _decode_tp_rank,
+            decode_tp_size,
         )
         # Consider using RDMA immediate data in decode side
         # to eliminate the need for this notification.
