@@ -478,7 +478,9 @@ class InternVLMultiModalProcessor(
                 "video", video_num_patches
             ),
             video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
-            video_token_id=MultiModalFieldConfig.shared("video", num_videos),
+            video_token_id=MultiModalFieldConfig.shared(
+                "video", num_videos, keep_on_cpu=True
+            ),
         )
 
     def _get_mm_fields_config(
