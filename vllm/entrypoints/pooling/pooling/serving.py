@@ -59,7 +59,8 @@ class ServingPooling(PoolingBaseServing):
         if pooling_task == "embed&token_classify":
             raise ValueError(
                 "The 'embed&token_classify' pooling task is only available "
-                "through an IO processor plugin. Send an IOProcessorRequest, "
+                "through an IO processor plugin. Send a plugin request with "
+                "a 'data' field, "
                 "or select a concrete task with --pooler-config.task."
             )
         return self.io_processors[pooling_task]

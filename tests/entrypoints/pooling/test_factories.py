@@ -72,5 +72,5 @@ def test_combined_task_plain_pooling_request_has_actionable_error():
     serving.io_processors = {"plugin": MagicMock()}
     request = SimpleNamespace(task=None, dimensions=None)
 
-    with pytest.raises(ValueError, match="only available through an IO processor"):
+    with pytest.raises(ValueError, match="plugin request with a 'data' field"):
         serving.get_io_processor(request)
