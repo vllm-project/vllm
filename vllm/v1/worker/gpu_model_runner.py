@@ -941,6 +941,9 @@ class GPUModelRunner(
         self._num_valid_draft_tokens_cpu: torch.Tensor | None = None
         self._num_valid_draft_tokens_event: torch.cuda.Event | None = None
         self._num_valid_draft_tokens_copy_stream: torch.cuda.Stream | None = None
+        # Per-step padded-slot trim counts (see update_scheduler_for_
+        # invalid_drafts), reported via ModelRunnerOutput for metrics.
+        self._last_num_invalid_spec_tokens: dict[str, int] | None = None
         if (
             self.speculative_config is not None
             and self.speculative_config.use_gpu_state_drafter()
@@ -1414,7 +1417,7 @@ class GPUModelRunner(
         ):
             for req_id, toks in scheduled_spec_tokens.items():
                 original_num_spec_per_req[req_id] = len(toks)
-            update_scheduler_for_invalid_drafts(
+            self._last_num_invalid_spec_tokens = update_scheduler_for_invalid_drafts(
                 self._num_valid_draft_tokens_event,
                 self._num_valid_draft_tokens_cpu,
                 scheduler_output,
@@ -4888,6 +4891,8 @@ class GPUModelRunner(
         self.kv_connector_output = None
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            num_invalid_spec_tokens = self._last_num_invalid_spec_tokens
+            self._last_num_invalid_spec_tokens = None
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -4899,6 +4904,7 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                num_invalid_spec_tokens=num_invalid_spec_tokens or None,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
             )

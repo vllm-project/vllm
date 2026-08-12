@@ -1797,7 +1797,13 @@ class Scheduler(SchedulerInterface):
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted,
-                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
+                    # GPU-state drafters trim padded spec slots on the worker
+                    # and report the trim in the runner output; the engine's
+                    # scheduler_output stays untrimmed for those methods.
+                    num_invalid_spec_tokens=(
+                        model_runner_output.num_invalid_spec_tokens
+                        or scheduler_output.num_invalid_spec_tokens
+                    ),
                     request_id=req_id,
                 )
 
@@ -2566,10 +2572,13 @@ class Scheduler(SchedulerInterface):
     ) -> SpecDecodingStats | None:
         if not self.log_stats or not num_draft_tokens:
             return None
-        if spec_decoding_stats is None:
-            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
         if num_invalid_spec_tokens:
             num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
+            if num_draft_tokens <= 0:
+                # Every scheduled slot was padding: no real draft to record.
+                return spec_decoding_stats
+        if spec_decoding_stats is None:
+            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
         )
