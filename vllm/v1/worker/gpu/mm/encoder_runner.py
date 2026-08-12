@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
 import time
+from collections.abc import Collection
+from contextlib import contextmanager
 
 import numpy as np
 import torch
@@ -18,7 +21,10 @@ from vllm.renderers.paged_shm.client import PagedShmClient
 from vllm.renderers.paged_shm.tensor_ipc import PagedShmTensorIPC
 from vllm.renderers.paged_shm.types import ShmTensor
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
+from vllm.v1.worker.utils import (
+    EncoderTimingStats,
+    sanity_check_mm_encoder_outputs,
+)
 
 logger = init_logger(__name__)
 
@@ -33,6 +39,7 @@ class EncoderRunner:
         dtype: torch.dtype,
         device: torch.device,
         vllm_config
+        enable_timing: bool = False,
     ):
         self.model = model
         self.max_num_tokens = max_num_tokens
@@ -41,6 +48,9 @@ class EncoderRunner:
         self.dtype = dtype
         self.device = device
         self.is_realtime = supports_realtime(model)
+        self.enable_timing = enable_timing
+        self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
+        self._timing_lock = threading.Lock()
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
@@ -125,6 +135,36 @@ class EncoderRunner:
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
         return encoder_outputs
+
+    @contextmanager
+    def timed_encoder_operation(self, request_ids: Collection[str]):
+        if not (self.enable_timing and request_ids):
+            yield
+            return
+
+        torch.accelerator.synchronize()
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            torch.accelerator.synchronize()
+            per_request_time = (time.perf_counter() - start_time) / len(request_ids)
+            with self._timing_lock:
+                for req_id in request_ids:
+                    stats = self.encoder_timing_registry.setdefault(
+                        req_id, EncoderTimingStats()
+                    )
+                    stats.encoder_forward_secs += per_request_time
+                    stats.num_encoder_calls += 1
+
+    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
+        with self._timing_lock:
+            stats = {
+                req_id: stats_obj.to_dict()
+                for req_id, stats_obj in self.encoder_timing_registry.items()
+            }
+            self.encoder_timing_registry.clear()
+            return stats
 
     def gather_mm_embeddings(
         self,

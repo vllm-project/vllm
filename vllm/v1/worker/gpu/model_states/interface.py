@@ -60,6 +60,7 @@ class ModelState(ABC):
         self.supports_mm_inputs = encoder_cache is not None
         if encoder_cache is not None:
             self.encoder_cache = encoder_cache
+            observability_config = vllm_config.observability_config
             self.encoder_runner = EncoderRunner(
                 model=self.model,
                 max_num_tokens=self.max_num_tokens,
@@ -68,6 +69,10 @@ class ModelState(ABC):
                 dtype=self.dtype,
                 device=self.device,
                 vllm_config=self.vllm_config
+                enable_timing=bool(
+                    observability_config
+                    and observability_config.enable_mm_processor_stats
+                ),
             )
 
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
@@ -151,7 +156,10 @@ class ModelState(ABC):
             scheduled_encoder_inputs
         )
         if mm_kwargs:
-            encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            with self.encoder_runner.timed_encoder_operation(
+                scheduled_encoder_inputs.keys()
+            ):
+                encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
     def gather_mm_embeddings(
