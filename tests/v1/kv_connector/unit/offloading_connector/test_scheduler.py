@@ -2389,7 +2389,7 @@ class TestEagle:
             req=req,
             req_context=ReqContext(req_id="test-req"),
             offloading_context=RequestOffloadingContext(
-                policy=OffloadPolicy.BLOCK_LEVEL
+                policy=OffloadPolicy.CHUNK_LEVEL
             ),
             num_locally_computed_tokens=num_computed_tokens,
         )

@@ -20,9 +20,10 @@ if TYPE_CHECKING:
 
 from vllm.v1.kv_offload.config import OffloadingConfig
 
-# `OffloadKey` identifies an offloaded block. It combines a block hash with
-# its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
-# Use the helper functions below to construct / decompose keys.
+# `OffloadKey` identifies an offloaded chunk (the transfer unit, which may
+# span one or more GPU blocks depending on blocks_per_chunk). It combines a
+# block hash with its KV cache group index, encoded as raw bytes to avoid
+# tuple GC overhead. Use the helper functions below to construct / decompose.
 OffloadKey = NewType("OffloadKey", bytes)
 
 
@@ -114,17 +115,17 @@ class LookupResult(Enum):
 
 
 class OffloadPolicy(Enum):
-    # Offload only newly-computed blocks as they arrive; prefix-hit
-    # blocks (already offloaded by a prior request) are skipped.
-    BLOCK_LEVEL = "block_level"
-    # Offload all blocks for the request, including prefix hits.
+    # Offload only newly-computed chunks as they arrive; prefix-hit
+    # chunks (already offloaded by a prior request) are skipped.
+    CHUNK_LEVEL = "chunk_level"
+    # Offload all chunks for the request, including prefix hits.
     # Used by tiers that need the complete KV context for a request.
     REQUEST_LEVEL = "request_level"
 
 
 @dataclass
 class RequestOffloadingContext:
-    policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
+    policy: OffloadPolicy = OffloadPolicy.CHUNK_LEVEL
 
 
 class ScheduleEndContext(NamedTuple):
@@ -139,7 +140,7 @@ class ScheduleEndContext(NamedTuple):
 class LoadStoreSpec:
     """
     Metadata that encapsulates information allowing a worker
-    to load, and optionally also to store, blocks of KV data.
+    to load, and optionally also to store, chunks of KV data.
     """
 
 
@@ -154,7 +155,7 @@ class PrepareStoreOutput:
 class OffloadingEvent:
     keys: list[OffloadKey]
     medium: Medium
-    # True if blocks are removed, False if stored
+    # True if chunks are removed, False if stored
     removed: bool
     locality: Locality | None = None
 
@@ -162,27 +163,27 @@ class OffloadingEvent:
 """
 OffloadingManager class for managing KV data offloading in vLLM v1
 
-This class runs in the scheduler, tracks which blocks are offloaded
+This class runs in the scheduler, tracks which chunks are offloaded
 and their address.
 
 The class provides the following primitives:
-    lookup() - check whether a single block is offloaded and ready.
-    prepare_load() - prepare given blocks to be read.
-        The given blocks will be protected from eviction.
+    lookup() - check whether a single chunk is offloaded and ready.
+    prepare_load() - prepare given chunks to be read.
+        The given chunks will be protected from eviction.
         This function returns a LoadSpec which encapsulates
         information required for performing the load.
-    touch() - marks the give blocks as recently used. Can be used
-        to track block's LRU. This function is separated from the
-        prepare_load function to allow setting block recency even
-        for blocks which do not need reading from the cache, such as
-        blocks that are cached by the GPU prefix cache.
-    complete_load() - mark blocks which were previously prepared to be
+    touch() - marks the given chunks as recently used. Can be used
+        to track chunk LRU. This function is separated from the
+        prepare_load function to allow setting chunk recency even
+        for chunks which do not need reading from the cache, such as
+        chunks that are cached by the GPU prefix cache.
+    complete_load() - mark chunks which were previously prepared to be
         loaded as done loading. This is to re-allow their eviction.
-    prepare_store() - prepare the given blocks to be written.
+    prepare_store() - prepare the given chunks to be written.
         Returns a StoreSpec encapsulating offloading information,
-        as well as a list of blocks that were evicted as a result.
+        as well as a list of chunks that were evicted as a result.
     complete_store() - marks a previous store as completed.
-        Following this call, the given blocks will become loadable.
+        Following this call, the given chunks will become loadable.
 """
 
 
@@ -221,14 +222,14 @@ class OffloadingManager(ABC):
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """
-        Checks whether a single block is offloaded and ready to be read.
+        Checks whether a single chunk is offloaded and ready to be read.
 
         Args:
-            key: the key identifying the block to lookup.
+            key: the key identifying the chunk to lookup.
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            HIT if the block is offloaded and ready, MISS if not found,
+            HIT if the chunk is offloaded and ready, MISS if not found,
             HIT_PENDING if found but not yet readable, or RETRY if the
             lookup should be retried later.
         """
@@ -241,13 +242,13 @@ class OffloadingManager(ABC):
         req_context: ReqContext,
     ) -> LoadStoreSpec:
         """
-        Prepare the given blocks to be read.
-        The given blocks will be protected from eviction until
+        Prepare the given chunks to be read.
+        The given chunks will be protected from eviction until
         complete_load is called.
-        It assumes all given blocks are offloaded.
+        It assumes all given chunks are offloaded.
 
         Args:
-            keys: the keys identifying the blocks.
+            keys: the keys identifying the chunks.
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
@@ -258,21 +259,21 @@ class OffloadingManager(ABC):
 
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
-        Mark the given blocks as recently used.
+        Mark the given chunks as recently used.
         This could in practice mean moving them to the end of an LRU list.
 
         Args:
-            keys: the keys identifying the blocks.
+            keys: the keys identifying the chunks.
             req_context: per-request context (e.g. kv_transfer_params).
         """
         return
 
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
-        Marks previous blocks that were prepared to load as done loading.
+        Marks previous chunks that were prepared to load as done loading.
 
         Args:
-            keys: the keys identifying the blocks.
+            keys: the keys identifying the chunks.
             req_context: per-request context (e.g. kv_transfer_params).
         """
         return
@@ -284,19 +285,19 @@ class OffloadingManager(ABC):
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
         """
-        Prepare the given blocks to be offloaded.
-        The given blocks will be protected from eviction until
+        Prepare the given chunks to be offloaded.
+        The given chunks will be protected from eviction until
         complete_store is called.
 
         Args:
-            keys: the keys identifying the blocks.
+            keys: the keys identifying the chunks.
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            A PrepareStoreOutput indicating which blocks need storing,
-            where to store them (LoadStoreSpec), and list of blocks that
+            A PrepareStoreOutput indicating which chunks need storing,
+            where to store them (LoadStoreSpec), and list of chunks that
             were evicted as a result.
-            None is returned if the blocks cannot be stored.
+            None is returned if the chunks cannot be stored.
         """
         pass
 
@@ -307,15 +308,15 @@ class OffloadingManager(ABC):
         success: bool = True,
     ):
         """
-        Marks blocks which were previously prepared to be stored, as stored.
-        Following this call, the blocks become loadable.
-        If success is False, blocks that were not marked as stored will be
+        Marks chunks which were previously prepared to be stored, as stored.
+        Following this call, the chunks become loadable.
+        If success is False, chunks that were not marked as stored will be
         removed.
 
         Args:
-            keys: the keys identifying the blocks.
+            keys: the keys identifying the chunks.
             req_context: per-request context (e.g. kv_transfer_params).
-            success: whether the blocks were stored successfully.
+            success: whether the chunks were stored successfully.
         """
         return
 
@@ -325,7 +326,7 @@ class OffloadingManager(ABC):
         Called when a new request is first seen by the scheduler.
 
         Returns a RequestOffloadingContext indicating how this request's
-        blocks should be offloaded.
+        chunks should be offloaded.
 
         Args:
             req_context: per-request context.
@@ -382,7 +383,7 @@ class OffloadingManager(ABC):
         return False
 
     def reset_cache(self) -> None:
-        """Evict all tracked blocks and reset internal state."""
+        """Evict all tracked chunks and reset internal state."""
         return
 
     def get_stats(self) -> "OffloadingConnectorStats | None":
@@ -396,7 +397,10 @@ class OffloadingManager(ABC):
 
 class BlockIDsLoadStoreSpec(LoadStoreSpec, ABC):
     """
-    Spec for loading/storing KV blocks from given block numbers.
+    Spec carrying integer IDs for a load/store operation.
+
+    Subclass semantics differ: GPULoadStoreSpec.block_ids are GPU block
+    indices; CPULoadStoreSpec.block_ids are CPU cache chunk indices.
     """
 
     def __init__(self, block_ids: list[int]):
@@ -607,7 +611,7 @@ class OffloadingSpec(ABC):
         """
         Get an OffloadingManager that will be used
         by the scheduler-side offloading connector to track
-        offloaded blocks and manage evictions.
+        offloaded chunks and manage evictions.
         """
         pass
 

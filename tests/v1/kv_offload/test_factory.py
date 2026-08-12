@@ -136,7 +136,7 @@ def test_get_spec_cls_defaults_to_cpu():
 def test_create_cpu_offloading_spec():
     spec = _create_spec()
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks > 0
+    assert spec.num_chunks > 0
 
 
 def test_cpu_spec_sizes_normalized_worker_layout():
@@ -156,7 +156,7 @@ def test_cpu_spec_sizes_normalized_worker_layout():
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.cpu_page_size_per_worker == 32
     assert spec.kv_bytes_per_chunk == alignment
-    assert spec.num_blocks == 3
+    assert spec.num_chunks == 3
 
 
 def test_cpu_spec_zero_worker_bytes_produces_empty_cache():
@@ -165,7 +165,7 @@ def test_cpu_spec_zero_worker_bytes_produces_empty_cache():
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.cpu_page_size_per_worker == 0
     assert spec.kv_bytes_per_chunk == 0
-    assert spec.num_blocks == 0
+    assert spec.num_chunks == 0
 
 
 def test_tiering_spec_aligns_row_size():
@@ -183,7 +183,7 @@ def test_tiering_spec_aligns_row_size():
     assert isinstance(spec, TieringOffloadingSpec)
     assert spec.cpu_page_size_per_worker == 32
     assert spec.kv_bytes_per_chunk == alignment
-    assert spec.num_blocks == 3
+    assert spec.num_chunks == 3
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
@@ -201,7 +201,7 @@ def test_tiering_spec_replicated_sizing_removes_world_factor(world_size: int):
     assert spec.replicated_layout is True
     assert spec.cpu_page_size_per_worker == worker_kv_bytes_per_block
     assert spec.kv_bytes_per_chunk == worker_kv_bytes_per_block
-    assert spec.num_blocks == 8
+    assert spec.num_chunks == 8
 
 
 def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monkeypatch):
@@ -239,7 +239,7 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     spec.create_worker(kv_caches)
 
     assert region_calls[0]["rank"] == 0
-    assert region_calls[0]["kv_bytes_per_block"] == worker_kv_bytes_per_block
+    assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
 
@@ -292,7 +292,7 @@ def test_cpu_spec_replicated_sizing_on_shared_region(monkeypatch, world_size: in
     assert spec.replicated_layout is True
     assert spec.cpu_page_size_per_worker == worker_kv_bytes_per_block
     assert spec.kv_bytes_per_chunk == worker_kv_bytes_per_block
-    assert spec.num_blocks == 8
+    assert spec.num_chunks == 8
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
@@ -320,7 +320,7 @@ def test_cpu_spec_replicated_disabled_without_shared_region(
     assert spec.replicated_layout is False
     assert spec.cpu_page_size_per_worker == worker_kv_bytes_per_block
     assert spec.kv_bytes_per_chunk == worker_kv_bytes_per_block * world_size
-    assert spec.num_blocks == 2
+    assert spec.num_chunks == 2
 
 
 @pytest.mark.parametrize("config_replicated", [True, False])
@@ -381,7 +381,7 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda_alike(monkeypatch):
     spec.create_worker(kv_caches)
 
     assert region_calls[0]["engine_id"] == "test-engine"
-    assert region_calls[0]["kv_bytes_per_block"] == worker_kv_bytes_per_block * 4
+    assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block * 4
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
 
@@ -419,11 +419,11 @@ def test_cpu_spec_create_worker_uses_tensor_path_off_cuda_alike(monkeypatch):
 def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
-    # worker_kv_bytes_per_block=0 yields num_blocks=0; a zero-byte region cannot
+    # worker_kv_bytes_per_block=0 yields num_chunks=0; a zero-byte region cannot
     # be mmap'd, so even on CUDA-alike this must fall back to the tensor path.
     spec = _create_spec(worker_kv_bytes_per_block=0, world_size=4)
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks == 0
+    assert spec.num_chunks == 0
 
     region_calls: list[dict[str, Any]] = []
     worker_calls: list[dict[str, Any]] = []

@@ -72,7 +72,7 @@ class TestCachePolicyFactory:
         policy_cls = CachePolicyFactory.get_cache_policy_cls("dummy")
         assert policy_cls is _DummyCachePolicy
 
-        manager = CPUOffloadingManager(num_chunk_slots=4, cache_policy="dummy")
+        manager = CPUOffloadingManager(num_chunks=4, cache_policy="dummy")
         assert isinstance(manager._policy, _DummyCachePolicy)
 
     def test_unregistered_policy_raises(self):
@@ -98,7 +98,7 @@ class TestCachePolicyFactory:
         """End-to-end: CPUOffloadingManager resolves an unregistered policy
         purely from cache_policy_module_path."""
         manager = CPUOffloadingManager(
-            num_chunk_slots=4,
+            num_chunks=4,
             cache_policy="_DummyCachePolicy",
             cache_policy_module_path="tests.v1.kv_offload.cpu.policies.test_factory",
         )
