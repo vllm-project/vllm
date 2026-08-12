@@ -1,8 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+
+def _get_cmake_bin() -> str:
+    cmake = shutil.which("cmake")
+    if cmake:
+        return cmake
+    venv_cmake = Path(sys.executable).parent / "cmake"
+    if venv_cmake.is_file():
+        return str(venv_cmake)
+    return "cmake"
 
 
 def test_exact_family_arch_precedes_generic_family_fallback(tmp_path: Path):
@@ -20,7 +32,7 @@ endif()
 """
     )
 
-    subprocess.run(["cmake", "-P", script], check=True)
+    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
 
 
 def test_extract_archs_prefers_sass_target_over_corrupted_virtual_arch(
@@ -45,4 +57,58 @@ endif()
 """
     )
 
-    subprocess.run(["cmake", "-P", script], check=True)
+    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
+
+
+def test_clear_cuda_gencode_flags(tmp_path: Path):
+    repo_root = Path(__file__).parents[1]
+    script = tmp_path / "test_clear_flags.cmake"
+    script.write_text(
+        f"""
+cmake_minimum_required(VERSION 3.26)
+include("{repo_root / "cmake" / "utils.cmake"}")
+set(CMAKE_CUDA_FLAGS "-Wall -gencode arch=compute_80,code=sm_80")
+clear_cuda_gencode_flags(CUDA_ARCH_FLAGS)
+if(NOT "${{CMAKE_CUDA_FLAGS}}" STREQUAL "-Wall ")
+  message(FATAL_ERROR "Expected '-Wall ', got '${{CMAKE_CUDA_FLAGS}}'")
+endif()
+if(NOT "${{CUDA_ARCH_FLAGS}}" STREQUAL "-gencode arch=compute_80,code=sm_80")
+  message(FATAL_ERROR "Expected '-gencode arch=compute_80,code=sm_80', got '${{CUDA_ARCH_FLAGS}}'")
+endif()
+"""
+    )
+
+    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
+
+
+def test_warn_if_ptx_arch_requested(tmp_path: Path):
+    repo_root = Path(__file__).parents[1]
+    script = tmp_path / "test_warn_ptx.cmake"
+    script.write_text(
+        f"""
+cmake_minimum_required(VERSION 3.26)
+include("{repo_root / "cmake" / "utils.cmake"}")
+
+set(CUDA_ARCH_FLAGS "-gencode arch=compute_80,code=sm_80")
+warn_if_ptx_arch_requested("${{CUDA_ARCH_FLAGS}}")
+
+set(CUDA_ARCH_FLAGS "-gencode arch=compute_80,code=compute_80")
+warn_if_ptx_arch_requested("${{CUDA_ARCH_FLAGS}}")
+
+set(CUDA_ARCH_FLAGS "-gencode arch=compute_90a,code=[sm_90a,compute_90a]")
+warn_if_ptx_arch_requested("${{CUDA_ARCH_FLAGS}}")
+"""
+    )
+
+    result = subprocess.run(
+        [_get_cmake_bin(), "-P", script],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert (
+        "PTX code generation requested in CUDA architecture flags"
+        in result.stderr
+    )
+
+
