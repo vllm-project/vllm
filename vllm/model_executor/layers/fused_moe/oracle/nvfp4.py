@@ -4,6 +4,7 @@ from enum import Enum
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
@@ -544,6 +545,18 @@ def make_nvfp4_moe_kernel(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
+    dynamic_gemm2 = envs.VLLM_FLASHINFER_MOE_NVFP4_DYNAMIC_GEMM2
+    if dynamic_gemm2 and backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        raise ValueError(
+            "VLLM_FLASHINFER_MOE_NVFP4_DYNAMIC_GEMM2 requires the "
+            "FlashInfer TRTLLM NVFP4 MoE backend."
+        )
+    if dynamic_gemm2:
+        logger.info_once(
+            "Using dynamic per-token GEMM2 input quantization for "
+            "FlashInfer TRTLLM NVFP4 MoE."
+        )
+
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -557,8 +570,9 @@ def make_nvfp4_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     extra_kwargs = {}
-    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM and per_token_activation:
-        extra_kwargs["per_token_activation"] = True
+    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        extra_kwargs["per_token_activation"] = per_token_activation
+        extra_kwargs["dynamic_gemm2"] = dynamic_gemm2
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:

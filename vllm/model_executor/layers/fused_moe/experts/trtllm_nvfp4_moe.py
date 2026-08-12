@@ -52,12 +52,16 @@ class TrtLlmNvFp4ExpertsBase:
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         per_token_activation: bool = False,
+        dynamic_gemm2: bool = False,
     ):
         self.moe_config = moe_config
         self.quant_config = quant_config
         # Quantize the input here (deferred from prepare) to capture a per-token
         # global scale, instead of a static one.
         self.per_token_activation = per_token_activation
+        # Supplying GEMM1 row scales selects FlashInfer's path that emits BF16
+        # post-activation rows and dynamically quantizes them for GEMM2.
+        self.dynamic_gemm2 = dynamic_gemm2 or per_token_activation
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -71,6 +75,13 @@ class TrtLlmNvFp4ExpertsBase:
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.is_situ = moe_config.activation == MoEActivation.SITU
+
+        if self.dynamic_gemm2:
+            assert self.quant_config.a1_gscale is not None
+            if not self.per_token_activation:
+                self.gemm1_input_decode_scale = (
+                    1.0 / self.quant_config.a1_gscale.reshape(-1)[0]
+                ).to(torch.float32)
 
         self.g1_scale_c = self._compute_g1_scale_c()
 
@@ -138,6 +149,10 @@ class TrtLlmNvFp4ExpertsBase:
     def _compute_g1_scale_c(self) -> torch.Tensor:
         assert self.quant_config.g1_alphas is not None
         assert self.quant_config.a2_gscale is not None
+        if self.dynamic_gemm2:
+            # The live GEMM2 row scale is supplied separately, so this value
+            # contains only the GEMM1 weight decode scale.
+            return self.quant_config.g1_alphas.clone()
         if not self.moe_config.is_act_and_mul:
             return self.quant_config.a2_gscale.clone()
         if self.is_situ:
@@ -151,8 +166,20 @@ class TrtLlmNvFp4ExpertsBase:
         return self.quant_config.g1_alphas * self.quant_config.a2_gscale
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
-        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        if self.dynamic_gemm2:
+            if not self.per_token_activation:
+                # GEMM1 stays checkpoint-quantized. FlashInfer requires its
+                # static outer decode scale as one FP32 value per input row
+                # when dynamic GEMM2 is selected.
+                layer.register_buffer(
+                    "gemm1_input_decode_scale",
+                    self.gemm1_input_decode_scale.clone(),
+                    persistent=False,
+                )
+                self.gemm1_input_decode_scale = layer.gemm1_input_decode_scale
+        else:
+            layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+            layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
         # Register as a layer parameter so EPLB rearranges it alongside
         # other expert weights.
@@ -276,6 +303,22 @@ class TrtLlmNvFp4ExpertsBase:
         )
         return hs_fp4, hs_block_scale, per_token_scale
 
+    def _prepare_gemm1_input(
+        self,
+        hidden_states: torch.Tensor,
+        a1q_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        if self.per_token_activation:
+            return self._quantize_per_token_input(hidden_states)
+
+        assert a1q_scale is not None
+        per_token_scale = None
+        if self.dynamic_gemm2:
+            per_token_scale = self.gemm1_input_decode_scale.expand(
+                hidden_states.shape[0]
+            ).contiguous()
+        return hidden_states, a1q_scale, per_token_scale
+
     def _get_chunk_size(self) -> int:
         MAX_GRID_Y = 65535
         MAX_TILE_TOKENS_DIM = 128
@@ -360,14 +403,9 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
 
-        # Per-token: input is unquantized, quantize it here. Otherwise it was
-        # already quantized in prepare() with the static global scale.
-        if self.per_token_activation:
-            hidden_states, block_scale, per_token_scale = (
-                self._quantize_per_token_input(hidden_states)
-            )
-        else:
-            block_scale, per_token_scale = a1q_scale, None
+        hidden_states, block_scale, per_token_scale = self._prepare_gemm1_input(
+            hidden_states, a1q_scale
+        )
 
         # Pack topk ids and weights into format expected by the kernel.
         packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
@@ -538,13 +576,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
             and self.routing_method_type != RoutingMethodType.Llama4
         )
 
-        # Per-token: input is unquantized, quantize it here (see modular apply).
-        if self.per_token_activation:
-            hidden_states, block_scale, per_token_scale = (
-                self._quantize_per_token_input(hidden_states)
-            )
-        else:
-            block_scale, per_token_scale = a1q_scale, None
+        hidden_states, block_scale, per_token_scale = self._prepare_gemm1_input(
+            hidden_states, a1q_scale
+        )
 
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 

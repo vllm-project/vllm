@@ -214,6 +214,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_FLASHINFER_MOE_NVFP4_DYNAMIC_GEMM2: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
@@ -1624,6 +1625,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
+    ),
+    # Dynamically quantize the post-activation GEMM2 input per routed token.
+    # This is supported by the FlashInfer TRTLLM NVFP4 MoE backend only.
+    "VLLM_FLASHINFER_MOE_NVFP4_DYNAMIC_GEMM2": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_MOE_NVFP4_DYNAMIC_GEMM2", "0"))
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
