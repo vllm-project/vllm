@@ -114,7 +114,7 @@ class LLMEngine:
         )
         if isinstance(self.engine_core, MPClient):
             self.engine_core.resources.append(self.paged_shm_server)
-            self.engine_core.resources.append(self.renderer._pshm_tensor_ipc)
+            self.engine_core.resources.append(self.renderer)
 
         self.logger_manager: StatLoggerManager | None = None
         if self.log_stats:

@@ -1648,8 +1648,7 @@ class EngineCoreProc(EngineCore):
 
         # Msgpack serialization decoding with optional tensor IPC receiver.
         add_request_decoder = MsgpackDecoder(
-            EngineCoreRequest,
-            oob_tensor_provider=self.tensor_ipc_receiver,
+            EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
         )
         generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
 

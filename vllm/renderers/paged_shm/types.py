@@ -17,7 +17,7 @@ class AllocatedShmItem(ShmItem):
 
 
 @dataclass
-class ShmTensor(ShmItem):
+class PagedShmTensor(ShmItem):
     blocks: list[int]
     dtype: str
     shape: tuple[int, ...]

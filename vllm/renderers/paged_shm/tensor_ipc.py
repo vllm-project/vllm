@@ -16,7 +16,7 @@ from vllm.utils import random_uuid
 
 from .client import PagedShmClient
 from .client_async import AsyncPagedShmClient
-from .types import ShmItem, ShmTensor
+from .types import PagedShmTensor, ShmItem
 
 
 def format_size(
@@ -106,7 +106,7 @@ class PagedShmTensorIPC:
         for elem, item in zip(elements, alloc):
             assert isinstance(elem.data, torch.Tensor)
 
-            elem.shm_object = ShmTensor(
+            elem.pshm_tensor = PagedShmTensor(
                 dtype=str(elem.data.dtype).removeprefix("torch."),
                 shape=tuple(elem.data.shape),
                 **asdict(item),
@@ -137,14 +137,14 @@ class PagedShmTensorIPC:
                 continue
 
             pixel_values = items["pixel_values"]
-            shm_object: ShmTensor | None = pixel_values.shm_object
+            pshm_tensor: PagedShmTensor | None = pixel_values.pshm_tensor
 
-            if shm_object is not None:
-                torch_dtype = getattr(torch, shm_object.dtype)
+            if pshm_tensor is not None:
+                torch_dtype = getattr(torch, pshm_tensor.dtype)
                 tensor_gpu = self.client_sync.read(
-                    shm_object.uuid, shm_object.size, shm_object.blocks, device
+                    pshm_tensor.uuid, pshm_tensor.size, pshm_tensor.blocks, device
                 )
-                tensor_gpu = tensor_gpu.view(torch_dtype).view(shm_object.shape)
+                tensor_gpu = tensor_gpu.view(torch_dtype).view(pshm_tensor.shape)
                 pixel_values.data = tensor_gpu
 
     def shutdown(self):

@@ -34,7 +34,7 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
-from vllm.renderers.paged_shm.types import ShmTensor
+from vllm.renderers.paged_shm.types import PagedShmTensor
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.utils import tensor_data
 
@@ -289,7 +289,9 @@ class MsgpackEncoder:
                 None if elem.data is None else self._encode_nested_tensors(elem.data)
             ),
             "field": self._encode_mm_field(elem.field),
-            "shm_object": None if elem.shm_object is None else asdict(elem.shm_object),
+            "pshm_tensor": None
+            if elem.pshm_tensor is None
+            else asdict(elem.pshm_tensor),
         }
 
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
@@ -455,8 +457,8 @@ class MsgpackDecoder:
 
         obj["field"] = factory_meth("", **factory_kw).field
 
-        if obj["shm_object"] is not None:
-            obj["shm_object"] = ShmTensor(**obj["shm_object"])
+        if obj["pshm_tensor"] is not None:
+            obj["pshm_tensor"] = PagedShmTensor(**obj["pshm_tensor"])
 
         return MultiModalFieldElem(**obj)
 
