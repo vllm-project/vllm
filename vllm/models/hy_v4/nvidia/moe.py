@@ -170,7 +170,7 @@ class HYV4MoEFused(nn.Module):
         )
         self.prefix = prefix
         if use_swiglu_clamp:
-            logger.info_once(
+            logger.debug_once(
                 "HYV4MoEFused: swiglu_limit=%.1f enabled for routed experts",
                 moe_swiglu_limit,
             )
