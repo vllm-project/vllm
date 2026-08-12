@@ -68,7 +68,7 @@ def numpy2base64(array: np.ndarray) -> str:
     """Encode a NumPy array using its `.npy` representation."""
     with io.BytesIO() as buffer:
         np.save(buffer, array, allow_pickle=False)
-        return pybase64.b64encode(buffer.getvalue()).decode("ascii")
+        return pybase64.b64encode(buffer.getbuffer()).decode("ascii")
 
 
 def tensor2binary(

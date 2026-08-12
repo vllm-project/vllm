@@ -347,12 +347,7 @@ class SamplingParams(
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
     routed_experts_prompt_start: int = 0
-    """When enable_return_routed_experts is active, skip the first
-    routed_experts_prompt_start prompt tokens from the returned routing
-    data. In multi-turn agent scenarios, set this to the length of the
-    already-returned prefix to avoid duplicating routing for prompt tokens
-    covered by earlier turns. Default 0 returns routing for all prompt
-    tokens."""
+    """Skip this many prompt tokens from returned routed-expert data."""
 
     # Fields used for bad words
     bad_words: list[str] | None = None
@@ -406,6 +401,7 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
+        routed_experts_prompt_start: int = 0,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -468,6 +464,7 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            routed_experts_prompt_start=routed_experts_prompt_start,
         )
 
     def __post_init__(self) -> None:
@@ -607,6 +604,13 @@ class SamplingParams(
                 f"stream_interval must be at least 1, got {self.stream_interval}.",
                 parameter="stream_interval",
                 value=self.stream_interval,
+            )
+        if self.routed_experts_prompt_start < 0:
+            raise VLLMValidationError(
+                "routed_experts_prompt_start must be non-negative, got "
+                f"{self.routed_experts_prompt_start}.",
+                parameter="routed_experts_prompt_start",
+                value=self.routed_experts_prompt_start,
             )
         if self.logprobs is not None and self.logprobs != -1 and self.logprobs < 0:
             raise VLLMValidationError(
