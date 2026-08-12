@@ -194,6 +194,9 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
 
 
 class Indexer(nn.Module):
+    # Precomputed Hadamard-128 rotation buffer (registered in __init__).
+    _hadamard: torch.Tensor
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -318,10 +321,22 @@ class Indexer(nn.Module):
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
-        # Fused wk + weights_proj: one GEMM, then split
+        # Fused wk + weights_proj: one GEMM for wk (bf16). The head-gate
+        # (weights_proj) is computed separately in fp32 to match sglang
+        # (ReplicatedLinear params_dtype=fp32, x.float()) -- bf16 head-gates
+        # introduce ~1e-2 logit error that flips near-tie pool rankings on hard
+        # long-context tasks (single-needle retrieval is unaffected, but HLE
+        # quality drops). Cached lazily after weights are loaded (CG-safe).
         kw, _ = self.wk_weights_proj(hidden_states)
         k = kw[:, : self.head_dim]
-        weights = kw[:, self.head_dim :]
+        if getattr(self, "_wp_fp32", None) is None:
+            self._wp_fp32 = (
+                self.wk_weights_proj.weight.data[self.head_dim :, :]
+                .t()
+                .contiguous()
+                .float()
+            )
+        weights = torch.mm(hidden_states.float(), self._wp_fp32)
 
         k = _fused_indexer_k_norm(
             k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps
@@ -356,7 +371,12 @@ class Indexer(nn.Module):
         # Without this the head-gate is scored against q.(Hk) -- a rotated basis
         # the gate was never trained against, destroying long-context pool
         # discrimination (the needle's pool drops out of the top-k).
-        q = (q.float() @ self._hadamard).to(q.dtype)
+        # bf16 @ bf16 (tensor-core GEMM, fp32 accumulate) -- avoids the fp32
+        # matmul + .float() memory doubling of the first version. Cast the
+        # constant once to q's dtype (CUDA-graph safe: happens in eager warmup).
+        if self._hadamard.dtype != q.dtype:
+            self._hadamard = self._hadamard.to(q.dtype)
+        q = q @ self._hadamard
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
         q_fp8, q_scale = per_token_group_quant_fp8(
