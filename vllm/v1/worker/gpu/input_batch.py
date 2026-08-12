@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
+from vllm.utils.math_utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.block_table import BlockTables
 
 
 class InputBuffers:
@@ -49,9 +54,10 @@ class InputBatch:
     expanded_local_pos: torch.Tensor
 
     # [num_reqs]
-    # batch_idx -> num_scheduled_tokens
+    # batch_idx -> num_scheduled_tokens, (upper bound when using adaptive verification)
     num_scheduled_tokens: np.ndarray
-    # sum(num_scheduled_tokens)
+    # number of tokens in the batch,
+    #  may be < sum(num_scheduled_tokens) when using adaptive verification
     num_tokens: int
     num_tokens_after_padding: int
     # Sum of draft tokens scheduled across requests.
@@ -101,9 +107,18 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
+    # Longest query the batch may contain. Set when a cudagraph descriptor promises
+    # a query length this batch's own split does not reach, so attention metadata
+    # stays valid for every replay the graph serves.
+    max_query_len: int | None = None
+
     @classmethod
     def make_dummy(
-        cls, num_reqs: int, num_tokens: int, input_buffers: InputBuffers
+        cls,
+        num_reqs: int,
+        num_tokens: int,
+        input_buffers: InputBuffers,
+        max_query_len: int | None = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -115,9 +130,12 @@ class InputBatch:
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
         # Distribute the remainder evenly so that no dummy request exceeds
-        # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+        # ceil(num_tokens / num_reqs) <= max_model_len tokens. Varlen graphs
+        # accept any split with non-empty slots, so this shape works for them
+        # too; attention metadata is built from the promised max_query_len.
         base_tokens = num_tokens // num_reqs
         num_extra = num_tokens % num_reqs
+        assert max_query_len is None or base_tokens + (num_extra > 0) <= max_query_len
         num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
         if num_extra > 0:
             num_scheduled_tokens[-num_extra:] += 1
@@ -150,7 +168,8 @@ class InputBatch:
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-        # Dummy: seq_len == query_len (fresh-prefill shape).
+        # Copy so set_dummy_context can add context in place without touching
+        # num_scheduled_tokens.
         seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
         return cls(
             req_ids=req_ids,
@@ -184,7 +203,51 @@ class InputBatch:
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=False,
             prompt_lens=None,
+            max_query_len=max_query_len,
         )
+
+
+def set_dummy_context(
+    input_batch: InputBatch,
+    block_tables: "BlockTables",
+    context_len: int,
+    num_kv_blocks: int,
+    max_model_len: int,
+) -> None:
+    """Give each dummy request context_len of context, used when profiling step cost."""
+    if not block_tables.input_block_tables:
+        # Attention-free models have no KV context to fabricate.
+        return
+    num_reqs = input_batch.num_reqs
+    query_len = input_batch.max_query_len or int(input_batch.num_scheduled_tokens.max())
+    context_len = max(min(context_len, max_model_len - query_len), 0)
+    if not context_len:
+        return
+
+    # Decode-like shape: each request continues after context_len
+    # already-computed tokens.
+    input_batch.seq_lens += context_len
+    input_batch.seq_lens_cpu_upper_bound += context_len
+    input_batch.num_computed_tokens_np.fill(context_len)
+    input_batch.num_computed_prefill_tokens_np.fill(context_len)
+    local_pos = np.arange(input_batch.num_tokens, dtype=np.int64) - np.repeat(
+        input_batch.query_start_loc_np[:-1], input_batch.num_scheduled_tokens
+    )
+    input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
+
+    seq_len = context_len + query_len
+    for block_table, block_size, bpk in zip(
+        block_tables.input_block_tables,
+        block_tables.kernel_block_sizes,
+        block_tables.blocks_per_kv_block,
+    ):
+        num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
+        # Spans are disjoint until the pool runs out, then they wrap and share
+        # blocks: profiling only needs the reads to be realistic, not distinct.
+        block_ids = torch.arange(
+            num_reqs * num_blocks, dtype=block_table.dtype, device=block_table.device
+        ) % (num_kv_blocks * bpk)
+        block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 
 
 @triton.jit

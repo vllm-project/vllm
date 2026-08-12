@@ -429,6 +429,12 @@ class FlashInferBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # The wrappers are planned from qo_indptr_cpu, so the CPU query offsets
+        # have to be the ones the kernel runs on.
+        return False
+
+    @classmethod
     def supports_sliding_window(cls) -> bool:
         return True
 

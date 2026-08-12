@@ -908,6 +908,20 @@ class SamplingParams(
         if speculative_config is None:
             return
 
+        # Adaptive verification compacts logits after the forward pass, while
+        # compute_topk_scores uses the scheduled layout in cu_num_logits_np.
+        # TODO(lucas): lift this restriction. The true boundaries exist on device as
+        # cu_num_logits; cu_num_generated_tokens is only read host-side after
+        # the logprobs D2H, so it could ride along on that copy.
+        if (
+            speculative_config.enable_adaptive_verification
+            and self.num_logprobs is not None
+        ):
+            raise ValueError(
+                "Output logprobs are not supported with DSpark confidence-based "
+                "verification."
+            )
+
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
             raise VLLMValidationError(
