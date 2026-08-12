@@ -55,6 +55,7 @@ def _make_runner(
     num_computed = np.array([s[0] for s in req_states.values()], dtype=np.int32)
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.decode_query_len = decode_query_len
+    runner.adaptive_verification = None
     runner.req_states = SimpleNamespace(
         req_id_to_index={req_id: i for i, req_id in enumerate(req_states)},
         # The runner keeps this as min(num_computed_tokens, prefill_len).
@@ -73,6 +74,7 @@ def _uniform_token_count(
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={req_id: query_len for req_id in req_states},
         total_num_scheduled_tokens=query_len * len(req_states),
+        scheduled_spec_decode_tokens={},
     )
     runner = _make_runner(req_states, decode_query_len=query_len)
     _, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, dummy_run)
@@ -155,6 +157,7 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     """
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.decode_query_len = 8
+    runner.adaptive_verification = None
     # State arrays in state-index order: a prefilling request, then two decodes.
     runner.req_states = SimpleNamespace(
         req_id_to_index={"prefilling": 0, "decode_a": 1, "decode_b": 2},
@@ -164,6 +167,7 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={"decode_a": 8, "decode_b": 8},
         total_num_scheduled_tokens=16,
+        scheduled_spec_decode_tokens={},
     )
 
     state, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, False)
