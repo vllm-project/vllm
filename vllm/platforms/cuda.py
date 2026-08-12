@@ -85,6 +85,7 @@ def _get_backend_priorities(
     device_capability: DeviceCapability,
     num_heads: int | None = None,
     kv_cache_dtype: CacheDType | None = None,
+    use_non_causal: bool = False,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -141,7 +142,10 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
     else:
-        if device_capability.major == 10:
+        # SM100f defaults to FlashInfer for TRTLLM causal attention, but its non-causal
+        # cutlass path (used for dflash attention) is known to have problems.
+        # So prefer FlashAttention when non-causal on SM100f.
+        if device_capability.major == 10 and not use_non_causal:
             return [
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.FLASH_ATTN,
@@ -286,7 +290,8 @@ class CudaPlatformBase(Platform):
             # kernel with limited pinned memory support for CUDA.
             version = _get_wsl_kernel_version()
             if version is None or version < (4, 19, 121):
-                logger.warning_once(
+                # warning_once() causes a circular import on WSL, see #48397.
+                logger.warning(
                     "Using 'pin_memory=False' as WSL is detected and the "
                     "WSL2 kernel version is below 4.19.121. This may slow "
                     "down performance. Please run `wsl --update`."
@@ -368,6 +373,7 @@ class CudaPlatformBase(Platform):
             device_capability,
             num_heads,
             attn_selector_config.kv_cache_dtype,
+            attn_selector_config.use_non_causal,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
@@ -735,12 +741,16 @@ class NvmlCudaPlatform(CudaPlatformBase):
             return None
 
     @classmethod
-    @with_nvml_context
     def has_device_capability(
         cls,
         capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
+        # No @with_nvml_context here: the base implementation only reads
+        # get_device_capability(), which is cached and brings its own NVML
+        # context. Wrapping this method as well cost an nvmlInit()/
+        # nvmlShutdown() pair on every call, including calls made per attention
+        # layer per step from the Triton reshape-and-cache path.
         try:
             return super().has_device_capability(capability, device_id)
         except RuntimeError:

@@ -158,6 +158,10 @@ flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
     "trtllm_batch_decode_sparse_mla_dsv4",
     fallback_fn=_missing_sparse_mla,
 )
+flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
+    "flashinfer.decode",
+    "xqa_batch_decode_with_kv_cache",
+)
 
 
 # Special case for autotune since it returns a context manager
@@ -375,8 +379,8 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
     """Return whether TRTLLM attention is available on the current platform
     for the given attention phase.
 
-    SM90 (Hopper) supports the XQA decode kernel but not TRTLLM prefill.
-    SM100+ supports TRTLLM for both phases. All others are unsupported.
+    SM90 (Hopper) and SM12x support the XQA decode kernel but not TRTLLM
+    prefill. SM100+ supports TRTLLM for both phases. All others are unsupported.
     """
     # Batch-invariant mode disables TRTLLM attention
     if envs.VLLM_BATCH_INVARIANT:
@@ -386,8 +390,10 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
     if not has_nvidia_artifactory():
         return False
 
-    # SM90 has XQA decode; prefill is not supported.
-    if current_platform.is_device_capability(90):
+    # SM90 and SM12x have XQA decode only.
+    if current_platform.is_device_capability(
+        90
+    ) or current_platform.is_device_capability_family(120):
         return not is_prefill
 
     # SM100/SM103 has both prefill and decode TRTLLM kernels.
@@ -439,11 +445,13 @@ def use_trtllm_attention(
     if force_use_trtllm is not None and not force_use_trtllm:
         return False
 
-    # Decode context parallel is not supported
+    # TRTLLM prefill attends only the DCP-local KV shard and has no
+    # cross-rank LSE combine, so it cannot be used with DCP; fall back to
+    # FlashInfer's DCP prefill path. TRTLLM decode under DCP is selected
+    # separately (all-gathered query heads + LSE combine in forward).
     if dcp_world_size > 1:
         logger.warning_once(
-            "Trtllm does not support returning LSE and as a result "
-            "does not support DCP, reverting to FlashInfer"
+            "TRTLLM prefill does not support DCP, reverting to FlashInfer"
         )
         return False
 
@@ -488,11 +496,11 @@ def use_trtllm_attention(
         if is_prefill:
             # Prefill auto-detection
             use_trtllm = kv_cache_dtype == "auto"
-        elif current_platform.is_device_capability(90) and kv_cache_dtype.startswith(
-            "fp8"
-        ):
-            # SM90 + FP8 KV cache: prefer the XQA decode kernel. XQA does not
-            # support NVFP4 KV (that is an SM100 trtllm-gen path only).
+        elif (
+            current_platform.is_device_capability(90)
+            or current_platform.is_device_capability_family(120)
+        ) and kv_cache_dtype.startswith("fp8"):
+            # SM90/SM12x + FP8 KV cache: prefer the XQA decode kernel.
             use_trtllm = True
         else:
             # Decode auto-detection
@@ -616,14 +624,16 @@ if has_flashinfer():
     )
     def flashinfer_mxfp4_quantize(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer import mxfp4_quantize as _mxfp4_quantize
 
-        return _mxfp4_quantize(a)
+        return _mxfp4_quantize(a, backend=backend)
 
     @torch.library.register_fake("vllm::flashinfer_mxfp4_quantize")
     def flashinfer_mxfp4_quantize_fake(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         m, k = a.shape
         sf_vec_size = 32
@@ -1032,6 +1042,7 @@ __all__ = [
     "trtllm_fp4_block_scale_moe",
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
+    "flashinfer_xqa_batch_decode_with_kv_cache",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_comm",

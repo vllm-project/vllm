@@ -77,7 +77,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
             warmup: bool,
-        ) -> tuple[Callable[[CUDAGraphMode], None], AttentionState]:
+        ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
@@ -98,7 +98,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
             )
             attn_metadata, slot_mappings = attn_state
 
-            fwd = lambda cg_mode: forward_fn(
+            return lambda cg_mode: forward_fn(
                 num_reqs,
                 num_tokens,
                 attn_metadata,
@@ -106,6 +106,5 @@ class DFlashCudaGraphManager(CudaGraphManager):
                 num_tokens_across_dp,
                 cg_mode,
             )
-            return fwd, attn_state
 
         super().capture(create_forward_fn, progress_bar_desc)

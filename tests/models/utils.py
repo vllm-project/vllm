@@ -468,6 +468,9 @@ def dummy_hf_overrides(
     # Kimi uses `num_expert_group` instead of `n_group`.
     if n_group is None:
         n_group = getattr(text_config, "num_expert_group", None)
+    # InternS1Pro uses `router_n_groups` instead of `n_group`.
+    if n_group is None:
+        n_group = getattr(text_config, "router_n_groups", None)
     num_experts = n_group * 2 if n_group is not None else 2
 
     # we use three layers for Gemma-3n to check
@@ -504,6 +507,12 @@ def dummy_hf_overrides(
         hf_config = _hf_config
         hf_text_config = text_config
 
+        # Keep architecture conversion on the default multimodal path; this
+        # helper only needs HF-derived fields, not deployment MM limits.
+        @staticmethod
+        def _supports_multimodal_for_mm_prefix() -> bool:
+            return True
+
     model_arch_config = ModelConfig.get_model_arch_config(DummyConfig)
     # Only set MoE related config when the model has MoE layers.
     # Otherwise all models detected as MoE by _get_transformers_backend_cls.
@@ -515,6 +524,9 @@ def dummy_hf_overrides(
             "EagleLlama4ForCausalLM",
         ):
             num_experts_per_tok = 1
+        elif model_arch == "InternS1ProForConditionalGeneration":
+            assert n_group is not None
+            num_experts_per_tok = n_group
         update_dict.update(
             {
                 "num_experts": num_experts,

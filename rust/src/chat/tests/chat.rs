@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -43,17 +46,9 @@ fn request_output(
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
-        new_logprobs: None,
-        new_prompt_logprobs_tensors: None,
-        pooling_output: None,
         finish_reason,
         stop_reason,
-        events: None,
-        kv_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -70,15 +65,9 @@ fn request_output_with_logprobs(
         new_token_ids,
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: new_prompt_logprobs_tensors.map(MaybeWireLogprobs::Direct),
-        pooling_output: None,
         finish_reason,
         stop_reason,
-        events: None,
-        kv_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -297,7 +286,7 @@ fn sample_request(request_id: &str) -> ChatRequest {
 
 fn sample_tool_request(request_id: &str) -> ChatRequest {
     let mut request = sample_request(request_id);
-    request.tools = vec![ChatTool {
+    let tools = vec![ChatTool {
         name: "get_weather".to_string(),
         description: Some("Get weather".to_string()),
         parameters: serde_json::json!({
@@ -307,7 +296,13 @@ fn sample_tool_request(request_id: &str) -> ChatRequest {
         }),
         strict: None,
     }];
-    request.tool_choice = ChatToolChoice::Auto;
+    request.tool_context = vllm_chat::ResolvedToolContext::new(
+        &request.messages,
+        tools,
+        Some(ChatToolChoice::Auto),
+        true,
+    )
+    .expect("tool context should resolve");
     request
 }
 

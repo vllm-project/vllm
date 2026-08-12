@@ -70,14 +70,7 @@ class DefaultModelState(ModelState):
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor:
-        mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
-            scheduled_encoder_inputs
-        )
-        if mm_kwargs:
-            # Execute the multimodal encoder.
-            encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
-            # Cache the encoder outputs by mm_hash
-            self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
+        self.execute_mm_encoder(scheduled_encoder_inputs)
 
         mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
         if self.mm_pruner is not None and mm_embeds:
@@ -147,8 +140,13 @@ class DefaultModelState(ModelState):
             # For piecewise cudagraphs and eager, use unpadded sizes.
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
-        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        query_start_loc_cpu = torch.from_numpy(
+            input_batch.query_start_loc_np[: num_reqs + 1]
+        )
+        query_start_loc_gpu = input_batch.query_start_loc[: num_reqs + 1]
+        max_query_len = input_batch.max_query_len
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
             # Capture with worst-case max_seq_len so the graph is valid at any replay.
@@ -170,7 +168,7 @@ class DefaultModelState(ModelState):
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
-            query_start_loc_gpu=input_batch.query_start_loc,
+            query_start_loc_gpu=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
@@ -181,6 +179,7 @@ class DefaultModelState(ModelState):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             positions=input_batch.positions,
+            is_prefilling=torch.from_numpy(input_batch.is_prefilling_np),
             mm_req_doc_ranges=req_doc_ranges,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,

@@ -24,7 +24,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     MoERunner,
     fused_moe_make_expert_params_mapping,
 )
@@ -53,6 +53,7 @@ from .utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -270,11 +271,11 @@ class Step3p5Attention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm inline similar to Qwen3 MOE attention
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        q_by_head = self.q_norm(q_by_head.contiguous())
+        q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
 
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = self.k_norm(k_by_head.contiguous())
+        k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
         if self.use_rope:
             q, k = self.rotary_emb(positions, q, k)
@@ -302,7 +303,6 @@ class FusedMoEBlock(nn.Module):
         self.layer_idx = extract_layer_index(prefix)
 
         self.ep_size = get_ep_group().device_group.size()
-        self.ep_rank = get_ep_group().device_group.rank()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
@@ -314,11 +314,6 @@ class FusedMoEBlock(nn.Module):
         self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         if self.tp_size > config.moe_num_experts:
             raise ValueError(
@@ -375,7 +370,7 @@ class FusedMoEBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.share_expert",
         )
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.share_expert,
             gate=self.gate,
             num_experts=config.moe_num_experts,
@@ -398,16 +393,9 @@ class FusedMoEBlock(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if self.experts.is_internal_router:
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=hidden_states
-            )
-        else:
-            # TODO(bnell): this gate could be moved into the FusedMoE?
-            router_logits, _ = self.gate(hidden_states)
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
-            )
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=hidden_states
+        )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -978,18 +966,3 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-
-def get_spec_layer_idx_from_weight_name(
-    config: ModelConfig, weight_name: str
-) -> int | None:
-    if hasattr(config, "num_nextn_predict_layers") and (
-        config.num_nextn_predict_layers > 0
-    ):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(
-                f"layers.{layer_idx + i}."  # Step3p5Model
-            ) or weight_name.startswith(f"model.layers.{layer_idx + i}."):  # Step3p5MTP
-                return layer_idx + i
-    return None

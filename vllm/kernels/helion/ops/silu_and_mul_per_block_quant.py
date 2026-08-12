@@ -13,6 +13,7 @@ from vllm.kernels.helion.utils import (
     get_int8_min_scaling_factor,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -59,7 +60,14 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
             device=input.device,
             dtype=scale_dtype,
         )
-        scale_ub = torch.mean(input).to(scale_dtype)
+        # scale_ub clamps the per-group amax of the SiLU-and-mul activation. Use
+        # a non-degenerate upper bound (midway between the mean and max of the
+        # activation magnitude) so clamping is partially active and the baseline
+        # comparison is meaningful. torch.mean(input) ~= 0 for the zero-mean
+        # input would collapse every scale to the floor and saturate the output.
+        # Mirrors tests/kernels/helion/test_silu_and_mul_per_block_quant.py.
+        act_abs = SiluAndMul.forward_native(input.to(torch.float32)).abs()
+        scale_ub = (0.5 * (act_abs.mean() + act_abs.amax())).to(scale_dtype)
 
         config_key = CaseKey(
             {
@@ -150,8 +158,34 @@ def baseline(
     scale_ub: torch.Tensor | None = None,  # scalar tensor
     is_scale_transposed: bool = False,
 ) -> None:
-    torch.ops._C.silu_and_mul_per_block_quant(
-        out, input, scales, group_size, scale_ub, is_scale_transposed
+    num_tokens, intermediate_size = out.shape
+    groups_per_row = intermediate_size // group_size
+    quant_dtype = out.dtype
+    qtype_min: int | float
+    qtype_max: int | float
+
+    if quant_dtype == torch.int8:
+        qtype_min, qtype_max = get_int8_min_max()
+        min_scaling_factor = get_int8_min_scaling_factor()
+    else:
+        qtype_min, qtype_max = get_fp8_min_max()
+        min_scaling_factor = 1.0 / (qtype_max * 512.0)
+
+    act = SiluAndMul.forward_native(input.to(torch.float32))
+    x_grouped = act.view(num_tokens, groups_per_row, group_size)
+
+    s = torch.amax(torch.abs(x_grouped), dim=-1)
+    if scale_ub is not None:
+        s = s.clamp(max=scale_ub)
+    s = (s * (1.0 / qtype_max)).clamp(min=min_scaling_factor)
+
+    y = x_grouped / s[:, :, None]
+    if quant_dtype == torch.int8:
+        y = y.round()
+
+    scales.copy_(s)
+    out.copy_(
+        y.clamp(qtype_min, qtype_max).view(num_tokens, intermediate_size).to(out.dtype)
     )
 
 
