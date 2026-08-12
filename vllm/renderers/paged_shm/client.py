@@ -102,12 +102,14 @@ class _WriteContext:
         uuid: str,
         size: int,
         use_cache: bool,
+        open_read: bool = False,
         blocks: list[int] | None = None,
     ):
         self._client = client
         self._uuid = uuid
         self._size = size
         self._use_cache = use_cache
+        self.open_read = open_read
         if blocks is None:
             self.blocks: list[int] = []
         else:
@@ -124,7 +126,7 @@ class _WriteContext:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type is None:
-            self._client.close_write(self._uuid)
+            self._client.close_write(self._uuid, self.open_read)
         else:
             # Rollback: release the write lock first, then delete the item
             try:
@@ -247,6 +249,7 @@ class PagedShmClient(_BaseClient):
         size: int,
         use_cache: bool = True,
         blocks: list[int] | None = None,
+        open_read: bool = False,
     ) -> _WriteContext:
         """
         Create a context manager for a write operation.
@@ -255,7 +258,14 @@ class PagedShmClient(_BaseClient):
         entry and either commits (``close_write``) on normal exit or
         rolls back (``delete``) if an exception occurs.
         """
-        return _WriteContext(self, uuid, size, use_cache, blocks)
+        return _WriteContext(
+            self,
+            uuid,
+            size,
+            use_cache=use_cache,
+            open_read=open_read,
+            blocks=blocks,
+        )
 
     def read_context(
         self, uuid: str, size: int | None = None, blocks: list[int] | None = None
@@ -278,6 +288,7 @@ class PagedShmClient(_BaseClient):
         data: bytes | np.ndarray | torch.Tensor,
         use_cache: bool = True,
         blocks: list[int] | None = None,
+        open_read: bool = False,
     ) -> int:
         """
         Write an item to the shared memory store.
@@ -296,7 +307,7 @@ class PagedShmClient(_BaseClient):
         else:
             raise TypeError(f"Unsupported data type: {type(data)}")
 
-        with self.write_context(uuid, size, use_cache, blocks) as ctx:
+        with self.write_context(uuid, size, use_cache, blocks, open_read) as ctx:
             self._storage.write(data, ctx.blocks)
         return size
 
@@ -361,9 +372,10 @@ class PagedShmClient(_BaseClient):
             raise MemoryError()
         return [AllocatedShmItem(**a) for a in resp_dict["data"]]
 
-    def close_write(self, uuid: str) -> None:
+    def close_write(self, uuid: str, open_read: bool = False) -> None:
         """Finalise a write operation for the given UUID."""
-        self._request(CLOSE_WRITE, uuid)
+        payload = json.dumps({"uuid": uuid, "open_read": open_read})
+        self._request(CLOSE_WRITE, payload)
 
     def open_read(self, uuid: str) -> AllocatedShmItem:
         """Acquire a read reference to an item and return its block list."""

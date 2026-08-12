@@ -95,19 +95,21 @@ class PagedShmManager:
         self._total_available_blocks -= total_need
         return allocated
 
-    def close_write(self, uuid: str):
+    def close_write(self, uuid: str, open_read: bool = False):
         item = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
         if item.ref_count >= 0:
             raise ValueError(f"UUID {uuid} not being written")
 
-        item.ref_count = 0
-
-        # Insert into LRU cache if caching is enabled and item is not pinned
-        if item.use_cache and uuid not in self._pinned_items:
-            self._total_available_blocks += item.n_block()
-            self._lru_cache.put(uuid, item)
+        if not open_read:
+            item.ref_count = 0
+            # Insert into LRU cache if caching is enabled and item is not pinned
+            if item.use_cache and uuid not in self._pinned_items:
+                self._total_available_blocks += item.n_block()
+                self._lru_cache.put(uuid, item)
+        else:
+            item.ref_count = 1
 
     def open_read(self, uuid):
         item: AllocatedShmItemInternal | None = self._all_items.get(uuid, None)

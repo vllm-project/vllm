@@ -28,14 +28,10 @@ def server_address():
 
 @pytest_asyncio.fixture
 async def async_client(server_address):
-    """
-    Create an AsyncPagedShmClient connected to the test server.
-    Memory pinning is disabled by default; GPU tests must create their own
-    client with ``pin=True``.
-    """
+    """Create an AsyncPagedShmClient connected to the test server."""
     client = AsyncPagedShmClient(address=server_address, pin=False)
     yield client
-    await client.close()
+    client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +160,7 @@ class TestWriteRead:
 
             await async_client.delete(uuid)
         finally:
-            await async_client.close()
+            async_client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -510,3 +506,62 @@ class TestAsyncConcurrency:
             result = await async_client.read(u)
             assert result.tobytes() == d
             await async_client.delete(u)
+
+
+@pytest.mark.asyncio
+class TestAsyncOpenReadFlag:
+    async def test_write_open_read_holds_read_lock(self, async_client):
+        uuid = _unique_uuid()
+        data = b"open_read async data"
+        state_before = await async_client.get_manager_state()
+
+        await async_client.write(uuid, data, open_read=True)
+
+        state_after_write = await async_client.get_manager_state()
+        assert (
+            state_after_write["reading_items_count"]
+            == state_before["reading_items_count"] + 1
+        )
+        assert (
+            state_after_write["cached_items_count"]
+            == state_before["cached_items_count"]
+        )
+        needed = _blocks_needed(len(data))
+        assert (
+            state_after_write["free_blocks_count"]
+            == state_before["free_blocks_count"] - needed
+        )
+
+        result = await async_client.read(uuid)
+        assert result.tobytes() == data
+
+        state_after_read = await async_client.get_manager_state()
+        assert (
+            state_after_read["reading_items_count"]
+            == state_after_write["reading_items_count"]
+        )
+
+        await async_client.close_read(uuid)
+        state_after_close = await async_client.get_manager_state()
+        assert (
+            state_after_close["reading_items_count"]
+            == state_before["reading_items_count"]
+        )
+        assert (
+            state_after_close["cached_items_count"]
+            == state_before["cached_items_count"] + 1
+        )
+
+        await async_client.delete(uuid)
+
+    async def test_write_open_read_without_manual_close_read_remains_locked(
+        self, async_client
+    ):
+        uuid = _unique_uuid()
+        data = b"locked async data"
+        await async_client.write(uuid, data, open_read=True)
+        state = await async_client.get_manager_state()
+        assert state["reading_items_count"] > 0
+
+        await async_client.close_read(uuid)
+        await async_client.delete(uuid)

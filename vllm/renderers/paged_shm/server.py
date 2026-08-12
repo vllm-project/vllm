@@ -68,9 +68,15 @@ class PagedShmServer:
         ]
         return json.dumps({"status": "ok", "data": result})
 
-    def close_write(self, uuid: str) -> str:
-        """Finish writing an item, making it readable and cacheable."""
-        self.manager.close_write(uuid)
+    def close_write(self, items_data: bytes) -> str:
+        """Finish writing an item, making it readable and cacheable.
+
+        The payload must contain 'uuid' and 'open_read' fields.
+        """
+        items = json.loads(items_data)
+        uuid = items["uuid"]
+        open_read = items["open_read"]
+        self.manager.close_write(uuid, open_read)
         return json.dumps({"status": "ok"})
 
     def open_read(self, uuid: str) -> str:

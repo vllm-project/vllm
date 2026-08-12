@@ -28,6 +28,7 @@ from vllm.utils.async_utils import make_async
 from .client import PagedShmClient
 from .constant import (
     CLOSE_READ,
+    CLOSE_WRITE,
     DELETE,
     EMPTY,
     ERROR,
@@ -77,12 +78,18 @@ class _AsyncWriteContext:
     """
 
     def __init__(
-        self, client: "AsyncPagedShmClient", uuid: str, size: int, use_cache: bool
+        self,
+        client: "AsyncPagedShmClient",
+        uuid: str,
+        size: int,
+        use_cache: bool,
+        open_read: bool = False,
     ):
         self._client = client
         self._uuid = uuid
         self._size = size
         self._use_cache = use_cache
+        self.open_read = open_read
         self.blocks: list[int] = []
 
     async def __aenter__(self) -> "_AsyncWriteContext":
@@ -93,7 +100,7 @@ class _AsyncWriteContext:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
         if exc_type is None:
-            await self._client.close_write(self._uuid)
+            await self._client.close_write(self._uuid, self.open_read)
         else:
             # Rollback: release write lock, then delete item
             try:
@@ -214,10 +221,10 @@ class AsyncPagedShmClient(_AsyncBaseClient):
     # ------------------------------------------------------------------
 
     def write_context(
-        self, uuid: str, size: int, use_cache: bool = True
+        self, uuid: str, size: int, use_cache: bool = True, open_read: bool = False
     ) -> _AsyncWriteContext:
         """Create an async context manager for a write operation."""
-        return _AsyncWriteContext(self, uuid, size, use_cache)
+        return _AsyncWriteContext(self, uuid, size, use_cache, open_read)
 
     def read_context(self, uuid: str) -> _AsyncReadContext:
         """Create an async context manager for a read operation."""
@@ -260,9 +267,10 @@ class AsyncPagedShmClient(_AsyncBaseClient):
         assert status == "ok"
         return [AllocatedShmItem(**a) for a in resp_dict["data"]]
 
-    async def close_write(self, uuid: str) -> None:
+    async def close_write(self, uuid: str, open_read: bool = False) -> None:
         """Finalise a write operation."""
-        await self._request(b"close_write", uuid)
+        payload = json.dumps({"uuid": uuid, "open_read": open_read})
+        await self._request(CLOSE_WRITE, payload)
 
     async def open_read(self, uuid: str) -> AllocatedShmItem:
         """Acquire a read reference and return block list."""

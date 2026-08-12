@@ -26,9 +26,7 @@ def server_address():
 
 @pytest.fixture(scope="function")
 def client(server_address):
-    """
-    Create a fresh PagedShmClient connected to the test server.
-    """
+    """Create a fresh PagedShmClient connected to the test server."""
     c = PagedShmClient(address=server_address, pin=False)
     yield c
     c.close()
@@ -535,3 +533,67 @@ class TestConcurrency:
             result = client.read(u)
             assert result.tobytes() == d
             client.delete(u)
+
+
+class TestOpenReadFlag:
+    """Verify that write with open_read=True automatically holds a read lock."""
+
+    def test_write_open_read_holds_read_lock(self, client):
+        uuid = _unique_uuid()
+        data = b"open_read data"
+        state_before = client.get_manager_state()
+
+        client.write(uuid, data, open_read=True)
+
+        state_after_write = client.get_manager_state()
+        # Should be reading, not cached
+        assert (
+            state_after_write["reading_items_count"]
+            == state_before["reading_items_count"] + 1
+        )
+        assert (
+            state_after_write["cached_items_count"]
+            == state_before["cached_items_count"]
+        )
+        needed = _blocks_needed(len(data))
+        assert (
+            state_after_write["free_blocks_count"]
+            == state_before["free_blocks_count"] - needed
+        )
+
+        # Data can still be read normally; read() will add another reader temporarily
+        result = client.read(uuid)
+        assert result.tobytes() == data
+
+        state_after_read = client.get_manager_state()
+        # read() releases its own lock, so reading count remains the same as after write
+        assert (
+            state_after_read["reading_items_count"]
+            == state_after_write["reading_items_count"]
+        )
+
+        # Release the initial open_read lock
+        client.close_read(uuid)
+        state_after_close = client.get_manager_state()
+        assert (
+            state_after_close["reading_items_count"]
+            == state_before["reading_items_count"]
+        )
+        assert (
+            state_after_close["cached_items_count"]
+            == state_before["cached_items_count"] + 1
+        )
+
+        client.delete(uuid)
+
+    def test_write_open_read_without_manual_close_read_remains_locked(self, client):
+        uuid = _unique_uuid()
+        data = b"locked data"
+        client.write(uuid, data, open_read=True)
+        state = client.get_manager_state()
+        # Item is in reading state, not in cache
+        assert state["reading_items_count"] > 0
+
+        # Cleanup: release lock and delete
+        client.close_read(uuid)
+        client.delete(uuid)
