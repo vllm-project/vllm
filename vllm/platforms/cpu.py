@@ -346,11 +346,38 @@ class CpuPlatform(Platform):
                 "prefill and prefix caching to be disabled."
             )
             vllm_config.scheduler_config.enable_chunked_prefill = False
-            vllm_config.cache_config.enable_prefix_caching = False
+            cache_config.enable_prefix_caching = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
+            # Hybrid MLA+Mamba models (KimiLinear / Kimi-K3) flip mamba cache
+            # mode to "align" and set mamba_block_size when prefix caching is
+            # on. After we disable prefix caching, revert those so validation
+            # stays consistent and the engine can still start in mamba mode
+            # "none". CPU MLA does not support prefix caching / chunked prefill
+            # (see vllm/v1/attention/backends/mla/cpu_mla.py).
+            if cache_config.user_specified_mamba_block_size:
+                raise ValueError(
+                    "CPU MLA backend cannot enable prefix caching, so "
+                    f"{model_config.architecture} cannot use "
+                    "--mamba-block-size / mamba cache mode 'align' on CPU. "
+                    "Omit --mamba-block-size to run with mamba cache mode "
+                    "'none'."
+                )
+            if cache_config.mamba_cache_mode != "none":
+                logger.info_once(
+                    "Mamba cache mode '%s' requires prefix caching, which "
+                    "is unsupported on the CPU MLA backend; falling back "
+                    "to mamba cache mode 'none'.",
+                    cache_config.mamba_cache_mode,
+                )
+                cache_config.mamba_cache_mode = "none"
+            if (
+                cache_config.mamba_block_size is not None
+                and cache_config.mamba_block_size != model_config.max_model_len
+            ):
+                cache_config.mamba_block_size = model_config.max_model_len
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
