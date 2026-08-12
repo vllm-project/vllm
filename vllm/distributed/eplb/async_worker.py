@@ -28,19 +28,19 @@ def start_async_worker(
     rank = get_eplb_group().device_group.rank()
     device_index = state.cuda_device_index
     assert state.is_async
+    ft_enabled = state.parallel_config.enable_fault_tolerance
 
     def thread_target() -> None:
         assert device_index is not None
         torch.accelerator.set_device_index(device_index)
         cuda_stream = torch.cuda.Stream(device=device_index)
-        try:
-            transfer_run_periodically(
-                state=state,
-                cuda_stream=cuda_stream,
-                is_profile=is_profile,
-            )
-        except Exception as exc:  # pragma: no cover - diagnostic path
-            logger.exception("async loop error (Rank %d): %s", rank, str(exc))
+        while True:
+            try:
+                transfer_run_periodically(state, cuda_stream, is_profile)
+            except Exception as exc:
+                logger.exception("async loop error (Rank %d): %s", rank, str(exc))
+                if not ft_enabled:
+                    return
 
     thread = threading.Thread(target=thread_target, daemon=True)
     thread.start()
@@ -80,6 +80,9 @@ def transfer_run_periodically(
 ) -> None:
     while True:
         state.rearrange_event.wait(stream=cuda_stream)
+        # Snapshot the FT reset epoch. A change in this value means a fault
+        # recovery happened, and the in-flight rebalance must be abandoned.
+        reset_epoch = state.ft_reset_epoch
 
         eplb_group = get_eplb_group().device_group
         eplb_cpu_group = get_eplb_group().cpu_group
@@ -153,10 +156,19 @@ def transfer_run_periodically(
                     transfer_metadata=transfer_metadata,
                     consumed_event=consumed_event,
                 )
+                # A fault recovery happened during the transfer, so the main
+                # thread will never consume this result. Drop it and abandon
+                # the rebalance.
+                if state.ft_reset_epoch != reset_epoch:
+                    model_state.pending_result = None
+                    return
 
                 # Block this thread until the main thread and main stream
                 # finish copying model_state.expert_buffer into
                 # model_state.model.expert_weights[layer_idx]
                 consumed_event.wait(stream=cuda_stream)
                 assert model_state.pending_result is None
+                # Woken by an FT reset's record, not a normal consume.
+                if state.ft_reset_epoch != reset_epoch:
+                    return
                 layer_idx += 1

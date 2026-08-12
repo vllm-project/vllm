@@ -5,8 +5,9 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
+from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.distributed.parallel_state import get_dp_group, get_tp_group
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -21,6 +22,7 @@ def sync_cudagraph_and_dp_padding(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
+    parallel_config: ParallelConfig,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
@@ -39,15 +41,17 @@ def sync_cudagraph_and_dp_padding(
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     dist.all_reduce(tensor, group=group)
 
-    # Under FT scale-down, dead ranks never write their column. Keep the
-    # zeros out of the min-aggregated cg_mode row, and fill the
-    # uniform-token-count row with the row max (the agreed value when
-    # alive ranks agree; disagreement degrades to None anyway) so the
-    # equality check below is not failed by dead columns.
-    if dead_dp_ranks := dp_group.dead_dp_ranks:
-        dead_cols = sorted(dead_dp_ranks)
-        tensor[1, dead_cols] = torch.iinfo(torch.int32).max
-        tensor[2, dead_cols] = tensor[2].max()
+    if parallel_config.enable_fault_tolerance:
+        if parallel_config.tensor_parallel_size > 1:
+            # Per-step barrier over the TP cpu group: a faulted sibling stops
+            # arriving, so survivors fail here on the host instead of leaving
+            # an orphaned TP collective running on device.
+            dist.barrier(group=get_tp_group().cpu_group)
+
+        if dead_dp_ranks := dp_group.dead_dp_ranks:
+            dead_cols = sorted(dead_dp_ranks)
+            tensor[1, dead_cols] = torch.iinfo(torch.int32).max
+            tensor[2, dead_cols] = tensor[2].max()
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
@@ -113,6 +117,7 @@ def dispatch_cg_and_sync_dp(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
+    parallel_config: ParallelConfig,
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
@@ -148,6 +153,7 @@ def dispatch_cg_and_sync_dp(
         uniform_token_count,
         dp_size,
         dp_rank,
+        parallel_config,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
     )

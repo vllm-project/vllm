@@ -281,6 +281,12 @@ class EplbState:
         """
         Event to signal when a new rearrangement is needed for the async thread.
         """
+        self.ft_reset_epoch: int = 0
+        """
+        Incremented by FT recovery (reset_eplb_async_state). The async worker
+        snapshots it when a transfer cycle starts; a change in the value means
+        a recovery happened, so the cycle is abandoned.
+        """
         self.async_worker: threading.Thread | None = None
         """
         Background thread handling async transfers.
