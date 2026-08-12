@@ -63,6 +63,31 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
                 merged.pop("fps", None)
             elif "fps" in runtime_kwargs and "num_frames" not in runtime_kwargs:
                 merged.pop("num_frames", None)
+
+            # Enforce a server-side num_frames ceiling so that
+            # request-level media_io_kwargs cannot disable or exceed
+            # the operator limit (CVE-2026-34755 / GHSA-vxqj).
+            _DEFAULT_NUM_FRAMES = 32
+            engine_nf = (default_kwargs or {}).get("num_frames")
+            if engine_nf is None or engine_nf == 0:
+                ceiling: int | None = _DEFAULT_NUM_FRAMES
+            elif engine_nf < 0:
+                ceiling = None
+            else:
+                ceiling = engine_nf
+
+            if ceiling is not None:
+                effective = merged.get("num_frames")
+                if effective is None:
+                    merged["num_frames"] = ceiling
+                elif effective <= 0 or effective > ceiling:
+                    logger.warning_once(
+                        "Clamping request-level num_frames=%r to server ceiling %d.",
+                        effective,
+                        ceiling,
+                    )
+                    merged["num_frames"] = ceiling
+
         return merged
 
     def __init__(

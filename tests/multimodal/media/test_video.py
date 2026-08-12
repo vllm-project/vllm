@@ -501,6 +501,104 @@ class TestMergeKwargsGpuBackendPolicy:
         assert not VIDEO_LOADER_REGISTRY.backend_requires_gpu("totally_unknown")
 
 
+# ---------------------------------------------------------------------------
+# num_frames ceiling policy tests (GHSA-vxqj / CVE-2026-34755)
+# ---------------------------------------------------------------------------
+
+
+class TestMergeKwargsNumFramesCeiling:
+    """Request-level num_frames must never exceed the engine ceiling."""
+
+    def test_clamps_negative_one_to_server_ceiling(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"num_frames": 8},
+            runtime_kwargs={"num_frames": -1},
+        )
+        assert result["num_frames"] == 8
+
+    def test_clamps_oversized_to_server_ceiling(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"num_frames": 8},
+            runtime_kwargs={"num_frames": 1000},
+        )
+        assert result["num_frames"] == 8
+
+    def test_allows_lower_than_ceiling(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"num_frames": 8},
+            runtime_kwargs={"num_frames": 4},
+        )
+        assert result["num_frames"] == 4
+
+    def test_engine_unlimited_allows_request_unlimited(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"num_frames": -1},
+            runtime_kwargs={"num_frames": -1},
+        )
+        assert result["num_frames"] == -1
+
+    def test_engine_unlimited_allows_any_positive(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"num_frames": -1},
+            runtime_kwargs={"num_frames": 5000},
+        )
+        assert result["num_frames"] == 5000
+
+    def test_absent_default_uses_constructor_ceiling(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs=None,
+            runtime_kwargs={"num_frames": -1},
+        )
+        assert result["num_frames"] == 32
+
+    def test_empty_default_uses_constructor_ceiling(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={},
+            runtime_kwargs={"num_frames": -1},
+        )
+        assert result["num_frames"] == 32
+
+    def test_fps_only_runtime_preserves_ceiling(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"num_frames": 8},
+            runtime_kwargs={"fps": 1.0},
+        )
+        assert result["num_frames"] == 8
+
+    def test_no_runtime_kwargs_returns_engine_value(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"num_frames": 16},
+            runtime_kwargs=None,
+        )
+        assert result["num_frames"] == 16
+
+    def test_no_runtime_kwargs_engine_unlimited(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"num_frames": -1},
+            runtime_kwargs=None,
+        )
+        assert result["num_frames"] == -1
+
+
+def test_merge_then_load_base64_enforces_ceiling():
+    """Integration: merge_media_io_kwargs + load_base64 respects ceiling."""
+    from vllm.multimodal.media.connector import merge_media_io_kwargs
+
+    sent_frames = 32
+    b64_frames = _make_jpeg_b64_frames(sent_frames)
+    data = ",".join(b64_frames)
+
+    merged = merge_media_io_kwargs(
+        {"video": {"num_frames": 8}},
+        {"video": {"num_frames": -1}},
+    )
+    videoio = VideoMediaIO(ImageMediaIO(), **merged["video"])
+    frames, metadata = videoio.load_base64("video/jpeg", data)
+
+    assert frames.shape[0] == 8
+    assert metadata["total_num_frames"] == 8
+
+
 @pytest.mark.parametrize("layout", ["nhwc", "nchw"])
 def test_pynvvc_frames_normalized_to_nhwc(layout: str):
     """PyNvVideoCodec frame batches are normalized to NHWC regardless of the
