@@ -6,10 +6,10 @@ ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
 ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
-# Umbrella for all KV connectors; each also has its own arg for opting into a
-# subset. Booleans, not a list, because stages select via FROM <stage>_${ARG}.
-ARG INSTALL_KV_CONNECTORS=false
-ARG INSTALL_LMCACHE=${INSTALL_KV_CONNECTORS}
+# Per-connector switches, independent so this flag is not an input to the cache
+# key of unrelated stages. Booleans, not a list, because stages select via
+# FROM <stage>_${ARG}. Release jobs pass each one explicitly.
+ARG INSTALL_LMCACHE=false
 # NIC backend for MoRI RDMA support.
 # By default (all), drivers and userspace libraries for all supported NIC types
 # (ainic and bnxt) are installed; MoRI selects the appropriate one at runtime.
@@ -479,16 +479,21 @@ RUN cd /opt/nixl && \
 FROM base AS build_lmcache
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b" # v0.5.3
-ARG LMCACHE_ROCM_ARCH="gfx942;gfx950"
+# Empty: inherit the image's PYTORCH_ROCM_ARCH so LMCache covers every arch
+# the release image targets.
+ARG LMCACHE_ROCM_ARCH=""
 ARG COMMON_WORKDIR
 # Full clone: setuptools_scm needs tag history reachable from LMCACHE_REF to
 # derive the version, so --depth/--filter would regress it to a fallback.
 RUN git clone ${LMCACHE_REPO} ${COMMON_WORKDIR}/lmcache \
     && cd ${COMMON_WORKDIR}/lmcache \
     && git checkout ${LMCACHE_REF}
+ARG USE_SCCACHE
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
+    --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
     cd ${COMMON_WORKDIR}/lmcache \
     && uv pip install --system -r requirements/build.txt \
+    && if [ "$USE_SCCACHE" = "1" ]; then export HIP_CLANG_PATH=/opt/sccache-wrappers; fi \
     && PYTORCH_ROCM_ARCH="${LMCACHE_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}" \
        BUILD_WITH_HIP=1 \
        CXX=hipcc \
@@ -496,6 +501,7 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
        python3 setup.py bdist_wheel --dist-dir=dist \
     && mkdir -p /app/install \
     && cp dist/*.whl /app/install \
+    && (cd /app/install && sha256sum *.whl > wheel.sha256) \
     && python3 -c "import glob, zipfile, sys; \
 names = zipfile.ZipFile(glob.glob('/app/install/*.whl')[0]).namelist(); \
 so = [n for n in names if n.endswith('.so')]; \
@@ -503,7 +509,7 @@ sys.exit('no compiled extension in wheel' if not so else 0)"
 
 # Gated so the hipcc build is skipped entirely when not requested.
 FROM scratch AS export_lmcache_true
-COPY --from=build_lmcache /app/install/*.whl /
+COPY --from=build_lmcache /app/install/*.whl /app/install/wheel.sha256 /
 FROM scratch AS export_lmcache_false
 FROM export_lmcache_${INSTALL_LMCACHE} AS export_lmcache
 
@@ -905,16 +911,21 @@ RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
 # LMCache's builtin hashing uses Python hash(), randomised per process: export a
 # fixed PYTHONHASHSEED (any value) or TP>1 workers disagree on keys and never hit.
 ARG INSTALL_LMCACHE
-RUN --mount=type=bind,from=export_lmcache,src=/,target=/lmcache_install \
-    --mount=type=cache,target=/root/.cache/uv \
+# COPY rather than bind-mount so the wheel and its digest are inputs to this
+# layer's cache key; a bind mount alone lets a warm builder reuse a stale
+# install after LMCACHE_REF/ARCH changed. Empty when the connector is off.
+COPY --from=export_lmcache / /lmcache_install/
+RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$INSTALL_LMCACHE" = "true" ]; then \
-        uv pip install --system --no-deps /lmcache_install/*.whl \
+        (cd /lmcache_install && sha256sum -c wheel.sha256) \
+        && uv pip install --system --no-deps /lmcache_install/*.whl \
         && uv pip install --system sortedcontainers cupy-rocm-7-0 aiofile \
            opentelemetry-exporter-prometheus \
         && python3 -c "import lmcache, lmcache.c_ops, importlib.metadata as m; \
 [m.version(d) for d in ('sortedcontainers','aiofile','cupy-rocm-7-0','opentelemetry-exporter-prometheus')]; \
 print('lmcache', lmcache.__version__)"; \
-    fi
+    fi; \
+    rm -rf /lmcache_install
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE

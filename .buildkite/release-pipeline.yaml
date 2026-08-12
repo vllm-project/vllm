@@ -884,7 +884,7 @@ steps:
               --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
               --build-arg SCCACHE_REGION_NAME=us-west-2 \
               --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
-              --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg INSTALL_LMCACHE=true \
               --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm \
               --target vllm-openai \
               --progress plain \
