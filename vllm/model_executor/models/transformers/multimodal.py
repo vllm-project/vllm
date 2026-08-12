@@ -18,7 +18,7 @@
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -57,7 +57,6 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     TimingContext,
 )
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -1019,34 +1018,26 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         kwargs.pop("token_type_ids", None)
         kwargs.pop("mm_token_type_ids", None)
 
-        context = nullcontext()
-        if current_platform.is_rocm():
-            context = torch.nn.attention.sdpa_kernel(
-                backends=[torch.nn.attention.SDPBackend.MATH]
-            )
         split_sizes = num_audio_tokens.flatten().tolist()
-        with context:
-            if isinstance(input_features, torch.Tensor):
-                audio_output = self.model.get_audio_features(
-                    input_features, return_dict=True, **kwargs
-                )
-                return self._split_embeddings(audio_output.pooler_output, split_sizes)
+        if isinstance(input_features, torch.Tensor):
+            audio_output = self.model.get_audio_features(
+                input_features, return_dict=True, **kwargs
+            )
+            return self._split_embeddings(audio_output.pooler_output, split_sizes)
 
-            # Audios the processor left un-padded arrive as a list once their
-            # lengths differ. Encode them one at a time so that none of them is
-            # padded to match another.
-            embeddings: list[torch.Tensor] = []
-            for index, features in enumerate(input_features):
-                audio_output = self.model.get_audio_features(
-                    features.unsqueeze(0),
-                    return_dict=True,
-                    **self._select_item_kwargs(kwargs, index, len(input_features)),
-                )
-                embeddings.extend(
-                    self._split_embeddings(
-                        audio_output.pooler_output, [split_sizes[index]]
-                    )
-                )
+        # Audios the processor left un-padded arrive as a list once their
+        # lengths differ. Encode them one at a time so that none of them is
+        # padded to match another.
+        embeddings: list[torch.Tensor] = []
+        for index, features in enumerate(input_features):
+            audio_output = self.model.get_audio_features(
+                features.unsqueeze(0),
+                return_dict=True,
+                **self._select_item_kwargs(kwargs, index, len(input_features)),
+            )
+            embeddings.extend(
+                self._split_embeddings(audio_output.pooler_output, [split_sizes[index]])
+            )
         return embeddings
 
     def _process_image_input(self, **kwargs) -> list[torch.Tensor] | None:
@@ -1064,44 +1055,26 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         num_image_patches = kwargs.pop("num_image_patches")
 
-        context = nullcontext()
-        if current_platform.is_rocm():
-            # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
-            # with flash_sdp and mem_efficient_sdp
-            # TODO: [ROCm] Fix accuracy issues with flash backend
-            logger.debug(
-                "ROCm platform detected. Forcing math SDP backend "
-                "for vision encoder. Currently ROCm platform has "
-                "accuracy issues with `flash_sdp` and"
-                "`mem_efficient_sdp` backends. See issue: "
-                "https://github.com/vllm-project/vllm/issues/30167"
-            )
-            context = torch.nn.attention.sdpa_kernel(
-                backends=[torch.nn.attention.SDPBackend.MATH]
-            )
         split_sizes = num_image_patches.flatten().tolist()
-        with context:
-            if isinstance(pixel_values, torch.Tensor):
-                vision_embeddings = self._get_image_features(pixel_values, **kwargs)
-                if isinstance(vision_embeddings, torch.Tensor):
-                    return self._split_embeddings(vision_embeddings, split_sizes)
-                return list(vision_embeddings)
+        if isinstance(pixel_values, torch.Tensor):
+            vision_embeddings = self._get_image_features(pixel_values, **kwargs)
+            if isinstance(vision_embeddings, torch.Tensor):
+                return self._split_embeddings(vision_embeddings, split_sizes)
+            return list(vision_embeddings)
 
-            # Images the processor left un-padded arrive as a list once their
-            # shapes differ. Encode them one at a time so that none of them is
-            # padded to match another.
-            embeddings: list[torch.Tensor] = []
-            for index, image in enumerate(pixel_values):
-                features = self._get_image_features(
-                    image.unsqueeze(0),
-                    **self._select_item_kwargs(kwargs, index, len(pixel_values)),
-                )
-                # Encoders which return one entry per image return a single entry
-                if not isinstance(features, torch.Tensor):
-                    features = torch.cat(list(features))
-                embeddings.extend(
-                    self._split_embeddings(features, [split_sizes[index]])
-                )
+        # Images the processor left un-padded arrive as a list once their
+        # shapes differ. Encode them one at a time so that none of them is
+        # padded to match another.
+        embeddings: list[torch.Tensor] = []
+        for index, image in enumerate(pixel_values):
+            features = self._get_image_features(
+                image.unsqueeze(0),
+                **self._select_item_kwargs(kwargs, index, len(pixel_values)),
+            )
+            # Encoders which return one entry per image return a single entry
+            if not isinstance(features, torch.Tensor):
+                features = torch.cat(list(features))
+            embeddings.extend(self._split_embeddings(features, [split_sizes[index]]))
         return embeddings
 
     def _select_item_kwargs(
