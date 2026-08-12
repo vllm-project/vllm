@@ -434,9 +434,11 @@ class HYV4Model(nn.Module):
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         skip_topk_layers = compute_skip_topk_layers(self.config)
 
-        if not hasattr(self, "_cached_params_dict"):
-            self._cached_params_dict = dict(self.named_parameters())
-        params_dict = self._cached_params_dict
+        # Must not be cached on `self`: `process_weights_after_loading` swaps in
+        # kernel-specific expert weights via `replace_parameter`, and a cache
+        # outliving this call would pin the pre-shuffle storage (OOM on large
+        # MoE) and make a later reload target orphaned tensors.
+        params_dict = dict(self.named_parameters())
         # Split per-expert mapping (V3 style): experts.0.gate_proj.weight
         split_expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()
@@ -450,10 +452,13 @@ class HYV4Model(nn.Module):
         base_layer = (
             "base_layer." if any(".base_layer." in name for name in params_dict) else ""
         )
-        # Fused expert mapping: experts.gate_up_proj (all experts in one tensor)
+        # Fused expert mapping: experts.gate_up_proj (all experts in one tensor).
+        # The packed weights are owned by the RoutedExperts submodule, so the
+        # targets are experts.routed_experts.[base_layer.]w{13,2}_weight.
+        fused_expert_prefix = f".experts.routed_experts.{base_layer}"
         fused_expert_params_mapping = [
-            (f".experts.{base_layer}w13_weight", ".experts.gate_up_proj", 0, "w1"),
-            (f".experts.{base_layer}w2_weight", ".experts.down_proj", 0, "w2"),
+            (f"{fused_expert_prefix}w13_weight", ".experts.gate_up_proj", 0, "w1"),
+            (f"{fused_expert_prefix}w2_weight", ".experts.down_proj", 0, "w2"),
         ]
         num_experts = getattr(self.config, "num_experts", 0)
 

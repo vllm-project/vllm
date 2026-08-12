@@ -43,7 +43,7 @@ from vllm.v1.attention.selector import get_attn_backend
 
 logger = init_logger(__name__)
 
-_SPARSE_LAYER_TYPES = ("sparse_attention", "sparse")
+_SPARSE_LAYER_TYPES = ("sparse_attention", "sparse", "deepseek_sparse_attention")
 _WEIGHT_LAYER_INDEX_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
 

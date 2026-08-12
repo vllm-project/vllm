@@ -1274,9 +1274,10 @@ tqdm==4.67.3
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers==5.15.0
+transformers @ https://mirrors.tencent.com/repository/generic/transformers/transformers-5.15.0.dev0+g7c7988d062-py3-none-any.whl
     # via
     #   -c requirements/common.txt
+    #   -c requirements/cuda.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
     #   compressed-tensors
