@@ -902,6 +902,8 @@ RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
 # numpy<=2.2.6, which would downgrade vLLM's. These four are the only runtime
 # deps requirements/rocm.txt lacks; the otel exporter is needed because
 # `lmcache server` initialises observability unconditionally.
+# LMCache's builtin hashing uses Python hash(), randomised per process: export a
+# fixed PYTHONHASHSEED (any value) or TP>1 workers disagree on keys and never hit.
 ARG INSTALL_LMCACHE
 RUN --mount=type=bind,from=export_lmcache,src=/,target=/lmcache_install \
     --mount=type=cache,target=/root/.cache/uv \
