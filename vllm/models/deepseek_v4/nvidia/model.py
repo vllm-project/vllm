@@ -165,6 +165,16 @@ def make_deepseek_v4_expert_params_mapping(
     ]
 
 
+def ue8m0_uint8_to_float(sf: torch.Tensor) -> torch.Tensor:
+    """Decode raw ue8m0 exponent bytes into the float32 scales they denote.
+
+    A ue8m0 byte ``v`` denotes ``2 ** (v - 127)``. Placing ``v`` in the
+    IEEE-754 exponent field (bits 23..30) reproduces that exactly, with no
+    rounding.
+    """
+    return (sf.to(torch.int32) << 23).view(torch.float32)
+
+
 class DeepseekV4MegaMoEExperts(nn.Module):
     _symm_buffer_cache: dict[tuple[int, int, int, int, int, int, int], object] = {}
 
@@ -309,7 +319,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
     @staticmethod
     def _ue8m0_uint8_to_float(sf: torch.Tensor) -> torch.Tensor:
-        return (sf.to(torch.int32) << 23).view(torch.float32)
+        return ue8m0_uint8_to_float(sf)
 
     def _check_runtime_supported(self) -> None:
         device = self.w13_weight.device
@@ -1259,15 +1269,26 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 break
             else:
                 if ".experts." in name:
-                    # E8M0 scales are stored as float8_e8m0fnu in
-                    # checkpoints but the MoE param is uint8. copy_()
-                    # would do a numeric conversion (e.g. 2^-7 → 0),
-                    # destroying the raw exponent bytes.
-                    if (
+                    # E8M0 scales are stored as float8_e8m0fnu in the
+                    # checkpoint, and how they must reach the weight loader
+                    # depends on the DESTINATION parameter:
+                    #
+                    #   * FP4 experts (Mxfp4MoEMethod / ModelOptNvFp4FusedMoE)
+                    #     keep the raw exponent bytes in a uint8 parameter, so
+                    #     a numeric copy_() would destroy them (2^-7 -> 0).
+                    #   * FP8 experts (expert_dtype="fp8" falls through to
+                    #     Fp8MoEMethod, which uses block-wise float32 scales)
+                    #     need the decoded value. Viewing as uint8 there makes
+                    #     copy_() write the exponent BYTE as a float
+                    #     (2^-7 -> 120.0), scaling every expert block by ~1e40
+                    #     and silently producing garbage output.
+                    #
+                    # Neither representation is right for both, so choose per
+                    # parameter below rather than once per checkpoint tensor.
+                    is_e8m0_scale = (
                         "weight_scale" in name
                         and loaded_weight.dtype == torch.float8_e8m0fnu
-                    ):
-                        loaded_weight = loaded_weight.view(torch.uint8)
+                    )
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
@@ -1276,6 +1297,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         if is_pp_missing_parameter(name_mapped, self):
                             continue
                         param = params_dict[name_mapped]
+                        expert_weight = loaded_weight
+                        if is_e8m0_scale:
+                            raw_bytes = loaded_weight.view(torch.uint8)
+                            expert_weight = (
+                                raw_bytes
+                                if param.dtype == torch.uint8
+                                else ue8m0_uint8_to_float(raw_bytes)
+                            )
                         # We should ask the weight loader to return success or not
                         # here since otherwise we may skip experts with other
                         # available replicas.
@@ -1284,7 +1313,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         )
                         success = weight_loader(
                             param,
-                            loaded_weight,
+                            expert_weight,
                             name_mapped,
                             shard_id=expert_shard_id,
                             expert_id=expert_id,
