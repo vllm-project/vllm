@@ -100,7 +100,7 @@ class MMEncoderModelRunner(GPUModelRunner):
         assert not dummy_run, "An encoder-only instance runs no dummy batch."
 
         with self.input_tensor_semaphore():
-            self.update_pp_decode_requests()
+            self.update_pp_decode_requests(scheduler_output)
             self.finish_requests(scheduler_output)
             self.free_states(scheduler_output)
             self.add_requests(scheduler_output)
