@@ -9,10 +9,12 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -36,6 +38,9 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import (
     get_pp_missing_layer_names,
     maybe_prefix,
+)
+from vllm.models.common.ops.fused_allreduce_rms_norm import (
+    fused_allreduce_rms_norm_fp8_quant,
 )
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -94,7 +99,7 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_index: int = 0,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
         assert inputs_embeds is not None
         # Fused: zero pos-0 embeds + enorm(embeds) + hnorm(prev) + cat -> [N, 2H].
         eh_input = fused_eh_norm(
@@ -119,23 +124,23 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        if not is_sequence_parallel:
-            # Without sequence parallelism, the MoE output is left un-reduced.
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-        # Recycle the POST-final-norm hidden into the next draft step. The
-        # residual-add is fused into the final RMSNorm so it is computed
-        # exactly once, and the result is returned for both tuple positions:
-        # the draft-logits hidden (compute_logits applies the LM head only) and
-        # the recycled previous_hidden_states. Recycling the pre-final-norm
-        # hidden mismatches the draft model's hnorm and lowers MTP acceptance;
-        # post-norm recycle matches deepseek_mtp.py (PR #45895). The tuple form
-        # is understood by both the V2 speculator (isinstance-tuple check) and
-        # the legacy proposer (model_returns_tuple is True for the
-        # DeepSeekMTPModel architecture).
-        hidden_states, _ = self.shared_head.norm(hidden_states, residual)
         if is_sequence_parallel:
+            hidden_states, _ = self.shared_head.norm(hidden_states, residual)
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
-        return hidden_states, hidden_states
+            return hidden_states, hidden_states
+
+        hidden_states, _, logits_input = fused_allreduce_rms_norm_fp8_quant(
+            hidden_states,
+            residual,
+            self.shared_head.norm,
+            self.shared_head.head,
+        )
+        # Recycle the post-final-norm BF16 hidden while compute_logits consumes
+        # the packed FP8 activation when the shared LM head supports it.
+        return (
+            logits_input if logits_input is not None else hidden_states,
+            hidden_states,
+        )
 
 
 class DeepseekV32MultiTokenPredictor(nn.Module):
@@ -188,7 +193,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         current_step_idx = spec_step_idx % self.num_mtp_layers
@@ -202,7 +207,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
 
     def compute_logits(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
@@ -250,14 +255,14 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
         return self.model(
             input_ids, positions, hidden_states, inputs_embeds, spec_step_idx
         )
 
     def compute_logits(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
