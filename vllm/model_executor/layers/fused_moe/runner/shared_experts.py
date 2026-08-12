@@ -103,11 +103,10 @@ class SharedExperts(torch.nn.Module):
 
     @property
     def _should_enable_stream_overlap_heuristic(self) -> bool:
-        # On ROCm, empirically it's shown that only DPA deployments benefit from
-        # multi-stream shared experts
-        if not current_platform.is_rocm():
-            return True
-        return self._moe_config.moe_parallel_config.dp_size > 1
+        # Workaround: the aux stream corrupts MoE output on ROCm, where this
+        # path first ran with #48223 -- Qwen3.5-35B-A3B at DP2 + EP on gfx950
+        # scores 0.00 on GSM8K. Keep it off until the cause is found.
+        return not current_platform.is_rocm()
 
     def _determine_shared_experts_order(
         self,
