@@ -444,7 +444,14 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [MoEActivation.SILU, MoEActivation.SWIGLUSTEP]
+        # SILU has fused gate+mul+quant kernels; SWIGLUSTEP/SITU take the
+        # general path (activation applied via self.activation, which forwards
+        # the situ betas, then FP8 requant).
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUSTEP,
+            MoEActivation.SITU,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -488,16 +495,15 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         M_sum, N = input.size()
         activation_out_dim = self.adjust_N_for_activation(N, activation)
 
-        if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
-            assert activation == MoEActivation.SILU
-            return fused_silu_mul_fp8_quant_packed(
-                input=input,
-                output_q=output,
-                group_size=block_k,
-                clamp_limit=self.gemm1_clamp_limit,
-            )
-
         if activation == MoEActivation.SILU:
+            # Fused gate+mul+quant kernels for the common SILU case.
+            if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
+                return fused_silu_mul_fp8_quant_packed(
+                    input=input,
+                    output_q=output,
+                    group_size=block_k,
+                    clamp_limit=self.gemm1_clamp_limit,
+                )
             use_ue8m0 = scale_fmt == DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
             return silu_mul_per_token_group_quant_fp8_colmajor(
                 input=input,
@@ -506,12 +512,24 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
                 clamp_limit=self.gemm1_clamp_limit,
             )
 
+        # General gated activations (SWIGLUSTEP, SITU): apply the activation
+        # (self.activation forwards the situ betas from moe_config) then
+        # FP8-requant into the layout DeepGEMM expects for this scale format.
         act_out = torch.empty(
             (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
         )
         self.activation(activation, act_out, input)
+        if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
+            return per_token_group_quant_fp8_packed_for_deepgemm(
+                act_out, block_k, use_ue8m0=True, out_q=output
+            )
+        use_ue8m0 = scale_fmt == DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
         return per_token_group_quant_fp8(
-            act_out, block_k, column_major_scales=True, out_q=output
+            act_out,
+            block_k,
+            column_major_scales=True,
+            out_q=output,
+            use_ue8m0=use_ue8m0,
         )
 
     def apply(

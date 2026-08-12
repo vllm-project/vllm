@@ -5,12 +5,13 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, ClassVar, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, Literal, NamedTuple
 
 import numpy
 import torch
 from torch import fx
 
+from vllm.distributed.parallel_state import get_ep_group, get_tp_group
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -29,6 +30,65 @@ def _dtype_abbr(dtype: torch.dtype | ScalarType) -> str:
     if isinstance(dtype, ScalarType):
         return str(dtype)
     return fx.graph.dtype_abbrs[dtype]
+
+
+def weight_amax(
+    weight: torch.Tensor, *, dim: int | None = None, keepdim: bool = False
+) -> torch.Tensor:
+    """``max(|weight|)``, without materializing a full-size ``abs()``."""
+    lo, hi = weight.aminmax(dim=dim, keepdim=keepdim)
+    return torch.maximum(lo.abs(), hi.abs())
+
+
+def amax_for_tp_weight_quant(amax: torch.Tensor, is_sharded: bool) -> torch.Tensor:
+    """Reduce a weight ``amax`` over the TP group when the weight is sharded
+    along a dim the ``amax`` reduces over, so each shard derives the same scale
+    it would as part of the whole weight.
+    """
+    if is_sharded:
+        torch.distributed.all_reduce(
+            amax,
+            op=torch.distributed.ReduceOp.MAX,
+            group=get_tp_group().device_group,
+        )
+    return amax
+
+
+def amax_for_moe_weight_quant(amax: torch.Tensor, moe_tp_size: int) -> torch.Tensor:
+    """Reduce a per-expert weight ``amax`` over the ranks that tensor-shard the
+    MoE weights. That sharding is flattened over DP x PCP x TP, exactly the EP
+    group's span. Under EP ``moe_tp_size`` is 1 and each rank owns whole
+    experts, so no reduction is needed.
+    """
+    if moe_tp_size > 1:
+        torch.distributed.all_reduce(
+            amax,
+            op=torch.distributed.ReduceOp.MAX,
+            group=get_ep_group().device_group,
+        )
+    return amax
+
+
+def amax_for_moe_activation_quant(
+    a_scale: torch.Tensor, enable_eplb: bool
+) -> torch.Tensor:
+    """Reduce a per-expert activation scale to one value shared by all experts.
+
+    Note: when EPLB is enabled and since this quantization scales get
+    folded into the per-expert dequantization alphas, we can only
+    ensure that the quant/dequant scales match by having a single
+    quantization scale shared across all ranks.
+    """
+    a_max = a_scale.max().to(torch.float32)
+    if enable_eplb:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        torch.distributed.all_reduce(
+            a_max,
+            op=torch.distributed.ReduceOp.MAX,
+            group=get_ep_group().device_group,
+        )
+    return a_max
 
 
 def get_fp8_min_max() -> tuple[float, float]:
@@ -97,6 +157,7 @@ class ScaleDesc:
             GroupShape.PER_CHANNEL: "per_channel",
         }
         group_shape = d.get(self.group_shape, str(self.group_shape))
+
         return (
             f"{_dtype_abbr(self.dtype)},"
             f"{'static' if self.static else 'dynamic'},{group_shape}"
@@ -113,7 +174,11 @@ class QuantKey:
     symmetric: symmetric if True, asymmetric if False
     """
 
-    dtype: torch.dtype
+    # TODO: QuantKey.dtype is assumed to be `torch.dtype` in matcher_utils.py,
+    # but #37990 introduced e.g. `kInt4Static` that uses a `ScalarType` dtype,
+    # same for kMxfp6 that does not have a native torch representation.
+    # Logical dtype and storage (torch) dtype should be separated (see #48949).
+    dtype: torch.dtype | ScalarType
     scale: ScaleDesc
     scale2: ScaleDesc | None = None
     symmetric: bool = True
@@ -179,6 +244,26 @@ kMxfp8Dynamic = QuantKey(FP8_DTYPE, scale=kMxfp8DynamicGroupScale, symmetric=Tru
 kMxfp4StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
 kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
 
+kMxfp6E3M2StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
+kMxfp6E3M2Static = QuantKey(
+    scalar_types.float6_e3m2f, scale=kMxfp6E3M2StaticGroupScale, symmetric=True
+)
+
+kMxfp6E3M2DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
+kMxfp6E3M2Dynamic = QuantKey(
+    scalar_types.float6_e3m2f, scale=kMxfp6E3M2DynamicGroupScale, symmetric=True
+)
+
+kMxfp6E2M3StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
+kMxfp6E2M3Static = QuantKey(
+    scalar_types.float6_e2m3f, scale=kMxfp6E2M3StaticGroupScale, symmetric=True
+)
+
+kMxfp6E2M3DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
+kMxfp6E2M3Dynamic = QuantKey(
+    scalar_types.float6_e2m3f, scale=kMxfp6E2M3DynamicGroupScale, symmetric=True
+)
+
 # TODO: convert this to use SCALAR_TYPE. This is not right.
 kInt4StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
 kInt4Static = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale, symmetric=True)
@@ -197,6 +282,8 @@ kInt4Static32Asym = QuantKey(
 
 kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
 kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
+kInt8StaticTensorSym = QuantKey(torch.int8, kStaticTensorScale, symmetric=True)
+kInt8DynamicTensorSym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=True)
 
 # INT4 W4A8 quantization keys
 
@@ -519,7 +606,7 @@ def is_layer_skipped(
     ignored_layers: list[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
     *,
-    skip_with_substr: bool = False,
+    match_mode: Literal["exact", "substring", "suffix"] = "exact",
 ) -> bool:
     def prefix_full_match(prefix: str, ignored_layers: list[str]) -> bool:
         return prefix in ignored_layers
@@ -528,7 +615,22 @@ def is_layer_skipped(
     def substr_match(prefix: str, ignored_layers: list[str]) -> bool:
         return any(layer in prefix for layer in ignored_layers)
 
-    match_func = substr_match if skip_with_substr else prefix_full_match
+    # Match abbreviated module paths at a component boundary. For example,
+    # ``b_proj`` matches ``model.layers.0.self_attn.b_proj`` but not
+    # ``model.layers.0.self_attn.q_b_proj``.
+    def suffix_match(prefix: str, ignored_layers: list[str]) -> bool:
+        return any(
+            prefix == layer or prefix.endswith(f".{layer}") for layer in ignored_layers
+        )
+
+    if match_mode == "exact":
+        match_func = prefix_full_match
+    elif match_mode == "substring":
+        match_func = substr_match
+    elif match_mode == "suffix":
+        match_func = suffix_match
+    else:
+        raise ValueError(f"Unsupported layer skip match mode: {match_mode}")
 
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
@@ -564,14 +666,11 @@ def is_layer_skipped(
                     "are quantized. All shards of fused layers "
                     "to have the same precision."
                 )
-    elif "experts" in prefix and not skip_with_substr:
+    elif "experts" in prefix and match_mode == "exact":
         expert_ignore_layers = filter(
             lambda layer_name: "experts" in layer_name, ignored_layers
         )
-        return any(
-            prefix in layer_name if not skip_with_substr else layer_name in prefix
-            for layer_name in expert_ignore_layers
-        )
+        return any(prefix in layer_name for layer_name in expert_ignore_layers)
     else:
         is_skipped = match_func(prefix, ignored_layers)
 

@@ -481,6 +481,11 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
         ),
+        (
+            "nm-testing/Llama-3.2-1B-Instruct-quipv16-nvfp4",
+            "Flat is better than nested.\nSparse is better than dense.",
+            150.0,
+        ),
     ],
 )
 def test_compressed_tensors_transforms_perplexity(
@@ -931,12 +936,12 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
         (None, 32, 64, 128, (False, 64, True)),
     ],
 )
-def test_wna16_marlin_moe_w2_scale_sharding(actorder, group_size, part, full, expected):
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_marlin import (  # noqa: E501
-        CompressedTensorsWNA16MarlinMoEMethod,
+def test_wna16_moe_w2_scale_sharding(actorder, group_size, part, full, expected):
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+        CompressedTensorsWNA16MoEMethod,
     )
 
-    result = CompressedTensorsWNA16MarlinMoEMethod._w2_scale_sharding(
+    result = CompressedTensorsWNA16MoEMethod._w2_scale_sharding(
         actorder, group_size, part, full
     )
     assert result == expected
@@ -991,10 +996,10 @@ def test_humming_wna16_weight_schema_accepts_compressed_tensors_args(num_bits):
 
 
 @pytest.mark.parametrize("num_bits", [2, 3, 5, 6, 7])
-def test_wna16_marlin_moe_allows_humming_only_bitwidths(monkeypatch, num_bits):
+def test_wna16_moe_allows_humming_only_bitwidths(monkeypatch, num_bits):
     from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import WNA16MoEBackend
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-        compressed_tensors_moe_wna16_marlin as marlin_module,
+        compressed_tensors_moe_wna16 as wna16_module,
     )
     from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa: E501
         WNA16_SUPPORTED_TYPES_MAP,
@@ -1002,13 +1007,13 @@ def test_wna16_marlin_moe_allows_humming_only_bitwidths(monkeypatch, num_bits):
 
     captured = {}
 
-    def fake_select_wna16_moe_backend(*, config, weight_key):
-        del config
+    def fake_select_wna16_moe_backend(*, config, weight_key, **kwargs):
+        del config, kwargs
         captured["weight_key"] = weight_key
         return WNA16MoEBackend.HUMMING, object
 
     monkeypatch.setattr(
-        marlin_module,
+        wna16_module,
         "select_wna16_moe_backend",
         fake_select_wna16_moe_backend,
     )
@@ -1022,7 +1027,7 @@ def test_wna16_marlin_moe_allows_humming_only_bitwidths(monkeypatch, num_bits):
         group_size=128,
     )
 
-    method = marlin_module.CompressedTensorsWNA16MarlinMoEMethod(
+    method = wna16_module.CompressedTensorsWNA16MoEMethod(
         quant_args,
         None,
         Mock(),

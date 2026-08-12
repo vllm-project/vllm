@@ -131,7 +131,7 @@ def _topk_topp_kernel(
                 mask_n = offs < VOCAB_SIZE
                 logits_blk0 = tl.load(
                     LOGITS_ROW + offs, mask=mask_n, other=-float("inf")
-                ).to(tl.float32)
+                )
                 # Exclude -inf values (e.g. from grammar bitmasks) from
                 # statistics to avoid NaN in pivot computation.
                 finite_mask = (logits_blk0 > -float("inf")) & mask_n
@@ -164,7 +164,7 @@ def _topk_topp_kernel(
                     mask_n = offs_n < VOCAB_SIZE
                     logits_blk = tl.load(
                         LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
-                    ).to(tl.float32)
+                    )
 
                     max_logit = tl.maximum(max_logit, tl.max(logits_blk))
                     # Exclude -inf from min to keep binary search bounds
@@ -305,7 +305,7 @@ def _topk_topp_kernel(
                             mask_n = offs_n < VOCAB_SIZE
                             logits_blk2 = tl.load(
                                 LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
-                            ).to(tl.float32)
+                            )
 
                             above_0 = logits_blk2 > k_pivot_0
                             above_1 = logits_blk2 > k_pivot_1
@@ -457,7 +457,7 @@ def _topk_topp_kernel(
                                     LOGITS_ROW + offs_n,
                                     mask=mask_n,
                                     other=-float("inf"),
-                                ).to(tl.float32)
+                                )
 
                                 outlier_mask = (probs_blk > min_logit) & mask_n
 
@@ -600,7 +600,7 @@ def _topk_topp_kernel(
                 mask_n = offs < VOCAB_SIZE
                 logits_blk0 = tl.load(
                     LOGITS_ROW + offs, mask=mask_n, other=-float("inf")
-                ).to(tl.float32)
+                )
                 # Exclude -inf values (e.g. from grammar bitmasks) from
                 # statistics to avoid NaN in pivot computation.
                 finite_mask = (logits_blk0 > -float("inf")) & mask_n
@@ -626,7 +626,7 @@ def _topk_topp_kernel(
                     mask_n = offs_n < VOCAB_SIZE
                     logits_blk = tl.load(
                         LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
-                    ).to(tl.float32)
+                    )
                     max_logit = tl.maximum(max_logit, tl.max(logits_blk))
                     # Exclude -inf from min to keep binary search bounds
                     # finite (avoids NaN pivots).
@@ -660,7 +660,7 @@ def _topk_topp_kernel(
 
                     probs_blk = tl.load(
                         LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
-                    ).to(tl.float32)
+                    )
                     probs_blk = tl.exp(probs_blk - max_sample)
                     probs_blk = probs_blk / sum_exp_logits
 
@@ -754,7 +754,7 @@ def _topk_topp_kernel(
 
                         probs_blk = tl.load(
                             LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
-                        ).to(tl.float32)
+                        )
                         probs_blk = tl.exp(probs_blk - max_sample)
                         probs_blk = probs_blk / sum_exp_logits
                         tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n)
@@ -835,7 +835,7 @@ def _topk_topp_kernel(
                 mask_n = offs_n < VOCAB_SIZE
                 logits_blk = tl.load(
                     LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
-                ).to(tl.float32)
+                )
                 keep_mask = (logits_blk > final_pivot) & mask_n
 
                 # Duplicate logit handling
@@ -878,7 +878,7 @@ def apply_top_k_top_p_triton(
         The masked logits tensor. It may or may not be modified in-place.
     """
     assert logits.ndim == 2
-    assert logits.dtype in (torch.float32, torch.bfloat16, torch.float16)
+    assert logits.dtype == torch.float32
     batch_size, vocab_size = logits.shape
     topk_enabled = k is not None
     topp_enabled = p is not None
@@ -911,9 +911,7 @@ def apply_top_k_top_p_triton(
     buffer = _TRITON_BUFFER_CACHE.get(buf_key)
     if buffer is None or buffer.shape[0] < NUM_PROGRAMS:
         size = min(next_power_of_2(NUM_PROGRAMS), num_sm)
-        buffer = torch.empty(
-            (size, vocab_size), dtype=torch.float32, device=logits.device
-        )
+        buffer = logits.new_empty((size, vocab_size))
         _TRITON_BUFFER_CACHE[buf_key] = buffer
     if buffer.shape[0] > NUM_PROGRAMS:
         buffer = buffer[:NUM_PROGRAMS]
@@ -921,12 +919,8 @@ def apply_top_k_top_p_triton(
     # Cache lookup table entries on each device.
     tables = _TRITON_TABLE_CACHE.get(logits.device)
     if tables is None:
-        normal_cdf_to_sigma_table = torch.tensor(
-            _NORMAL_CDF_TO_SIGMA_TABLE, dtype=torch.float32, device=logits.device
-        )
-        percentile_to_std_table = torch.tensor(
-            _PERCENTILE_TO_STD_TABLE, dtype=torch.float32, device=logits.device
-        )
+        normal_cdf_to_sigma_table = logits.new_tensor(_NORMAL_CDF_TO_SIGMA_TABLE)
+        percentile_to_std_table = logits.new_tensor(_PERCENTILE_TO_STD_TABLE)
         _TRITON_TABLE_CACHE[logits.device] = (
             normal_cdf_to_sigma_table,
             percentile_to_std_table,
@@ -937,12 +931,18 @@ def apply_top_k_top_p_triton(
     # Smaller tiles compile and run faster on CPU; GPU benefits from larger tiles.
     # On XPU, large BLOCK_SIZE causes precision loss in the single-pass pivot
     # approximation; use smaller tiles for accurate top-p results.
+    launch_kwargs = {}
     if logits.device.type == "cpu":
         block_size, block_size_trunc = 256, 128
     elif logits.device.type == "xpu":
         block_size, block_size_trunc = 4096, 2048
     else:
         block_size, block_size_trunc = 8192, 4096
+        # Each program serially sweeps the vocab row in BLOCK_SIZE tiles, so
+        # per-tile latency bounds kernel latency, and Triton's default of 4
+        # warps leaves an 8192-wide tile at 16 elements per lane. 8 warps is
+        # faster on every arch measured (SM90, SM100, SM120, gfx950); 16 is not.
+        launch_kwargs["num_warps"] = 8
 
     _topk_topp_kernel[(NUM_PROGRAMS,)](
         logits,
@@ -959,6 +959,7 @@ def apply_top_k_top_p_triton(
         BLOCK_SIZE_TRUNC=block_size_trunc,
         TOPK_ENABLED=topk_enabled,
         TOPP_ENABLED=topp_enabled,
+        **launch_kwargs,
     )
 
     return logits
