@@ -46,9 +46,7 @@ class KVQuantMode(IntEnum):
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
     INT4_PER_TOKEN_HEAD = 4  # packed 2×int4/byte, RHT + asymmetric zp
     NVFP4 = 5  # packed fp4 data + fp8 block scales
-    # Hadamard-rotated Lloyd-Max quant, packed K+V per slot. One member per
-    # preset (member names mirror the ``kv_cache_dtype`` strings) so the mode
-    # alone identifies the slot format.
+    # Hadamard-rotated Lloyd-Max quant, packed K+V per slot.
     TURBOQUANT_K8V4 = 6
     TURBOQUANT_4BIT_NC = 7
     TURBOQUANT_K3V4_NC = 8
@@ -347,6 +345,8 @@ class FullAttentionSpec(AttentionSpec):
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
+            num_head_slots=specs[0].num_head_slots,
+            state_content_bytes=specs[0].state_content_bytes,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             # If any layer in the group is non-causal, treat the group as
@@ -424,6 +424,8 @@ class MLAAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            num_head_slots=specs[0].num_head_slots,
+            state_content_bytes=specs[0].state_content_bytes,
             indexes_kv_by_block_stride=block_stride_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
@@ -481,6 +483,8 @@ class RSWASpec(FullAttentionSpec):
             kv_quant_mode=base.kv_quant_mode,
             page_size_padded=base.page_size_padded,
             indexes_kv_by_block_stride=base.indexes_kv_by_block_stride,
+            num_head_slots=base.num_head_slots,
+            state_content_bytes=base.state_content_bytes,
             sliding_window=base.sliding_window,
             attention_chunk_size=base.attention_chunk_size,
             non_causal=base.non_causal,
@@ -639,6 +643,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
+            num_head_slots=specs[0].num_head_slots,
+            state_content_bytes=specs[0].state_content_bytes,
             indexes_kv_by_block_stride=block_stride_set.pop(),
             sliding_window=sliding_window_set.pop(),
             extra_retained_tokens=extra_retained_set.pop(),
@@ -765,6 +771,8 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
+            num_head_slots=specs[0].num_head_slots,
+            state_content_bytes=specs[0].state_content_bytes,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),
