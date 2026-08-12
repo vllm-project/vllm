@@ -224,8 +224,8 @@ class AttentionSpec(KVCacheSpec):
     page_size_padded: int | None = None
     indexes_kv_by_block_stride: bool = False
     num_head_slots: int | None = None
-    """Num heads (H) in the standard [B,H,N,C], by default is `num_kv_heads` but can be
-    overridden by the backend when specialized packing is needed.
+    """Num heads (H) in the standard [B,H,N,C] (RFC: https://github.com/vllm-project/vllm/issues/42082) 
+    default is `num_kv_heads`, can be overridden by the backend for specialized packing.
     (e.g. NVFP4 stores K and V continuously by doing: ``[B,2*num_kv_heads,N,hs]``)."""
     state_content_bytes: int | None = None
     """C in bytes when packed; None defaults to ``(hs_k + hs_v) * dtype`` content."""

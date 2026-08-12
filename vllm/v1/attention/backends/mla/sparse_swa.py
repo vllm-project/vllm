@@ -97,8 +97,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
-            # DeepseekV4 fp8_ds_mla: 584B per token (448B NoPE + 128B RoPE
-            # + 8B fp8 scale).
+            # DeepseekV4 fp8_ds_mla: 584B per token (448B NoPE + 128B RoPE + 8B scales)
             state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
             # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
             alignment=576 if uses_fp8_ds_mla_layout else 512,
