@@ -1,18 +1,115 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
+    RoutedExpertsTensors,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.worker.utils import raise_if_nan_logits
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+@dataclass(frozen=True)
+class StepTimingSample:
+    forward_ms: float
+    drafter_ms: float
+    num_target_tokens: int
+    num_reqs: int
+    full_cudagraph: bool
+
+
+def _timing_event() -> torch.cuda.Event:
+    return torch.cuda.Event(enable_timing=True)
+
+
+@dataclass
+class StepTimingEvents:
+    forward_start: torch.cuda.Event = field(default_factory=_timing_event)
+    forward_end: torch.cuda.Event = field(default_factory=_timing_event)
+    drafter_start: torch.cuda.Event = field(default_factory=_timing_event)
+    drafter_end: torch.cuda.Event = field(default_factory=_timing_event)
+
+
+class StepTimingCollector:
+    """Times the steps run inside ``collect``; record calls no-op outside it.
+
+    Every step gets its own events, so the steps queue back-to-back and the
+    block resolves them all behind one sync on the way out.
+    """
+
+    def __init__(self):
+        self._collecting = False
+        self._step: StepTimingEvents | None = None
+        self._batch = (False, 0, 0)
+        self._timed: list[tuple[StepTimingEvents, tuple[bool, int, int]]] = []
+
+    @contextlib.contextmanager
+    def collect(self) -> Iterator[list[StepTimingSample]]:
+        """Time every step run in this block.
+
+        The yielded list holds one sample per timed step once the block exits;
+        it stays empty inside the block, where the timings are still on device.
+        """
+        samples: list[StepTimingSample] = []
+        self._collecting = True
+        try:
+            yield samples
+        finally:
+            self._collecting = False
+            timed, self._timed, self._step = self._timed, [], None
+        if not timed:
+            return
+        # Same stream, issue order: once the last step is done, so are the rest.
+        timed[-1][0].drafter_end.synchronize()
+        samples.extend(
+            StepTimingSample(
+                events.forward_start.elapsed_time(events.forward_end),
+                events.drafter_start.elapsed_time(events.drafter_end),
+                num_target_tokens,
+                num_reqs,
+                full_cudagraph,
+            )
+            for events, (full_cudagraph, num_target_tokens, num_reqs) in timed
+        )
+
+    def record_batch(self, input_batch: "InputBatch", full_cudagraph: bool) -> None:
+        """Costs from different execution modes must not share a cost curve."""
+        self._batch = (full_cudagraph, input_batch.num_tokens, input_batch.num_reqs)
+
+    def forward_start(self) -> None:
+        if self._collecting:
+            self._step = StepTimingEvents()
+            self._step.forward_start.record()
+
+    def forward_end(self) -> None:
+        if self._step is not None:
+            self._step.forward_end.record()
+
+    def drafter_start(self) -> None:
+        if self._step is not None:
+            self._step.drafter_start.record()
+
+    def drafter_end(self) -> None:
+        """Ends the step: only steps that reach here have a draft cost."""
+        if self._step is not None:
+            self._step.drafter_end.record()
+            self._timed.append((self._step, self._batch))
+            self._step = None
 
 
 class AsyncOutput(AsyncModelRunnerOutput):
@@ -24,6 +121,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool = False,
+        routed_experts: RoutedExpertsTensors | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -31,6 +129,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
+        self.routed_experts = routed_experts
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -48,6 +147,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
+            self.routed_experts_cpu: RoutedExpertsTensors | None = None
+            if routed_experts is not None:
+                self.routed_experts_cpu = routed_experts.to_cpu_nonblocking()
             self.prompt_logprobs_dict = {
                 k: v.to_cpu_nonblocking() if v is not None else None
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items()
@@ -74,10 +176,14 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.model_runner_output.num_nans_in_logits = dict(
                 zip(self.model_runner_output.req_ids, self.num_nans.tolist())
             )
+            if envs.VLLM_RAISE_ON_LOGIT_NANS:
+                raise_if_nan_logits(self.model_runner_output.num_nans_in_logits)
 
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
+        if self.routed_experts_cpu is not None:
+            self.model_runner_output.routed_experts = self.routed_experts_cpu.tolists()
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()
