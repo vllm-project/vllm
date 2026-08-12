@@ -3,11 +3,12 @@
 """Regression test: DiffusionGemmaModelState._causal_buf must stay visible to
 an already-captured CUDA graph.
 
-FlashAttentionMetadataBuilder.build() casts non-int32 causal tensors via
-``causal.to(torch.int32)``, which allocates a new tensor every call. Under
-CUDAGraphMode.FULL, a captured graph binds to the address it saw at capture
-time, so a bool ``_causal_buf`` gets reallocated out from under it and later
-updates never reach the graph on replay.
+A captured graph binds to tensor addresses at capture time, so the causal
+flags can only reach replay through in-place updates to a persistent buffer.
+That requires the buffer to be int32: FlashAttentionMetadataBuilder.build()
+rejects other dtypes rather than casting out-of-place, because such a cast
+would allocate a fresh tensor each call and freeze the graph at the
+capture-time snapshot.
 """
 
 import types
@@ -39,23 +40,20 @@ def _make_model_state() -> DiffusionGemmaModelState:
 
 def test_causal_buf_survives_cudagraph_replay():
     causal_buf = _make_model_state()._causal_buf
+    assert causal_buf.dtype == torch.int32, (
+        "FlashAttentionMetadataBuilder.build() requires int32 causal tensors; "
+        "any other dtype raises there instead of silently breaking replay"
+    )
+
     out = torch.zeros(causal_buf.shape[0], dtype=torch.int32, device=DEVICE)
-
-    def flash_attn_cast(causal: torch.Tensor) -> torch.Tensor:
-        return causal.to(torch.int32) if causal.dtype != torch.int32 else causal
-
-    # Mirrors FlashAttentionMetadataBuilder.build() running once at capture
-    # time, outside the graph -- the graph itself only ever sees this fixed
-    # tensor, never a later call to flash_attn_cast().
     causal_buf[:] = 0
-    causal_for_capture = flash_attn_cast(causal_buf)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            out.copy_(causal_for_capture)
+            out.copy_(causal_buf)
     torch.cuda.current_stream().wait_stream(stream)
 
     causal_buf[:] = 1  # e.g. a request entering its causal (encoder) phase
