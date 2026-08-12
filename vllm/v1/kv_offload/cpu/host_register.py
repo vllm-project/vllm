@@ -42,7 +42,13 @@ def host_register(ptr: int, num_bytes: int) -> bool:
         return True
 
     if current_platform.is_xpu():
-        return torch.ops._C.xpu_host_register(ptr, num_bytes)
+        if not torch.ops._C.xpu_host_register(ptr, num_bytes):
+            logger.warning(
+                "xpu_host_register failed — transfers will still work "
+                "but may be slower (unpinned DMA)"
+            )
+            return False
+        return True
 
     logger.info_once(
         "Host registration is not implemented on %s; KV offload transfers will "
@@ -64,4 +70,6 @@ def host_unregister(ptr: int) -> None:
         return
 
     if current_platform.is_xpu():
-        torch.ops._C.xpu_host_unregister(ptr)
+        if not torch.ops._C.xpu_host_unregister(ptr):
+            logger.warning("xpu_host_unregister failed")
+        return
