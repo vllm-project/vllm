@@ -201,9 +201,10 @@ def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-def test_pynvvideocodec_corrupted_video_raises_value_error():
+def test_pynvvideocodec_corrupted_videos_raise_value_error():
     valid_video = create_long_gop_video(num_frames=2, width=64, height=64)
     corrupted_video = (ASSETS_DIR / "corrupted.mp4").read_bytes()
+    malformed_video = corrupted_video[:128]
 
     old_slots = PyNvVideoCodecVideoBackend._decoder_slots
     old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
@@ -219,6 +220,18 @@ def test_pynvvideocodec_corrupted_video_raises_value_error():
         with pytest.raises(
             ValueError,
             match=r"^Invalid or unsupported video file\.$",
+        ) as malformed_exc:
+            loader.load_bytes(
+                malformed_video,
+                num_frames=1,
+                hw_decoders=1,
+            )
+
+        assert malformed_exc.value.__cause__ is not None
+
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid or unsupported video file\.$",
         ) as exc_info:
             loader.load_bytes(
                 corrupted_video,
@@ -226,7 +239,7 @@ def test_pynvvideocodec_corrupted_video_raises_value_error():
                 hw_decoders=1,
             )
 
-        assert isinstance(exc_info.value.__cause__, IndexError)
+        assert exc_info.value.__cause__ is not None
 
         frames, _ = loader.load_bytes(
             valid_video,

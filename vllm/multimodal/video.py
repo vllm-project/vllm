@@ -816,10 +816,10 @@ class PyNvVideoCodecVideoBackendMixin:
         with cls._borrow_decoder_slot() as decoder_slot:
             stream = decoder_slot.stream
             with cls._torch_stream_context(stream):
-                decoder = decoder_slot.get_decoder(
-                    file_path, nvc, device_index=cls._DEVICE_INDEX
-                )
                 try:
+                    decoder = decoder_slot.get_decoder(
+                        file_path, nvc, device_index=cls._DEVICE_INDEX
+                    )
                     decoded_frames = decoder.get_batch_frames_by_index(frame_idx)
                 except Exception as exc:
                     if not isinstance(
