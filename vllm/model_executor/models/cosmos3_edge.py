@@ -24,6 +24,7 @@ from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -490,6 +491,7 @@ def _cosmos3_edge_diffusers_prefix_map() -> dict[str, str]:
 class Cosmos3EdgeForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
 ):
@@ -745,6 +747,20 @@ class Cosmos3EdgeForConditionalGeneration(
             connector="visual.projector",
             tower_model="visual.",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        if num_image_tokens <= 0:
+            return 0
+        # projector_config is where this checkpoint stores the merge size;
+        # vision_config's copy is aliased from it in Cosmos3EdgeConfig.
+        merge_unit = self.visual.spatial_merge_size**2
+        return int(num_image_tokens * merge_unit)
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        if num_vision_tokens <= 0:
+            return 0
+        merge_unit = self.visual.spatial_merge_size**2
+        return int(num_vision_tokens // merge_unit)
 
     def get_mrope_input_positions(
         self,
