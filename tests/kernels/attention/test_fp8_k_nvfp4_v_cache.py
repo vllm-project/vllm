@@ -8,13 +8,19 @@ import pytest
 import torch
 
 from tests.kernels.quantization.nvfp4_utils import dequant_nvfp4_kv_cache
+from tests.v1.attention.utils import create_vllm_config
+from vllm.config import SpeculativeConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import fp8_k_nvfp4_v_cache_split_views
+from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 from vllm.v1.attention.backends.flashinfer import (
     FlashInferBackend,
+    FlashInferDecodeKernel,
     FlashInferMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import PerLayerParameters
+from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
@@ -60,6 +66,66 @@ def test_fp8_k_nvfp4_v_rejects_sm107() -> None:
         **kwargs, device_capability=DeviceCapability(10, 7)
     )
     assert reason == "fp8_k_nvfp4_v is not supported on SM107"
+
+
+def test_fp8_k_nvfp4_v_routes_spec_decode_to_context(monkeypatch) -> None:
+    vllm_config = create_vllm_config(
+        max_model_len=1024,
+        block_size=64,
+        dtype=torch.bfloat16,
+    )
+    vllm_config.cache_config.cache_dtype = "fp8_k_nvfp4_v"
+    vllm_config.attention_config.use_trtllm_attention = True
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=3
+    )
+
+    monkeypatch.setattr(
+        flashinfer_backend, "can_use_trtllm_attention", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(
+        flashinfer_backend, "supports_trtllm_attention", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(
+        FlashInferMetadataBuilder,
+        "_get_flashinfer_trtllm_api_decode_kernel",
+        staticmethod(lambda: FlashInferDecodeKernel.TRTLLM_GEN),
+    )
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "get_per_layer_parameters",
+        lambda *args, **kwargs: {
+            "layer.0": PerLayerParameters(
+                window_left=-1,
+                logits_soft_cap=None,
+                sm_scale=0.1,
+                has_sinks=False,
+            )
+        },
+    )
+
+    kv_cache_spec = FullAttentionSpec(
+        block_size=64,
+        num_kv_heads=vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config
+        ),
+        head_size=vllm_config.model_config.get_head_size(),
+        dtype=torch.uint8,
+        kv_quant_mode=get_kv_quant_mode("fp8_k_nvfp4_v"),
+    )
+    with set_current_vllm_config(vllm_config):
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec,
+            ["layer.0"],
+            vllm_config,
+            torch.device("cpu"),
+        )
+
+    assert (
+        builder.flashinfer_trtllm_api_decode_kernel
+        == FlashInferDecodeKernel.TRTLLM_GEN
+    )
+    assert builder.reorder_batch_threshold == 1
 
 
 @torch.inference_mode()
