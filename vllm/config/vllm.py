@@ -1301,11 +1301,11 @@ class VllmConfig:
             self.model_config.disable_cascade_attn = True
 
         if (
-            self.observability_config.per_request_spec_decode_stats != "none"
+            self.observability_config.per_request_spec_decode_metrics != "none"
             and self.speculative_config is None
         ):
             raise ValueError(
-                "--per-request-spec-decode-stats requires speculative decoding "
+                "--per-request-spec-decode-metrics requires speculative decoding "
                 "to be enabled (via --speculative-config)."
             )
 

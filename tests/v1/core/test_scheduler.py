@@ -1308,21 +1308,21 @@ def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected,expected_per_req",
     [
-        ([[1, 2, 3]], [[1, 2, 3, 4]], (1, 3, 3, [1, 1, 1]), [{"3": 1}]),  # perfect
-        ([[1, 2, 3]], [[1, 5]], (1, 3, 1, [1, 0, 0]), [{"1": 1}]),  # early mismatch
+        ([[1, 2, 3]], [[1, 2, 3, 4]], (1, 3, 3, [1, 1, 1]), [[0, 0, 0, 1]]),  # perfect
+        ([[1, 2, 3]], [[1, 5]], (1, 3, 1, [1, 0, 0]), [[0, 1, 0, 0]]),  # early mismatch
         (
             [[1, 2], [3]],
             [[1, 2, 5], [3, 4]],
             (2, 3, 3, [2, 1]),
-            [{"2": 1}, {"1": 1}],
+            [[0, 0, 1], [0, 1, 0]],
         ),  # multiple sequences
-        ([[1]], [[1, 2]], (1, 1, 1, [1]), [{"1": 1}]),  # single token sequence
-        ([[]], [[5]], (0, 0, 0, [0]), [{}]),  # empty sequence -> empty accumulator
+        ([[1]], [[1, 2]], (1, 1, 1, [1]), [[0, 1]]),  # single token sequence
+        ([[]], [[5]], (0, 0, 0, [0]), [[0, 0]]),  # empty sequence -> empty accumulator
         (
             [[1, 2, 3], [4, 5, 6]],
             [[1, 2, 7], [4, 8]],
             (2, 6, 3, [2, 1, 0]),
-            [{"2": 1}, {"1": 1}],
+            [[0, 0, 1, 0], [0, 1, 0, 0]],
         ),  # multiple mismatches
     ],
 )
@@ -1334,13 +1334,13 @@ def test_schedule_spec_decoding_stats(
     This test verifies that:
     1. Speculated tokens get scheduled correctly
     2. The aggregate SpecDecodingStats count draft and accepted tokens
-    3. The per-request accumulator (enabled via per_request_spec_decode_stats)
+    3. The per-request accumulator (enabled via per_request_spec_decode_metrics)
        buckets the same acceptance by accepted draft count (j)
     """
     num_spec_tokens = max(1, max(len(t) for t in spec_tokens))
     scheduler = create_scheduler(
         num_speculative_tokens=num_spec_tokens,
-        per_request_spec_decode_stats="summary",
+        per_request_spec_decode_metrics="summary",
     )
     requests = create_requests(num_requests=len(spec_tokens), num_tokens=1)
     req_ids = []
@@ -1432,7 +1432,7 @@ def test_schedule_spec_decoding_stats(
     # accumulator is created eagerly on add_request, so every request has one
     # (an empty histogram when it drafted nothing).
     for i, req_id in enumerate(req_ids):
-        payload = scheduler.requests[req_id].spec_decode_stats.to_dict()
+        payload = scheduler.requests[req_id].spec_decode_metrics.to_dict()
         assert payload["acceptance_histogram"] == expected_per_req[i]
         assert payload["num_draft_tokens"] == len(spec_tokens[i])
         assert "per_step_accepted" not in payload  # summary level
@@ -1475,7 +1475,7 @@ def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
 def test_per_request_spec_decode_detailed_records_per_step():
     scheduler = create_scheduler(
         num_speculative_tokens=3,
-        per_request_spec_decode_stats="detailed",
+        per_request_spec_decode_metrics="detailed",
     )
     # Three verify steps for one request; num_accepted = len(output) - 1, so the
     # outputs below accept 3, 1, then 0 drafts across the steps.
@@ -1487,7 +1487,7 @@ def test_per_request_spec_decode_detailed_records_per_step():
             ([9, 10, 11], [12]),  # accept 0
         ],
     )
-    payload = scheduler.requests[req.request_id].spec_decode_stats.to_dict()
+    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
     assert payload["per_step_accepted"] == [3, 1, 0]
     assert payload["per_step_drafted"] == [3, 3, 3]
     assert payload["num_spec_steps"] == 3
@@ -1498,7 +1498,7 @@ def test_per_request_spec_decode_subtracts_invalid_drafts():
     # output) are excluded from the proposed count, mirroring the aggregate.
     scheduler = create_scheduler(
         num_speculative_tokens=3,
-        per_request_spec_decode_stats="summary",
+        per_request_spec_decode_metrics="summary",
     )
     # One verify step: 3 drafted, 1 grammar-invalid, output accepts 2.
     req = _run_spec_verify_steps(
@@ -1506,17 +1506,17 @@ def test_per_request_spec_decode_subtracts_invalid_drafts():
         [([1, 2, 3], [1, 2, 5])],
         num_invalid_per_round=[1],
     )
-    payload = scheduler.requests[req.request_id].spec_decode_stats.to_dict()
+    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
     assert payload["num_draft_tokens"] == 2  # 3 drafted - 1 invalid
     assert payload["num_accepted_draft_tokens"] == 2  # len([1,2,5]) - 1
-    assert payload["acceptance_histogram"] == {"2": 1}
+    assert payload["acceptance_histogram"] == [0, 0, 1, 0]
 
 
 def test_per_request_spec_decode_acceptance_disabled_by_default():
     scheduler = create_scheduler(num_speculative_tokens=3)
-    assert scheduler.spec_decode_stats_level == "none"
+    assert scheduler.spec_decode_metrics_level == "none"
     req = _run_spec_verify_steps(scheduler, [([1, 2, 3], [1, 2, 3, 4])])
-    assert scheduler.requests[req.request_id].spec_decode_stats is None
+    assert scheduler.requests[req.request_id].spec_decode_metrics is None
 
 
 def test_spec_decoding_stats_empty_output():

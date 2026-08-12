@@ -18,7 +18,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import (
     PrefillStats,
-    RequestSpecDecodeStats,
+    RequestSpecDecodeMetrics,
     SchedulerStats,
 )
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplingMaskLists
@@ -231,7 +231,7 @@ class EngineCoreOutput(
 
     # Per-request spec-decode acceptance; attached only on the final output.
     # Appended last so `array_like` positional serialization stays compatible.
-    spec_decode_stats: RequestSpecDecodeStats | None = None
+    spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
     @property
     def finished(self) -> bool:

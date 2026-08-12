@@ -298,7 +298,7 @@ class PrefillStats:
 
 
 @dataclass
-class RequestSpecDecodeStats:
+class RequestSpecDecodeMetrics:
     """Per-output-sequence speculative-decoding statistics accumulator.
 
     Accumulates, over one sequence's verify steps, a histogram of accepted
@@ -307,7 +307,8 @@ class RequestSpecDecodeStats:
     per-step accepted/proposed sequences (``summary`` omits them). Tracked per
     engine ``Request`` (one per sampled sequence, so ``n > 1`` yields one per
     child), surfaced via ``EngineCoreOutput`` and the response
-    ``choices[].speculative_decoding_stats`` (see ``to_dict``).
+    ``metrics.speculative_decoding`` for single-sequence requests (see
+    ``to_dict``).
 
     Fields:
         num_spec_tokens: Configured ``num_speculative_tokens`` (the max ``k``);
@@ -329,7 +330,7 @@ class RequestSpecDecodeStats:
     per_step_drafted: list[int] = field(default_factory=list)
 
     @classmethod
-    def new(cls, num_spec_tokens: int) -> "RequestSpecDecodeStats":
+    def new(cls, num_spec_tokens: int) -> "RequestSpecDecodeMetrics":
         return cls(
             num_spec_tokens=num_spec_tokens,
             histogram=[0] * (num_spec_tokens + 1),
@@ -345,11 +346,12 @@ class RequestSpecDecodeStats:
             self.per_step_drafted.append(num_draft_tokens)
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-ready payload for the response ``speculative_decoding_stats``.
+        """Payload matching ``SpeculativeDecodingMetrics`` for the response.
 
-        Histogram keys are stringified (JSON object keys). ``mean_acceptance
-        _length`` includes the bonus token (``j + 1``); ``draft_acceptance_rate``
-        is draft-only, full precision. Per-step arrays are included only when
+        ``acceptance_histogram`` is a dense list indexed by accepted draft count
+        ``j`` (length ``num_spec_tokens + 1``). ``mean_acceptance_length``
+        includes the bonus token (``j + 1``); ``draft_acceptance_rate`` is
+        draft-only, full precision. Per-step arrays are included only when
         populated (``detailed`` level).
         """
         num_spec_steps = sum(self.histogram)
@@ -359,9 +361,7 @@ class RequestSpecDecodeStats:
         result: dict[str, Any] = {
             "mean_acceptance_length": mean_al,
             "draft_acceptance_rate": rate,
-            "acceptance_histogram": {
-                str(j): count for j, count in enumerate(self.histogram) if count
-            },
+            "acceptance_histogram": list(self.histogram),
             "num_spec_steps": num_spec_steps,
             "num_accepted_draft_tokens": num_accepted,
             "num_draft_tokens": self.num_draft_tokens,

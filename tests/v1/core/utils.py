@@ -72,7 +72,7 @@ def create_scheduler(
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
-    per_request_spec_decode_stats: str = "none",
+    per_request_spec_decode_metrics: str = "none",
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -178,7 +178,7 @@ def create_scheduler(
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
         observability_config=ObservabilityConfig(
-            per_request_spec_decode_stats=per_request_spec_decode_stats,
+            per_request_spec_decode_metrics=per_request_spec_decode_metrics,
         ),
     )
     if kv_cache_spec is None:

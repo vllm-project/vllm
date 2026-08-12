@@ -85,15 +85,15 @@ def test_kda_recoverssm_derivation_is_revalidated():
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
-def test_per_request_spec_decode_stats_requires_spec_decode():
+def test_per_request_spec_decode_metrics_requires_spec_decode():
     # The flag only makes sense with speculative decoding configured; enabling
     # it without --speculative-config should fail fast rather than silently
-    # produce no stats.
+    # produce no metrics.
     for level in ("summary", "detailed"):
         with pytest.raises(ValueError, match="speculative"):
             VllmConfig(
                 observability_config=ObservabilityConfig(
-                    per_request_spec_decode_stats=level
+                    per_request_spec_decode_metrics=level
                 )
             )
 

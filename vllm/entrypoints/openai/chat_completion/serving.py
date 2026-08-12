@@ -20,6 +20,7 @@ from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     GenerationError,
     build_per_request_timing_metrics,
+    build_spec_decoding_metrics,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -40,7 +41,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     FunctionCall,
-    PerRequestTimingMetrics,
+    PerRequestMetrics,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     ToolCall,
@@ -752,11 +753,6 @@ class OpenAIServingChat(GenerateBaseServing):
                             token_ids=(
                                 as_list(output.token_ids) if include_token_ids else None
                             ),
-                            speculative_decoding_stats=(
-                                output.spec_decode_stats.to_dict()
-                                if output.spec_decode_stats is not None
-                                else None
-                            ),
                         )
 
                         finish_reason_sent[i] = True
@@ -824,16 +820,21 @@ class OpenAIServingChat(GenerateBaseServing):
                 # only emitted when usage reporting is enabled (i.e.
                 # ``stream_options.include_usage=true`` or
                 # ``--enable-force-include-usage``).
-                stream_per_request_metrics: PerRequestTimingMetrics | None = None
-                if (
-                    self.enable_per_request_metrics
-                    # See note in chat_completion_full_generator: suppress for n>1.
-                    and (request.n or 1) == 1
-                ):
-                    last_metrics = last_res.metrics if last_res is not None else None
-                    stream_per_request_metrics = build_per_request_timing_metrics(
-                        last_metrics, completion_tokens
-                    )
+                stream_per_request_metrics: PerRequestMetrics | None = None
+                # See note in chat_completion_full_generator: suppress for n>1.
+                if (request.n or 1) == 1:
+                    if self.enable_per_request_metrics:
+                        last_metrics = (
+                            last_res.metrics if last_res is not None else None
+                        )
+                        stream_per_request_metrics = build_per_request_timing_metrics(
+                            last_metrics, completion_tokens
+                        )
+                    spec_stats = build_spec_decoding_metrics(last_res)
+                    if spec_stats is not None:
+                        if stream_per_request_metrics is None:
+                            stream_per_request_metrics = PerRequestMetrics()
+                        stream_per_request_metrics.speculative_decoding = spec_stats
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -1077,11 +1078,6 @@ class OpenAIServingChat(GenerateBaseServing):
                     else None
                 ),
                 routed_experts=routed_experts_b64,
-                speculative_decoding_stats=(
-                    output.spec_decode_stats.to_dict()
-                    if output.spec_decode_stats is not None
-                    else None
-                ),
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
@@ -1128,17 +1124,20 @@ class OpenAIServingChat(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
-        per_request_metrics: PerRequestTimingMetrics | None = None
-        if (
-            self.enable_per_request_metrics
-            # Timing metrics describe a single generation stream. For n>1 the
-            # returned stats belong to only one of the n sequences, so they
-            # cannot be accurately attributed to the request; suppress instead.
-            and (request.n or 1) == 1
-        ):
-            per_request_metrics = build_per_request_timing_metrics(
-                final_res.metrics, num_generated_tokens
-            )
+        per_request_metrics: PerRequestMetrics | None = None
+        # Per-request metrics (timing + spec-decode acceptance) describe a single
+        # generation stream. For n>1 the stats belong to only one of the n
+        # sequences, so they cannot be attributed to the request; suppress.
+        if (request.n or 1) == 1:
+            if self.enable_per_request_metrics:
+                per_request_metrics = build_per_request_timing_metrics(
+                    final_res.metrics, num_generated_tokens
+                )
+            spec_stats = build_spec_decoding_metrics(final_res)
+            if spec_stats is not None:
+                if per_request_metrics is None:
+                    per_request_metrics = PerRequestMetrics()
+                per_request_metrics.speculative_decoding = spec_stats
 
         # ``final_res.prompt`` is the rendered chat-templated prompt text
         prompt_text = final_res.prompt if request.return_prompt_text else None
