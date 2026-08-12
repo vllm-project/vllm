@@ -40,7 +40,7 @@ from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
-from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool, Task
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -447,8 +447,17 @@ def test_wait_idle_blocks_until_tasks_complete():
     """wait_idle must not return while a task is still in flight."""
     pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
     gate = threading.Event()
+
+    def blocking_batch_store_block(*args, **kwargs):
+        gate.wait(timeout=5.0)
+
+    # dummy task
+    task = Task(key=key(0), offset=0)
     pool.enqueue_store(
-        job_id=1, n_tasks=1, tasks=[(lambda: gate.wait(timeout=5.0), [None])]
+        job_id=1,
+        n_tasks=1,
+        tasks=[task],
+        make_io_fn=lambda batch: blocking_batch_store_block,
     )
 
     waiter = threading.Thread(target=pool.wait_idle)
@@ -463,6 +472,28 @@ def test_wait_idle_blocks_until_tasks_complete():
         gate.set()
         pool.shutdown(wait=True)
         waiter.join(timeout=5.0)
+
+
+@pytest.mark.parametrize(
+    ("n_tasks", "n_threads", "expected_sizes"),
+    [
+        (7, 1, [7]),
+        (6, 1, [6]),
+        (2, 1, [2]),
+        (0, 1, []),
+    ],
+)
+def test_batch_tasks_distribution(n_tasks, n_threads, expected_sizes):
+    """_batch_tasks splits tasks evenly across n_threads (largest remainder
+    first), preserving order and accounting for every task."""
+    pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
+    try:
+        tasks = [Task(key=key(i), offset=i) for i in range(n_tasks)]
+        batches = list(pool._batch_tasks(tasks, n_threads))
+        assert [len(b) for b in batches] == expected_sizes
+        assert [t for b in batches for t in b] == tasks
+    finally:
+        pool.shutdown(wait=True)
 
 
 def test_batch_lookup_c_extension(tmp_path):
