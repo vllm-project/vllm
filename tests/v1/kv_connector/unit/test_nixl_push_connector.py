@@ -338,6 +338,10 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._physical_blocks_per_logical_kv_block = 1
+        w.region_group_ids = [0]
+        w.dst_region_group_ids = {}
+        w.dst_region_block_sizes = {}
+        w.dst_region_split_ratios = {}
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._group_spec_types = (FullAttentionSpec,)
@@ -1158,6 +1162,7 @@ class TestPushWriterMlaReplication:
             )
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w.dst_region_group_ids[engine_id] = [0]
         w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
@@ -1249,6 +1254,8 @@ class TestPushPrefixCaching:
             )
         }
         w.dst_num_blocks = {engine_id: 10_000, w.engine_id: 10_000}
+        w.dst_region_num_blocks = {engine_id: [10_000], w.engine_id: [10_000]}
+        w.dst_region_group_ids[engine_id] = [0]
         w.dst_xfer_side_handles = {engine_id: {0: 5000}}
         w.src_xfer_handles_by_block_size = {16: 2000}
 

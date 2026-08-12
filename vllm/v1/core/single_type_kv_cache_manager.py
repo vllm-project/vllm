@@ -946,10 +946,10 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
-        del num_local_computed_tokens, num_tokens_main_model, apply_admission_cap
+        del num_tokens_main_model, apply_admission_cap
         assert not new_computed_blocks
         existing = len(self.req_to_blocks.get(request_id, ()))
-        host_pages = cdiv(total_computed_tokens, self.block_size)
+        host_pages = cdiv(num_local_computed_tokens, self.block_size)
         required = cdiv(num_tokens, self.block_size)
         return max(required - max(existing, host_pages), 0)
 
@@ -963,10 +963,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         assert not new_computed_blocks
         req_blocks = self.req_to_blocks[request_id]
         assert not req_blocks
-        num_host_pages = cdiv(
-            num_local_computed_tokens + num_external_computed_tokens,
-            self.block_size,
-        )
+        num_host_pages = cdiv(num_local_computed_tokens, self.block_size)
         req_blocks.extend([self._null_block] * num_host_pages)
         self.num_cached_block[request_id] = 0
 

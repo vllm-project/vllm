@@ -216,7 +216,6 @@ class KVCacheCoordinator(ABC):
         self.hisparse_coordinator.require_hot_if_needed(
             request_id,
             new_computed_blocks[0],
-            total_computed_tokens,
             num_local_computed_tokens,
         )
         required = [0] * len(self.block_pools)

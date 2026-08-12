@@ -1466,7 +1466,7 @@ def _get_hisparse_hma_config(
         indexer_group_spec,
         block_pool_id=0,
         enable_prefix_caching=False,
-        enable_kv_transfer=False,
+        enable_kv_transfer=True,
         role=KVCacheGroupRole.HISPARSE_INDEXER,
     )
 
@@ -1523,7 +1523,7 @@ def _get_hisparse_hma_config(
                 ),
                 block_pool_id=0,
                 enable_prefix_caching=False,
-                enable_kv_transfer=False,
+                enable_kv_transfer=True,
             )
         )
         hot_groups.append(
@@ -1554,16 +1554,13 @@ def _get_hisparse_hma_config(
     remaining_full_specs = {
         name: spec for name, spec in all_full_specs.items() if name not in specs
     }
-    # Full-attention layers retain one scheduler block table so their packed
-    # P/D regions stay aligned. Only source_specs are allocated on host or
-    # bound to the HiSparse runtime; remaining_full_specs stay on GPU.
-    transfer_specs = {**source_specs, **remaining_full_specs}
-    transfer_group_spec = UniformTypeKVCacheSpecs.from_specs(transfer_specs)
-    assert transfer_group_spec is not None
-    transfer_group = KVCacheGroupSpec(
-        list(transfer_specs),
-        transfer_group_spec,
+    source_group_spec = UniformTypeKVCacheSpecs.from_specs(source_specs)
+    assert source_group_spec is not None
+    source_group = KVCacheGroupSpec(
+        list(source_specs),
+        source_group_spec,
         block_pool_id=None,
+        enable_kv_transfer=False,
         role=KVCacheGroupRole.HISPARSE_SOURCE,
     )
 
@@ -1579,18 +1576,6 @@ def _get_hisparse_hma_config(
                 block_pool_id=0,
             )
         )
-    other_regular_groups = [
-        KVCacheGroupSpec(
-            layer_names=regular.layer_names,
-            kv_cache_spec=regular.kv_cache_spec,
-            is_eagle_group=regular.is_eagle_group,
-            block_pool_id=0,
-            enable_prefix_caching=regular.enable_prefix_caching,
-            enable_kv_transfer=regular.enable_kv_transfer,
-            role=regular.role,
-        )
-        for regular in groups[1:]
-    ]
     gpu_other_regular_groups = [
         KVCacheGroupSpec(
             layer_names=regular.layer_names,
@@ -1662,11 +1647,12 @@ def _get_hisparse_hma_config(
         num_blocks_by_pool=[gpu_num_blocks],
         kv_cache_tensors=tensors,
         kv_cache_groups=[
-            transfer_group,
+            source_group,
             indexer_group,
             *resident_groups,
             *hot_groups,
-            *other_regular_groups,
+            *gpu_regular_groups,
+            *gpu_other_regular_groups,
         ],
         hisparse_host_num_blocks=host_num_blocks,
     )

@@ -42,8 +42,8 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
 #   6: Validate EAGLE/MTP speculative configuration compatibility
-#   7: Add packed KV cache region strides and per-region block counts to
-#      NixlAgentMetadata
+#   7: Add packed KV cache region metadata, including strides, block counts,
+#      group IDs, block sizes, and names
 #
 NIXL_CONNECTOR_VERSION: int = 7
 
@@ -63,6 +63,9 @@ class NixlAgentMetadata:
     physical_blocks_per_logical_kv_block: int
     region_strides: list[int] | None = None
     region_num_blocks: list[int] | None = None
+    region_group_ids: list[int] | None = None
+    region_block_sizes: list[int] | None = None
+    region_names: list[str] | None = None
 
 
 @dataclass

@@ -137,16 +137,13 @@ class HiSparseCoordinator:
         self,
         request_id: str,
         new_computed_blocks: Sequence[KVCacheBlock],
-        total_computed_tokens: int,
         num_local_computed_tokens: int,
     ) -> None:
-        has_cpu_history = bool(new_computed_blocks) or (
-            total_computed_tokens > num_local_computed_tokens
-        )
+        has_cpu_history = bool(new_computed_blocks)
         if self.resident_managers and has_cpu_history:
             block_size = self.resident_managers[0].block_size
             self.host_valid_pages.setdefault(request_id, set()).update(
-                range(cdiv(total_computed_tokens, block_size))
+                range(cdiv(num_local_computed_tokens, block_size))
             )
         if not self.resident_managers or has_cpu_history:
             for manager in self.hot_managers:

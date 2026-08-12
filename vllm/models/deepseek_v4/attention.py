@@ -734,6 +734,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
     ):
         super().__init__()
         self.kv_cache = torch.tensor([])
+        self.hisparse_cache: HiSparseCacheHandle | None = None
         self.head_dim = head_dim
         self.prefix = prefix
         self.cache_config = cache_config

@@ -220,6 +220,8 @@ def test_read_blocks_for_req_expands_remote_ids(
     )
 
     remote_engine_id = "remote-engine"
+    worker.region_group_ids = list(range(len(resolved_types)))
+    worker.dst_region_group_ids = {remote_engine_id: list(worker.region_group_ids)}
 
     worker.transfer_topo = MagicMock()
     # tp_ratio not exercised (all_source_ranks is empty so no reads run),
@@ -774,6 +776,103 @@ def test_get_block_descs_ids_uses_per_region_pool_capacity():
     )
 
     assert result.tolist() == [4, 13]
+
+
+@pytest.mark.cpu_test
+def test_get_block_descs_ids_aligns_different_group_partitions_by_region():
+    """Equivalent layer regions may come from different cache groups."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=3,
+        has_mamba=False,
+        group_spec_types=(FullAttentionSpec,),
+        block_len_per_layer=[100, 100, 100],
+    )
+    worker.region_group_ids = [0, 0, 0]
+    producer_by_region = NixlConnectorWorker._block_ids_by_region(([1, 2],), [0, 0, 0])
+    decode_by_region = NixlConnectorWorker._block_ids_by_region(
+        ([4, 5], [6, 7], [8, 9]), [0, 1, 2]
+    )
+
+    producer_descs = worker._compute_desc_ids(
+        block_ids=producer_by_region,
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+        region_group_ids=[0, 1, 2],
+    )
+    decode_descs = worker._compute_desc_ids(
+        block_ids=decode_by_region,
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+        region_group_ids=[0, 1, 2],
+    )
+
+    assert producer_descs.tolist() == [1, 2, 11, 12, 21, 22]
+    assert decode_descs.tolist() == [4, 5, 16, 17, 28, 29]
+
+
+@pytest.mark.cpu_test
+def test_build_remote_descriptors_splits_only_larger_peer_regions():
+    """A 256-token producer region is split for a 64-token consumer region."""
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlAgentMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.transfer_topo = MagicMock()
+    worker._group_spec_types = (FullAttentionSpec,)
+    worker._region_is_mla = [True, True]
+    worker.block_len_per_layer = [10, 20]
+    worker.device_id = 0
+    meta = NixlAgentMetadata(
+        engine_id="producer",
+        agent_metadata=b"meta",
+        kv_caches_base_addr=[1000, 2000],
+        device_id=0,
+        num_blocks=2,
+        block_lens=[40, 20],
+        kv_cache_layout="NHD",
+        block_size=256,
+        ssm_sizes=(0, 0),
+        attn_backend_name="test",
+        physical_blocks_per_logical_kv_block=1,
+        region_strides=[40, 20],
+        region_num_blocks=[2, 2],
+    )
+
+    descriptors = worker._build_fa_remote(
+        MagicMock(), meta, block_size_ratio=1, region_split_ratios=[4, 1]
+    )
+
+    assert descriptors[:, 0].tolist() == [
+        1000,
+        1010,
+        1020,
+        1030,
+        1040,
+        1050,
+        1060,
+        1070,
+        2000,
+        2020,
+    ]
+    assert descriptors[:, 1].tolist() == [10] * 8 + [20] * 2
+    assert NixlConnectorWorker._split_block_ids_by_region(([3], [7]), [4, 1]) == [
+        [12, 13, 14, 15],
+        [7],
+    ]
 
 
 @pytest.mark.cpu_test
@@ -1785,6 +1884,8 @@ def test_push_write_hybrid_mla_replicates_attention():
     worker.dst_xfer_side_handles = {engine_id: {0: 100, 1: 101}}
     worker.src_xfer_handles_by_tp_ratio = {(-2, 4): [200, 201]}
     worker.src_xfer_handles_by_block_size = {4: 300}
+    worker.region_group_ids = [0, 1]
+    worker.dst_region_group_ids = {engine_id: [0, 1]}
     worker._sending_transfers = defaultdict(list)
     worker._sending_transfers_lock = threading.Lock()
     worker.kv_cache_config = _make_hybrid_mla_kv_cache_config()

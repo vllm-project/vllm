@@ -149,6 +149,9 @@ def test_packed_cache_initializes_descriptor_region_metadata():
     worker._registered_descs = []
     worker.dst_num_blocks = {}
     worker.dst_region_num_blocks = {}
+    worker.dst_region_group_ids = {}
+    worker.dst_region_block_sizes = {}
+    worker.dst_region_split_ratios = {}
     worker.src_xfer_handles_by_block_size = {}
     worker.kv_caches_base_addr = defaultdict(dict)
     worker._mamba_ssm_size = (0, 0)
@@ -156,6 +159,8 @@ def test_packed_cache_initializes_descriptor_region_metadata():
     worker._physical_blocks_per_logical_kv_block = 1
     worker.region_mem_types = []
     worker.region_group_ids = []
+    worker.region_block_sizes = []
+    worker.region_names = []
     worker.region_num_blocks = []
     worker._mixed_mem_types = False
     worker._region_is_mla = []
@@ -236,6 +241,9 @@ def test_packed_cache_preserves_cross_group_regions_and_layer_strides():
     worker._registered_descs = []
     worker.dst_num_blocks = {}
     worker.dst_region_num_blocks = {}
+    worker.dst_region_group_ids = {}
+    worker.dst_region_block_sizes = {}
+    worker.dst_region_split_ratios = {}
     worker.src_xfer_handles_by_block_size = {}
     worker.kv_caches_base_addr = defaultdict(dict)
     worker._mamba_ssm_size = (0, 0)
@@ -246,6 +254,8 @@ def test_packed_cache_preserves_cross_group_regions_and_layer_strides():
     worker.region_mem_types = []
     worker.region_strides = []
     worker.region_group_ids = []
+    worker.region_block_sizes = []
+    worker.region_names = []
     worker.region_num_blocks = []
     worker._mixed_mem_types = False
     worker._region_is_mla = []
@@ -261,6 +271,7 @@ def test_packed_cache_preserves_cross_group_regions_and_layer_strides():
     for group in transfer_groups:
         group.role = KVCacheGroupRole.DEFAULT
         group.block_pool_id = 0
+        group.kv_cache_spec.block_size = spec.block_size
     worker.kv_cache_config = MagicMock()
     worker.kv_cache_config.transfer_groups = transfer_groups
     worker.kv_cache_config.transfer_group_index_by_layer = {

@@ -603,6 +603,25 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
         [reused.request_id]
     )
 
+    manager.free(reused)
+    external = make_request("external", list(range(2 * block_size)), block_size, sha256)
+    assert (
+        manager.allocate_slots(
+            external,
+            num_new_tokens=1,
+            num_external_computed_tokens=block_size,
+            delay_cache_blocks=True,
+        )
+        is not None
+    )
+    external_blocks = manager.get_block_ids(external.request_id)
+    assert all(len(external_blocks[group_id]) == 2 for group_id in (0, 1, 2))
+    assert external_blocks[3] == []
+    assert manager.hisparse_coordinator.are_requests_fully_resident(
+        [external.request_id]
+    )
+    assert external.request_id not in manager.hisparse_coordinator.host_valid_pages
+
 
 def make_kv_cache_config_hybrid_model(
     block_size: int,

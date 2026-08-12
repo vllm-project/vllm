@@ -294,12 +294,12 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
     assert source.layer_names == [
         c4_main,
         f"{c4_indexer}.hisparse_source",
-        c128_main,
-        c128_indexer,
     ]
     assert indexer.layer_names == [c4_indexer]
     assert indexer.kv_cache_spec.block_size == 256
+    assert indexer.enable_kv_transfer
     assert source.block_pool_id is None
+    assert not source.enable_kv_transfer
     hisparse_gpu_groups = [
         group for group in other_groups if not group.enable_kv_transfer
     ]
@@ -307,7 +307,10 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
     regular_groups = [group for group in other_groups if group.enable_kv_transfer]
     assert all(group.block_pool_id == 0 for group in regular_groups)
     assert {name for group in regular_groups for name in group.layer_names} == {
-        "model.layers.2.attn.swa_cache"
+        f"{c4_main}.hisparse_resident",
+        c128_main,
+        c128_indexer,
+        "model.layers.2.attn.swa_cache",
     }
     host_layers = {
         name

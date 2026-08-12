@@ -512,7 +512,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         )
         remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
-        num_groups = len(local_block_ids)
+        local_region_groups = self.region_group_ids
+        remote_region_groups = self.dst_region_group_ids[engine_id]
+        groups_differ = local_region_groups != remote_region_groups
+        if groups_differ:
+            raise NotImplementedError(
+                "NixlPushConnector does not support different producer and "
+                "consumer cache-group layouts"
+            )
 
         # MLA latent is replicated across D's TP ranks: the tp-mapping
         # collapses it to one rank (fine for reads), but push must WRITE every
@@ -526,6 +533,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
         else:
             write_ranks = list(plan.all_source_ranks)
+
+        num_groups = len(local_block_ids)
 
         def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
             return [

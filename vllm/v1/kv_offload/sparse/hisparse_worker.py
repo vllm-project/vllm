@@ -472,6 +472,8 @@ def init_hisparse_worker(
                 block_table=block_tables.input_block_tables[group_id],
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
+            assert cache_handle.view is not None
+            kv_caches[cache_name] = cache_handle.view.cache
             cache_handle.runtime.resident_source_index = resident_source_index
         resident_source_index += 1
 
