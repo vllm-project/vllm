@@ -12,6 +12,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
     MoEActivation,
     apply_moe_activation,
 )
@@ -469,6 +470,12 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
 
 # TODO: add supported activations method (return string)
 class FusedMoEExperts(ABC):
+    # ROCm AITER kernels consume a 0/1 local-expert mask (with a trailing
+    # sentinel slot); every other backend consumes the canonical -1/local-slot
+    # expert_map. RoutedExperts.expert_map reads this flag to pick which to hand
+    # the active experts kernel.
+    consumes_expert_mask: bool = False
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -497,6 +504,9 @@ class FusedMoEExperts(ABC):
 
         self.moe_config = moe_config
         self.quant_config = quant_config
+        self.activation_config = ApplyMoEActivationConfig.from_configs(
+            moe_config, quant_config
+        )
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -885,9 +895,6 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         output: torch.Tensor,
         input: torch.Tensor,
         *,
-        clamp_limit: float | None = None,
-        alpha: float = 1.0,
-        beta: float = 0.0,
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
     ) -> None:
@@ -895,9 +902,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             activation,
             output,
             input,
-            clamp_limit=clamp_limit,
-            alpha=alpha,
-            beta=beta,
+            activation_config=self.activation_config,
             topk_ids=topk_ids,
             expert_map=expert_map,
         )
@@ -1307,6 +1312,14 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
+        use_output_alias = (
+            output_alias is not None
+            and output_alias.shape == fused_out.shape
+            and output_alias.dtype == fused_out.dtype
+            and output_alias.device == fused_out.device
+            and output_alias.is_contiguous()
+        )
+
         # If caller's output buffer already matches fused_out shape/dtype, alias
         # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
         # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
@@ -1314,15 +1327,10 @@ class FusedMoEKernelModularImpl:
         if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if (
-                rocm_aiter_ops.is_fused_moe_enabled()
-                and output_alias is not None
-                and output_alias.shape == fused_out.shape
-                and output_alias.dtype == fused_out.dtype
-                and output_alias.device == fused_out.device
-                and output_alias.is_contiguous()
-            ):
+            if use_output_alias and rocm_aiter_ops.is_fused_moe_enabled():
                 fused_out = output_alias
+        elif use_output_alias:
+            fused_out = output_alias
 
         self.fused_experts.apply(
             output=fused_out,

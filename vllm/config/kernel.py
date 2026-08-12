@@ -122,6 +122,7 @@ class IrOpPriorityConfig:
 MoEBackend = Literal[
     "auto",
     "triton",
+    "batched_triton",
     "deep_gemm",
     "deep_gemm_mega_moe",
     "cutlass",
@@ -179,7 +180,7 @@ class KernelConfig:
     # to the shared JIT warmup infrastructure.
     # https://github.com/vllm-project/vllm/pull/47451
     enable_cutedsl_warmup: bool = True
-    """If True, run CuTeDSL compile warmup during kernel warmup."""
+    """Deprecated: run legacy CuTeDSL warmup providers."""
 
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
@@ -192,6 +193,8 @@ class KernelConfig:
 
     - "auto": Automatically select the best backend based on model and hardware
     - "triton": Use Triton-based fused MoE kernels
+    - "batched_triton": Use batched Triton experts (moe_mmk) on the batched
+      activation format ([E_local, max_num_tokens, K])
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
     - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
     - "cutlass": Use vLLM CUTLASS kernels

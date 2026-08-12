@@ -6,6 +6,7 @@ DeepEP test utilities
 
 import dataclasses
 import os
+import sys
 import traceback
 from collections.abc import Callable
 from typing import Concatenate
@@ -15,6 +16,7 @@ from torch.distributed import ProcessGroup
 from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import ParamSpec
 
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
@@ -34,6 +36,10 @@ if has_deep_ep_v2():
 ## Parallel Processes Utils
 
 P = ParamSpec("P")
+
+
+class GINNotAvailableError(RuntimeError):
+    pass
 
 
 @dataclasses.dataclass
@@ -68,6 +74,7 @@ def _worker_parallel_launch(
     barrier = torch.tensor([rank], device=device)
     torch.distributed.all_reduce(barrier)
 
+    exit_code = 0
     try:
         worker(
             ProcessGroupInfo(
@@ -84,9 +91,18 @@ def _worker_parallel_launch(
     except Exception as ex:
         print(ex)
         traceback.print_exc()
+        exit_code = 1
         raise
     finally:
         torch.distributed.destroy_process_group()
+        if current_platform.is_rocm():
+            # Bypass a ROCm teardown use-after-free (SIGSEGV in HIP's atexit
+            # handler; fixed by https://github.com/ROCm/rocm-systems/pull/6942).
+            # Flush first since os._exit skips it, to keep a failing traceback.
+            # TODO (Rohan138): Remove after ROCm 10.0 lands
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(exit_code)
 
 
 def parallel_launch(
@@ -96,19 +112,27 @@ def parallel_launch(
     **kwargs: P.kwargs,
 ) -> None:
     assert not kwargs
-    spawn(
-        _worker_parallel_launch,
-        args=(
-            world_size,
-            world_size,
-            0,
-            f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
-            worker,
+    try:
+        spawn(
+            _worker_parallel_launch,
+            args=(
+                world_size,
+                world_size,
+                0,
+                f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
+                worker,
+            )
+            + args,
+            nprocs=world_size,
+            join=True,
         )
-        + args,
-        nprocs=world_size,
-        join=True,
-    )
+    except Exception as exc:
+        # pytest.skip cannot propagate directly through torch.multiprocessing.
+        if "GINNotAvailableError" in str(exc):
+            import pytest
+
+            pytest.skip("NCCL GIN not available (no IBGDA-capable hardware)")
+        raise
 
 
 ## DeepEP specific utils
@@ -224,6 +248,18 @@ def make_deepep_v2_a2a(
     use_cudagraph: bool = False,
 ):
     import deep_ep
+
+    from vllm.utils.nccl import query_nccl_gin_type
+
+    # ElasticBuffer can segfault when GIN is unavailable. Initialize the
+    # lazy communicator and reject unsupported systems before entering DeepEP.
+    probe = torch.zeros(1, device=pgi.device)
+    torch.distributed.all_reduce(probe, group=pg)
+    gin_type = query_nccl_gin_type(pg)
+    if gin_type is None:
+        raise RuntimeError("Failed to determine NCCL GIN support")
+    if gin_type == 0:
+        raise GINNotAvailableError("NCCL GIN not available")
 
     buffer = deep_ep.ElasticBuffer(
         group=pg,
