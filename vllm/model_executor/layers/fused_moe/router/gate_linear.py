@@ -157,16 +157,25 @@ class GateLinear(ReplicatedLinear):
                 and self.out_dtype == torch.float32
             )
 
-        if self.allow_ll_fp32w_gemm and vllm_config is not None:
-            from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
-                LL_FP32W_GEMM_KERNEL,
-            )
+        self._register_ll_fp32w_warmup()
 
-            LL_FP32W_GEMM_KERNEL.register_warmup(
-                shapes=((input_size, output_size),),
-                m_values=range(1, self.FP32_MAX_TOKENS + 1),
-                a_dtypes=(vllm_config.model_config.dtype,),
-            )
+    def _register_ll_fp32w_warmup(self) -> None:
+        # Based on multi-tier GEMM dispatch. See above.
+        # This avoids compiling LL_FP32W_GEMM_KERNEL if not used.
+        if not self.allow_ll_fp32w_gemm or self.allow_fp32_router_gemm:
+            return
+
+        from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
+            LL_FP32W_GEMM_KERNEL,
+        )
+
+        # FP16 remains runtime-supported; JIT monitoring reports unexpected use.
+        # The kernel supports it, but there is no FP16 activation use case yet.
+        LL_FP32W_GEMM_KERNEL.register_warmup(
+            shapes=((self.weight.shape[1], self.weight.shape[0]),),
+            m_values=range(1, self.FP32_MAX_TOKENS + 1),
+            a_dtypes=(torch.bfloat16, torch.float32),
+        )
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
@@ -207,17 +216,7 @@ class GateLinear(ReplicatedLinear):
                 and self.weight.dtype == torch.float32
                 and out_dtype == torch.float32
             )
-            vllm_config = get_current_vllm_config_or_none()
-            if self.allow_ll_fp32w_gemm and vllm_config is not None:
-                from vllm.model_executor.kernels.linear.cute_dsl.ll_fp32w import (
-                    LL_FP32W_GEMM_KERNEL,
-                )
-
-                LL_FP32W_GEMM_KERNEL.register_warmup(
-                    shapes=((self.weight.shape[1], self.weight.shape[0]),),
-                    m_values=range(1, self.FP32_MAX_TOKENS + 1),
-                    a_dtypes=(vllm_config.model_config.dtype,),
-                )
+            self._register_ll_fp32w_warmup()
 
     def forward(
         self, x: torch.Tensor
