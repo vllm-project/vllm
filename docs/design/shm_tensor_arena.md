@@ -191,7 +191,7 @@ are internal constants (no env vars).
 
 | Flag (`ParallelConfig` field) | Default | Meaning |
 |---|---|---|
-| `--enable-shm-tensor-arena` / `--no-enable-shm-tensor-arena` (`enable_shm_tensor_arena`) | on | Route large CPU tensors through the arena; disable to avoid the `/dev/shm` reservation and take the out-of-band path only. |
+| `--enable-shm-tensor-arena` / `--no-enable-shm-tensor-arena` (`enable_shm_tensor_arena`) | **off** | Opt in to route large CPU tensors through the arena (reserves slots in `/dev/shm`). Off = the out-of-band `_reduce_tensor` path only, identical to stock behavior. |
 
 Internal constants in `shm_broadcast.py`: **8 slots × 256 MB**; tensors larger
 than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band

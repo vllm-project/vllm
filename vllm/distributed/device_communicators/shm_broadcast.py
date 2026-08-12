@@ -787,7 +787,7 @@ class MessageQueue:
         max_chunk_bytes: int = 1024 * 1024 * 24,
         max_chunks: int = 10,
         connect_ip: str | None = None,
-        enable_shm_tensor_arena: bool = True,
+        enable_shm_tensor_arena: bool = False,
     ):
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
