@@ -225,7 +225,15 @@ class SpeculativeConfig:
 
     suffix_gpu_max_occurrences: int = 32
     """Maximum number of pattern occurrences sampled for the frequency-ranked
-    draft vote."""
+    draft vote. Larger samples make the vote (and hence the chain-probability
+    cutoff) closer to exact occurrence counts, at the cost of wider
+    [batch, occurrences, k] draft buffers."""
+
+    suffix_gpu_num_backoff: int = 4
+    """Number of candidate suffix-match lengths scored per step. The longest
+    match is often a rare one-off whose continuation vote splits; shorter,
+    better-supported matches draft deeper. 1 disables the backoff (longest
+    match only); larger values score one more candidate each."""
 
     suffix_gpu_use_cuda_graph: bool = True
     """Capture the suffix-gpu draft path into a CUDA graph and replay it each
@@ -1246,6 +1254,8 @@ class SpeculativeConfig:
             raise ValueError("suffix_gpu_delta_capacity must be >= 1")
         if self.suffix_gpu_max_occurrences < 1:
             raise ValueError("suffix_gpu_max_occurrences must be >= 1")
+        if self.suffix_gpu_num_backoff < 1:
+            raise ValueError("suffix_gpu_num_backoff must be >= 1")
 
     @staticmethod
     def _maybe_override_draft_max_model_len(

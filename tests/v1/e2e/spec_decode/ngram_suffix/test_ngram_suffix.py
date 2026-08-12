@@ -131,6 +131,94 @@ def test_suffix_gpu_with_async_scheduling(
 
 
 @single_gpu_only
+def test_suffix_gpu_acceptance(
+    sampling_config: SamplingParams,
+    model_name: str,
+    vllm_runner,
+):
+    """
+    Same acceptance-improvement check as test_suffix_decoding_acceptance,
+    for suffix_gpu under async scheduling. Relies on worker-reported
+    invalid-slot counts so padded spec slots do not deflate the
+    draft-token denominator.
+    """
+    pytest.importorskip("suffix_gpu")
+    test_prompts = get_test_prompts(mm_enabled=False)
+
+    with vllm_runner(
+        model_name,
+        block_size=None,
+        trust_remote_code=False,
+        speculative_config={
+            "method": "suffix_gpu",
+            "num_speculative_tokens": 16,
+            "suffix_decoding_max_spec_factor": 2.0,
+            "suffix_decoding_max_cached_requests": 1000,
+            "suffix_decoding_max_tree_depth": 24,
+            # Responses here are 10 tokens long, so the default ingest chunk
+            # never fires and a response would only reach the cross-request
+            # index once its request finishes. Ingest every step instead, which
+            # is what the CPU suffix method does (add_active_response).
+            "suffix_gpu_ingest_chunk": 1,
+            # Pinned at the current defaults so the acceptance floor below
+            # keeps guarding the same drafting behaviour.
+            "suffix_gpu_num_backoff": 8,
+            "suffix_gpu_max_occurrences": 256,
+        },
+        max_model_len=1024,
+        async_scheduling=True,
+        disable_log_stats=False,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+    ) as spec_runner:
+        num_draft = []
+        num_accept = []
+        for _ in range(10):  # Run multiple times to warm up the cache.
+            spec_runner.llm.chat(test_prompts, sampling_config)
+            metrics = spec_runner.llm.get_metrics()
+            num_draft.append(
+                get_spec_decode_metric_value(
+                    metrics, "vllm:spec_decode_num_draft_tokens"
+                )
+            )
+            num_accept.append(
+                get_spec_decode_metric_value(
+                    metrics, "vllm:spec_decode_num_accepted_tokens"
+                )
+            )
+
+    first_accept_tokens = num_accept[0]
+    first_draft_tokens = num_draft[0]
+    assert first_draft_tokens > 0, (
+        "suffix_gpu produced no draft tokens on the first run: "
+        f"accepted={first_accept_tokens}, drafted={first_draft_tokens}"
+    )
+    first_accept_rate = first_accept_tokens / first_draft_tokens
+
+    last_accept_tokens = num_accept[-1] - num_accept[-2]
+    last_draft_tokens = num_draft[-1] - num_draft[-2]
+    assert last_draft_tokens > 0, (
+        "suffix_gpu produced no draft tokens on the last run: "
+        f"accepted_delta={last_accept_tokens}, drafted_delta={last_draft_tokens}; "
+        f"cumulative_drafted={num_draft[-2:]}"
+    )
+    last_accept_rate = last_accept_tokens / last_draft_tokens
+    summary = (
+        f"first accepted/drafted={first_accept_tokens}/{first_draft_tokens} "
+        f"(rate={first_accept_rate:.3f}); last delta accepted/drafted="
+        f"{last_accept_tokens}/{last_draft_tokens} (rate={last_accept_rate:.3f})"
+    )
+
+    assert first_accept_tokens < last_accept_tokens, (
+        f"Expected accepted tokens to increase after cache warmup; {summary}"
+    )
+    assert first_accept_rate < last_accept_rate, (
+        f"Expected acceptance rate to increase after cache warmup; {summary}"
+    )
+    assert last_accept_rate > 0.80, f"Expected final acceptance rate > 0.80; {summary}"
+
+
+@single_gpu_only
 def test_suffix_decoding_acceptance(
     sampling_config: SamplingParams,
     model_name: str,

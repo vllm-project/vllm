@@ -58,6 +58,7 @@ class SuffixProposerGPU:
             max_spec_factor=config.suffix_decoding_max_spec_factor,
             max_spec_offset=0.0,
             min_token_prob=config.suffix_decoding_min_token_prob,
+            num_backoff=config.suffix_gpu_num_backoff,
         )
 
         # CUDA-graph state (captured at engine warmup, or lazily on the

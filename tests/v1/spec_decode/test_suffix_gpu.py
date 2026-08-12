@@ -30,6 +30,7 @@ def _make_config(use_cuda_graph: bool) -> SimpleNamespace:
         suffix_gpu_global_capacity=1 << 16,
         suffix_gpu_delta_capacity=1 << 12,
         suffix_gpu_max_occurrences=32,
+        suffix_gpu_num_backoff=4,
         suffix_gpu_use_cuda_graph=use_cuda_graph,
         suffix_gpu_ingest_chunk=16,
     )
