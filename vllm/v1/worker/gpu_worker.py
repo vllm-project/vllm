@@ -1113,6 +1113,8 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
+            # Start capture in lockstep once the DP ranks agreed this step.
+            self._maybe_start_synced_profile()
             if (
                 self.use_v2_model_runner
                 and self.model_runner.is_pooling_model
@@ -1194,8 +1196,20 @@ class Worker(WorkerBase):
                         f"Invalid profiler value of {self.profiler_config.profiler}"
                     )
 
-            self.profiler.start()
+            dp_profiler_sync = getattr(self.model_runner, "dp_profiler_sync", None)
+            if dp_profiler_sync is not None:
+                # Defer the actual start: request it here and let the per-step DP
+                # coordination reduce agree on a common start step across ranks,
+                # so multi-node traces cover the same iterations without a
+                # deadlock-prone barrier (see DPProfilerSync).
+                dp_profiler_sync.request_start()
+            else:
+                self.profiler.start()
         else:
+            dp_profiler_sync = getattr(self.model_runner, "dp_profiler_sync", None)
+            if dp_profiler_sync is not None:
+                # Drop a request that never reached consensus yet.
+                dp_profiler_sync.cancel()
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
                 return
@@ -1206,6 +1220,19 @@ class Worker(WorkerBase):
                     # Proton output names are fixed when the wrapper is constructed.
                     # Recreate it so the next profile_prefix is honored.
                     self.profiler = None
+
+    def _maybe_start_synced_profile(self) -> None:
+        """Start capture once all DP ranks have agreed on the start step.
+
+        Called every worker step (real and dummy) so idle DP ranks start in
+        lockstep with busy ones. No-op unless VLLM_ENABLE_MULTINODE_PROFILING
+        deferred a start via DPProfilerSync.
+        """
+        dp_profiler_sync = getattr(self.model_runner, "dp_profiler_sync", None)
+        if dp_profiler_sync is None or self.profiler is None:
+            return
+        if dp_profiler_sync.consume_start():
+            self.profiler.start()
 
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
@@ -1219,6 +1246,7 @@ class Worker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        self._maybe_start_synced_profile()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
