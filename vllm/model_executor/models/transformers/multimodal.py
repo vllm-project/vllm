@@ -331,9 +331,7 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> "BatchFeature":
-        """
-        Run the HF processor, drop the inputs the model would reject and unpad inputs.
-        """
+        """Run the HF processor and unpad inputs."""
         try:
             hf_inputs = super()._call_hf_processor(
                 prompt, mm_data, mm_kwargs, tok_kwargs
@@ -347,8 +345,6 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
             hf_inputs = transformers.BatchFeature(
                 dict(input_ids=[prompt_ids]), tensor_type="pt"
             )
-        hf_inputs.pop("mm_token_type_ids", None)
-        hf_inputs.pop("token_type_ids", None)
         self._unpad_images(hf_inputs)
         self._unpad_audios(hf_inputs, mm_data, mm_kwargs, tok_kwargs)
         return hf_inputs
@@ -437,6 +433,19 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         deriving them from updates."""
         return []
 
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> "BatchFeature":
+        """Ask which modality owns each token of the expanded prompt, which is the
+        only marking of the tokens an expansion adds around an item."""
+        if any(mm_data.values()):
+            mm_data = {**mm_data, "return_mm_token_type_ids": True}
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+
     def _get_mm_token_ids(self, modality: str) -> list[int]:
         """Token ids marking where `modality` sits in the prompt, which for some
         processors differ from the placeholder written into it.
@@ -523,17 +532,21 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         processed_data: "BatchFeature",
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        mm_token_type_ids: torch.Tensor | None,
     ) -> dict[str, list[PlaceholderRange]]:
-        """Split the positions of the image tokens into one placeholder per item,
-        sized by the token count the processor reports for each image."""
+        """Split the positions the processor marks as image into one placeholder per
+        item, sized by the token count it reports for each image."""
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token_ids = self._get_mm_token_ids("image")
-        prompt_tensor = torch.tensor(prompt_ids)
-        is_image = torch.isin(prompt_tensor, torch.tensor(image_token_ids))
+        if mm_token_type_ids is None:
+            raise ValueError(
+                f"{type(hf_processor).__name__} returned no `mm_token_type_ids`, so "
+                "the Transformers modeling backend cannot locate the placeholder of "
+                "each image."
+            )
 
-        # Unlike audio, the tokens per item are known, so adjacent placeholders
-        # can be split apart
-        mm_positions = torch.where(is_image)[0]
+        # These mark the tokens structuring an image as well as the image itself,
+        # which is what the counts below are over
+        mm_positions = torch.where(mm_token_type_ids[0] == 1)[0]
         mm_tokens_per_modality = self._get_num_multimodal_tokens(
             mm_items, hf_processor_mm_kwargs
         )
@@ -548,13 +561,19 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
             )
 
         if split_sizes:
-            # Positions hold only image tokens, so there is nothing to mask out
+            image_token_ids = torch.tensor(self._get_mm_token_ids("image"))
+            mm_tokens = torch.tensor(prompt_ids)[mm_positions]
             ranges = [
                 PlaceholderRange(
                     offset=positions[0].item(),
                     length=positions.shape[0],
+                    # Only some of the span carries embeddings
+                    is_embed=torch.isin(tokens, image_token_ids),
                 )
-                for positions in torch.split(mm_positions, split_sizes)
+                for positions, tokens in zip(
+                    torch.split(mm_positions, split_sizes),
+                    torch.split(mm_tokens, split_sizes),
+                )
             ]
             mm_placeholders = {"image": ranges}
 
@@ -605,6 +624,10 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
                 self.info.ctx.get_mm_config().mm_hasher_algorithm,
             )
 
+        # Gemma3 reports them under the key the model uses for its own token types
+        mm_token_type_ids = processed_data.pop("token_type_ids", None)
+        mm_token_type_ids = processed_data.pop("mm_token_type_ids", mm_token_type_ids)
+
         mm_placeholders: dict[str, list[PlaceholderRange]] = {}
         if num_audios := mm_items.get_count("audio", strict=False):
             mm_placeholders.update(
@@ -613,7 +636,11 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         if mm_items.get_count("image", strict=False):
             mm_placeholders.update(
                 self._apply_vision(
-                    prompt_ids, processed_data, mm_items, hf_processor_mm_kwargs
+                    prompt_ids,
+                    processed_data,
+                    mm_items,
+                    hf_processor_mm_kwargs,
+                    mm_token_type_ids,
                 )
             )
 
@@ -760,6 +787,9 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         if has_mm_data := any(mm_data.values()):
             mm_data = {**mm_data, "return_text_replacement_offsets": True}
         hf_inputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        # Drop the inputs the model would reject
+        hf_inputs.pop("mm_token_type_ids", None)
+        hf_inputs.pop("token_type_ids", None)
 
         offsets = hf_inputs.pop("text_replacement_offsets", None)
         # Some processors return an empty batch as a tensor rather than a list

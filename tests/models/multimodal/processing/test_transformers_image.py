@@ -148,10 +148,10 @@ def test_non_embedding_tokens_excluded_from_placeholders():
 
 
 def test_legacy_placeholders_hold_only_image_tokens():
-    """The legacy path has no expansion to read the wrapping text out of, so its
-    placeholders cover the image tokens alone. Gemma3 is the sharp case: its
-    `image_token_id` is the marker in the unexpanded prompt, not the token the
-    expansion repeats."""
+    """The legacy path spans whatever `mm_token_type_ids` attributes to the image,
+    which for Gemma3 excludes the text wrapping it, unlike the replacement the offsets
+    path spans. Gemma3 is also the sharp case for the mask: its `image_token_id` is the
+    marker in the unexpanded prompt, not the token the expansion repeats."""
     hf_processor, result = _process_one_gemma3_image(LegacyMultiModalProcessor)
 
     (placeholder,) = result["mm_placeholders"]["image"]
@@ -161,13 +161,15 @@ def test_legacy_placeholders_hold_only_image_tokens():
     assert set(covered) == {hf_processor.tokenizer.image_token_id}
 
 
-@offsets_only
-def test_processor_refusing_text_only_calls():
-    """Idefics3 raises when a prompt holds `<image>` but no images are passed, which
-    is how the offsets path has to tokenize the prompt before splicing in the
-    expansion."""
+@pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
+def test_tokens_structuring_an_image_are_masked_not_dropped(processor_cls):
+    """SmolVLM splits each image into tiles introduced by tokens carrying no
+    embeddings. Those belong inside the placeholder and masked out, because the token
+    count the processor reports is over the whole span. Idefics3 also refuses a prompt
+    holding `<image>` when no images are passed, which is how the offsets path has to
+    tokenize it before splicing in the expansion."""
     mm_processor = create_processor(
-        "HuggingFaceTB/SmolVLM-256M-Instruct", OffsetsMultiModalProcessor
+        "HuggingFaceTB/SmolVLM-256M-Instruct", processor_cls
     )
     result = mm_processor(
         prompt="<image>What is this?",
@@ -178,7 +180,6 @@ def test_processor_refusing_text_only_calls():
     )
 
     (placeholder,) = result["mm_placeholders"]["image"]
-    # The span covers the tokens structuring the image as well as the image itself
     assert placeholder.is_embed is not None
     assert 0 < int(placeholder.is_embed.sum()) < placeholder.length
 
