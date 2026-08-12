@@ -402,7 +402,7 @@ class CustomAllreduce:
             return False
         if self.world_size == 16 and not self.mnnvl_only:
             return False
-        inp_size = inp.nbytes
+        inp_size = inp.numel() * inp.element_size()
         if inp.dtype not in (
             torch.float32,
             torch.float16,
@@ -456,7 +456,7 @@ class CustomAllreduce:
             return False
         if self.world_size == 16 and not self.mnnvl_only:
             return False
-        inp_size = inp.nbytes
+        inp_size = inp.numel() * inp.element_size()
         if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
             return False
         if inp.shape[0] % self.world_size != 0:

@@ -8,6 +8,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -15,9 +16,8 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_gather,
-    tensor_model_parallel_reduce_scatter,
 )
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
@@ -47,7 +47,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
-from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
@@ -203,7 +208,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         if self.is_sequence_parallel and not already_sequence_parallel:
-            hidden_states = sequence_parallel_chunk(hidden_states)
+            hidden_states = sp_shard(hidden_states)
 
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the MoERunner class
@@ -218,9 +223,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
-            final_hidden_states = tensor_model_parallel_all_gather(
-                final_hidden_states, 0
-            )
+            final_hidden_states = sp_all_gather(final_hidden_states)
             final_hidden_states = final_hidden_states[:num_tokens]
 
         return final_hidden_states.view(orig_shape)
@@ -423,7 +426,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             config.num_experts > 0
             and (self.layer_idx + 1) % config.decoder_sparse_step == 0
         )
-        self.use_attn_reduce_scatter_for_moe = (
+        self.use_sequence_parallel = (
             parallel_config.use_sequence_parallel_moe
             and parallel_config.pipeline_parallel_size == 1
             and is_moe_layer
@@ -435,7 +438,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=True,
-                reduce_results=not self.use_attn_reduce_scatter_for_moe,
+                reduce_results=not self.use_sequence_parallel,
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
@@ -443,7 +446,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                reduce_results=not self.use_attn_reduce_scatter_for_moe,
+                reduce_results=not self.use_sequence_parallel,
                 prefix=f"{prefix}.self_attn",
             )
         else:
@@ -492,14 +495,14 @@ class Qwen3NextDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         positions: torch.Tensor = None,
+        input_is_sequence_parallel: bool | None = None,
         **kwargs: object,
     ):
         full_num_tokens = positions.shape[-1]
-        input_is_sequence_parallel = (
-            self.use_attn_reduce_scatter_for_moe
-            and residual is not None
-            and hidden_states.shape[0] != full_num_tokens
-        )
+        if input_is_sequence_parallel is None:
+            input_is_sequence_parallel = (
+                self.use_sequence_parallel and residual is not None
+            )
 
         if residual is None:
             residual = hidden_states
@@ -508,7 +511,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         if input_is_sequence_parallel:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = sp_all_gather(hidden_states)
             hidden_states = hidden_states[:full_num_tokens]
 
         if self.layer_type == "linear_attention":
@@ -531,19 +534,23 @@ class Qwen3NextDecoderLayer(nn.Module):
                     self.attn_layer_scale.to(hidden_states.dtype) + 1
                 )
 
-        if self.use_attn_reduce_scatter_for_moe:
-            tp_world_size = get_tensor_model_parallel_world_size()
-            # small trick using minus, eg. -17 % 8 = 7
-            sp_pad = (-hidden_states.shape[0]) % tp_world_size
-            # pad if not divisible by world size
-            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
-            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+        if self.use_sequence_parallel:
+            if (
+                not input_is_sequence_parallel
+                and envs.VLLM_MOE_SKIP_PADDING
+                and is_forward_context_available()
+            ):
+                forward_context = get_forward_context()
+                forward_context.is_padding = sp_padding_mask(
+                    forward_context.is_padding, hidden_states
+                )
+            hidden_states = sp_reduce_scatter(hidden_states)
             if not input_is_sequence_parallel:
-                residual = sequence_parallel_chunk(residual)
+                residual = sp_shard(residual)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        if self.use_attn_reduce_scatter_for_moe:
+        if self.use_sequence_parallel:
             hidden_states = self.mlp(
                 hidden_states,
                 already_sequence_parallel=True,
@@ -575,15 +582,37 @@ def _all_gather_hidden_and_residual(
     hidden_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     if residual is None:
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        hidden_states = sp_all_gather(hidden_states)
         hidden_states = hidden_states[:full_num_tokens]
         return hidden_states, None
 
     combined_states = torch.cat([hidden_states, residual], dim=-1)
-    combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+    combined_states = sp_all_gather(combined_states)
     combined_states = combined_states[:full_num_tokens]
     hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
     return hidden_states, residual
+
+
+def _restore_sequence_parallel_outputs(
+    tensors: list[torch.Tensor],
+    sequence_parallel: list[bool],
+    full_num_tokens: int,
+) -> list[torch.Tensor]:
+    assert len(tensors) == len(sequence_parallel)
+    sharded_indices = [
+        idx for idx, is_sharded in enumerate(sequence_parallel) if is_sharded
+    ]
+    if not sharded_indices:
+        return tensors
+
+    sharded_tensors = [tensors[idx] for idx in sharded_indices]
+    split_sizes = [tensor.shape[-1] for tensor in sharded_tensors]
+    packed = sp_all_gather(torch.cat(sharded_tensors, dim=-1))[:full_num_tokens]
+    for idx, tensor in zip(
+        sharded_indices, packed.split(split_sizes, dim=-1), strict=True
+    ):
+        tensors[idx] = tensor
+    return tensors
 
 
 @support_torch_compile
@@ -662,51 +691,46 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         full_num_tokens = positions.shape[-1]
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        states_are_sequence_parallel = False
+        aux_hidden_states: list[torch.Tensor] = []
+        aux_states_are_sequence_parallel: list[bool] = []
+        if 0 in self.aux_hidden_state_layers:
+            aux_hidden_states.append(hidden_states)
+            aux_states_are_sequence_parallel.append(False)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            if (
-                hidden_states.shape[0] != full_num_tokens
-                and not layer.use_attn_reduce_scatter_for_moe
-            ):
+            if states_are_sequence_parallel and not layer.use_sequence_parallel:
                 hidden_states, residual = _all_gather_hidden_and_residual(
                     hidden_states,
                     residual,
                     full_num_tokens,
                     self.config.hidden_size,
                 )
+                states_are_sequence_parallel = False
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+                input_is_sequence_parallel=states_are_sequence_parallel,
             )
-            if (layer_idx + 1) in self.aux_hidden_state_layers and hidden_states.shape[
-                0
-            ] != full_num_tokens:
-                hidden_states, residual = _all_gather_hidden_and_residual(
-                    hidden_states,
-                    residual,
-                    full_num_tokens,
-                    self.config.hidden_size,
-                )
-            self._maybe_add_hidden_state(
-                aux_hidden_states, layer_idx + 1, hidden_states, residual
-            )
+            states_are_sequence_parallel = layer.use_sequence_parallel
+            if (layer_idx + 1) in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
+                aux_states_are_sequence_parallel.append(states_are_sequence_parallel)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        if hidden_states.shape[0] != full_num_tokens:
-            hidden_states, residual = _all_gather_hidden_and_residual(
-                hidden_states,
-                residual,
-                full_num_tokens,
-                self.config.hidden_size,
-            )
         hidden_states, _ = self.norm(hidden_states, residual)
+        outputs = _restore_sequence_parallel_outputs(
+            [hidden_states, *aux_hidden_states],
+            [states_are_sequence_parallel, *aux_states_are_sequence_parallel],
+            full_num_tokens,
+        )
+        hidden_states, *aux_hidden_states = outputs
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

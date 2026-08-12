@@ -10,6 +10,39 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
+
+
+def _sp_pad_compiled(x: torch.Tensor, tp_size: int, value: float) -> torch.Tensor:
+    sp_pad = (-x.shape[0]) % tp_size
+    pad = (0, 0) * (x.ndim - 1) + (0, sp_pad)
+    return torch.nn.functional.pad(x, pad, value=value)
+
+
+def _sp_pad_compiled_fake(x: torch.Tensor, tp_size: int, value: float) -> torch.Tensor:
+    new_shape = list(x.shape)
+    new_shape[0] += (-new_shape[0]) % tp_size
+    return torch.empty(new_shape, dtype=x.dtype, device=x.device)
+
+
+direct_register_custom_op(
+    op_name="sp_pad_compiled",
+    op_func=_sp_pad_compiled,
+    fake_impl=_sp_pad_compiled_fake,
+)
+
+
+def _sp_pad(x: torch.Tensor, tp_size: int, value: float = 0.0) -> torch.Tensor:
+    sp_pad = (-x.shape[0]) % tp_size
+    if torch.compiler.is_compiling():
+        # Keep dynamic padding opaque to Inductor. If aten.constant_pad_nd is
+        # compiled inline, its output can incorrectly reuse the unpadded input
+        # buffer when the tracing shape needs no padding.
+        return torch.ops.vllm.sp_pad_compiled(x, tp_size, value)
+    if sp_pad == 0:
+        return x
+    pad = (0, 0) * (x.ndim - 1) + (0, sp_pad)
+    return torch.nn.functional.pad(x, pad, value=value)
 
 
 def _custom_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
@@ -30,9 +63,7 @@ def sp_all_gather(x: torch.Tensor) -> torch.Tensor:
 def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
     assert x.ndim == 2
     tp_size = get_tensor_model_parallel_world_size()
-    sp_pad = (-x.shape[0]) % tp_size
-    if sp_pad > 0:
-        x = torch.nn.functional.pad(x, (0, 0, 0, sp_pad))
+    x = _sp_pad(x, tp_size)
     output = _custom_collective("custom_reduce_scatter", x)
     if output is not None:
         return output
@@ -42,10 +73,7 @@ def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
 def sp_shard(x: torch.Tensor) -> torch.Tensor:
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
-    sp_pad = (-x.shape[0]) % tp_size
-    if sp_pad > 0:
-        pad = (0, 0) * (x.ndim - 1) + (0, sp_pad)
-        x = torch.nn.functional.pad(x, pad)
+    x = _sp_pad(x, tp_size)
     chunk = x.shape[0] // tp_size
     return x[tp_rank * chunk : (tp_rank + 1) * chunk]
 
@@ -60,9 +88,7 @@ def sp_padding_mask(
     assert is_padding.shape[0] == num_tokens
 
     tp_size = get_tensor_model_parallel_world_size()
-    sp_pad = (-num_tokens) % tp_size
-    if sp_pad > 0:
-        is_padding = torch.nn.functional.pad(is_padding, (0, sp_pad), value=True)
+    is_padding = _sp_pad(is_padding, tp_size, value=1.0)
     chunk = is_padding.shape[0] // tp_size
     tp_rank = get_tensor_model_parallel_rank()
     return is_padding[tp_rank * chunk : (tp_rank + 1) * chunk]

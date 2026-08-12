@@ -142,7 +142,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        if mtp_layer.use_attn_reduce_scatter_for_moe:
+        if mtp_layer.use_sequence_parallel:
             hidden_states, residual = _all_gather_hidden_and_residual(
                 hidden_states,
                 residual,
