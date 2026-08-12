@@ -80,6 +80,10 @@ pub struct EngineCoreReadyResponse {
     pub max_num_batched_tokens: u64,
     /// Unique identifier for this server instance.
     pub instance_id: String,
+    /// Whether the engine was started with LoRA support enabled.
+    pub supports_lora: bool,
+    /// Maximum number of LoRA adapters the engine may keep active.
+    pub max_loras: u32,
     /// Total KV cache capacity in tokens, if reported.
     pub kv_cache_size_tokens: Option<u64>,
     /// Maximum achievable request concurrency given the KV cache, if reported.

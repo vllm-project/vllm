@@ -150,6 +150,7 @@ impl pb::control_server::Control for ControlServiceImpl {
             total_kv_blocks: self.state.engine_core_client().total_num_gpu_blocks(),
             max_running_requests: ready.max_num_seqs,
             max_batched_tokens: ready.max_num_batched_tokens,
+            max_loras: ready.max_loras,
             rl_capabilities: Some(self.rl_capabilities()),
         }))
     }
@@ -166,6 +167,7 @@ impl pb::control_server::Control for ControlServiceImpl {
             // GenerateRequest accepts both prompt representations.
             supports_text_input: true,
             supports_token_ids_input: true,
+            supports_lora: self.ready().supports_lora,
             supports_multimodal: self.state.chat.supports_multimodal(),
             reasoning_parser: self
                 .state
