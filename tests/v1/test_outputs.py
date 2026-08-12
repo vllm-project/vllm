@@ -69,9 +69,10 @@ def test_sampling_mask_tensors_from_logits():
                 [1.0, float("-inf"), 2.0],
                 [3.0, 4.0, float("-inf")],
                 [float("-inf"), 5.0, 6.0],
-            ]
+            ],
+            device="cuda",
         ),
-        num_sampled_tokens=torch.tensor([1, 0, 1]),
+        num_sampled_tokens=torch.tensor([1, 0, 1], device="cuda"),
     )
 
     result = tensors.tolists(np.array([1, 0, 1]))
