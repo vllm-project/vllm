@@ -307,6 +307,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         ChannelWiseTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
         BlockWiseTorchFP8ScaledMMLinearKernel,
+        TorchMxFp8LinearKernel,
     },
     "aiter": {
         AiterInt8ScaledMMLinearKernel,
