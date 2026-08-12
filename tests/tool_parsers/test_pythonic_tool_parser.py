@@ -305,3 +305,33 @@ def test_unrecoverable_block_still_reports_no_tool_call(
     assert not extracted.tools_called
     assert extracted.tool_calls == []
     assert extracted.content == model_output
+
+
+def test_streaming_mismatched_brackets_reported_once(
+    default_tokenizer: TokenizerLike,
+):
+    """Brackets the model got structurally wrong raise at the same offset on
+    every chunk of the block, so the failure was logged with a full traceback
+    once per chunk and none of them named the offending text. It is reported
+    once per request instead."""
+    from vllm.tool_parsers import pythonic_tool_parser as parser_module
+
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+    model_output = "[foo(x=1])]"
+
+    with (
+        patch.object(parser_module.logger, "exception") as logged_exception,
+        patch.object(parser_module.logger, "warning") as logged_warning,
+    ):
+        _, tool_calls = run_tool_extraction(
+            tool_parser,
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert tool_calls == []
+    assert logged_exception.call_count == 0
+    assert logged_warning.call_count == 1

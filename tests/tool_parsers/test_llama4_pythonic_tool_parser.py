@@ -317,3 +317,33 @@ def test_non_finite_argument_rejected(default_tokenizer: TokenizerLike):
     assert tool_calls[0].function == INNER_SIMPLE_CALL
     for call in tool_calls:
         json.loads(call.function.arguments)
+
+
+def test_streaming_mismatched_brackets_reported_once(
+    default_tokenizer: TokenizerLike,
+):
+    """Brackets the model got structurally wrong raise at the same offset on
+    every chunk of the block, so the failure was logged with a full traceback
+    once per chunk and none of them named the offending text. It is reported
+    once per request instead."""
+    from vllm.tool_parsers import llama4_pythonic_tool_parser as parser_module
+
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("llama4_pythonic")(
+        default_tokenizer
+    )
+    model_output = "<|python_start|>[foo(x=1])]<|python_end|>"
+
+    with (
+        patch.object(parser_module.logger, "exception") as logged_exception,
+        patch.object(parser_module.logger, "warning") as logged_warning,
+    ):
+        _, tool_calls = run_tool_extraction(
+            tool_parser,
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert tool_calls == []
+    assert logged_exception.call_count == 0
+    assert logged_warning.call_count == 1

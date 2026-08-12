@@ -57,6 +57,13 @@ class PythonicToolParser(ToolParser):
         tools: list[Tool] | None = None,
     ):
         super().__init__(tokenizer, tools)
+        self._reported_malformed_block = False
+
+    def _report_malformed_block(self, text: str) -> None:
+        """Log an unparsable block once, however many chunks repeat it."""
+        if not self._reported_malformed_block:
+            self._reported_malformed_block = True
+            logger.warning("Skipping malformed tool call block: %s", text)
 
     # Rename for readability. This is NOT a tool id.
     @property
@@ -142,7 +149,15 @@ class PythonicToolParser(ToolParser):
             return DeltaMessage(content=delta_text)
 
         try:
-            valid_and_added_text = make_valid_python(current_text)
+            try:
+                valid_and_added_text = make_valid_python(current_text)
+            except UnexpectedAstError:
+                # Brackets the model got structurally wrong fail at the same
+                # offset on every chunk of the block. There is no terminator
+                # to wait for here, so report the first such text once for
+                # the request rather than a traceback per chunk.
+                self._report_malformed_block(current_text)
+                return None
             if valid_and_added_text is None:
                 return None
             valid_text, added_text = valid_and_added_text
