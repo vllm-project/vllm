@@ -36,7 +36,21 @@ steps:
   - tests/compile/correctness_e2e/test_qk_norm_rope.py
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_qk_norm_rope.py
+  - pytest -v -s tests/compile/correctness_e2e/test_qk_norm_rope.py -k "not tp2"
+
+- label: QK-Norm+RoPE Correctness Tests (2xH100)
+  key: qk-norm-rope-correctness-tests-2xh100
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/"
+  device: h100
+  num_devices: 2
+  source_file_dependencies:
+  - csrc/libtorch_stable/fused_qknorm_rope_kernel.cu
+  - vllm/compilation/passes/fusion/qk_norm_rope_fusion.py
+  - tests/compile/correctness_e2e/test_qk_norm_rope.py
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -v -s tests/compile/correctness_e2e/test_qk_norm_rope.py -k "tp2"
 
 - label: Distributed Compile Unit Tests (2xH100)
   key: distributed-compile-unit-tests-2xh100

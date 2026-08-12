@@ -12,7 +12,11 @@ asks for.
 import json
 
 from tests.models.registry import _HfExamplesInfo
-from tests.utils import compare_two_settings, create_new_process_for_each_test
+from tests.utils import (
+    compare_two_settings,
+    create_new_process_for_each_test,
+    multi_gpu_test,
+)
 from vllm.config import CompilationMode
 
 # Qwen3 RMSNorms Q/K before RoPE (`q_norm`/`k_norm`), which is the pattern the
@@ -65,3 +69,10 @@ def _compare_fusion_settings(tp_size: int) -> None:
 @create_new_process_for_each_test()
 def test_qk_norm_rope_fusion_correctness():
     _compare_fusion_settings(tp_size=1)
+
+
+# Sharding splits the heads the pass reasons about, so TP is worth covering
+# separately. multi_gpu_test already applies create_new_process_for_each_test.
+@multi_gpu_test(num_gpus=2)
+def test_qk_norm_rope_fusion_correctness_tp2():
+    _compare_fusion_settings(tp_size=2)
