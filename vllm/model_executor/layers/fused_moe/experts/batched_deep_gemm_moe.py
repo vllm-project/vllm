@@ -204,22 +204,20 @@ def persistent_masked_m_silu_mul_quant(
         dtype=ys_dtype,
         device=y.device,
     )
+    y_s.zero_()
 
     ceil_ue8m0 = quant_scale_fmt in [
         DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
         DeepGemmQuantScaleFMT.UE8M0,
     ]
 
-    device_capability = current_platform.get_device_capability()
-    assert device_capability is not None
-    cuda_arch = device_capability.to_int()
-
-    if current_platform.is_cuda() and cuda_arch >= 80:
+    # The C++ kernel requires sm_80+; ROCm and XPU take the Triton path below.
+    if current_platform.is_cuda() and current_platform.has_device_capability(80):
         torch.ops._C.persistent_masked_m_silu_mul_quant(
             y, tokens_per_expert, y_q, y_s, ceil_ue8m0
         )
     else:
-        # Triton fallback for ROCm -- the C++ kernel is guarded by
+        # Triton fallback for ROCm and XPU -- the C++ kernel is guarded by
         # #ifndef USE_ROCM in activation_kernels.cu.
         # https://github.com/ROCm/aiter/issues/2420
         stride_cnt_e = tokens_per_expert.stride()[0]

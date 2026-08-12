@@ -16,6 +16,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 pytestmark = pytest.mark.cpu_test
 
@@ -194,6 +195,77 @@ def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
     assert desc.num_reqs is None
     assert desc.num_tokens == 3
     assert desc.num_active_loras == 0
+
+
+def test_prompt_chunks_shaped_like_spec_decode_miss_the_full_graph(monkeypatch):
+    """A batch holding K+1-token prompt chunks must not replay a decode graph.
+
+    Prompt chunks of exactly K + 1 tokens give the batch a spec-decode shape
+    by coincidence; replaying the FULL graph over them corrupts every request
+    in the batch. See https://github.com/vllm-project/vllm/issues/49918.
+    """
+
+    max_spec_tokens = 7
+    decode_query_len = max_spec_tokens + 1
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=64,
+        max_spec_tokens=max_spec_tokens,
+        use_dynamic_sd=False,
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=decode_query_len,
+    )
+    manager._graphs_captured = True
+
+    num_decodes, num_chunks = 6, 2
+    num_reqs = num_decodes + num_chunks
+    num_tokens = num_reqs * decode_query_len
+
+    # The batch shape is indistinguishable from a full batch of spec decodes.
+    assert (
+        gpu_cudagraph_utils.get_uniform_token_count(
+            num_reqs, num_tokens, decode_query_len
+        )
+        == decode_query_len
+    )
+
+    # Two of the requests are decode_query_len tokens into a longer prompt.
+    uniform_tok_count = get_uniform_decode_token_count(
+        num_reqs, num_tokens, decode_query_len, has_prefill=True
+    )
+    assert uniform_tok_count is None
+    desc = manager.dispatch(
+        num_reqs=num_reqs,
+        num_tokens=num_tokens,
+        uniform_token_count=uniform_tok_count,
+        num_active_loras=0,
+    )
+    assert desc.cg_mode == CUDAGraphMode.PIECEWISE
+    assert desc.uniform_token_count is None
+
+    # The same shape with every request decoding still gets its FULL graph.
+    uniform_tok_count = get_uniform_decode_token_count(
+        num_reqs, num_tokens, decode_query_len, has_prefill=False
+    )
+    assert uniform_tok_count == decode_query_len
+    desc = manager.dispatch(
+        num_reqs=num_reqs,
+        num_tokens=num_tokens,
+        uniform_token_count=uniform_tok_count,
+        num_active_loras=0,
+    )
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.uniform_token_count == decode_query_len
 
 
 def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):

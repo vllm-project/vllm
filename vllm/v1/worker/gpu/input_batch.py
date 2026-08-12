@@ -76,6 +76,8 @@ class InputBatch:
     num_computed_prefill_tokens_np: np.ndarray
     # [num_reqs] CPU bool array == (num_computed_prefill_tokens_np < prefill_len_np).
     is_prefilling_np: np.ndarray
+    # == np.any(is_prefilling_np)
+    has_prefill: bool
 
     # [num_reqs] only populated when pipeline parallelism is enabled.
     max_seq_len_np: np.ndarray | None
@@ -101,17 +103,14 @@ class InputBatch:
 
     @classmethod
     def make_dummy(
-        cls,
-        num_reqs: int,
-        num_tokens: int,
-        input_buffers: InputBuffers,
+        cls, num_reqs: int, num_tokens: int, input_buffers: InputBuffers
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
-        idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+        idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
@@ -175,6 +174,7 @@ class InputBatch:
             prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
+            has_prefill=False,
             max_seq_len_np=None,
             input_ids=input_ids,
             positions=positions,
@@ -191,6 +191,8 @@ class InputBatch:
 def _prepare_prefill_inputs_kernel(
     input_ids_ptr,
     next_prefill_tokens_ptr,
+    next_prefill_tokens_stride,
+    num_lookahead,
     idx_mapping_ptr,
     query_start_loc_ptr,
     all_token_ids_ptr,
@@ -198,6 +200,7 @@ def _prepare_prefill_inputs_kernel(
     prefill_lens_ptr,
     num_computed_tokens_ptr,
     BLOCK_SIZE: tl.constexpr,
+    LOOKAHEAD_BLOCK: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -218,10 +221,20 @@ def _prepare_prefill_inputs_kernel(
         tokens = tl.load(request_ptr + num_computed + block, mask=mask)
         tl.store(input_ids_ptr + query_start + block, tokens, mask=mask)
 
-    next_pos = num_computed + query_len
-    if next_pos < prefill_len:
-        next_token = tl.load(request_ptr + next_pos)
-        tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
+    # Store the next num_lookahead prefill tokens.
+    lookahead = tl.arange(0, LOOKAHEAD_BLOCK)
+    pos = num_computed + query_len + lookahead
+    in_lookahead = lookahead < num_lookahead
+    tokens = tl.load(
+        request_ptr + pos, mask=in_lookahead & (pos < prefill_len), other=0
+    )
+    tl.store(
+        next_prefill_tokens_ptr
+        + lookahead * next_prefill_tokens_stride
+        + req_state_idx,
+        tokens,
+        mask=in_lookahead,
+    )
 
 
 def prepare_prefill_inputs(
@@ -234,9 +247,12 @@ def prepare_prefill_inputs(
     num_computed_tokens: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
+    num_lookahead = next_prefill_tokens.shape[0]
     _prepare_prefill_inputs_kernel[(num_reqs,)](
         input_ids,
         next_prefill_tokens,
+        next_prefill_tokens.stride(0),
+        num_lookahead,
         idx_mapping,
         query_start_loc,
         all_token_ids,
@@ -244,6 +260,7 @@ def prepare_prefill_inputs(
         prefill_len,
         num_computed_tokens,
         BLOCK_SIZE=1024,
+        LOOKAHEAD_BLOCK=triton.next_power_of_2(num_lookahead),
     )
 
 

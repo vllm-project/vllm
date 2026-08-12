@@ -405,7 +405,7 @@ def test_max_logprobs():
         runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
 
         bad_sampling_params = SamplingParams(logprobs=2)
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             runner.generate(["Hello world"], sampling_params=bad_sampling_params)
 
 
@@ -1114,7 +1114,6 @@ def test_correct_decoded_token_preserves_valid_tokens():
 def test_spec_decode_logprobs(
     logprobs_mode: LogprobsMode,
     model_setup: tuple[str, str, dict, int],
-    monkeypatch,
 ):
     """Spec decode logprobs should match those of the base model.
 
@@ -1127,19 +1126,8 @@ def test_spec_decode_logprobs(
         logprobs_mode: logprobs mode.
         model_setup: Tuple of (method, base model name,
             speculative_config dict, top_logprobs).
-        monkeypatch: pytest fixture for setting env vars.
     """
     from vllm import LLM
-
-    # The ROCm skinny GEMM kernels (gemm_kernels.cu) are
-    # non-deterministic across LLM instantiations due to persistent
-    # workgroup scheduling and wave-level shuffle reductions, which
-    # causes logprob differences that get misattributed to spec decode.
-    # Disable them so this test isolates spec decode correctness only.
-    # TODO(akaratza): Remove this workaround once the follow-up to
-    # https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
-    # lands with a determinism fix for wvSplitK kernels.
-    monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
 
     method, model_name, spec_config, top_logprobs = model_setup
 
