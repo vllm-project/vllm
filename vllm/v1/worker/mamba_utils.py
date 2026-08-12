@@ -192,7 +192,9 @@ def _copy_mamba_state_block(
         offsets = tl.arange(0, COPY_BLOCK_SIZE)
 
         # Stable row-to-lane ownership makes left shifts memmove-safe while
-        # exposing the dimension rows in parallel.
+        # exposing the dimension rows in parallel. All addresses retain
+        # state_elem_size alignment: tensor strides and token offsets are
+        # measured in whole elements before conversion to bytes.
         num_dst_tokens = conv_width - token_bias
         for token_idx in range(0, num_dst_tokens):
             for row_base in range(0, dim_rows, COPY_BLOCK_SIZE):
@@ -254,19 +256,20 @@ def _copy_mamba_state_block(
             )
             return
 
-        # Preserve each byte's lane ownership while copying tokens from low
-        # to high. No lane can overwrite data another lane will read, so
-        # same-block left shifts are memmove-safe without a barrier.
-        offsets = tl.arange(0, COPY_BLOCK_SIZE)
+        # Copy tokens from low to high. Each token-sized source and destination
+        # region is disjoint, so same-block left shifts are memmove-safe
+        # without a barrier.
         for token_idx in range(0, num_dst_tokens):
             src_token = src_block_addr + (token_idx + token_bias) * token_bytes
             dst_token = dst_addr + token_idx * token_bytes
-            for i in range(0, token_bytes, COPY_BLOCK_SIZE):
-                mask = (i + offsets) < token_bytes
-                curr_src = (src_token + i + offsets).to(tl.pointer_type(tl.uint8))
-                curr_dst = (dst_token + i + offsets).to(tl.pointer_type(tl.uint8))
-                data = tl.load(curr_src, mask=mask)
-                tl.store(curr_dst, data, mask=mask)
+            _memcpy_u64_tiled(
+                src_token,
+                dst_token,
+                token_bytes,
+                tile_idx,
+                COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+                NUM_TILES=1,
+            )
         return
 
     # Temporal state: copy state[bt[src_col + token_bias]] -> state[bt[dst_col]]
@@ -563,6 +566,7 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
     src_ptr = tl.load(src_ptrs + pid)
     dst_ptr = tl.load(dst_ptrs + pid)
     size = tl.load(sizes + pid)
+    is_left_overlap = dst_ptr < src_ptr and dst_ptr + size > src_ptr
 
     offsets = tl.arange(0, BLOCK_SIZE)
     for i in range(0, size, BLOCK_SIZE):
@@ -572,6 +576,10 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
         curr_dst_ptr = (dst_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
 
         data = tl.load(curr_src_ptr, mask=mask)
+        if is_left_overlap:
+            # Preserve each lane's source before a lower-address lane stores
+            # over it. The condition is uniform within the program.
+            tl.debug_barrier()
         tl.store(curr_dst_ptr, data, mask=mask)
 
 

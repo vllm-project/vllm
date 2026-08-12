@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpe
 from vllm.v1.worker.mamba_utils import (
     MambaCopyBuffers,
     MambaSpecDecodeGPUContext,
+    batch_memcpy,
     collect_mamba_copy_meta,
     do_mamba_copy_block,
     preprocess_mamba,
@@ -535,6 +536,34 @@ class TestPostprocessMambaFusedKernel:
     @pytest.fixture
     def test_config(self):
         return _TestConfig()
+
+    def test_batch_memcpy_left_overlap_has_memmove_semantics(self, device):
+        batch = 128
+        row_bytes = 32 * 1024
+        shift = 16
+        copy_size = row_bytes - shift
+
+        pattern = (torch.arange(row_bytes, dtype=torch.int32, device=device) % 251).to(
+            torch.uint8
+        )
+        state = pattern.expand(batch, -1).clone()
+        snapshot = state.clone()
+
+        row_stride_bytes = state.stride(0) * state.element_size()
+        row_offsets = (
+            torch.arange(batch, dtype=torch.int64, device=device) * row_stride_bytes
+        )
+        dst_ptrs = (row_offsets + state.data_ptr()).to(torch.uint64)
+        src_ptrs = (row_offsets + state.data_ptr() + shift).to(torch.uint64)
+        sizes = torch.full((batch,), copy_size, dtype=torch.int32, device=device)
+
+        expected = snapshot.clone()
+        expected[:, :copy_size].copy_(snapshot[:, shift:])
+        for _ in range(10):
+            state.copy_(snapshot)
+            batch_memcpy(src_ptrs, dst_ptrs, sizes)
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(state, expected, rtol=0, atol=0)
 
     def test_matches_python_postprocess_mamba(self, device, test_config):
         """
