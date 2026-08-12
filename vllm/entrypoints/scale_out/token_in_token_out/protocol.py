@@ -351,16 +351,31 @@ class DerenderStreamState(BaseModel):
     streaming derender endpoint. All fields are plain JSON serializable data.
     No opaque tokenizer or parser internals are stored here.
 
+    Two separate sets of fields support two different streaming modes:
+
+    - For plain streaming (no parser configured including the completions path):
+      `prev_tokens`, `prefix_offset` and `read_offset` maintain a bounded incremental
+      decoding window. This requires O(window) transport and O(delta) computation
+      per chunk.
+    - For parser enabled chat streaming: `output_token_ids`, `tools_streamed` and
+      `last_tool_call_ids` are used to replay `parse_delta()` from scratch on every
+      chunk because parser state cannot be serialized. This incurs O(n) transport
+      per chunk (O(n²) per generation) and O(n²) `parse_delta()` calls per generation.
+      Since many parsers re-scan the entire accumulated text on each invocation,
+      `parse_delta()` itself is O(n) yielding a true worst case compute cost of O(n³)
+      per generation. No caching is performed. Work is bounded by `max_model_len`.
+      See `OnlineDerenderer._derender_chat_stream_parsed`.
+
     The detokenization strategy carries the incremental decode offsets
     directly rather than re-sending the whole token history each chunk.
-    ``detokenize_incrementally`` only ever reads the trailing token window
-    ``prev_tokens[prefix_offset:]``, so we carry just that tail plus the two
+    `detokenize_incrementally` only ever reads the trailing token window
+    `prev_tokens[prefix_offset:]`, so we carry just that tail plus the two
     offsets. Each chunk resumes exactly where the last one stopped, including
-    any partially processed multi-byte character (tracked by ``read_offset``),
+    any partially processed multi-byte character (tracked by `read_offset`),
     then trims and rebases the window so it never grows with generation length.
 
     Performance:
-    - Compute per chunk is O(delta). One ``detokenize_incrementally`` call per
+    - Compute per chunk is O(delta). One `detokenize_incrementally` call per
       new token, independent of how many tokens preceded it.
     - Transport per chunk is O(window). The carried tail is bounded by the
       incremental detokenization offset, so cumulative bytes over the wire are
@@ -368,18 +383,18 @@ class DerenderStreamState(BaseModel):
     """
 
     prev_tokens: list[str] = Field(default_factory=list)
-    """Trailing decode window. Token strings from ``prefix_offset`` onward.
+    """Trailing decode window. Token strings from `prefix_offset` onward.
 
     Bounded, trimmed and rebased each chunk to the tail
-    ``detokenize_incrementally`` still reads, so it does not grow with the
+    `detokenize_incrementally` still reads, so it does not grow with the
     number of chunks.
     """
 
     prefix_offset: int = Field(default=0, ge=0)
-    """Prefix offset into ``prev_tokens`` for incremental detokenization."""
+    """Prefix offset into `prev_tokens` for incremental detokenization."""
 
     read_offset: int = Field(default=0, ge=0)
-    """Read offset into ``prev_tokens`` for incremental detokenization."""
+    """Read offset into `prev_tokens` for incremental detokenization."""
 
     @field_validator("prev_tokens")
     @classmethod
@@ -393,23 +408,35 @@ class DerenderStreamState(BaseModel):
         return v
 
     role_sent: bool = False
-    """True once the initial ``role: "assistant"`` delta has been emitted.
+    """True once the initial `role: "assistant"` delta has been emitted.
 
     Prevents re-emitting the role on subsequent chunks even when the detok
     window is transiently empty (e.g. usage only final chunk).
     """
 
-    # TODO: Properties used in follow on PR for tool call parsing
-    last_content: str | None = None
-    """Last emitted cumulative assistant content text."""
+    output_token_ids: list[int] = Field(default_factory=list)
+    """All output tokens seen so far. Parser path only.
 
-    last_reasoning: str | None = None
-    """Last emitted cumulative reasoning text."""
+    Replay buffer: each chunk rebuilds a fresh parser and replays every
+    token in here through `parse_delta` (discarding the result) before
+    processing the current chunk's tokens since parser internal state
+    cannot be serialized into this stateless model. Unavoidably O(n)
+    bounded by ``max_model_len`` (enforced server side, not by a field
+    validator here since the bound is model dependent).
+    """
+
+    tools_streamed: bool = False
+    """True once a tool call delta has been emitted. Parser path only.
+
+    Drives the `finish_reason` -> `"tool_calls"` rewrite on the final
+    chunk mirroring the generate streaming path.
+    """
 
     last_tool_call_ids: list[str] = Field(default_factory=list)
-    """Stable tool-call IDs, assigned once when each call first appears.
+    """Stable tool call IDs, assigned once when each call first appears.
 
-    Prevents ID regeneration across re-parsing.
+    Indexed by tool call index. Parser path only. Prevents ID regeneration
+    when replay reprocesses a tool call that already has a pinned ID.
     """
 
 
@@ -437,6 +464,19 @@ class DerenderChatStreamRequest(BaseModel):
 
     prompt_tokens: int | None = None
     """Prompt token count for usage. Forwarded from the render step."""
+
+    prompt_token_ids: list[int] | None = None
+    """Prompt token IDs. Required by the parser path's `parse_delta` to
+    settle its initial reasoning state (e.g. chat templates that pre-open
+    ``<think>``). `prompt_tokens` is a usage count and cannot serve this
+    purpose. Sourced from `GenerateRequest.token_ids` at the render step.
+
+    Rejected with a 400 (by `ServingDerender`) when a tool or reasoning
+    parser is configured and this is omitted. Without it, `parse_delta`
+    cannot tell whether the prompt left reasoning open and would silently
+    misclassify reasoning content as plain content. Unused on the plain
+    detokenization path.
+    """
 
     chat_request: ChatCompletionRequest | None = None
     """The original (post adjust_request) ChatCompletionRequest from /render."""

@@ -781,7 +781,12 @@ def _e2e_generate_response(
 
 @pytest.mark.asyncio
 async def test_e2e_plain_roundtrip(parser_client, parser_tokenizer):
-    """Plain text without reasoning markers roundtrips correctly."""
+    """Plain text without reasoning markers roundtrips correctly.
+
+    Markerless output has no ``</think>``, which deepseek_r1 classifies
+    wholly as reasoning, so the text lands there rather than in content.
+    What this pins is detokenization fidelity through the parser path.
+    """
     messages = [{"role": "user", "content": "What is 2+2?"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -795,16 +800,22 @@ async def test_e2e_plain_roundtrip(parser_client, parser_tokenizer):
             "model": PARSER_MODEL,
             "generate_response": _e2e_generate_response(output_ids),
             "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {"model": PARSER_MODEL, "messages": messages},
         },
     )
     assert resp.status_code == 200, resp.text
-    content = resp.json()["choices"][0]["message"]["content"]
-    assert content == expected
+    message = resp.json()["choices"][0]["message"]
+    assert message["reasoning"] == expected
+    assert message["content"] is None
 
 
 @pytest.mark.asyncio
 async def test_e2e_token_identity(parser_client, parser_tokenizer):
-    """encode(derender(token_ids)) == token_ids (RL invariant)."""
+    """encode(derender(token_ids)) == token_ids (RL invariant).
+
+    Markerless output comes back as reasoning (see
+    ``test_e2e_plain_roundtrip``), so re-encode that.
+    """
     messages = [{"role": "user", "content": "Hi"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -817,17 +828,22 @@ async def test_e2e_token_identity(parser_client, parser_tokenizer):
             "model": PARSER_MODEL,
             "generate_response": _e2e_generate_response(output_ids),
             "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {"model": PARSER_MODEL, "messages": messages},
         },
     )
     assert resp.status_code == 200
-    content = resp.json()["choices"][0]["message"]["content"]
-    re_encoded = _encode(parser_tokenizer, content)
+    reasoning = resp.json()["choices"][0]["message"]["reasoning"]
+    re_encoded = _encode(parser_tokenizer, reasoning)
     assert output_ids == re_encoded
 
 
 @pytest.mark.asyncio
 async def test_e2e_non_ascii_roundtrip(parser_client, parser_tokenizer):
-    """CJK + emoji roundtrip without U+FFFD."""
+    """CJK + emoji roundtrip without U+FFFD.
+
+    Markerless output comes back as reasoning (see
+    ``test_e2e_plain_roundtrip``).
+    """
     messages = [{"role": "user", "content": "Reply in Chinese"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -840,11 +856,12 @@ async def test_e2e_non_ascii_roundtrip(parser_client, parser_tokenizer):
             "model": PARSER_MODEL,
             "generate_response": _e2e_generate_response(output_ids),
             "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {"model": PARSER_MODEL, "messages": messages},
         },
     )
     assert resp.status_code == 200
-    content = resp.json()["choices"][0]["message"]["content"]
-    assert "�" not in content
+    reasoning = resp.json()["choices"][0]["message"]["reasoning"]
+    assert "�" not in reasoning
 
 
 @pytest.mark.asyncio
@@ -957,8 +974,10 @@ async def test_e2e_parsed_reasoning_and_tool_call(parser_client, parser_tokenize
 
 
 @pytest.mark.asyncio
-async def test_e2e_no_chat_request_fallback(parser_client, parser_tokenizer):
-    """Without chat_request, derender falls back to plain detokenization."""
+async def test_e2e_no_chat_request_rejected(parser_client, parser_tokenizer):
+    """Without chat_request a parser configured model rejects with 400
+    rather than silently falling back to plain detokenization. This is to
+    prevent the leak of raw reasoning/tool markup into content."""
     messages = [{"role": "user", "content": "Hello"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -973,9 +992,8 @@ async def test_e2e_no_chat_request_fallback(parser_client, parser_tokenizer):
             "prompt_tokens": len(gen_req["token_ids"]),
         },
     )
-    assert resp.status_code == 200
-    content = resp.json()["choices"][0]["message"]["content"]
-    assert "Hi" in content
+    assert resp.status_code == 400
+    assert "chat_request" in resp.json()["error"]["message"]
 
 
 # ---------------------------------------------------------------------------
