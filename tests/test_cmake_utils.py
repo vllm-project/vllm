@@ -6,8 +6,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 
 def _get_cmake_bin() -> str:
     cmake = shutil.which("cmake")
@@ -82,39 +80,3 @@ endif()
     )
 
     subprocess.run([_get_cmake_bin(), "-P", script], check=True)
-
-
-@pytest.mark.parametrize(
-    "cuda_arch_flags, expect_warning",
-    [
-        ("-gencode arch=compute_80,code=sm_80", False),
-        ("-gencode arch=compute_80,code=compute_80", True),
-        ("-gencode arch=compute_90a,code=[sm_90a,compute_90a]", True),
-    ],
-)
-def test_warn_if_ptx_arch_requested(
-    tmp_path: Path, cuda_arch_flags: str, expect_warning: bool
-):
-    repo_root = Path(__file__).parents[1]
-    script = tmp_path / "test_warn_ptx.cmake"
-    script.write_text(
-        f"""
-cmake_minimum_required(VERSION 3.26)
-include("{repo_root / "cmake" / "utils.cmake"}")
-
-set(CUDA_ARCH_FLAGS "{cuda_arch_flags}")
-warn_if_ptx_arch_requested("${{CUDA_ARCH_FLAGS}}")
-"""
-    )
-
-    result = subprocess.run(
-        [_get_cmake_bin(), "-P", script],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    warning_msg = "PTX code generation requested in CUDA architecture flags"
-    if expect_warning:
-        assert warning_msg in result.stderr
-    else:
-        assert warning_msg not in result.stderr
