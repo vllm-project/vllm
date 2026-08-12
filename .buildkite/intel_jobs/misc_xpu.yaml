@@ -311,7 +311,7 @@ steps:
     'pip install av &&
     cd tests &&
     pytest -v -s detokenizer || true &&
-    pytest -v -s -m not cpu_test multimodal || true &&
+    pytest -v -s -m "not cpu_test" ./multimodal || true &&
     pytest -v -s utils_ || true'
 - label: Batch Invariance (A100)
   device: intel_gpu
