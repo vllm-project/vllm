@@ -19,6 +19,8 @@ from vllm.distributed.device_communicators import shm_broadcast
 from vllm.distributed.device_communicators.shm_broadcast import (
     MessageQueue,
     ShmRingBuffer,
+    ShmTensorArena,
+    _ArenaPickler,
     _rebuild_tensor,
     _reduce_tensor,
     check_shm_free_space,
@@ -36,14 +38,17 @@ def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
     return [np.random.randint(1, 100, i) for i in sizes]
 
 
-def distributed_run(fn, world_size, timeout=60):
+def distributed_run(fn, world_size, timeout=60, mp_context=None):
     """Run a function in multiple processes with proper error handling.
 
     Args:
         fn: Function to run in each process
         world_size: Number of processes to spawn
         timeout: Maximum time in seconds to wait for processes (default: 60)
+        mp_context: Optional multiprocess context (e.g. ``mp.get_context("spawn")``)
+            for workers that must not inherit the parent's thread/CUDA state.
     """
+    ctx = mp_context or mp
     number_of_processes = world_size
     processes = []
     for i in range(number_of_processes):
@@ -54,7 +59,7 @@ def distributed_run(fn, world_size, timeout=60):
         env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
         env["MASTER_ADDR"] = "localhost"
         env["MASTER_PORT"] = "12345"
-        p = mp.Process(target=fn, args=(env,))
+        p = ctx.Process(target=fn, args=(env,))
         processes.append(p)
         p.start()
 
@@ -778,3 +783,249 @@ def test_remote_subscribe_addr_unique_concurrent_writers(
 
     for q in queues:
         q.remote_socket.close(linger=0)
+
+
+# --------------- ShmTensorArena (zero-copy tensor arena) tests ---------------
+
+
+def _make_arena(n_reader: int = 2, slot_bytes: int = 4 << 20, n_slots: int = 3):
+    """Writer arena plus attached per-reader arenas (same process)."""
+    writer = ShmTensorArena(n_reader, slot_bytes, n_slots)
+    readers = [
+        ShmTensorArena(*writer.handle(), reader_rank=i) for i in range(n_reader)
+    ]
+    return writer, readers
+
+
+def _get_view(reader: ShmTensorArena, idx: int, ref: torch.Tensor) -> torch.Tensor:
+    return reader.get_tensor(
+        idx, ref.numel() * ref.element_size(), ref.dtype, tuple(ref.shape)
+    )
+
+
+def _drain(reader: ShmTensorArena) -> None:
+    """Flush a reader's releases to completion. On the pinned path the first
+    flush defers the release behind an H2D-completion event; the second flush
+    retires it once the event has fired."""
+    reader.flush_releases()
+    if reader._deferred_releases:
+        torch.cuda.synchronize()
+        reader.flush_releases()
+    assert not reader._pending_release
+    assert not reader._deferred_releases
+
+
+def test_arena_zero_copy_roundtrip():
+    writer, (r0, r1) = _make_arena(n_reader=2)
+    src = torch.randn(400, 512)
+    idx = writer.write_tensor(src)
+    assert idx is not None
+    a = _get_view(r0, idx, src)
+    b = _get_view(r1, idx, src)
+    assert torch.equal(a, src)
+    assert torch.equal(b, src)
+    assert a.dtype == src.dtype and a.shape == src.shape
+    # Readers alias one shared mapping: a write through one reader's view is
+    # visible through the other's (this is what "zero-copy" means here).
+    a[0, 0] = 12345.0
+    assert b[0, 0].item() == 12345.0
+    del a, b
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_arena_dtype_roundtrip(dtype):
+    """Dtypes numpy doesn't recognize traverse the arena's uint8 view path."""
+    writer, (reader,) = _make_arena(n_reader=1)
+    src = torch.randn(256, 256).to(dtype)
+    idx = writer.write_tensor(src)
+    assert idx is not None
+    got = _get_view(reader, idx, src)
+    assert got.dtype == dtype
+    assert torch.equal(got.view(torch.uint8), src.view(torch.uint8))
+    del got
+
+
+def test_arena_slot_lifecycle():
+    """A slot must not be reusable until EVERY reader has released it —
+    the writer overwriting a slot a reader still consumes would corrupt data."""
+    writer, readers = _make_arena(n_reader=2, n_slots=3)
+    t = torch.ones(1000)
+    first = writer.write_tensor(t)
+    views = [_get_view(r, first, t) for r in readers]
+    # Fill the remaining slots; the arena is now exhausted.
+    assert all(writer.write_tensor(t) is not None for _ in range(2))
+    assert writer.write_tensor(t) is None  # exhausted -> caller falls back
+    # One of two readers releasing is NOT enough to reuse the slot.
+    _drain(readers[0])
+    assert writer.write_tensor(t) is None
+    # Once every reader has released, the original slot is reused.
+    _drain(readers[1])
+    assert writer.write_tensor(t) == first
+    del views
+
+
+def test_arena_oversize_falls_back():
+    writer, _ = _make_arena(n_reader=1, slot_bytes=1 << 20, n_slots=2)
+    big = torch.empty((1 << 20) + 4096, dtype=torch.uint8)
+    assert writer.write_tensor(big) is None
+
+
+def _dumps_arena(obj, arena: ShmTensorArena) -> tuple[bytes, list]:
+    """Pickle `obj` the same way `MessageQueue.enqueue` does when an arena is
+    attached: arena diversion first (reducer_override), then the tensor
+    dispatch table, with out-of-band buffers >= 1MiB."""
+    buffers = []
+
+    def callback(buf: pickle.PickleBuffer) -> bool:
+        raw = buf.raw()
+        if raw.nbytes < 1024 * 1024:
+            return True
+        buffers.append(raw)
+        return False
+
+    bio = io.BytesIO()
+    pickler = _ArenaPickler(bio, arena, buffer_callback=callback)
+    pickler.dispatch_table = {torch.Tensor: _reduce_tensor}
+    pickler.dump(obj)
+    return bio.getvalue(), buffers
+
+
+def test_arena_pickler_composes(monkeypatch):
+    """Large contiguous tensors are diverted into the arena; everything the
+    arena declines falls through to `_reduce_tensor` unchanged."""
+    writer, (reader,) = _make_arena(n_reader=1)
+    monkeypatch.setattr(shm_broadcast, "_ARENA_MIN_BYTES", 1 << 20)
+    monkeypatch.setitem(
+        shm_broadcast._TENSOR_ARENAS, writer.shared_memory.name, reader
+    )
+    big = torch.randn(1024, 1024)  # 4MiB -> diverted into the arena
+    small = torch.randn(16, 16)  # 1KiB -> falls through to _reduce_tensor
+    data, buffers = _dumps_arena({"big": big, "small": small}, writer)
+    # The diverted tensor's bytes are in the arena, not the pickle stream.
+    assert len(data) + sum(b.nbytes for b in buffers) < big.numel() * 4
+    out = pickle.loads(data, buffers=buffers)
+    assert torch.equal(out["big"], big)
+    assert torch.equal(out["small"], small)
+    # "big" is a zero-copy view of the reader's slot; "small" is not.
+    (idx,) = reader._pending_release
+    nbytes = big.numel() * big.element_size()
+    slot_ptr = torch.frombuffer(
+        reader._slot(idx, nbytes), dtype=torch.uint8
+    ).data_ptr()
+    assert out["big"].data_ptr() == slot_ptr
+    assert out["small"].data_ptr() != slot_ptr
+    del out
+    _drain(reader)
+
+
+def test_arena_pickler_noncontig_falls_through(monkeypatch):
+    writer, (reader,) = _make_arena(n_reader=1)
+    monkeypatch.setattr(shm_broadcast, "_ARENA_MIN_BYTES", 1 << 20)
+    monkeypatch.setitem(
+        shm_broadcast._TENSOR_ARENAS, writer.shared_memory.name, reader
+    )
+    nc = torch.randn(2048, 1024)[:, ::2]  # non-contiguous, above threshold
+    assert not nc.is_contiguous()
+    data, buffers = _dumps_arena(nc, writer)
+    out = pickle.loads(data, buffers=buffers)
+    assert torch.equal(out, nc)
+    # The arena never saw it: no slot consumed on the reader.
+    assert reader._pending_release == []
+    del out
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_arena_event_gated_release():
+    """On the pinned path a slot release is gated on an H2D-completion CUDA
+    event: the writer must not see the reader's done flag until the async DMA
+    sourced from the slot has been retired."""
+    writer, (reader,) = _make_arena(n_reader=1)
+    reader._ensure_pinned()
+    if not reader._pinned:
+        pytest.skip("cudaHostRegister unavailable in this environment")
+    src = torch.randn(512, 1024)
+    idx = writer.write_tensor(src)
+    view = _get_view(reader, idx, src)
+    dev = view.to("cuda", non_blocking=True)
+    assert reader._pending_release == [idx]
+    reader.flush_releases()
+    # Deferred behind the event, not applied eagerly.
+    assert len(reader._deferred_releases) == 1
+    with reader._meta(idx) as meta:
+        assert meta[1] == 0
+    torch.cuda.synchronize()
+    reader.flush_releases()
+    assert reader._deferred_releases == []
+    with reader._meta(idx) as meta:
+        assert meta[1] == 1
+    assert torch.equal(dev.cpu(), src)
+    del view, dev
+
+
+@worker_fn_wrapper
+def worker_fn_arena_broadcast():
+    rank = dist.get_rank()
+    writer_rank = 0
+    if rank == writer_rank:
+        message_queue = MessageQueue(
+            1,
+            1,
+            local_reader_ranks=[1],
+            max_chunk_bytes=8 * 1024 * 1024,
+            enable_shm_tensor_arena=True,
+        )
+        handles = [message_queue.export_handle()]
+        dist.broadcast_object_list(handles, src=writer_rank)
+    else:
+        handles = [None]
+        dist.broadcast_object_list(handles, src=writer_rank)
+        message_queue = MessageQueue.create_from_handle(handles[0], rank)
+    message_queue.wait_until_ready()
+
+    torch.manual_seed(42)
+    payload = {
+        # 16MiB: above the arena divert threshold (8MiB) -> arena slot.
+        "huge": torch.randn(2048, 2048),
+        # 2MiB: declined by the arena -> out-of-band _reduce_tensor path.
+        "mid": torch.randn(1024, 512),
+    }
+
+    if rank == writer_rank:
+        assert message_queue.tensor_arena is not None
+        with mock.patch(
+            "vllm.distributed.device_communicators.shm_broadcast._reduce_tensor",
+            wraps=_reduce_tensor,
+        ) as wrapped_reduce:
+            message_queue.enqueue(payload)
+        # "huge" was diverted into the arena before the dispatch table was
+        # consulted; only "mid" went through _reduce_tensor.
+        assert wrapped_reduce.call_count == 1
+    else:
+        received = message_queue.dequeue(timeout=30)
+        assert torch.equal(received["huge"], payload["huge"])
+        assert torch.equal(received["mid"], payload["mid"])
+        # The huge tensor is a zero-copy view of an arena slot.
+        (arena,) = shm_broadcast._TENSOR_ARENAS.values()
+        (idx,) = arena._pending_release
+        nbytes = received["huge"].numel() * received["huge"].element_size()
+        slot_ptr = torch.frombuffer(
+            arena._slot(idx, nbytes), dtype=torch.uint8
+        ).data_ptr()
+        assert received["huge"].data_ptr() == slot_ptr
+
+    dist.barrier()
+    print(f"arena broadcast passed the test! Rank {rank}")
+
+
+def test_arena_broadcast():
+    # Spawn (not fork): by the time this test runs, the pytest process may be
+    # multi-threaded / CUDA-initialized (earlier GPU tests), and a forked
+    # child running the arena's slot memcpy can deadlock on inherited lock
+    # state. Spawned workers start clean; the larger timeout absorbs their
+    # interpreter + import startup.
+    distributed_run(
+        worker_fn_arena_broadcast,
+        2,
+        timeout=180,
+        mp_context=mp.get_context("spawn"),
+    )

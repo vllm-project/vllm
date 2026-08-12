@@ -205,11 +205,13 @@ than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band
 > path. The current-`main` oob baseline would land between the "stock" and
 > "arena + pinning" rows; measuring exactly where is the open item.
 
-1. **Unit test** (to be added to the branch): a 199 MB bf16 tensor pushed through
-   a real `MessageQueue` to two forked reader processes — byte-exact checksums,
-   arena path confirmed, deferred release, slot reuse, and exhaustion/oversize
-   fallbacks. Enqueue of the 199 MB payload: **66.7 ms** (vs ~1275 ms for the
-   in-band serialize of the same size).
+1. **Unit tests** (`tests/distributed/test_shm_broadcast.py`): byte-exact
+   zero-copy round-trips (incl. bf16/fp8), slot lifecycle (no reuse until every
+   reader releases; exhaustion / oversize / non-contiguous fall back to the
+   out-of-band path), event-gated release on the pinned path, `_ArenaPickler` ⊕
+   `_reduce_tensor` composition, and an end-to-end `MessageQueue` broadcast
+   through forked processes. (Historical microbenchmark: enqueue of a 199 MB
+   payload took **66.7 ms** vs ~1275 ms for the old in-band serialize.)
 2. **Same-seed A/B** (baseline = in-band pickle, pre-`_reduce_tensor`), interactive
    multimodal workload, uncapped input images, TP=4 ×2 workers on one 8-GPU node,
    low qps so individual images decompose cleanly (~1.2k aligned requests):
