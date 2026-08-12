@@ -19,6 +19,8 @@ from vllm.tool_parsers.utils import (
     normalize_leading_zero_ints,
     rename_reserved_kwargs,
     restore_reserved_kwarg_names,
+    salvage_calls_from_unparsable_block,
+    split_top_level_calls,
 )
 
 
@@ -640,6 +642,111 @@ class TestContainsBrokenStringLiteral:
     )
     def test_detection(self, text, broken):
         assert contains_broken_string_literal(text) is broken
+
+
+def _call_name(call: ast.Call) -> str:
+    """Return the plain function name of a parsed call."""
+    assert isinstance(call.func, ast.Name)
+    return call.func.id
+
+
+class TestSplitTopLevelCalls:
+    def test_basic_split(self):
+        assert split_top_level_calls("[a(x=1), b(y=2)]") == ["a(x=1)", "b(y=2)"]
+
+    def test_comma_inside_string_not_a_separator(self):
+        # String args sit at depth >= 1, so even the bracket-only strategy
+        # never splits on their commas.
+        text = "[exec(command='echo a, b'), f(x=1)]"
+        for respect_strings in (True, False):
+            assert split_top_level_calls(text, respect_strings=respect_strings) == [
+                "exec(command='echo a, b')",
+                "f(x=1)",
+            ]
+
+    def test_broken_quote_desyncs_string_aware_scan(self):
+        # A broken quote flips the string state, so every later separator
+        # looks like string content to the string-aware scan and the block
+        # cannot be split at all. Counting brackets only is immune: string
+        # arguments live at depth >= 1, so their commas still never split.
+        # This asymmetry is why salvage runs both strategies.
+        text = "[f(a='x 'y', b='z'), ls(path='/tmp')]"
+        assert len(split_top_level_calls(text, respect_strings=True)) == 1
+        assert split_top_level_calls(text, respect_strings=False) == [
+            "f(a='x 'y', b='z')",
+            "ls(path='/tmp')",
+        ]
+
+    def test_nested_brackets_not_split(self):
+        text = "[f(x=[1, 2], y={'a': (3, 4)}), g(z=5)]"
+        assert split_top_level_calls(text, respect_strings=False) == [
+            "f(x=[1, 2], y={'a': (3, 4)})",
+            "g(z=5)",
+        ]
+
+
+class TestSalvageCallsFromUnparsableBlock:
+    def test_good_sibling_recovered_from_broken_block(self):
+        # The whole block is a SyntaxError (genuinely ambiguous nested
+        # quote), so the AST-level salvage never gets a call list and ls
+        # died with the block.
+        calls = salvage_calls_from_unparsable_block(
+            "[ls(path='/tmp'), f(a='x 'y', b='z')]"
+        )
+        assert [_call_name(c) for c in calls] == ["ls"]
+
+    def test_never_returns_a_call_swallowing_reading(self):
+        # Closing the broken string late makes the text parse but swallows
+        # the sibling call into the argument value, so the tool would run
+        # with corrupted arguments — worse than dropping it. Any rewriting
+        # returned must preserve the block's call count.
+        text = "[f(a='x 'y'), g(b='p 'q')]"
+        rewritten, changed = escape_nested_quotes_in_strings(text)
+        if changed:
+            statement = ast.parse(rewritten).body[0]
+            assert isinstance(statement, ast.Expr)
+            assert isinstance(statement.value, ast.List)
+            assert len(statement.value.elts) == 2
+        else:
+            assert rewritten == text
+
+    def test_both_calls_recovered_per_segment(self):
+        # Each segment on its own has a unique closing quote, so splitting
+        # first recovers both calls with the values the model intended.
+        calls = salvage_calls_from_unparsable_block(
+            "[f(a='x 'y'), g(b='p 'q')]",
+            rewrite=lambda segment: [escape_nested_quotes_in_strings(segment)[0]],
+        )
+        assert [_call_name(c) for c in calls] == ["f", "g"]
+        assert [_kwarg_constant(c) for c in calls] == ["x 'y", "p 'q"]
+
+    def test_rewrites_apply_per_segment(self):
+        # A recoverable quirk (month=07) in one segment is fixed by the
+        # rewrite ladder even though the sibling segment is unrecoverable.
+        def rewrite(text):
+            return [normalize_leading_zero_ints(text)]
+
+        calls = salvage_calls_from_unparsable_block(
+            "[f(a='x 'y', b='z'), g(month=07)]", rewrite=rewrite
+        )
+        assert [_call_name(c) for c in calls] == ["g"]
+
+    def test_no_fabrication_when_nothing_parses(self):
+        assert (
+            salvage_calls_from_unparsable_block("[f(a='x 'y' 'z), g(b='p 'q' 'r)]")
+            == []
+        )
+
+    def test_single_segment_not_salvaged(self):
+        # One segment equals the whole block, which the caller's rewrite
+        # ladder already tried; re-parsing it here could only duplicate work.
+        assert salvage_calls_from_unparsable_block("[f(a='x 'y', b='z')]") == []
+
+    def test_order_preserved(self):
+        calls = salvage_calls_from_unparsable_block(
+            "[b(y=2), broken(a='x 'y', b='z'), a(x=1)]"
+        )
+        assert [_call_name(c) for c in calls] == ["b", "a"]
 
 
 class TestHandleSingleToolPositionalArgs:

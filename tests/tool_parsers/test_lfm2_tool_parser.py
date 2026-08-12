@@ -8,6 +8,7 @@ from transformers import AutoTokenizer
 
 from tests.tool_parsers.utils import (
     run_tool_extraction,
+    run_tool_extraction_nonstreaming,
     run_tool_extraction_streaming,
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
@@ -735,3 +736,37 @@ def test_regex_timeout_handling(streaming: bool, lfm2_tokenizer: TokenizerLike):
         assert content == fake_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+def test_good_call_survives_unparsable_sibling(lfm2_tokenizer: TokenizerLike):
+    """A genuinely ambiguous nested quote makes the whole block a
+    SyntaxError, so the per-call salvage never gets a call list and the
+    parseable sibling died with the block — leaving an agent loop with no
+    tool result at all. Non-streaming only: a partial streaming block is
+    legitimately unparsable and must keep waiting, not be split."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}, "
+        f"f(a='x 'y', b='z')]{TOOL_CALL_END}"
+    )
+
+    extracted = run_tool_extraction_nonstreaming(cls(lfm2_tokenizer), model_output)
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
+def test_unrecoverable_block_still_reports_no_tool_call(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """Splitting must not fabricate calls: when no segment parses, the
+    block still falls back to content with tools_called=False."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[f(a='x 'y' 'z), g(b='p 'q' 'r)]{TOOL_CALL_END}"
+
+    extracted = run_tool_extraction_nonstreaming(cls(lfm2_tokenizer), model_output)
+
+    assert not extracted.tools_called
+    assert extracted.tool_calls == []
+    assert extracted.content == model_output

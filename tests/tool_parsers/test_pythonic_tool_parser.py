@@ -7,6 +7,7 @@ import pytest
 
 from tests.tool_parsers.utils import (
     run_tool_extraction,
+    run_tool_extraction_nonstreaming,
     run_tool_extraction_streaming,
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
@@ -270,3 +271,37 @@ def test_non_finite_argument_rejected(default_tokenizer: TokenizerLike):
     assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
     for call in tool_calls:
         json.loads(call.function.arguments)
+
+
+def test_good_call_survives_unparsable_sibling(default_tokenizer: TokenizerLike):
+    """A broken quote makes the whole block a SyntaxError, so the per-call
+    salvage never gets a call list and the parseable sibling died with the
+    block. Non-streaming only: a partial streaming block is legitimately
+    unparsable and must keep waiting, not be split."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+    model_output = f"[{SIMPLE_FUNCTION_OUTPUT}, f(a='x 'y', b='z')]"
+
+    extracted = run_tool_extraction_nonstreaming(tool_parser, model_output)
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
+def test_unrecoverable_block_still_reports_no_tool_call(
+    default_tokenizer: TokenizerLike,
+):
+    """Splitting must not fabricate calls: when no segment parses, the
+    block still falls back to content with tools_called=False."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+    model_output = "[f(a='x 'y' 'z), g(b='p 'q' 'r)]"
+
+    extracted = run_tool_extraction_nonstreaming(tool_parser, model_output)
+
+    assert not extracted.tools_called
+    assert extracted.tool_calls == []
+    assert extracted.content == model_output

@@ -24,6 +24,7 @@ from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     compute_tool_delta,
     make_valid_python,
+    salvage_calls_from_unparsable_block,
     salvage_tool_calls,
 )
 
@@ -107,7 +108,20 @@ class Olmo3PythonicToolParser(ToolParser):
             )
 
         try:
-            module = ast.parse(model_output)
+            try:
+                module = ast.parse(model_output)
+            except (SyntaxError, ValueError):
+                # The block as a whole is unparsable (e.g. a broken quote).
+                # Split into top-level segments and parse each on its own so
+                # one bad call does not drop every parseable sibling.
+                salvaged = salvage_calls_from_unparsable_block(model_output)
+                if not salvaged:
+                    raise
+                return ExtractedToolCallInformation(
+                    tools_called=True,
+                    tool_calls=salvage_tool_calls(salvaged),
+                    content=None,
+                )
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                 isinstance(e, ast.Call) for e in parsed.elts
