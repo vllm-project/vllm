@@ -86,7 +86,7 @@ def test_deep_gemm_mega_moe_capture_precedes_eplb(monkeypatch, use_kimi):
         raise MappingReached
 
     monkeypatch.setattr(
-        "vllm.models.deepseek_v4.nvidia.model.eplb_map_to_physical_and_record",
+        f"{experts_cls.__module__}.eplb_map_to_physical_and_record",
         map_ids,
     )
     monkeypatch.setattr(
