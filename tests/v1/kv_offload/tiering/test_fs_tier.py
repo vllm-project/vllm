@@ -453,7 +453,7 @@ def test_wait_idle_blocks_until_tasks_complete():
         gate.wait(timeout=5.0)
 
     # dummy task
-    task = Task(path="unused", offset=0)
+    task = Task(key=key(0), offset=0)
 
     pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
     pool.enqueue_store(
@@ -491,7 +491,7 @@ def test_batch_tasks_distribution(n_tasks, n_threads, expected_sizes):
     first), preserving order and accounting for every task."""
     pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
     try:
-        tasks = [Task(path=f"p{i}", offset=i) for i in range(n_tasks)]
+        tasks = [Task(key=key(i), offset=i) for i in range(n_tasks)]
         batches = list(pool._batch_tasks(tasks, n_threads))
         assert [len(b) for b in batches] == expected_sizes
         assert [t for b in batches for t in b] == tasks
@@ -517,7 +517,7 @@ def test_store_job_parallelized_across_threads():
 
     pool = DualQueueThreadPool(n_read_threads=0, n_write_threads=n_threads)
     try:
-        tasks = [Task(path=f"p{i}", offset=i) for i in range(n_threads)]
+        tasks = [Task(key=key(i), offset=i) for i in range(n_threads)]
         pool.enqueue_store(
             job_id=1,
             n_tasks=n_threads,
@@ -701,7 +701,7 @@ def test_batched_partial_load_failure_keeps_loaded_blocks(
     results = drain(tier)
     # (a) the job fails but reports the two blocks that loaded before the bad one.
     assert len(results) == 1 and not results[0].success
-    assert tuple(results[0].successful_keys) == (key(1), key(2))
+    assert sorted(results[0].successful_keys) == [key(1), key(2)]
 
     # (b) Only the failed tail is a miss; the loaded blocks stay HIT on the same
     # request, and nothing was re-probed.
@@ -726,34 +726,50 @@ def test_batched_partial_load_failure_keeps_loaded_blocks(
 
 @pytest.mark.parametrize("use_c_ext", [True, False])
 def test_batched_load_first_block_fails_marks_whole_batch(
-    fs_tier, monkeypatch, use_c_ext
+    tmp_path, monkeypatch, use_c_ext
 ):
     """When the FIRST block fails, nothing loaded before it: the job reports no
     successful_keys (None) and the whole batch is marked a miss for the
-    request."""
+    request.
+
+    Uses a single read thread so all 3 tasks land in one batch/thread call:
+    the "no partial success" guarantee only holds within a single sequential
+    batch_load_block call, not across independently-scheduled threads."""
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
         pytest.skip("fs_io_C extension not built")
     monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
 
-    tier, _ = fs_tier
-    keys = [key(1), key(2), key(3)]  # first one is the "bad" block
-    tier.submit_store(make_job(1, keys, [0, 1, 2]))
-    assert all(r.success for r in drain(tier))
+    tensor = _page_aligned_zero_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    mock_view = memoryview(tensor.numpy())
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_view,
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        n_read_threads=1,
+        n_write_threads=1,
+    )
+    try:
+        keys = [key(1), key(2), key(3)]  # first one is the "bad" block
+        tier.submit_store(make_job(1, keys, [0, 1, 2]))
+        assert all(r.success for r in drain(tier))
 
-    ctx = ReqContext(req_id="batch-first-fail")
-    assert lookup_and_wait(tier, keys, ctx=ctx) == [LookupResult.HIT] * 3
+        ctx = ReqContext(req_id="batch-first-fail")
+        assert lookup_and_wait(tier, keys, ctx=ctx) == [LookupResult.HIT] * 3
 
-    with open(tier.file_mapper.get_file_name(key(1)), "wb") as f:
-        f.write(b"x" * 10)
-    tier.submit_load(make_job(2, keys, [0, 1, 2], is_promotion=True))
-    results = drain(tier)
-    assert len(results) == 1 and not results[0].success
-    # Nothing loaded before the failure -> no partial success reported.
-    assert results[0].successful_keys is None
-    # The whole batch is a miss for this request.
-    assert [tier.lookup(k, ctx) for k in keys] == [LookupResult.MISS] * 3
+        with open(tier.file_mapper.get_file_name(key(1)), "wb") as f:
+            f.write(b"x" * 10)
+        tier.submit_load(make_job(2, keys, [0, 1, 2], is_promotion=True))
+        results = drain(tier)
+        assert len(results) == 1 and not results[0].success
+        # Nothing loaded before the failure -> no partial success reported.
+        assert results[0].successful_keys is None
+        # The whole batch is a miss for this request.
+        assert [tier.lookup(k, ctx) for k in keys] == [LookupResult.MISS] * 3
+    finally:
+        tier.shutdown()
 
 
 @pytest.mark.parametrize("use_c_ext", [True, False])

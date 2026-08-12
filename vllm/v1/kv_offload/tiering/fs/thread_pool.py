@@ -15,8 +15,8 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 from vllm.logger import init_logger
+from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.kv_offload.tiering.base import JobId
-from vllm.v1.kv_offload.base import (OffloadKey)
 
 logger = init_logger(__name__)
 
@@ -69,6 +69,7 @@ class JobState:
             if not success:
                 self._success = False
             return self._completed == self._n_tasks, self._success, self._transfer_time
+
 
 class DualQueueThreadPool:
     """
@@ -152,7 +153,7 @@ class DualQueueThreadPool:
     ) -> None:
         """Batch `tasks` and append (fn, state, batch_size) entries to `queue`."""
         if n_tasks == 0:
-            self._finished_q.append((job_id, True))
+            self._finished_q.append((job_id, True, 0.0))
             return
         state = JobState(job_id, n_tasks)
         task_lst = list(tasks)  # Materialize tasks out of self._condition
@@ -255,7 +256,9 @@ class DualQueueThreadPool:
                 start_time = time.monotonic()
                 fn()
                 transfer_time = time.monotonic() - start_time
-                job_finished, success, total_time = state.task_done(batch_size, True, transfer_time)
+                job_finished, success, total_time = state.task_done(
+                    batch_size, True, transfer_time
+                )
             except Exception as exc:
                 transfer_time = time.monotonic() - start_time
                 logger.error(
