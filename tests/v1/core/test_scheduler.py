@@ -760,7 +760,7 @@ def test_stop_via_update_from_output():
     assert list(requests[0].output_token_ids) == [10, 42]
     assert list(requests[1].output_token_ids) == [13, 14]
     outputs_by_id = {
-        output.request_id: output for output in engine_core_outputs.outputs
+        output.request_id: output for output in engine_core_outputs[0].outputs
     }
     assert outputs_by_id[requests[0].request_id].num_accepted_spec_tokens == 2
     assert outputs_by_id[requests[0].request_id].num_rejected_spec_tokens == 0

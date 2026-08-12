@@ -3,6 +3,7 @@
 
 import math
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -27,7 +28,11 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+    RequestState,
+)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 
@@ -218,33 +223,40 @@ def test_request_stream_interval_raises_but_not_below_engine_default(
     assert not output_processor.has_unfinished_requests()
 
 
-def test_speculative_token_counts_accumulate_per_request(dummy_test_vectors):
-    output_processor = OutputProcessor(
-        dummy_test_vectors.tokenizer, log_stats=False, stream_interval=1
-    )
-    request = EngineCoreRequest(
+def test_speculative_token_counts_accumulate_per_request():
+    output_processor = OutputProcessor(None, log_stats=False, stream_interval=1)
+    detokenizer = MagicMock()
+    detokenizer.update.return_value = None
+    detokenizer.get_next_output_text.return_value = ""
+    logprobs_processor = MagicMock()
+    logprobs_processor.logprobs = None
+    logprobs_processor.cumulative_logprob = None
+    logprobs_processor.pop_prompt_logprobs.return_value = None
+    output_processor.request_states["request-int"] = RequestState(
         request_id="request-int",
         external_req_id="request",
-        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
-        mm_features=None,
-        arrival_time=0,
+        parent_req=None,
+        request_index=0,
         lora_request=None,
-        cache_salt=None,
-        data_parallel_rank=None,
-        sampling_params=SamplingParams(
-            output_kind=RequestOutputKind.DELTA,
-            skip_special_tokens=False,
-            spaces_between_special_tokens=False,
-        ),
-        pooling_params=None,
+        output_kind=RequestOutputKind.DELTA,
+        prompt="",
+        prompt_token_ids=[1],
+        prompt_embeds=None,
+        logprobs_processor=logprobs_processor,
+        detokenizer=detokenizer,
+        max_tokens_param=2,
+        arrival_time=0,
+        queue=None,
+        log_stats=False,
+        stream_interval=1,
     )
-    output_processor.add_request(request, dummy_test_vectors.prompt_strings[0])
+    output_processor.external_req_ids["request"].append("request-int")
 
     first = output_processor.process_outputs(
         [
             EngineCoreOutput(
                 request_id="request-int",
-                new_token_ids=[dummy_test_vectors.generation_tokens[0][0]],
+                new_token_ids=[2],
                 num_accepted_spec_tokens=2,
                 num_rejected_spec_tokens=1,
             )
@@ -254,7 +266,7 @@ def test_speculative_token_counts_accumulate_per_request(dummy_test_vectors):
         [
             EngineCoreOutput(
                 request_id="request-int",
-                new_token_ids=[dummy_test_vectors.generation_tokens[0][1]],
+                new_token_ids=[3],
                 finish_reason=FinishReason.LENGTH,
                 num_accepted_spec_tokens=1,
                 num_rejected_spec_tokens=2,
