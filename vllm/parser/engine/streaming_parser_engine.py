@@ -158,6 +158,7 @@ class StreamingParserEngine:
         )
 
         self.skip_tool_parsing = False
+        self.skip_reasoning_parsing = False
         self.reset(initial_state=initial_state)
 
     def _reset_args_state(self) -> None:
@@ -297,6 +298,8 @@ class StreamingParserEngine:
         }
     )
 
+    _REASONING_TERMINALS = frozenset({"THINK_START", "THINK_END"})
+
     def _on_terminal(self, terminal: str, value: str) -> list[SemanticEvent]:
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
@@ -311,6 +314,9 @@ class StreamingParserEngine:
                 and not self.skip_tool_parsing
             ):
                 return []
+            return self._emit_for_state(value)
+
+        if self.skip_reasoning_parsing and terminal in self._REASONING_TERMINALS:
             return self._emit_for_state(value)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:

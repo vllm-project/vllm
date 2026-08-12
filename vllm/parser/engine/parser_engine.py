@@ -169,6 +169,14 @@ class ParserEngine(Parser):
         self._engine.skip_tool_parsing = value
 
     @property
+    def skip_reasoning_parsing(self) -> bool:
+        return self._engine.skip_reasoning_parsing
+
+    @skip_reasoning_parsing.setter
+    def skip_reasoning_parsing(self, value: bool) -> None:
+        self._engine.skip_reasoning_parsing = value
+
+    @property
     def reasoning_ended(self) -> bool:
         return self._reasoning_ended
 

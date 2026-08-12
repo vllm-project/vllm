@@ -1782,3 +1782,90 @@ class TestTruncatedToolOpenerStreamParity:
         assert tool_calls is not None and len(tool_calls) == 1
         assert tool_calls[0].name == "get_weather"
         assert not content
+
+
+class TestThinkMarkupWithoutReasoningParser:
+    """With no reasoning parser configured, reasoning markup is plain
+    content: engine-backed tool parsers must return it verbatim in both
+    the non-streaming and streaming paths, not consume the markers or
+    reclassify the block as reasoning and drop it."""
+
+    _VOCAB = {
+        "<think>": 90,
+        "</think>": 91,
+        "<tool_call>": 100,
+        "</tool_call>": 101,
+    }
+
+    # Two distinct failure modes are covered: qwen3_coder consumed a
+    # stray </think> marker in CONTENT state (unbalanced markup),
+    # deepseek_v4 re-entered REASONING on <think> and dropped the block
+    # from non-streaming content entirely.
+    _PARSERS = ["qwen3_coder", "deepseek_v4"]
+
+    def _make_parser(self, tool_parser_name):
+        from vllm.parser.parser_manager import ParserManager
+
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name=tool_parser_name,
+            enable_auto_tools=True,
+        )
+        tokenizer = make_mock_tokenizer(self._VOCAB)
+        return parser_cls(tokenizer, [])
+
+    def _stream(self, tool_parser_name, request, chunks):
+        parser = self._make_parser(tool_parser_name)
+        content, reasoning = "", ""
+        for i, chunk in enumerate(chunks):
+            delta_token_ids = [
+                tid for text, tid in self._VOCAB.items() if text in chunk
+            ]
+            delta = parser.parse_delta(
+                chunk,
+                delta_token_ids,
+                request,
+                prompt_token_ids=[1],
+                finished=(i == len(chunks) - 1),
+            )
+            if delta and delta.content:
+                content += delta.content
+            if delta and delta.reasoning:
+                reasoning += delta.reasoning
+        return content, reasoning
+
+    @pytest.mark.parametrize("tool_parser_name", _PARSERS)
+    def test_think_block_passes_through_both_paths(
+        self, mock_request, tool_parser_name
+    ):
+        chunks = ["<think>", "reasoning here", "</think>", "the answer"]
+        text = "".join(chunks)
+
+        reasoning, content, tool_calls = self._make_parser(tool_parser_name).parse(
+            text, mock_request, enable_auto_tools=True
+        )
+        streamed_content, streamed_reasoning = self._stream(
+            tool_parser_name, mock_request, chunks
+        )
+
+        assert not tool_calls
+        assert reasoning is None
+        assert streamed_reasoning == ""
+        assert content == streamed_content == text
+
+    def test_think_block_preserved_alongside_tool_call(self, mock_request):
+        """The tools-called branch also returns the tool parser's content;
+        a think block preceding a promoted tool call must survive in it."""
+        think = "<think>plan</think>"
+        text = think + (
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        _, content, tool_calls = self._make_parser("qwen3_coder").parse(
+            text, mock_request, enable_auto_tools=True
+        )
+        assert tool_calls is not None and len(tool_calls) == 1
+        assert tool_calls[0].name == "get_weather"
+        assert content == think

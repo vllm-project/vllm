@@ -131,6 +131,15 @@ class Parser:
             self._reasoning_parser is None
             or self._reasoning_parser.engine_based_streaming
         ) and (self._tool_parser is None or self._tool_parser.engine_based_streaming)
+        if (
+            self._reasoning_parser is None
+            and self._tool_parser is not None
+            and hasattr(self._tool_parser, "skip_reasoning_parsing")
+        ):
+            # With no reasoning parser configured, reasoning markup is
+            # plain content: an engine-based tool parser must pass it
+            # through verbatim, not consume or reclassify it.
+            self._tool_parser.skip_reasoning_parsing = True
         self._stream_state = StreamState(
             tool_call_id_type=(
                 get_tool_call_id_type(model_config)
