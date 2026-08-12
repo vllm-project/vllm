@@ -1226,7 +1226,7 @@ tqdm==4.67.3
     #   sentence-transformers
     #   tilelang
     #   transformers
-transformers==5.14.1
+transformers==5.15.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
