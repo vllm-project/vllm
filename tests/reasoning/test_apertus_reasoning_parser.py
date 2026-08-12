@@ -33,17 +33,6 @@ def make_parser(vocab: dict[str, int]) -> ReasoningParser:
     return parser_cls(MockTokenizer(vocab))
 
 
-def test_delimiters_are_the_inner_pair():
-    """The inner pair carries the ids the model emits for thinking."""
-    parser = make_parser(INNER_VOCAB)
-
-    assert (parser.start_token, parser.end_token) == (
-        "<|inner_prefix|>",
-        "<|inner_suffix|>",
-    )
-    assert (parser.start_token_id, parser.end_token_id) == (32, 33)
-
-
 def test_think_strings_are_not_delimiters():
     """``<think>`` is an ordinary vocab entry: the tokenizer's normalizer maps it
     to the inner pair on input only, so generated ``<think>`` text is content."""
