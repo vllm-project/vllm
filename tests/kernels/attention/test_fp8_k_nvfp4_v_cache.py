@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,6 +10,7 @@ import torch
 from tests.kernels.quantization.nvfp4_utils import dequant_nvfp4_kv_cache
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import fp8_k_nvfp4_v_cache_split_views
+from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
@@ -19,6 +21,18 @@ pytestmark = pytest.mark.skipif(
 def _to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, float]:
     scale = float(x.abs().amax().item() / torch.finfo(torch.float8_e4m3fn).max)
     return (x / scale).to(torch.float8_e4m3fn), scale
+
+
+def test_fp8_k_nvfp4_v_query_dtype_is_e4m3() -> None:
+    builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
+    builder.vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(disable_flashinfer_q_quantization=False)
+    )
+    builder.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    builder.cache_dtype = "fp8_k_nvfp4_v"
+
+    assert builder.get_q_data_type(is_prefill=True) == torch.float8_e4m3fn
+    assert builder.get_q_data_type(is_prefill=False) == torch.float8_e4m3fn
 
 
 @torch.inference_mode()

@@ -1015,6 +1015,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         ):
             return self.model_config.dtype
 
+        # Packed NVFP4 and mixed caches use E4M3 queries even though their
+        # storage dtype is uint8.
+        if cache_dtype.startswith("nvfp4") or cache_dtype == "fp8_k_nvfp4_v":
+            return FlashInferBackend.get_dtype_for_flashinfer("fp8_e4m3")
+
         # Otherwise, match Q dtype to the KV cache dtype.
         if cache_dtype.startswith("fp8"):
             # FP8-Q requires an fp8 tensor-core attention path.
@@ -1025,8 +1030,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             ) or current_platform.is_device_capability_family(100):
                 return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
             return self.model_config.dtype
-        if cache_dtype.startswith("nvfp4") or cache_dtype == "fp8_k_nvfp4_v":
-            return FlashInferBackend.get_dtype_for_flashinfer("fp8_e4m3")
         return self.kv_cache_spec.dtype
 
     def _make_buffer(
