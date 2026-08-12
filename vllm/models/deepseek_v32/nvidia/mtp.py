@@ -6,9 +6,10 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -36,6 +37,11 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_shard,
+)
 from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -99,13 +105,20 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             self.hnorm.weight,
             self.enorm.variance_epsilon,
         )
+        is_sequence_parallel = self.mtp_block.use_sequence_parallel
+        if is_sequence_parallel:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                forward_context = get_forward_context()
+                forward_context.is_padding = sp_padding_mask(
+                    forward_context.is_padding, eh_input
+                )
+            eh_input = sp_shard(eh_input)
         hidden_states = run_glm52_plan(self._eh_plan, eh_input, self.eh_proj.weight)
         if hidden_states is None:
             hidden_states = self.eh_proj(eh_input)
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        is_sequence_parallel = self.mtp_block.use_sequence_parallel_moe
         # Recycle the POST-final-norm hidden into the next draft step. The
         # residual-add is fused into the final RMSNorm so it is computed
         # exactly once, and the result is returned for both tuple positions:
@@ -118,8 +131,7 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         # DeepSeekMTPModel architecture).
         if is_sequence_parallel:
             hidden_states, _ = self.shared_head.norm(hidden_states, residual)
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            hidden_states = hidden_states[: positions.shape[0]]
+            hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
         else:
             # The MoE output is left un-reduced; fuse its all-reduce into the
             # final norm, as the main model does at layer boundaries.

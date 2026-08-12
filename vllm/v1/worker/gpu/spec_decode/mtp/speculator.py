@@ -10,9 +10,6 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 
 class MTPSpeculator(AutoRegressiveSpeculator):
-    # index_share_for_mtp_iteration: draft step 0 computes the top-k, steps 1+
-    # set skip_topk and reuse it, skipping the indexer GEMMs and op. Set only
-    # once load_draft_model has confirmed the model exposes the toggle.
     share_mtp_topk_indices: bool = False
 
     def load_draft_model(
@@ -27,9 +24,14 @@ class MTPSpeculator(AutoRegressiveSpeculator):
             if spec_config is not None
             else None
         )
-        self.share_mtp_topk_indices = getattr(
-            draft_hf_config, "index_share_for_mtp_iteration", False
-        ) and hasattr(draft_model.model, "set_skip_topk")
+        # Detect index_share_for_mtp_iteration. When True, the proposer
+        # toggles skip_topk so step 0 computes MTP's own indices and
+        # steps 1+ reuse them.
+        self.share_mtp_topk_indices = (
+            getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
+            and hasattr(draft_model.model, "set_skip_topk")
+            and hasattr(draft_model.model, "compact_topk_indices")
+        )
         return draft_model
 
     def on_prefill_begin(self, num_reqs: int) -> None:
@@ -39,12 +41,15 @@ class MTPSpeculator(AutoRegressiveSpeculator):
             self.model.model.set_skip_topk(False)
 
     def on_prefill_end(self, num_reqs: int) -> None:
-        # Step 0 wrote a row per query token; gather each request's last-token
-        # row to the front so the single-token steps 1+ line up.
+        # Step 0 (prefill) wrote topk indices for every query token in the
+        # multi-token batch. Compact them down to each request's last token so
+        # steps 1+ can reuse them from the shared buffer.
         if self.share_mtp_topk_indices and self.num_speculative_steps > 1:
             self.model.model.compact_topk_indices(self.last_token_indices[:num_reqs])
 
     def on_multi_step_decode_begin(self, num_reqs: int) -> None:
+        # Switch to reuse mode so draft steps 1+ skip the indexer op and read
+        # the indices that step 0 wrote into the shared buffer.
         if self.share_mtp_topk_indices:
             self.model.model.set_skip_topk(True)
 

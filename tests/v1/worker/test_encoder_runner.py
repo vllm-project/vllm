@@ -224,3 +224,19 @@ def test_execute_mm_encoder_is_a_noop_without_scheduled_items():
 
     assert not cache.encoder_outputs
     state.encoder_runner.execute_mm_encoder.assert_not_called()
+
+
+def test_encoder_timing_stats_registry():
+    runner = _make_runner([], [])
+    runner.enable_timing = True
+
+    with runner.timed_encoder_operation({"r1"}):
+        pass
+    with runner.timed_encoder_operation({"r1"}):
+        pass
+
+    stats = runner.get_encoder_timing_stats()
+    assert set(stats) == {"r1"}
+    assert stats["r1"]["num_encoder_calls"] == 2
+    assert stats["r1"]["encoder_forward_secs"] >= 0
+    assert runner.get_encoder_timing_stats() == {}
