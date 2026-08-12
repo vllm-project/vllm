@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
+from dataclasses import dataclass, field
 
 from typing_extensions import override
 
@@ -25,6 +26,11 @@ from vllm.v1.kv_offload.cpu.common import (
 )
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
+
+
+@dataclass
+class _AdmissionState:
+    request_tokens_by_manager: dict[object, object] = field(default_factory=dict)
 
 
 class CPUOffloadingManager(OffloadingManager):
@@ -67,10 +73,14 @@ class CPUOffloadingManager(OffloadingManager):
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
 
-        # Number of block references. It is ordered so can evict the LRU entry in O(1).
+        # Number of requests producing each candidate, in LRU order.
         self.counts: OrderedDict[OffloadKey, int] | None = (
             OrderedDict() if store_threshold >= 2 else None
         )
+        self._observed_request_tokens: dict[OffloadKey, set[object] | None] | None = (
+            {} if store_threshold >= 2 else None
+        )
+        self._admission_state_key = object()
 
     # --- block pool ---
 
@@ -109,16 +119,62 @@ class CPUOffloadingManager(OffloadingManager):
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
 
+    def _observe_store_candidates(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> None:
+        if self.counts is None:
+            return
+
+        state = req_context.get_state(_AdmissionState)
+        if state is None:
+            state = _AdmissionState()
+            req_context.set_state(state)
+
+        request_token = state.request_tokens_by_manager.setdefault(
+            self._admission_state_key, object()
+        )
+        assert self._observed_request_tokens is not None
+
+        # Protect and count tracked candidates before admitting new ones, so
+        # the input order cannot evict a later candidate from this request.
+        protected: set[OffloadKey] = set()
+        for key in keys:
+            if key in self.counts:
+                protected.add(key)
+                self.counts.move_to_end(key)
+                observed_request_tokens = self._observed_request_tokens[key]
+                if (
+                    observed_request_tokens is not None
+                    and request_token not in observed_request_tokens
+                ):
+                    self.counts[key] += 1
+                    if self.counts[key] >= self.store_threshold:
+                        self._observed_request_tokens[key] = None
+                    else:
+                        observed_request_tokens.add(request_token)
+
+        # Keep candidates stable within a request so oversized batches can
+        # reach the threshold instead of churning the entire tracker.
+        num_unprotected = len(self.counts) - len(protected)
+        for key in keys:
+            if key in self.counts:
+                continue
+            if len(self.counts) >= self.max_tracker_size:
+                if num_unprotected == 0:
+                    continue
+                evicted_key = next(iter(self.counts))
+                while evicted_key in protected:
+                    self.counts.move_to_end(evicted_key)
+                    evicted_key = next(iter(self.counts))
+                del self.counts[evicted_key]
+                del self._observed_request_tokens[evicted_key]
+                num_unprotected -= 1
+            self.counts[key] = 1
+            self._observed_request_tokens[key] = {request_token}
+            protected.add(key)
+
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        if self.counts is not None:
-            if key in self.counts:
-                self.counts.move_to_end(key)
-                self.counts[key] += 1
-            else:
-                if len(self.counts) >= self.max_tracker_size:
-                    self.counts.popitem(last=False)
-                self.counts[key] = 1
         block = self._policy.get(key)
         if block is None:
             return LookupResult.MISS
@@ -168,12 +224,17 @@ class CPUOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
-        if self.counts is not None:
-            num_keys = len(keys)
-            keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
-            self.stores_skipped_in_current_batch += num_keys - len(keys)
         # filter out blocks that are already stored
         keys_to_store = [k for k in keys if self._policy.get(k) is None]
+        if self.counts is not None:
+            self._observe_store_candidates(keys_to_store, req_context)
+            num_keys = len(keys_to_store)
+            keys_to_store = [
+                k
+                for k in keys_to_store
+                if self.counts.get(k, 0) >= self.store_threshold
+            ]
+            self.stores_skipped_in_current_batch += num_keys - len(keys_to_store)
 
         if not keys_to_store:
             return PrepareStoreOutput(
