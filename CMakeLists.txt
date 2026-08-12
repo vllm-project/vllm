@@ -222,7 +222,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # `+PTX` in TORCH_CUDA_ARCH_LIST is not preserved here. If a kernel really
   # needs PTX, add `+PTX` to that kernel's component-specific arch list below.
   #
-  clear_cuda_arches(CUDA_ARCH_FLAGS)
+  clear_cuda_gencode_flags(CUDA_ARCH_FLAGS)
   warn_if_ptx_arch_requested("${CUDA_ARCH_FLAGS}")
   extract_unique_cuda_archs_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
   message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")

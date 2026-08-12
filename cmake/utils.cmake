@@ -220,11 +220,11 @@ endmacro()
 #
 # Example:
 #   CMAKE_CUDA_FLAGS="-Wall -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75"
-#   clear_cuda_arches(CUDA_ARCH_FLAGS)
+#   clear_cuda_gencode_flags(CUDA_ARCH_FLAGS)
 #   CUDA_ARCH_FLAGS="-gencode arch=compute_70,code=sm_70;-gencode arch=compute_75,code=sm_75"
 #   CMAKE_CUDA_FLAGS="-Wall"
 #
-macro(clear_cuda_arches CUDA_ARCH_FLAGS)
+macro(clear_cuda_gencode_flags CUDA_ARCH_FLAGS)
     # Extract all `-gencode` flags from `CMAKE_CUDA_FLAGS`
     string(REGEX MATCHALL "-gencode arch=[^ ]+" CUDA_ARCH_FLAGS
       ${CMAKE_CUDA_FLAGS})
