@@ -218,6 +218,32 @@ def test_hermes_streaming_tool_call_with_stream_interval(
 
 
 @pytest.mark.parametrize("stream_interval", [2, 3, 5, 8])
+def test_hermes_streaming_tool_call_with_name_key_argument(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    stream_interval: int,
+) -> None:
+    """An argument literally named "name" must not be mistaken for the
+    tool's own name field (regression: hunyuan_a13b/xlam phantom-tool-call
+    bug class, vllm-project/vllm#49535)."""
+    text = (
+        '<tool_call>{"name": "create_user", '
+        '"arguments": {"name": "Alice", "role": "admin"}}</tool_call>'
+    )
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(
+        qwen_tokenizer, parser, any_chat_request, text, stream_interval
+    )
+
+    tool_deltas = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    assert tool_deltas, "Expected at least one tool call delta"
+    assert tool_deltas[0].function.name == "create_user"
+
+    args_str = "".join(tc.function.arguments or "" for tc in tool_deltas)
+    assert json.loads(args_str) == {"name": "Alice", "role": "admin"}
+
+
+@pytest.mark.parametrize("stream_interval", [2, 3, 5, 8])
 def test_hermes_streaming_content_then_tool_call_with_stream_interval(
     qwen_tokenizer: TokenizerLike,
     any_chat_request: ChatCompletionRequest,
