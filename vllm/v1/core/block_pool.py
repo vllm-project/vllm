@@ -733,7 +733,7 @@ class BlockPool:
             if block.ref_cnt == 0 and not block.is_null:
                 # When caching is disabled we always append for better
                 # GPU cache locality from reusing recently used blocks
-                if block.block_hash is None and self.enable_caching:
+                if block.block_hash is None or not self.enable_caching:
                     blocks_without_hash.append(block)
                 else:
                     blocks_with_hash.append(block)

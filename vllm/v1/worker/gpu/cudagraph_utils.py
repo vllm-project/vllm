@@ -92,22 +92,6 @@ def _is_compatible(
     )
 
 
-def get_uniform_token_count(
-    num_reqs: int,
-    num_tokens: int,
-    max_query_len: int,
-) -> int | None:
-    """
-    Return the uniform token count if batch is uniform, else None.
-    A batch is uniform if all requests have the same number of tokens.
-    """
-    if (max_query_len == num_tokens // num_reqs) and (
-        num_tokens == max_query_len * num_reqs
-    ):
-        return max_query_len
-    return None
-
-
 class CudaGraphManager:
     def __init__(
         self,
