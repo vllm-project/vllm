@@ -98,6 +98,7 @@ class EngineCoreOutput(
     routed_experts: object | None = None
     num_nans_in_logits: int = 0
     new_sampling_mask: object | None = None
+    mm_cache_miss_hashes: list[str] | None = None
 
 
 class EngineCoreOutputs(

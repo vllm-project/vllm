@@ -114,6 +114,17 @@ pub struct EngineCoreOutput {
     pub num_nans_in_logits: u32,
     #[serde(default)]
     pub new_sampling_mask: Option<OpaqueValue>,
+    /// Multi-modal hashes the engine could not find in its receiver cache,
+    /// because the frontend sent `data: None` for an item the engine had
+    /// already evicted. Non-empty makes the output retryable: a frontend that
+    /// keeps a metadata-only shadow of the engine cache drops these entries and
+    /// resends the request with the item data attached.
+    ///
+    /// TODO: always `None` here, since this client has no multi-modal processor
+    /// cache and always sends item data inline. Act on it once the Rust
+    /// frontend grows one.
+    #[serde(default)]
+    pub mm_cache_miss_hashes: Option<Vec<String>>,
 }
 
 impl EngineCoreOutput {
@@ -374,19 +385,9 @@ mod tests {
             outputs: vec![EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![42],
-                new_logprobs: None,
-                new_prompt_logprobs_tensors: None,
-                pooling_output: None,
                 finish_reason: Some(EngineCoreFinishReason::Length),
                 stop_reason: Some(StopReason::Text("stop".to_string())),
-                events: None,
-                kv_transfer_params: None,
-                ec_transfer_params: None,
-                trace_headers: None,
-                prefill_stats: None,
-                routed_experts: None,
-                num_nans_in_logits: 0,
-                new_sampling_mask: None,
+                ..Default::default()
             }],
             finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
             ..Default::default()
@@ -441,6 +442,7 @@ mod tests {
                             routed_experts: None,
                             num_nans_in_logits: 0,
                             new_sampling_mask: None,
+                            mm_cache_miss_hashes: None,
                         },
                     ],
                     scheduler_stats: None,
