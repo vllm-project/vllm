@@ -1241,9 +1241,7 @@ def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
     src_padding = dst.shape[-1] - src.shape[-1]
     assert src_padding >= 0
     new_src = torch.nn.functional.pad(src, (0, src_padding), value=-1)
-    # `non_blocking` matters even for a pageable source: without it the copy
-    # blocks the calling thread.
-    dst.copy_(new_src, non_blocking=True)
+    dst.copy_(new_src)
 
 
 def _commit_eplb_maps_for_layer(
@@ -1262,9 +1260,9 @@ def _commit_eplb_maps_for_layer(
     src = new_physical_to_logical_map
     dst = model_state.physical_to_logical_map[layer]
     assert src.shape == dst.shape, (
-        "The number of physical experts must stay the same while running "
-        f"Async EPLB. Current number of physical experts: {dst.shape[0]}. "
-        f"New number of physical experts {src.shape[0]}."
+        "The number of physical experts must stay the same while running Async EPLB. "
+        f"Current number of physical experts: {dst.shape[0]}. New number of physical "
+        f"experts {src.shape[0]}."
     )
     dst.copy_(src, non_blocking=True)
 

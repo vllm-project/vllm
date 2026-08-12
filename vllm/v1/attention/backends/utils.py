@@ -544,8 +544,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     # just how many there were -- already known as a Python int.
     total_num_decode_tokens = num_logits_indices
 
-    # Largest per-request logits count. The runner derives this on the host
-    # from `num_sampled_tokens`, so it needs no D2H.
+    # Largest per-request logits count.
     decode_max_query_len = common_attn_metadata.max_logits_per_req
     assert decode_max_query_len is not None
 
