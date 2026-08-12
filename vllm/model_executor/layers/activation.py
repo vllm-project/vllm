@@ -226,10 +226,15 @@ class SiluAndMulWithClamp(CustomOp):
         self.swiglu_limit = float(swiglu_limit)
         self.alpha = float(alpha)
         self.beta = float(beta)
-        if current_platform.is_rocm() or current_platform.is_xpu():
+        if current_platform.is_xpu():
             self._forward_method = self.forward_native
         elif current_platform.is_cuda_alike():
-            self.op = torch.ops._C.silu_and_mul_with_clamp
+            # Limit the ROCm _C path to the default case to avoid the
+            # precision loss MiniMax saw without fp32 intermediates.
+            if current_platform.is_rocm() and (self.alpha != 1.0 or self.beta != 0.0):
+                self._forward_method = self.forward_native
+            else:
+                self.op = torch.ops._C.silu_and_mul_with_clamp
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
 
