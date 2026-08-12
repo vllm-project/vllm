@@ -1,45 +1,635 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""GLM5Next vision tower + multimodal processor.
 
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.glm4_1v import Glm4vProcessingInfo
-from vllm.model_executor.models.glm_ocr import (
-    GlmOcrPatchMerger,
-    GlmOcrVisionTransformer,
+Self-contained fork of the GLM-OCR / GLM-4V vision transformer so GLM5Next owns its
+vision path (no inheritance from `glm_ocr`/`glm4_1v`, leaving those upstream models
+untouched). Folds in:
+  - P1: fused q/k RMSNorm (one kernel, two distinct weights) in the attention.
+  - P7: a `forward(..., encoder_metadata=)` fast path so the ModelRunnerV2 encoder
+    CUDA graph (PR #49852 + `--compilation-config cudagraph_mm_encoder=true`) can
+    replay the tower instead of re-building rotary/cu_seqlens on the CPU each call.
+  - the OCR-variant delta vs GLM-4V base (no abs-pos embeddings / post-conv norm;
+    q/k norm eps=1e-5; qkv/proj/MLP bias=True).
+
+Default (flag off) is bit-identical to the inherited eager forward.
+"""
+
+from functools import partial
+
+import numpy as np
+import torch
+import torch.nn as nn
+from einops import rearrange
+
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    parallel_state,
 )
+from vllm.distributed import utils as dist_utils
+from vllm.model_executor.layers.activation import SiluAndMulWithClamp
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.model_executor.models.glm4_1v import Glm4vProcessingInfo
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+)
+from vllm.model_executor.models.vision import (
+    get_vit_attn_backend,
+    is_vit_use_data_parallel,
+)
+from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
-class Glm5NextVisionPatchMerger(GlmOcrPatchMerger):
-    pass
-
-
-class Glm5NextVisionTransformer(GlmOcrVisionTransformer):
+class Glm5NextVisionPatchEmbed(nn.Module):
     def __init__(
         self,
-        text_config,
-        vision_config,
-        norm_eps: float = 1e-5,
+        patch_size: int = 14,
+        temporal_patch_size: int = 1,
+        in_channels: int = 3,
+        hidden_size: int = 1536,
+    ) -> None:
+        super().__init__()
+        self.patch_size = patch_size
+        self.temporal_patch_size = temporal_patch_size
+        self.hidden_size = hidden_size
+
+        kernel_size = (temporal_patch_size, patch_size, patch_size)
+        self.proj = Conv3dLayer(
+            in_channels,
+            hidden_size,
+            kernel_size=kernel_size,
+            stride=kernel_size,
+            bias=True,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        L, C = x.shape
+        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
+        x = self.proj(x).view(L, self.hidden_size)
+        return x
+
+
+class Glm5NextVisionMLP(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int,
+        swiglu_limit: float,
+        bias: bool = True,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=in_features,
+            output_sizes=[hidden_features] * 2,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.down_proj = RowParallelLinear(
+            hidden_features,
+            in_features,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+            disable_tp=use_data_parallel,
+        )
+        # GLM5Next clamps the vision SwiGLU gate/up (matches sglang
+        # `swiglu_clamped`); GLM-OCR / GLM-4V do not. This is the behavioral
+        # delta that makes the vision tower genuinely GLM5Next-specific.
+        self.act_fn = SiluAndMulWithClamp(swiglu_limit=swiglu_limit)
+
+    def forward(self, x: torch.Tensor):
+        x, _ = self.gate_up_proj(x)
+        x = self.act_fn(x)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class Glm5NextVisionAttention(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        projection_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(
-            text_config,
-            vision_config,
-            norm_eps=norm_eps,
-            quant_config=quant_config,
-            prefix=prefix,
+        super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
+        self.tp_size = (
+            1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        )
+        self.tp_rank = (
+            0 if use_data_parallel else parallel_state.get_tensor_model_parallel_rank()
+        )
+        self.hidden_size_per_attention_head = dist_utils.divide(
+            projection_size, num_heads
+        )
+        self.num_attention_heads_per_partition = dist_utils.divide(
+            num_heads, self.tp_size
         )
 
-        # Override the merger to use the GLM5-Next-specific bottleneck width
-        # (vision_config.projection_intermediate_size) instead of
-        # text_config.intermediate_size used by GLM-OCR.
-        self.merger = Glm5NextVisionPatchMerger(
+        self.head_dim = embed_dim // num_heads
+
+        # q/k norm eps hard-coded 1e-5 — distinct from block/post norm eps.
+        self.q_norm = RMSNorm(self.head_dim, eps=1e-5)
+        self.k_norm = RMSNorm(self.head_dim, eps=1e-5)
+
+        self.qkv = QKVParallelLinear(
+            hidden_size=embed_dim,
+            head_size=self.hidden_size_per_attention_head,
+            total_num_heads=num_heads,
+            total_num_kv_heads=num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj" if quant_config else f"{prefix}.qkv",
+            disable_tp=use_data_parallel,
+        )
+        self.proj = RowParallelLinear(
+            input_size=projection_size,
+            output_size=embed_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj",
+            bias=True,
+            disable_tp=use_data_parallel,
+        )
+
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_attention_heads_per_partition,
+            head_size=self.hidden_size_per_attention_head,
+            scale=self.hidden_size_per_attention_head**-0.5,
+            prefix=f"{prefix}.attn",
+        )
+        self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
+
+    def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        seq_len, bs, _ = qkv.shape
+        q, k, v = qkv.chunk(3, dim=2)
+        new_shape = (
+            seq_len,
+            bs,
+            self.num_attention_heads_per_partition,
+            self.hidden_size_per_attention_head,
+        )
+        q, k, v = (x.view(*new_shape) for x in (q, k, v))
+        return q, k, v
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
+        max_seqlen: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x, _ = self.qkv(x)
+        q, k, v = self.split_qkv(x)
+
+        # P1: fused q/k RMSNorm (two distinct weights, one launch; fp32, bit-identical).
+        q_shape, k_shape = q.shape, k.shape
+        q_flat = q.reshape(-1, self.head_dim)
+        k_flat = k.reshape(-1, self.head_dim)
+        q, k = fused_q_kv_rmsnorm(
+            q_flat,
+            k_flat,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            self.q_norm.variance_epsilon,
+        )
+        q = q.view(q_shape)
+        k = k.view(k_shape)
+
+        q, k, v = (rearrange(t, "s b ... -> b s ...").contiguous() for t in (q, k, v))
+        if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
+            qk_concat = torch.cat([q, k], dim=0)
+            qk_rotated = self.apply_rotary_emb(
+                qk_concat,
+                rotary_pos_emb_cos,
+                rotary_pos_emb_sin,
+            )
+            q, k = torch.chunk(qk_rotated, 2, dim=0)
+
+        context_layer = self.attn(
+            query=q,
+            key=k,
+            value=v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
+
+        output, _ = self.proj(context_layer)
+        return output
+
+
+class Glm5NextVisionBlock(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_hidden_dim: int,
+        swiglu_limit: float,
+        norm_layer: partial[nn.Module] | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = partial(nn.LayerNorm, eps=1e-6)
+        self.norm1 = norm_layer(dim)
+        self.norm2 = norm_layer(dim)
+        self.attn = Glm5NextVisionAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            projection_size=dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
+        self.mlp = Glm5NextVisionMLP(
+            dim,
+            mlp_hidden_dim,
+            swiglu_limit=swiglu_limit,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
+        max_seqlen: int | None = None,
+    ) -> torch.Tensor:
+        x_attn = self.attn(
+            self.norm1(x),
+            cu_seqlens=cu_seqlens,
+            rotary_pos_emb_cos=rotary_pos_emb_cos,
+            rotary_pos_emb_sin=rotary_pos_emb_sin,
+            max_seqlen=max_seqlen,
+        )
+        x_fused_norm, residual = self.norm2(x, residual=x_attn)
+        x = residual + self.mlp(x_fused_norm)
+        return x
+
+
+class Glm5NextPatchMerger(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        context_dim: int,
+        swiglu_limit: float,
+        quant_config: QuantizationConfig | None = None,
+        bias: bool = False,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
+        self.hidden_size = d_model
+        self.proj = ColumnParallelLinear(
+            self.hidden_size,
+            self.hidden_size,
+            bias=bias,
+            gather_output=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj",
+            disable_tp=use_data_parallel,
+        )
+        self.post_projection_norm = nn.LayerNorm(self.hidden_size)
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=self.hidden_size,
+            output_sizes=[context_dim] * 2,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.down_proj = RowParallelLinear(
+            context_dim,
+            self.hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+            disable_tp=use_data_parallel,
+        )
+        # Merger SwiGLU is clamped too (matches sglang Glm5NextVisionPatchMerger);
+        # GLM-OCR / GLM-4V mergers are unclamped.
+        self.act_fn = SiluAndMulWithClamp(swiglu_limit=swiglu_limit)
+        self.extra_activation_func = nn.GELU()
+
+    def forward(self, x: torch.Tensor):
+        x, _ = self.proj(x)
+        x = self.extra_activation_func(self.post_projection_norm(x))
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class Glm5NextVisionTransformer(nn.Module):
+    # Stacked-weight remap for the GLM-OCR/GLM-4V vision checkpoint layout.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".attn.q.": (".attn.qkv.", "q"),
+            ".attn.k.": (".attn.qkv.", "k"),
+            ".attn.v.": (".attn.qkv.", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        }
+    )
+
+    def __init__(
+        self,
+        text_config,  # noqa: ANN001  (kept for call-signature parity; unused — GLM5Next
+        # uses vision_config.projection_intermediate_size for the merger, not
+        # text_config.intermediate_size like GLM-OCR does.)
+        vision_config,
+        norm_eps: float = 1e-6,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
+        self.tp_size = (
+            1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        )
+
+        patch_size = vision_config.patch_size
+        temporal_patch_size = vision_config.temporal_patch_size
+        in_channels = vision_config.in_channels
+        depth = vision_config.depth
+        self.hidden_size = vision_config.hidden_size
+        self.num_heads = vision_config.num_heads
+
+        self.patch_size = vision_config.patch_size
+        self.spatial_merge_size = vision_config.spatial_merge_size
+        self.out_hidden_size = vision_config.out_hidden_size
+
+        # GLM5Next applies a SwiGLU gate/up clamp in the vision encoder (block
+        # MLP + patch merger) that GLM-OCR / GLM-4V do not. Falls back to the
+        # text config's limit if the vision config omits it (matches sglang).
+        swiglu_limit = getattr(vision_config, "swiglu_limit", None)
+        if swiglu_limit is None:
+            swiglu_limit = getattr(text_config, "swiglu_limit", None)
+        assert swiglu_limit is not None, (
+            "GLM5Next vision requires swiglu_limit (vision_config or text_config)"
+        )
+
+        # Single construction pass — no abs-pos embeddings / post-conv norm (OCR delta).
+        self.patch_embed = Glm5NextVisionPatchEmbed(
+            patch_size=patch_size,
+            temporal_patch_size=temporal_patch_size,
+            in_channels=in_channels,
+            hidden_size=self.hidden_size,
+        )
+
+        norm_layer = partial(RMSNorm, eps=norm_eps)
+        head_dim = self.hidden_size // self.num_heads
+        self.rotary_pos_emb = get_rope(
+            head_size=head_dim,
+            max_position=8192,
+            is_neox_style=True,
+            rope_parameters={"partial_rotary_factor": 0.5},
+        )
+        self.blocks = nn.ModuleList(
+            [
+                Glm5NextVisionBlock(
+                    dim=self.hidden_size,
+                    num_heads=self.num_heads,
+                    mlp_hidden_dim=vision_config.intermediate_size,
+                    swiglu_limit=swiglu_limit,
+                    norm_layer=norm_layer,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.blocks.{layer_idx}",
+                )
+                for layer_idx in range(depth)
+            ]
+        )
+        # GLM5Next-specific merger bottleneck width.
+        self.merger = Glm5NextPatchMerger(
             d_model=vision_config.out_hidden_size,
             context_dim=vision_config.projection_intermediate_size,
+            swiglu_limit=swiglu_limit,
             quant_config=quant_config,
             bias=False,
             prefix=f"{prefix}.merger",
         )
+
+        self.downsample = Conv2dLayer(
+            in_channels=vision_config.hidden_size,
+            out_channels=vision_config.out_hidden_size,
+            kernel_size=vision_config.spatial_merge_size,
+            stride=vision_config.spatial_merge_size,
+        )
+        self.post_layernorm = RMSNorm(
+            vision_config.hidden_size, eps=vision_config.rms_norm_eps
+        )
+
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+        )
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.patch_embed.proj.weight.dtype
+
+    @property
+    def device(self) -> torch.device:
+        return self.patch_embed.proj.weight.device
+
+    def rot_pos_emb(
+        self, grid_thw: list[list[int]]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        pos_ids = []
+        for t, h, w in grid_thw:
+            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            hpos_ids = (
+                hpos_ids.reshape(
+                    h // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                    w // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                )
+                .permute(0, 2, 1, 3)
+                .flatten()
+            )
+            wpos_ids = (
+                wpos_ids.reshape(
+                    h // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                    w // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                )
+                .permute(0, 2, 1, 3)
+                .flatten()
+            )
+            pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
+        pos_ids = torch.cat(pos_ids, dim=0)
+        max_grid_size = max(max(h, w) for _, h, w in grid_thw)
+
+        cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
+
+        pos_ids = pos_ids.to(cos.device, non_blocking=True)
+        cos_combined = cos[pos_ids].flatten(1)
+        sin_combined = sin[pos_ids].flatten(1)
+        return cos_combined, sin_combined, pos_ids
+
+    def compute_attn_mask_seqlen(
+        self,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor | None:
+        max_seqlen = None
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
+        }:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        return max_seqlen
+
+    def prepare_encoder_metadata(
+        self,
+        grid_thw_list: list[list[int]],
+        *,
+        max_batch_size: int | None = None,
+        max_frames_per_batch: int | None = None,
+        max_seqlen_override: int | None = None,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor | None]:
+        """Compute encoder metadata (shared by eager forward + CG capture/replay).
+
+        Forked from Glm4vVisionTransformer with the ``pos_embeds`` entry removed —
+        GLM5Next's tower has no abs-pos embeddings (``self.embeddings`` is never
+        built), so the upstream ``pos_embeds_interpolate`` call would AttributeError.
+        """
+        if device is None:
+            device = self.device
+
+        metadata: dict[str, torch.Tensor | None] = {}
+
+        rotary_cos, rotary_sin, _ = self.rot_pos_emb(grid_thw_list)
+        metadata["rotary_pos_emb_cos"] = rotary_cos
+        metadata["rotary_pos_emb_sin"] = rotary_sin
+
+        grid_thw_np = np.array(grid_thw_list, dtype=np.int32)
+        patches_per_frame = grid_thw_np[:, 1] * grid_thw_np[:, 2]
+        cu_seqlens = np.repeat(patches_per_frame, grid_thw_np[:, 0]).cumsum(
+            dtype=np.int32
+        )
+        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+
+        pad_to = (
+            max_frames_per_batch if max_frames_per_batch is not None else max_batch_size
+        )
+        if pad_to is not None:
+            num_seqs = len(cu_seqlens) - 1
+            if num_seqs < pad_to:
+                cu_seqlens = np.concatenate(
+                    [
+                        cu_seqlens,
+                        np.full(
+                            pad_to - num_seqs,
+                            cu_seqlens[-1],
+                            dtype=np.int32,
+                        ),
+                    ]
+                )
+
+        metadata["sequence_lengths"] = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_seqlens, device
+        )
+
+        if max_seqlen_override is not None:
+            max_seqlen_val = max_seqlen_override
+        else:
+            max_seqlen_val = MMEncoderAttention.compute_max_seqlen(
+                self.attn_backend, cu_seqlens
+            )
+        metadata["max_seqlen"] = torch.tensor(max_seqlen_val, dtype=torch.int32)
+
+        metadata["cu_seqlens"] = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_seqlens,
+            self.hidden_size,
+            self.tp_size,
+            device,
+        )
+
+        return metadata
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        grid_thw: torch.Tensor | list[list[int]],
+        *,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        # patchify
+        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.patch_embed(x)
+
+        if encoder_metadata is not None:
+            # Encoder CUDA-graph path (PR #49852): rotary/cu_seqlens/max_seqlen are
+            # precomputed by prepare_encoder_metadata (which uses rot_pos_emb exactly
+            # as the eager rebuild does), so reuse them and skip the per-call CPU
+            # rebuild (the low-GPU-util culprit on multimodal workloads).
+            rotary_pos_emb_cos = encoder_metadata["rotary_pos_emb_cos"]
+            rotary_pos_emb_sin = encoder_metadata["rotary_pos_emb_sin"]
+            cu_seqlens = encoder_metadata["cu_seqlens"]
+            max_seqlen = encoder_metadata["max_seqlen"]
+        else:
+            if isinstance(grid_thw, list):
+                grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
+            rotary_pos_emb_cos, rotary_pos_emb_sin, _ = self.rot_pos_emb(grid_thw)
+            cu_seqlens = torch.repeat_interleave(
+                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+            ).cumsum(dim=0, dtype=torch.int32)
+            cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
+            cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+            max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+
+        # transformers
+        x = x.unsqueeze(1)
+        for blk in self.blocks:
+            x = blk(
+                x,
+                cu_seqlens=cu_seqlens,
+                rotary_pos_emb_cos=rotary_pos_emb_cos,
+                rotary_pos_emb_sin=rotary_pos_emb_sin,
+                max_seqlen=max_seqlen,
+            )
+
+        # adapter
+        x = self.post_layernorm(x)
+        x = x.view(-1, self.spatial_merge_size, self.spatial_merge_size, x.shape[-1])
+        x = x.permute(0, 3, 1, 2)
+        x = self.downsample(x).view(-1, self.out_hidden_size)
+        x = self.merger(x)
+        return x
+
+    def load_weights(self, weights) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Glm5NextProcessingInfo(Glm4vProcessingInfo):
