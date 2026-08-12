@@ -146,7 +146,11 @@ from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
+from vllm.v1.worker.utils import (
+    KVBlockZeroer,
+    copy_kv_cache_blocks_inplace,
+    get_uniform_decode_token_count,
+)
 
 logger = init_logger(__name__)
 
@@ -1040,42 +1044,80 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.kv_cache_block_copies,
             )
 
-    def prepare_inputs(
-        self,
-        scheduler_output: SchedulerOutput,
-        batch_desc: BatchExecutionDescriptor,
-        # May be less than scheduler_output.total_num_scheduled_tokens:
-        # adaptive verification trims the draft budget before running.
-        num_tokens: int,
-    ) -> InputBatch:
-        num_tokens_after_padding = batch_desc.num_tokens
-        assert num_tokens > 0
-        if envs.VLLM_MOE_SKIP_PADDING:
-            # Mark trailing cudagraph-padding rows so kernels can skip work for
-            # them when supported.
-            self.input_buffers.is_padding[:num_tokens].fill_(False)
-            self.input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(
-                True
-            )
+    def gather_batch_req_state(
+        self, scheduler_output: SchedulerOutput, dummy_run: bool
+    ) -> tuple["BatchReqState | None", int | None]:
+        """Gather CPU request state for the scheduled batch, in batch order.
+        Returns (batch_state, uniform_decode_token_count)
+        """
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
+        num_toks = scheduler_output.total_num_scheduled_tokens
+        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
 
-        # batch_idx -> req_id
+        if dummy_run:
+            # Dummy batches are uniform by construction.
+            return None, get_uniform_token_count(num_reqs, num_toks, max_query_len)
+
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
-        # Drafts-first ordering is required by adaptive verification
+        adaptive_draft_tokens = draft_tokens if self.adaptive_verification else {}
+        if adaptive_draft_tokens:
+            num_toks = self.adaptive_verification.get_num_tokens(  # type: ignore[union-attr]
+                num_tokens_per_req, adaptive_draft_tokens
+            )
+        # batch_idx -> req_id
         req_ids = sort_batch_req_ids(
-            num_tokens_per_req,
-            draft_tokens if self.adaptive_verification is not None else {},
-            self.decode_query_len,
+            num_tokens_per_req, adaptive_draft_tokens, self.decode_query_len
         )
         numtoks_iter = map(num_tokens_per_req.__getitem__, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
 
         idx_mapping_iter = map(self.req_states.req_id_to_index.__getitem__, req_ids)
         idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.intp, count=num_reqs)
+        prefill_len_np = self.req_states.prefill_len.np[idx_mapping_np]
+        num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[
+            idx_mapping_np
+        ]
+        is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
+
+        batch_state = BatchReqState(
+            req_ids=req_ids,
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_tokens=num_toks,
+            idx_mapping_np=idx_mapping_np,
+            prefill_len_np=prefill_len_np,
+            num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
+            is_prefilling_np=is_prefilling_np,
+            has_prefill=bool(is_prefilling_np.any()),
+        )
+        return batch_state, get_uniform_decode_token_count(
+            num_reqs, num_toks, max_query_len, batch_state.has_prefill
+        )
+
+    def prepare_inputs(
+        self,
+        scheduler_output: SchedulerOutput,
+        batch_req_state: "BatchReqState",
+        batch_desc: BatchExecutionDescriptor,
+    ) -> InputBatch:
+        num_tokens = batch_req_state.num_tokens
+        num_tokens_after_padding = batch_desc.num_tokens
+        assert num_tokens > 0
+        if envs.VLLM_MOE_SKIP_PADDING:
+            # Mark trailing cudagraph-padding rows so kernels can skip work for
+            # them when supported.
+            is_padding = self.input_buffers.is_padding
+            is_padding[:num_tokens].fill_(False)
+            is_padding[num_tokens:num_tokens_after_padding].fill_(True)
+
+        req_ids = batch_req_state.req_ids
+        num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
+        idx_mapping_np = batch_req_state.idx_mapping_np
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+        num_reqs = len(req_ids)
 
         # Get the number of draft tokens for each request.
+        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         num_draft_tokens_per_req = None
         if not draft_tokens:
             # No draft token scheduled (common case).
@@ -1107,15 +1149,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         adaptive_verification = (
             self.adaptive_verification if num_draft_tokens_per_req is not None else None
         )
-        num_scheduled_tokens_upper_bound = num_scheduled_tokens
+        num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
         if adaptive_verification is not None:
             # num_scheduled_tokens represents the draft budget evenly distributed across
             # all verification requests, `reallocate_drafts` will unevenly assign the
             # draft budget to requests on the GPU side only.
-            num_scheduled_tokens, cu_num_logits_np = (
+            num_scheduled_tokens_np, cu_num_logits_np = (
                 adaptive_verification.compact_batch(
                     num_draft_tokens_per_req,
-                    num_scheduled_tokens,
+                    num_scheduled_tokens_np,
                     cu_num_logits_np,
                 )
             )
@@ -1125,7 +1167,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
+        np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
@@ -1138,20 +1180,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
         if draft_tokens:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
-                idx_mapping,
-                total_num_logits,
-                cu_num_logits,
-                self.decode_query_len,
+                idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
             )
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
-        prefill_len_np = self.req_states.prefill_len.np[idx_mapping_np]
-        computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens
-        num_computed_prefill_tokens_np = computed_prefill_tokens_np[idx_mapping_np]
-        is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
 
         # Get prefill tokens if any.
-        if np.any(is_prefilling_np):
+        if batch_req_state.has_prefill:
             prepare_prefill_inputs(
                 self.input_buffers.input_ids,
                 self.req_states.next_prefill_tokens,
@@ -1239,9 +1274,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=dcp_local_seq_lens,
             num_computed_tokens_np=num_computed_tokens_np,
-            prefill_len_np=prefill_len_np,
-            num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
-            is_prefilling_np=is_prefilling_np,
+            prefill_len_np=batch_req_state.prefill_len_np,
+            num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
+            is_prefilling_np=batch_req_state.is_prefilling_np,
+            has_prefill=batch_req_state.has_prefill,
             max_seq_len_np=max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
@@ -1381,7 +1417,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
-        uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
+        batch_req_state, uniform_tok_count = self.gather_batch_req_state(
+            scheduler_output, dummy_run
+        )
+        if batch_req_state is not None:
+            num_toks = batch_req_state.num_tokens
 
         num_active_loras = 0
         if self.lora_config:
@@ -1396,18 +1436,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # when encoder inputs are scheduled, because this step updates
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
-
-        if (
-            self.adaptive_verification is not None
-            and scheduler_output.scheduled_spec_decode_tokens
-            and not dummy_run
-        ):
-            num_toks = self.adaptive_verification.get_num_tokens(
-                scheduler_output.num_scheduled_tokens,
-                scheduler_output.scheduled_spec_decode_tokens,
-            )
-            # Trimming drafts makes the batch non-uniform.
-            uniform_tok_count = None
 
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
@@ -1429,7 +1457,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
-            input_batch = self.prepare_inputs(scheduler_output, batch_desc, num_toks)
+            assert batch_req_state is not None
+            input_batch = self.prepare_inputs(
+                scheduler_output, batch_req_state, batch_desc
+            )
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
@@ -1789,8 +1820,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
-                    self.speculator.draft_token_confidence_probs,
-                    input_batch,
+                    self.speculator.draft_token_confidence_probs, input_batch
                 )
 
         if self.num_speculative_steps > 0:
@@ -1926,6 +1956,21 @@ class ExecuteModelState(NamedTuple):
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
     routed_experts: RoutedExpertsTensors | None
+
+
+class BatchReqState(NamedTuple):
+    """CPU request state for a scheduled batch, in batch (sorted) order."""
+
+    req_ids: list[str]
+    num_scheduled_tokens: np.ndarray  # [num_reqs]
+    # May be less than scheduler_output.total_num_scheduled_tokens:
+    # adaptive verification trims the draft budget before running.
+    num_tokens: int
+    idx_mapping_np: np.ndarray  # [num_reqs]
+    prefill_len_np: np.ndarray  # [num_reqs]
+    num_computed_prefill_tokens_np: np.ndarray  # [num_reqs]
+    is_prefilling_np: np.ndarray  # [num_reqs]
+    has_prefill: bool
 
 
 def sort_batch_req_ids(

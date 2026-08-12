@@ -35,7 +35,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, is_uniform_query_len
 
 logger = init_logger(__name__)
 
@@ -100,17 +100,17 @@ def _is_compatible(
 
 
 def get_uniform_token_count(
-    num_reqs: int,
-    num_tokens: int,
-    max_query_len: int,
+    num_reqs: int, num_tokens: int, max_query_len: int
 ) -> int | None:
     """
     Return the uniform token count if batch is uniform, else None.
     A batch is uniform if all requests have the same number of tokens.
+
+    Shape test only, valid for batches known to be decoding by construction
+    (e.g. dummy runs). Scheduled batches must use
+    `get_uniform_decode_token_count`.
     """
-    if (max_query_len == num_tokens // num_reqs) and (
-        num_tokens == max_query_len * num_reqs
-    ):
+    if is_uniform_query_len(num_reqs, num_tokens, max_query_len):
         return max_query_len
     return None
 
