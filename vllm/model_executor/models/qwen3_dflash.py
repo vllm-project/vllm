@@ -496,9 +496,7 @@ class DFlashQwen3Model(nn.Module):
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
         # Compute dtype for the fused-KV path (dequant / scaled_mm).
-        self.compute_dtype = getattr(
-            vllm_config.model_config, "dtype", torch.bfloat16
-        )
+        self.compute_dtype = getattr(vllm_config.model_config, "dtype", torch.bfloat16)
 
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))

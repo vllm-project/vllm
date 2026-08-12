@@ -26,8 +26,8 @@ from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
 from .qwen3_dflash import (
     ContextKVStrategy,
     DFlashQwen3Model,
-    _dflash_layer_causal,
     _decide_context_kv_strategy,
+    _dflash_layer_causal,
     _project_kv_per_layer,
 )
 from .qwen3_dspark import DSparkMarkovHead, Qwen3DSparkForCausalLM
@@ -217,7 +217,7 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         # Two tiers: FUSED (all unquantized -> fused F.linear) or PER_LAYER
         # (any quantized scheme -> per-layer quantized k_proj projection).
         self._fuse_context_kv = (
-            _decide_context_kv_strategy((a.k_proj for a in layers_attn))
+            _decide_context_kv_strategy(a.k_proj for a in layers_attn)
             == ContextKVStrategy.FUSED
         )
         if self._fuse_context_kv:

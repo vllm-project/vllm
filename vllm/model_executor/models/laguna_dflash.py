@@ -163,9 +163,7 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         # Two tiers: FUSED (all unquantized -> stacked bmm) or PER_LAYER
         # (any quantized scheme -> per-layer quantized projection).
         self._fuse_context_kv = (
-            _decide_context_kv_strategy(
-                (a.qkv_proj for a in layers_attn)
-            )
+            _decide_context_kv_strategy(a.qkv_proj for a in layers_attn)
             == ContextKVStrategy.FUSED
         )
         if self._fuse_context_kv:
