@@ -436,25 +436,42 @@ def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
 def test_mamba_get_block_table_tensor_align_mode_oob_clamp():
     """Regression test for https://github.com/vllm-project/vllm/issues/42084
 
-    In mamba_cache_mode='align' with speculative decoding, sequences with
-    seq_len near max_model_len caused indices_to_gather to exceed the block
-    table column count, triggering a CUDA device-side assert in torch.gather.
+    In mamba_cache_mode='align' with speculative decoding, seq_lens can
+    transiently exceed max_model_len under async scheduling because:
 
-    The fix adds .clamp_(max=block_table.shape[1] - 1) to indices_to_gather
-    before the gather call.
+        seq_lens = num_computed_tokens + num_scheduled_tokens
+
+    and num_scheduled_tokens includes speculative draft tokens, so a request
+    near the end of its context window can produce:
+
+        seq_lens = (max_model_len - 1) + (1 + num_speculative_tokens)
+                 = max_model_len + num_speculative_tokens
+
+    The runtime block table in align mode has shape:
+        (#requests, cdiv(max_model_len, block_size) + num_speculative_blocks)
+    i.e. 18 columns for max_model_len=256, block_size=16, num_spec_blocks=2.
+
+    Without the fix, start_indices = (seq_len-1) // block_size can reach 16
+    for seq_len=258, and 16 + 2 (offset) = 18 which is OOB on an 18-wide
+    table, triggering a CUDA device-side assert.
+
+    The fix clamps start_indices to
+        [0, block_table.shape[1] - (1 + num_speculative_blocks)]
+    so the gather always stays within bounds, and always reads from the correct
+    speculative state slots (no aliasing).
     """
     from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
     from vllm.v1.kv_cache_interface import MambaSpec
 
     block_size = 16
     max_model_len = 256
-    num_speculative_blocks = 2  # simulates speculative decoding
-    num_requests = 3
+    num_speculative_blocks = 2
+    num_requests = 4
     device = torch.device("cpu")
 
-    # Block table sized as align mode: cdiv(max_model_len, block_size) cols
-    # (no extra speculative columns — that's what causes the OOB in align mode)
-    num_cols = max_model_len // block_size  # = 16
+    # Replicate the ACTUAL runtime block table width in align mode:
+    #   cdiv(max_model_len, block_size) + num_speculative_blocks = 16 + 2 = 18
+    num_cols = max_model_len // block_size + num_speculative_blocks  # = 18
     block_table = torch.randint(
         1, 100, (num_requests, num_cols), dtype=torch.int32, device=device
     )
@@ -467,18 +484,29 @@ def test_mamba_get_block_table_tensor_align_mode_oob_clamp():
         num_speculative_blocks=num_speculative_blocks,
     )
 
-    # seq_lens near max_model_len: start_index = (seq_len-1) // block_size
-    # will be at or near the last column; adding num_speculative_blocks
-    # pushes indices_to_gather past the end without the fix.
+    # seq_lens that EXCEED max_model_len — the actual failure scenario under
+    # async scheduling with speculative decoding:
+    #
+    #   seq_len=258: start_idx=(258-1)//16=16, 16+2=18  → OOB without fix
+    #   seq_len=257: start_idx=(257-1)//16=16, 16+2=18  → OOB without fix
+    #   seq_len=256: start_idx=(256-1)//16=15, 15+2=17  → safe (last col)
+    #   seq_len=1:   start_idx=0,              0+2=2    → safe (CUDA graph pad)
     seq_lens = torch.tensor(
-        [max_model_len, max_model_len - 1, max_model_len - block_size],
+        [
+            max_model_len + num_speculative_blocks,  # 258: OOB without fix
+            max_model_len + 1,  # 257: OOB without fix
+            max_model_len,  # 256: boundary, safe
+            1,  # CUDA graph zero-len pad
+        ],
         dtype=torch.int32,
         device=device,
     )
 
-    # Before the fix this would raise:
+    # Before the fix this raises:
     #   torch.AcceleratorError: CUDA error: device-side assert triggered
-    # (or an index error on CPU). With the fix it must return without error.
+    # (or IndexError on CPU). With the fix, start_indices is clamped to
+    # max = 18 - 3 = 15, so start_indices + offsets[2] = 15 + 2 = 17 which
+    # is exactly the last valid column — no aliasing of state slots.
     result = mamba_get_block_table_tensor(
         block_table, seq_lens, spec, mamba_cache_mode="align"
     )
@@ -486,8 +514,15 @@ def test_mamba_get_block_table_tensor_align_mode_oob_clamp():
     # Output shape: (#requests, 1 + num_speculative_blocks)
     assert result.shape == (num_requests, 1 + num_speculative_blocks)
 
-    # All gathered indices must have been valid columns in block_table,
-    # i.e. every value in result must appear in block_table (no OOB read).
-    # The clamp ensures we never read past column num_cols - 1.
+    # The OOB rows (seq_lens 258 and 257) must be clamped to the same
+    # start_index as the boundary row (seq_len 256), i.e. column 15.
+    # Verify that all three rows read from the same block table columns.
+    torch.testing.assert_close(result[0], result[2])  # 258 clamped == 256
+    torch.testing.assert_close(result[1], result[2])  # 257 clamped == 256
+
+    # CUDA graph zero-length row must start at column 0 (min clamp).
+    torch.testing.assert_close(result[3], block_table[3, : 1 + num_speculative_blocks])
+
+    # All values must be within the valid block table range.
     assert result.max().item() <= block_table.max().item()
     assert result.min().item() >= block_table.min().item()

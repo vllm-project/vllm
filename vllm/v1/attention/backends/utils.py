@@ -1031,6 +1031,12 @@ def mamba_get_block_table_tensor(
         # to handle the invalid block table.
         start_indices = (seq_lens - 1) // kv_cache_spec.block_size
         start_indices.clamp_(min=0)
+        # Clamp both ends:
+        # min=0: handles zero-length CUDA graph padding rows.
+        # max=block_table.shape[1] - (1 + num_speculative_blocks): prevents
+        #   out-of-bounds gather.
+        max_start = block_table.shape[1] - (1 + kv_cache_spec.num_speculative_blocks)
+        start_indices.clamp_(min=0, max=max_start)
         # Use int32 for arithmetic to avoid dtype promotion overhead,
         # then convert to int64 for gather (which requires Long indices)
         offsets = torch.arange(
