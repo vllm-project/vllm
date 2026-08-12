@@ -6,6 +6,7 @@ import pytest
 
 from vllm.assets.image import ImageAsset
 from vllm.model_executor.models.transformers.multimodal import (
+    LegacyMultiModalProcessor,
     OffsetsMultiModalProcessor,
 )
 
@@ -144,6 +145,20 @@ def test_non_embedding_tokens_excluded_from_placeholders():
     (placeholder,) = result["mm_placeholders"]["image"]
     assert placeholder.is_embed is not None
     assert 0 < int(placeholder.is_embed.sum()) < placeholder.length
+
+
+def test_legacy_placeholders_hold_only_image_tokens():
+    """The legacy path has no expansion to read the wrapping text out of, so its
+    placeholders cover the image tokens alone. Gemma3 is the sharp case: its
+    `image_token_id` is the marker in the unexpanded prompt, not the token the
+    expansion repeats."""
+    hf_processor, result = _process_one_gemma3_image(LegacyMultiModalProcessor)
+
+    (placeholder,) = result["mm_placeholders"]["image"]
+    assert placeholder.length == hf_processor.image_seq_length
+    prompt_ids = result["prompt_token_ids"]
+    covered = prompt_ids[placeholder.offset : placeholder.offset + placeholder.length]
+    assert set(covered) == {hf_processor.tokenizer.image_token_id}
 
 
 @offsets_only
