@@ -14,7 +14,6 @@ import asyncio
 import contextlib
 import json
 import logging
-from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Any
@@ -197,7 +196,7 @@ class AsyncPagedShmClient(_AsyncBaseClient):
         self.sync_client = PagedShmClient(address, pin, pool_size)
 
         self._storage = self.sync_client._storage
-        self._executor: Executor = ThreadPoolExecutor(max_workers=pool_workers)
+        self._executor = self.sync_client._executor
 
         self.write = make_async(self.sync_client.write, executor=self._executor)
         self.read = make_async(self.sync_client.read, executor=self._executor)

@@ -282,6 +282,9 @@ class LLMEngine:
             self.output_processor.add_request(request, prompt_text, None, 0)
             # Add the request to EngineCore.
             self.engine_core.add_request(request)
+            print(
+                f"after engine_core.add_request {(time.perf_counter() - arrival_time) * 1000} ms",
+            )
             return req_id
 
         # Fan out child requests (for n>1).

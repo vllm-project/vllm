@@ -67,6 +67,7 @@ class ModelState(ABC):
                 encoder_cache=encoder_cache,
                 dtype=self.dtype,
                 device=self.device,
+                vllm_config=self.vllm_config
             )
 
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:

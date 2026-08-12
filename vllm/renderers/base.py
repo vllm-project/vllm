@@ -763,10 +763,24 @@ class BaseRenderer(ABC, Generic[_T]):
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
+        start = time.perf_counter()
         with set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
+        end = time.perf_counter()
+        elapsed_time = end - start
+        print(
+            f"mm_processor.apply {elapsed_time * 1000} ms",
+        )
 
-        self._pshm_tensor_ipc.write(mm_inputs)
+        start = time.perf_counter()
+        self._pshm_tensor_ipc.write(
+            mm_inputs,
+        )
+        end = time.perf_counter()
+        elapsed_time = end - start
+        print(
+            f"pshm_tensor_ipc.write {elapsed_time * 1000} ms",
+        )
         self.update_mm_cache_stats()
 
         return mm_inputs
@@ -960,6 +974,10 @@ class BaseRenderer(ABC, Generic[_T]):
         else:
             engine_input = self._process_singleton(prompt, skip_mm_cache=skip_mm_cache)
 
+        print(
+            f"after process_for_engine {(time.perf_counter() - arrival_time) * 1000} ms",
+        )
+
         engine_input["arrival_time"] = arrival_time
 
         return engine_input
@@ -994,8 +1012,9 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
+        arrival_time: float | None = None,
     ):
-        arrival_time = time.time()
+        arrival_time = arrival_time or time.perf_counter()
 
         if tok_params is None:
             tok_params = self.default_cmpl_tok_params
@@ -1004,6 +1023,8 @@ class BaseRenderer(ABC, Generic[_T]):
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
+
+        print(f"after render_prompts {(time.perf_counter() - arrival_time) * 1000} ms")
 
         return [
             self.process_for_engine(prompt, arrival_time, skip_mm_cache=skip_mm_cache)

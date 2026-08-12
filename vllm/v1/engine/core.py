@@ -32,7 +32,6 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.renderers.paged_shm.client import PagedShmClient
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -1646,15 +1645,10 @@ class EngineCoreProc(EngineCore):
     ):
         """Input socket IO thread."""
 
-        pshm_client = PagedShmClient.from_model_config(
-            self.vllm_config.model_config, pin=True
-        )
-
         # Msgpack serialization decoding with optional tensor IPC receiver.
         add_request_decoder = MsgpackDecoder(
             EngineCoreRequest,
             oob_tensor_provider=self.tensor_ipc_receiver,
-            pshm_client=pshm_client,
         )
         generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
 
@@ -1715,6 +1709,11 @@ class EngineCoreProc(EngineCore):
                     request: Any
                     if request_type == EngineCoreRequestType.ADD:
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
+
+                        print(
+                            f"after add_request_decoder {(time.perf_counter() - req.arrival_time) * 1000} ms",
+                        )
+
                         try:
                             request = self.preprocess_add_request(req)
                         except Exception:

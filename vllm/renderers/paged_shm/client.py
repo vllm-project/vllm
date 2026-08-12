@@ -14,6 +14,7 @@ import contextlib
 import json
 import logging
 import queue
+from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict
 from typing import Any
@@ -206,7 +207,13 @@ class PagedShmClient(_BaseClient):
         Initial number of ZMQ sockets to pre‑allocate.
     """
 
-    def __init__(self, address: str, pin: bool = False, init_pool_size: int = 4):
+    def __init__(
+        self,
+        address: str,
+        pin: bool = False,
+        init_pool_size: int = 4,
+        pool_workers: int = 4,
+    ):
         self._pin = pin
         self._address = address
         self._ctx = zmq.Context()
@@ -215,6 +222,8 @@ class PagedShmClient(_BaseClient):
         for _ in range(init_pool_size):
             sock = self._init_sock()
             self._pool.put(sock)
+
+        self._executor: Executor = ThreadPoolExecutor(max_workers=pool_workers)
 
         # Retrieve storage metadata and attach to the shared memory segment
         info = json.loads(self._request(GET_STORAGE_INFO))["data"]
@@ -289,7 +298,8 @@ class PagedShmClient(_BaseClient):
         use_cache: bool = True,
         blocks: list[int] | None = None,
         open_read: bool = False,
-    ) -> int:
+        async_write: bool = False,
+    ):
         """
         Write an item to the shared memory store.
 
@@ -308,8 +318,12 @@ class PagedShmClient(_BaseClient):
             raise TypeError(f"Unsupported data type: {type(data)}")
 
         with self.write_context(uuid, size, use_cache, blocks, open_read) as ctx:
-            self._storage.write(data, ctx.blocks)
-        return size
+            if not async_write:
+                self._storage.write(data, ctx.blocks)
+                return size
+            else:
+                future = self._executor.submit(self._storage.write, data, ctx.blocks)
+                return size, future
 
     def read(
         self,

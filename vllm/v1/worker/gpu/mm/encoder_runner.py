@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
+
 import numpy as np
 import torch
 
@@ -12,6 +14,8 @@ from vllm.multimodal.utils import (
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
 )
+from vllm.renderers.paged_shm.client import PagedShmClient
+from vllm.renderers.paged_shm.types import ShmTensor
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
@@ -27,6 +31,7 @@ class EncoderRunner:
         encoder_cache: EncoderCache,
         dtype: torch.dtype,
         device: torch.device,
+        vllm_config
     ):
         self.model = model
         self.max_num_tokens = max_num_tokens
@@ -38,6 +43,10 @@ class EncoderRunner:
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
+        )
+
+        self.pshm_client = PagedShmClient.from_model_config(
+            vllm_config.model_config, pin=True
         )
 
     def prepare_mm_inputs(
@@ -102,6 +111,27 @@ class EncoderRunner:
         self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
     ) -> list[torch.Tensor]:
         encoder_outputs: list[torch.Tensor] = []
+
+        stream = torch.cuda.Stream()
+        with stream:
+            for modality, items in mm_kwargs:
+                if not "pixel_values" in items:
+                    continue
+
+                pixel_values = items["pixel_values"]
+                shm_object: ShmTensor | None = pixel_values.shm_object
+
+                if shm_object is not None:
+                    torch_dtype = getattr(torch, shm_object.dtype)
+                    tensor_gpu = self.pshm_client.read(
+                        shm_object.uuid, shm_object.size, shm_object.blocks, device=self.device
+                    )
+                    tensor_gpu = tensor_gpu.view(torch_dtype).view(shm_object.shape)
+                    pixel_values.data = tensor_gpu
+
+        stream.synchronize()
+        print("execute_mm_encoder", time.perf_counter())
+
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=True
         ):

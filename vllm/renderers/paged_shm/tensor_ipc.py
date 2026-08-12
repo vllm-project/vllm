@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
@@ -94,6 +95,7 @@ class PagedShmTensorIPC:
             item = ShmItem(uuid=random_uuid(), size=elem.data.nbytes, use_cache=True)
             items.append(item)
 
+        start = time.perf_counter()
         try:
             alloc = self.client_sync.open_write(items)
         except MemoryError:
@@ -112,9 +114,15 @@ class PagedShmTensorIPC:
                 data=elem.data,
                 use_cache=item.use_cache,
                 blocks=item.blocks,
+                open_read=True,
+                async_write=True,
             )
             elem.data = None
-            self.client_sync.open_read(item.uuid)
+        end = time.perf_counter()
+        elapsed_time = end - start
+        print(
+            f"PagedShmTensorIPC.write {elapsed_time * 1000} ms",
+        )
         return None
 
     def _traversal(self, obj: Any, func: Callable[[MultiModalFieldElem], None]):

@@ -34,7 +34,6 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
-from vllm.renderers.paged_shm.client import PagedShmClient
 from vllm.renderers.paged_shm.types import ShmTensor
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.utils import tensor_data
@@ -329,7 +328,6 @@ class MsgpackDecoder:
         t: Any | None = None,
         share_mem: bool = True,
         oob_tensor_provider: OOBTensorProvider | None = None,
-        pshm_client: PagedShmClient | None = None,
     ):
         self.share_mem = share_mem
         self.pin_tensors = PIN_MEMORY
@@ -339,7 +337,6 @@ class MsgpackDecoder:
         )
         self.aux_buffers: Sequence[bytestr] = ()
         self.oob_tensor_provider = oob_tensor_provider
-        self.pshm_client = pshm_client
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
@@ -444,22 +441,7 @@ class MsgpackDecoder:
         )
 
     def _decode_mm_field_elem(self, obj: dict[str, Any]) -> MultiModalFieldElem:
-        shm_object_dict: dict | None = obj.get("shm_object")
-        if shm_object_dict is not None:
-            item = ShmTensor(**shm_object_dict)
-            assert self.pshm_client is not None
-            torch_dtype = getattr(torch, item.dtype)
-
-            stream = torch.cuda.Stream()
-            with stream:
-                tensor_gpu = self.pshm_client.read(
-                    item.uuid, item.size, item.blocks, device="cuda"
-                )
-                tensor_gpu = tensor_gpu.view(torch_dtype).view(item.shape)
-            stream.synchronize()
-
-            obj["data"] = tensor_gpu
-        elif obj["data"] is not None:
+        if obj["data"] is not None:
             obj["data"] = self._decode_nested_tensors(obj["data"])
 
         # Reconstruct the field processor using MultiModalFieldConfig
@@ -472,6 +454,10 @@ class MsgpackDecoder:
             factory_kw["slices"] = self._decode_nested_slices(factory_kw["slices"])
 
         obj["field"] = factory_meth("", **factory_kw).field
+
+        if obj["shm_object"] is not None:
+            obj["shm_object"] = ShmTensor(**obj["shm_object"])
+
         return MultiModalFieldElem(**obj)
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
