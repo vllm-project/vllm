@@ -401,6 +401,38 @@ class TestWorkerSyncedProfileStart:
         Worker._maybe_start_synced_profile(worker)
         profiler.start.assert_not_called()
 
+    def test_creates_profiler_on_remote_consensus(self):
+        """A rank that never received /start_profile has no profiler wrapper
+        yet. Reaching consensus via the OR-reduce must build one and start it,
+        not silently consume the latch (regression: only the rank hit by the
+        HTTP call ever captured)."""
+        sync = DPProfilerSync()
+        sync.observe(consensus=True)  # request came from another DP rank
+        worker = self._worker(sync, profiler=None)
+        worker.profiler = None
+
+        def create():
+            worker.profiler = MagicMock()
+
+        worker._create_profiler.side_effect = create
+
+        Worker._maybe_start_synced_profile(worker)
+
+        worker._create_profiler.assert_called_once()
+        worker.profiler.start.assert_called_once()
+
+    def test_no_create_when_profiling_unconfigured(self):
+        """Consensus with no profiler and no profiler config: skip, don't crash."""
+        sync = DPProfilerSync()
+        sync.observe(consensus=True)
+        worker = self._worker(sync, profiler=None)
+        worker.profiler = None
+        worker.profiler_config = None
+
+        Worker._maybe_start_synced_profile(worker)
+
+        worker._create_profiler.assert_not_called()
+
 
 def test_profiler_entered_during_capture():
     """Profiler is used as a context manager in _warmup_and_capture,
