@@ -500,6 +500,9 @@ def test_decode_only_batch_reports_no_ranges():
         # paged KV + seqused_k works on B200 and H100. Non-paged mm_prefix
         # cases in this file already use HEAD_SIZE=128.
         pytest.param(128, id="hd128"),
+        # 256: supported by FA4 on H100; skipped on Blackwell because its
+        # dedicated kernel cannot combine paged KV with seqused_k.
+        pytest.param(256, id="hd256"),
         # 512: Gemma4 global head dim; FA4 resolves on H100, skips on
         # Blackwell (TMEM).
         pytest.param(512, id="global_512"),
@@ -508,10 +511,9 @@ def test_decode_only_batch_reports_no_ranges():
 def test_mm_prefix_kv_cache_path(head_size: int):
     """FA4 + mask_mod + block_table matches a dense reference.
 
-    Use head_size=128 on B200/H100 (FA4 + paged/`seqused_k` supported) and
-    512 on H100 only (Blackwell FA4 rejects 512 via TMEM). Avoid 256: SM100's
-    dedicated hd256 2CTA kernel asserts away ``seqused_k``, which paged KV
-    requires.
+    Use head_size=128 on B200/H100 (FA4 + paged/`seqused_k` supported), 256
+    on H100 only (Blackwell's dedicated kernel rejects `seqused_k`), and 512
+    on H100 only (Blackwell FA4 rejects 512 via TMEM).
 
     Tensors, kv_cache_spec, and FlashAttentionImpl must all use the same
     ``head_size`` — ``run_attention_backend`` / ``create_standard_kv_cache_spec``
@@ -537,7 +539,13 @@ def test_mm_prefix_kv_cache_path(head_size: int):
     # Skip under the same config Gemma4 forces (flash_attn_version=4), so the
     # check matches FlashAttentionImpl's get_flash_attn_version call.
     with set_current_vllm_config(vllm_config):
-        if get_flash_attn_version(head_size=head_size) != 4:
+        if (
+            get_flash_attn_version(
+                head_size=head_size,
+                requires_sequence_lengths=True,
+            )
+            != 4
+        ):
             pytest.skip(f"FA4 does not support head_size={head_size} on this device")
 
     num_heads = mc.get_num_attention_heads(vllm_config.parallel_config)

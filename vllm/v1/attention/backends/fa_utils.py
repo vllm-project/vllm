@@ -73,7 +73,7 @@ def get_flash_attn_version(
     head_size_v: int | None = None,
     has_sinks: bool = False,
     requires_local_attention: bool = False,
-    requires_sequence_lengths: bool = False,
+    requires_sequence_lengths: bool = True,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -174,23 +174,11 @@ def get_flash_attn_version(
             fa_version == 4
             and device_capability.major >= 10
             and head_size == 256
-            and requires_local_attention
+            and (requires_local_attention or requires_sequence_lengths)
         ):
             logger.warning_once(
-                "FA4 on Blackwell does not support local attention with "
-                "head_size=256, defaulting to FA version 2."
-            )
-            fa_version = 2
-
-        if (
-            fa_version == 4
-            and device_capability.major >= 10
-            and head_size == 256
-            and requires_sequence_lengths
-        ):
-            logger.warning_once(
-                "FA4 on Blackwell does not support sequence lengths with "
-                "head_size=256, defaulting to FA version 2."
+                "FA4 on Blackwell does not support head_size=256 with local "
+                "attention or sequence lengths, defaulting to FA version 2."
             )
             fa_version = 2
 
@@ -243,7 +231,7 @@ def flash_attn_supports_kv_cache_dtype(
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
-    requires_sequence_lengths: bool = False,
+    requires_sequence_lengths: bool = True,
 ) -> bool:
     if kv_cache_dtype == "fp8_e5m2":
         return False

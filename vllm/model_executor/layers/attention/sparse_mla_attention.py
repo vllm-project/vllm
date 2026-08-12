@@ -96,7 +96,11 @@ def _is_masked_mha_available(
     ):
         return False
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-    fa_version = get_flash_attn_version(head_size=qk_head_dim, head_size_v=v_head_dim)
+    fa_version = get_flash_attn_version(
+        head_size=qk_head_dim,
+        head_size_v=v_head_dim,
+        requires_sequence_lengths=False,
+    )
     return fa_version == 4 and not is_quantized_kv_cache(kv_cache_dtype)
 
 
