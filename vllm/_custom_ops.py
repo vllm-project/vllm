@@ -2003,6 +2003,23 @@ def scaled_int8_quant(
     Returns:
       tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] : Output int8 tensor, scales, and optionally azp.
     """
+    if current_platform.is_xpu():
+        # XPU has no _C int8 quant op; use the torch.compile reference.
+        if not symmetric:
+            raise NotImplementedError(
+                "asymmetric int8 activation quantization is unsupported on XPU"
+            )
+        if scale is not None:
+            q = (input.to(torch.float32) / scale).round().clamp(-128, 127)
+            return q.to(torch.int8), scale, None
+
+        from vllm._xpu_ops import xpu_ops
+
+        q, scales, _ = xpu_ops.dynamic_per_token_int8_quant_ref(
+            input.contiguous(), True, 8
+        )
+        return q, scales.reshape(-1, 1).to(torch.float32), None
+
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
         # static-per-tensor quantization.
