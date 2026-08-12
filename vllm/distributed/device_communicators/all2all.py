@@ -18,7 +18,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_two_sided,
 )
 from vllm.utils.func_utils import supports_kw
-from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
+from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_moonep, has_mori
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -1084,6 +1084,69 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
 
     def max_sms_used(self) -> int | None:
         return self._num_sms
+
+    def destroy(self):
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
+            self.handle_cache._cache.clear()
+
+
+class MoonEPAll2AllManager(All2AllManagerBase):
+    """
+    All2All communication based on MoonEP
+    (https://github.com/MoonshotAI/MoonEP).
+
+    MoonEP keeps token loads perfectly balanced across EP ranks by planning
+    a small number of dynamically redundant experts online and prefetching
+    their weights before expert compute. Every rank receives exactly
+    S x K token slots regardless of router skew, so all communication and
+    compute shapes are static.
+
+    Requires NVLink symmetric-memory / multicast capable topologies
+    (single node NVSwitch, e.g. H100/H200/B200/GB300 class).
+    """
+
+    def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
+        assert has_moonep(), (
+            "MoonEP not available. Install it from "
+            "https://github.com/MoonshotAI/MoonEP."
+        )
+        super().__init__(cpu_group, tcp_store_group)
+        self._device_group = device_group
+        self.handle_cache = Cache()
+
+    def _make_buffer_kwargs(
+        self,
+        max_num_tokens_per_dp_rank: int,
+        token_hidden_size: int,
+        num_topk: int,
+        num_global_experts: int,
+        num_prefetch_slots: int,
+        token_padding: int,
+        num_sms: int,
+    ) -> dict:
+        return dict(
+            S=max_num_tokens_per_dp_rank,
+            H=token_hidden_size,
+            K=num_topk,
+            E=num_global_experts,
+            num_ep_ranks=self.world_size,
+            num_sms=num_sms,
+            token_padding=token_padding,
+            B=num_prefetch_slots,
+            group=self._device_group
+            if self._device_group is not None
+            else self.cpu_group,
+        )
+
+    def get_handle(self, kwargs):
+        from moonep import Buffer  # type: ignore[import-not-found]
+
+        buffer_kwargs = self._make_buffer_kwargs(**kwargs)
+        logger.debug("MoonEP all2all args %s", buffer_kwargs)
+        handle: Buffer = self.handle_cache.get_or_create(buffer_kwargs, Buffer)
+        return handle
 
     def destroy(self):
         with self.handle_cache._lock:
