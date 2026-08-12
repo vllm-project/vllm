@@ -103,12 +103,16 @@ def _fused_norm_rope_kernel(
     kv_stride,
     kv_rms_norm_w_ptr,
     kv_rms_eps,
+    kv_out_ptr,
+    kv_out_stride,
     KV_DIM: tl.constexpr,
     # KV RoPE
     kpe_ptr,
     kpe_stride,
     kpe_rope_cos_sin_cache_ptr,
     kpe_rope_cos_sin_cache_stride,
+    kpe_out_ptr,
+    kpe_out_stride,
     KPE_HALF_ROT_DIM: tl.constexpr,
     # Index K layer norm
     index_k_ptr,
@@ -121,6 +125,8 @@ def _fused_norm_rope_kernel(
     # Index K RoPE
     index_k_rope_cos_sin_cache_ptr,
     index_k_rope_cos_sin_cache_stride,
+    index_k_out_ptr,
+    index_k_out_stride,
     INDEX_K_HALF_ROT_DIM: tl.constexpr,
     # Cache params (shared by indexer K and MLA)
     slot_mapping_ptr,
@@ -174,12 +180,14 @@ def _fused_norm_rope_kernel(
         return
 
     if slot_mapping_ptr is None:
-        # Memory profiling run.
-        return
-    slot_idx = tl.load(slot_mapping_ptr + tok_idx)
-    if slot_idx < 0:
-        # Padding
-        return
+        if kv_out_ptr is None and kpe_out_ptr is None and index_k_out_ptr is None:
+            return
+        slot_idx = 0
+    else:
+        slot_idx = tl.load(slot_mapping_ptr + tok_idx)
+        if slot_idx < 0:
+            # Padding
+            return
 
     if pid == 2:
         # Q RMS norm
@@ -216,6 +224,18 @@ def _fused_norm_rope_kernel(
         x2 = tl.load(kpe_base + dim_off * 2 + 1).to(tl.float32)
         r1 = x1 * cos - x2 * sin
         r2 = x2 * cos + x1 * sin
+
+        if kv_out_ptr is not None:
+            tl.store(kv_out_ptr + tok_idx * kv_out_stride + kv_block, kv_c)
+        if kpe_out_ptr is not None:
+            tl.store(
+                kpe_out_ptr + tok_idx * kpe_out_stride + dim_off * 2,
+                r1.to(kpe_out_ptr.dtype.element_ty),
+            )
+            tl.store(
+                kpe_out_ptr + tok_idx * kpe_out_stride + dim_off * 2 + 1,
+                r2.to(kpe_out_ptr.dtype.element_ty),
+            )
 
         # MLA concat_and_cache: write [kv_c_normed, k_pe_roped] to cache.
         if mla_cache_entry_stride == 0:
@@ -354,20 +374,31 @@ def _fused_norm_rope_kernel(
         roped = normed * cos_full + sign * normed_partner * sin_full
         result = tl.where(in_rope, roped, normed)
 
-        # 3. FP8 quantize + cache write from registers.
-        #    No need to write back to index_k_ptr — the only consumer
-        #    (sparse_attn_indexer) reads from the cache, not index_k.
-        _fp8_quant_and_cache_write(
-            result,
-            index_k_mask,
-            slot_idx,
-            indexer_cache_ptr,
-            indexer_cache_scale_ptr,
-            indexer_cache_block_size,
-            indexer_cache_stride,
-            index_k_block,
-            INDEX_K_DIM,
-        )
+        if index_k_out_ptr is not None:
+            tl.store(
+                index_k_out_ptr + tok_idx * index_k_out_stride + index_k_block,
+                result.to(index_k_out_ptr.dtype.element_ty),
+                mask=index_k_mask,
+            )
+
+        if indexer_cache_ptr is None:
+            # PCP gathers the materialized index K before inserting it into cache.
+            return
+        else:
+            # 3. FP8 quantize + cache write from registers.
+            #    No need to write back to index_k_ptr — the only consumer
+            #    (sparse_attn_indexer) reads from the cache, not index_k.
+            _fp8_quant_and_cache_write(
+                result,
+                index_k_mask,
+                slot_idx,
+                indexer_cache_ptr,
+                indexer_cache_scale_ptr,
+                indexer_cache_block_size,
+                indexer_cache_stride,
+                index_k_block,
+                INDEX_K_DIM,
+            )
 
 
 def fused_norm_rope(
@@ -395,6 +426,9 @@ def fused_norm_rope(
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
     q_c_out: torch.Tensor | None = None,
+    kv_c_out: torch.Tensor | None = None,
+    k_pe_out: torch.Tensor | None = None,
+    index_k_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert positions.ndim == 1
     assert q_c.ndim == 2
@@ -420,6 +454,10 @@ def fused_norm_rope(
     assert index_k_rope_cos_sin_cache is not None
     index_k_dim = index_k.shape[-1]
     topk = topk_indices_buffer.shape[-1]
+    if indexer_k_cache is not None or mla_kv_cache is not None:
+        assert slot_mapping is not None
+    else:
+        slot_mapping = None
 
     # --- Indexer K cache setup ---
     if indexer_k_cache is not None:
@@ -430,17 +468,9 @@ def fused_norm_rope(
         if indexer_k_cache.dtype == torch.uint8:
             indexer_k_cache = indexer_k_cache.view(torch.float8_e4m3fn)
     else:
-        # No indexer cache (shared layer / MLA-only fusion). Use dummies but
-        # KEEP the caller's slot_mapping so the MLA write (pid 1) still runs.
-        idx_cache_scale_view = torch.empty(0, dtype=torch.float32, device=device)
-        indexer_k_cache = torch.empty(0, dtype=torch.float8_e4m3fn, device=device)
+        idx_cache_scale_view = None
         idx_cache_block_size = 1
-        idx_cache_stride = 1
-        if mla_kv_cache is None:
-            # Pure profiling run (no caches at all): skip all per-token writes.
-            slot_mapping = torch.full(
-                (num_tokens,), -1, dtype=torch.int64, device=device
-            )
+        idx_cache_stride = 0
 
     # --- MLA KV cache setup ---
     mla_cache_ds_mla = mla_kv_cache_dtype == "fp8_ds_mla"
@@ -469,15 +499,26 @@ def fused_norm_rope(
         if mla_k_scale is None:
             mla_k_scale = torch.ones(1, dtype=torch.float32, device=device)
     else:
-        # Dummy values — pid 2 will skip the MLA cache write because
-        # slot_mapping is all -1.
+        # Dummy cache values; a zero entry stride disables the cache write.
         mla_kv_cache = torch.empty(0, dtype=torch.bfloat16, device=device)
         mla_block_stride = 0
         mla_entry_stride = 0
-        mla_k_scale = torch.ones(1, dtype=torch.float32, device=device)
+        mla_k_scale = _dummy((1,), torch.float32, device)
 
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
+    kv_c_out_stride = 0
+    k_pe_out_stride = 0
+    index_k_out_stride = 0
+    if kv_c_out is not None:
+        assert kv_c_out.shape == kv_c.shape
+        kv_c_out_stride = kv_c_out.stride(0)
+    if k_pe_out is not None:
+        assert k_pe_out.shape == k_pe.shape
+        k_pe_out_stride = k_pe_out.stride(0)
+    if index_k_out is not None:
+        assert index_k_out.shape == index_k.shape
+        index_k_out_stride = index_k_out.stride(0)
     use_pdl = current_platform.is_arch_support_pdl()
     _fused_norm_rope_kernel[(4, num_tokens)](
         positions,
@@ -495,12 +536,16 @@ def fused_norm_rope(
         kv_c.stride(0),
         kv_rms_norm_w,
         kv_rms_eps,
+        kv_c_out,
+        kv_c_out_stride,
         kv_dim,
         # KV RoPE
         k_pe,
         k_pe.stride(0),
         k_rope_cos_sin_cache,
         k_rope_cos_sin_cache.stride(0),
+        k_pe_out,
+        k_pe_out_stride,
         k_rope_cos_sin_cache.shape[-1] // 2,
         # Index K layer norm + RoPE + FP8 quant
         index_k,
@@ -512,6 +557,8 @@ def fused_norm_rope(
         triton.next_power_of_2(index_k_dim),
         index_k_rope_cos_sin_cache,
         index_k_rope_cos_sin_cache.stride(0),
+        index_k_out,
+        index_k_out_stride,
         index_k_rope_cos_sin_cache.shape[-1] // 2,
         # Cache params
         slot_mapping,
