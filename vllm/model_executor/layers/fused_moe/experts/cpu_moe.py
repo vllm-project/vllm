@@ -20,6 +20,10 @@ from vllm._custom_ops import (
     cpu_prepack_moe_weight_int8,
     fused_experts_cpu,
 )
+from vllm.model_executor.kernels.linear.zentorch_utils import (
+    is_zentorch_moe_config_supported,
+    is_zentorch_moe_supported,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -214,6 +218,7 @@ class CPUUnquantizedExperts(mk.FusedMoEExpertsMonolithic):
         self.renormalize = False
         self.scoring_func = "softmax"
         self.custom_routing_function: Callable | None = None
+        self._use_zentorch = False
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -240,6 +245,8 @@ class CPUUnquantizedExperts(mk.FusedMoEExpertsMonolithic):
         )
         if not supported:
             return supported, reason
+        if is_zentorch_moe_config_supported(moe_config):
+            return True, None
         cpu_cls = cast(type[CPUUnquantizedExperts], cls)
         return cpu_cls._supports_grouped_gemm(moe_config)
 
@@ -287,11 +294,14 @@ class CPUUnquantizedExperts(mk.FusedMoEExpertsMonolithic):
         return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        self._pad_moe_intermediate(layer)
         self.use_grouped_topk = layer.use_grouped_topk
         self.renormalize = layer.renormalize
         self.scoring_func = layer.scoring_func
         self.custom_routing_function = layer.custom_routing_function
+        self._use_zentorch = is_zentorch_moe_supported(layer)
+        if self._use_zentorch:
+            return
+        self._pad_moe_intermediate(layer)
         replace_parameter(
             layer, "w13_weight", cpu_prepack_moe_weight(layer.w13_weight, self.isa)
         )
@@ -388,6 +398,22 @@ class CPUUnquantizedExperts(mk.FusedMoEExpertsMonolithic):
             )
             hidden_states.mul_(topk_weights.to(hidden_states.dtype))
 
+        if self._use_zentorch:
+            output = torch.empty_like(hidden_states)
+            torch.ops.zentorch.zentorch_fused_moe(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                self.w1_bias,
+                self.w2_bias,
+                topk_weights,
+                topk_ids,
+                apply_router_weight_on_input,
+                str(activation.value).lower(),
+            )
+            return output
+
         return cpu_fused_moe(
             hidden_states,
             w1,
@@ -430,6 +456,8 @@ class X86CPUUnquantizedExperts(CPUUnquantizedExperts):
         )
         if not supported:
             return supported, reason
+        if is_zentorch_moe_config_supported(moe_config):
+            return True, None
         if moe_config.in_dtype != torch.bfloat16:
             return False, "kernel requires bfloat16 activations"
         cpu_cls = cast(type[CPUUnquantizedExperts], cls)
@@ -464,6 +492,8 @@ class ArmCPUUnquantizedExperts(CPUUnquantizedExperts):
         )
         if not supported:
             return supported, reason
+        if is_zentorch_moe_config_supported(moe_config):
+            return True, None
         if moe_config.in_dtype != torch.bfloat16:
             return False, "kernel requires bfloat16 activations"
         cpu_cls = cast(type[CPUUnquantizedExperts], cls)

@@ -1084,7 +1084,15 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
-        assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
+        # Remove once the vllm-xpu-kernels fix for empty and non-pinned inputs
+        # (vllm-project/vllm-xpu-kernels#513) is in a released package.
+        if cpu_tensor.numel() == 0:
+            return torch.empty(cpu_tensor.shape, dtype=cpu_tensor.dtype, device="xpu")
+        if not cpu_tensor.is_pinned():
+            contiguous_cpu = cpu_tensor.contiguous()
+            pinned = torch.empty_like(contiguous_cpu, pin_memory=True)
+            pinned.copy_(contiguous_cpu)
+            cpu_tensor = pinned
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
     elif current_platform.is_cuda_alike():
         return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
