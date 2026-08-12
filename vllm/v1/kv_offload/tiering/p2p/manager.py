@@ -414,7 +414,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
-        block_ids = job_metadata.block_ids
+        block_ids = job_metadata.block_ids.tolist()
 
         assert len(keys) == len(block_ids)
 
