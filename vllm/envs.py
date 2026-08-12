@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_USE_FASTOKENS: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
+    VLLM_MQ_SPIN_SECONDS: float = 1.0
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
@@ -725,6 +726,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
         os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
     ),
+    # How long (seconds) MessageQueue readers keep busy-looping after the
+    # last message before falling back to blocking on the notify socket.
+    # The default keeps the historical always-spin behavior for latency.
+    # Lower values (e.g. 0.002) let reader processes sleep between decode
+    # steps, which greatly reduces CPU usage and heat on machines where
+    # CPU and GPU share a package/board (e.g. NVIDIA DGX Spark / GB10).
+    "VLLM_MQ_SPIN_SECONDS": lambda: float(os.getenv("VLLM_MQ_SPIN_SECONDS", "1")),
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
     "CUDA_HOME": lambda: os.environ.get("CUDA_HOME", None),
@@ -2189,6 +2197,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
+        "VLLM_MQ_SPIN_SECONDS",
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",
