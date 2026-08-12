@@ -136,6 +136,31 @@ steps:
   # rlhf examples
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_ipc.py
+  mirror:
+    amd:
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 30
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - tests/distributed/test_torchrun_example.py
+      - tests/distributed/test_torchrun_example_moe.py
+      - examples/rl/
+      - examples/features/data_parallel/data_parallel_offline.py
+      - vllm/platforms/rocm.py
+      commands:
+      - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
+      - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
+      - TP_SIZE=4 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+      - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+      - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+      - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+      - python3 ../examples/features/data_parallel/data_parallel_offline.py --enforce-eager
+      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_nccl.py
+      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_ipc.py
 
 - label: Distributed DP Tests (4 GPUs)
   key: distributed-dp-tests-4-gpus
@@ -281,6 +306,23 @@ steps:
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
+  mirror:
+    amd:
+      device: mi250_4
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - vllm/engine/
+      - vllm/executor/
+      - vllm/model_executor/models/
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - tests/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: RayExecutorV2 (4 GPUs)
   key: rayexecutorv2-4-gpus
