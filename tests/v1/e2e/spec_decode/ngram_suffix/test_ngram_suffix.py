@@ -93,6 +93,43 @@ def test_ngram_gpu_default_with_async_scheduling(
         evaluate_llm_for_gsm8k(spec_runner.llm, expected_accuracy_threshold=0.8)
 
 
+@pytest.mark.parametrize("async_scheduling", [True], ids=["async"])
+@single_gpu_only
+def test_suffix_gpu_with_async_scheduling(
+    async_scheduling: bool,
+    model_name: str,
+    vllm_runner,
+):
+    """
+    Test suffix_gpu speculative decoding (k=16) correctness under async
+    scheduling, validated via GSM8K accuracy. The CPU suffix method is
+    rejected by the async-scheduling whitelist; suffix_gpu is the
+    device-state variant that composes with it.
+    """
+    pytest.importorskip("suffix_gpu")
+    with vllm_runner(
+        model_name,
+        block_size=None,
+        trust_remote_code=False,
+        speculative_config={
+            "method": "suffix_gpu",
+            "num_speculative_tokens": 16,
+            "suffix_decoding_max_cached_requests": 1000,
+            "suffix_decoding_max_tree_depth": 24,
+        },
+        max_model_len=4096,
+        async_scheduling=async_scheduling,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+    ) as spec_runner:
+        # Assert the resolved async_scheduling config matches what was requested.
+        assert (
+            spec_runner.llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+            == async_scheduling
+        )
+        evaluate_llm_for_gsm8k(spec_runner.llm)
+
+
 @single_gpu_only
 def test_suffix_decoding_acceptance(
     sampling_config: SamplingParams,
