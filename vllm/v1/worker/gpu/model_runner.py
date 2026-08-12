@@ -94,7 +94,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
 )
-from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.dp_utils import DPProfilerSync, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
@@ -211,6 +211,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Data parallelism.
         self.dp_size = self.parallel_config.data_parallel_size
         self.dp_rank = self.parallel_config.data_parallel_rank
+
+        # Rides the per-step DP coordination all-reduce to start the torch
+        # profiler on the same step across all DP ranks. Only meaningful with DP
+        # (that reduce only runs when data_parallel_size > 1) and opt-in via
+        # VLLM_ENABLE_MULTINODE_PROFILING.
+        self.dp_profiler_sync: DPProfilerSync | None = (
+            DPProfilerSync()
+            if (envs.VLLM_ENABLE_MULTINODE_PROFILING and self.dp_size > 1)
+            else None
+        )
 
         # Detect EP all2all peer faults to prevent emitting corrupted output.
         # Only meaningful for MoE + DP with an FT-capable all2all backend.
@@ -1463,6 +1473,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_query_len,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
+            profiler_sync=self.dp_profiler_sync,
         )
 
         if batch_desc.num_tokens == 0:

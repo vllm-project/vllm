@@ -13,6 +13,55 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 
 
+class DPProfilerSync:
+    """Starts the torch profiler on the same step across all DP ranks.
+
+    ``start_profile`` reaches each DP rank asynchronously, at a different point
+    in its own step loop, and every step all DP ranks must jointly execute the
+    EP all-to-all / DP coordination collective. A separate barrier on the
+    profiler control path therefore deadlocks: the first rank to reach it stops
+    stepping, so the others wedge on the next collective before they ever reach
+    their own barrier (see VLLM_ENABLE_MULTINODE_PROFILING).
+
+    Instead this rides the per-step DP coordination all-reduce that every rank
+    already executes in lockstep. ``request_start`` sets a pending flag; the
+    flag is OR-reduced across DP ranks inside ``sync_cudagraph_and_dp_padding``;
+    once any rank has requested it, ``start_now`` latches on every rank on the
+    same step, and the worker starts capture next step. No extra collective, no
+    deadlock, and it needs only one rank to receive start_profile (the OR
+    propagates it).
+    """
+
+    def __init__(self) -> None:
+        # This rank has received start_profile but capture has not begun yet.
+        self._pending = False
+        # Consensus reached: every rank should start capture. Latched until the
+        # worker consumes it, so a second reduce in the same step can't clear it
+        # before the worker reads it.
+        self.start_now = False
+
+    def request_start(self) -> None:
+        self._pending = True
+
+    def cancel(self) -> None:
+        """Drop a pending request (e.g. stop_profile before capture began)."""
+        self._pending = False
+        self.start_now = False
+
+    def observe(self, consensus: bool) -> None:
+        """Record the OR-reduced request flag from a DP coordination reduce."""
+        if consensus:
+            self.start_now = True
+
+    def consume_start(self) -> bool:
+        """Return True once, on the step every rank agreed to start capture."""
+        if self.start_now:
+            self.start_now = False
+            self._pending = False
+            return True
+        return False
+
+
 def sync_cudagraph_and_dp_padding(
     cudagraph_manager: CudaGraphManager | None,
     desired_batch_desc: BatchExecutionDescriptor,
@@ -23,6 +72,7 @@ def sync_cudagraph_and_dp_padding(
     dp_rank: int,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
+    profiler_sync: DPProfilerSync | None = None,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
@@ -31,12 +81,22 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(4, dp_size, dtype=torch.int32, device="cpu")
+    # Row 4 carries the profiler start request so it is OR-reduced together with
+    # the batch coordination, avoiding a separate collective (see DPProfilerSync).
+    tensor = torch.zeros(5, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
+    tensor[4][dp_rank] = (
+        1 if (profiler_sync is not None and profiler_sync._pending) else 0
+    )
     dist.all_reduce(tensor, group=group)
+
+    # OR-reduced profiler start request: latch it so the worker starts capture
+    # on the same step across all DP ranks.
+    if profiler_sync is not None:
+        profiler_sync.observe(bool(tensor[4].any().item()))
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
@@ -105,6 +165,7 @@ def dispatch_cg_and_sync_dp(
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
+    profiler_sync: DPProfilerSync | None = None,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     if need_eager:
         batch_desc = BatchExecutionDescriptor(
@@ -139,4 +200,5 @@ def dispatch_cg_and_sync_dp(
         dp_rank,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
+        profiler_sync=profiler_sync,
     )
