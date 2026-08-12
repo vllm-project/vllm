@@ -315,8 +315,8 @@ class MoRIIOWriter:
             # so resolve the per-rank host from multi_pod_hosts (falls back to
             # task.remote_ip for single-pod or on any indexing miss).
             _remote_ip = task.remote_ip
-            _hosts = list(getattr(self.worker, "multi_pod_hosts", []) or [])
-            _dp_local = int(getattr(self.worker, "remote_dp_size_local", 0) or 0)
+            _hosts = list(task.multi_pod_hosts)
+            _dp_local = int(task.remote_dp_size_local or 0)
             if _hosts and _dp_local > 0:
                 _pod_idx = int(request_info.decode_dp_rank) // _dp_local
                 if 0 <= _pod_idx < len(_hosts):
