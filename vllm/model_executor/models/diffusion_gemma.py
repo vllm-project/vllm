@@ -803,11 +803,10 @@ class DiffusionGemmaModelState(ModelState):
         self._req_id_to_index: dict[str, int] = {}
 
         # Persistent buffer for per-request causal flags, updated in-place
-        # so FULL CUDA graph replay sees the latest values. int32 to match
-        # what FlashAttentionMetadataBuilder.build() casts causal tensors to
-        # -- a bool buffer would get `.to(torch.int32)`'d into a fresh
-        # tensor on every call, and a graph captured against that address
-        # would replay against a stale, capture-time snapshot forever.
+        # so FULL CUDA graph replay sees the latest values. Must be int32:
+        # FlashAttentionMetadataBuilder.build() rejects other dtypes, since
+        # an out-of-place cast there would detach the captured graph from
+        # this buffer and freeze replay at the capture-time snapshot.
         self._causal_buf = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
         )

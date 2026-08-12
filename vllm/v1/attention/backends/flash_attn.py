@@ -709,7 +709,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         scheduler_metadata = self._store_scheduler_metadata(scheduler_metadata)
 
         if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
-            causal = causal.to(torch.int32)
+            raise ValueError(
+                f"Per-request causal tensor must be int32, got {causal.dtype}. "
+                "Casting here would allocate a fresh tensor each build() and "
+                "break FULL CUDA graph replay; allocate the buffer as int32."
+            )
 
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
