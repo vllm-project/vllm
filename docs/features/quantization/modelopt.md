@@ -124,5 +124,5 @@ by default in CI. To run the tests locally:
 ```bash
 export VLLM_TEST_MODELOPT_FP8_PC_PT_MODEL_PATH=<path_to_fp8_pc_pt_checkpoint>
 export VLLM_TEST_MODELOPT_FP8_PB_WO_MODEL_PATH=<path_to_fp8_pb_wo_checkpoint>
-pytest -q tests/quantization/test_modelopt.py
+pytest -q tests/quantization/checkpoint_formats/test_modelopt.py
 ```

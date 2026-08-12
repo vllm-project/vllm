@@ -10,6 +10,7 @@ against the pure-torch reference in `reference_mxfp4.py`.
 import pytest
 import torch
 
+from tests.quantization.reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 from vllm.config.model import ModelConfig
 from vllm.model_executor.kernels.linear import _POSSIBLE_MXFP4_KERNELS
 from vllm.model_executor.kernels.linear.mxfp4.aiter import (
@@ -38,8 +39,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import PlatformEnum, current_platform
-
-from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 
 def fix_negative_zeros(tensor: torch.Tensor) -> torch.Tensor:

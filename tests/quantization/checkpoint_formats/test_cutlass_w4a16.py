@@ -6,7 +6,7 @@ Verifies that W4A16 quantized models loaded through vllm select the
 MacheteLinearKernel on sm_90 GPUs, that weights are correctly repacked,
 and that inference produces valid output.
 
-Run `pytest tests/quantization/test_cutlass_w4a16.py`.
+Run `pytest tests/quantization/checkpoint_formats/test_cutlass_w4a16.py`.
 """
 
 import pytest

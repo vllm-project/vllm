@@ -8,7 +8,7 @@ Covers:
 - process_weights_after_loading early-return path
 - End-to-end integration with Triton unified attention kernel
 
-Run: pytest tests/quantization/test_per_token_kv_cache.py -v -s
+Run: pytest tests/quantization/compressed_tensors/test_per_token_kv_cache.py -v -s
 """
 
 import random

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests whether gptq models with dynamic quantized can be loaded.
 
-Run `pytest tests/quantization/test_gptq_dynamic.py --forked`.
+Run `pytest tests/quantization/checkpoint_formats/test_gptq_dynamic.py --forked`.
 
 Note: Only symmetric GPTQ models are supported after consolidation to Marlin.
 """

@@ -148,8 +148,8 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
-        pytest -v -s quantization/test_auto_round.py &&
-        pytest -v -s quantization/test_online.py'
+        pytest -v -s quantization/checkpoint_formats/test_auto_round.py &&
+        pytest -v -s quantization/core/test_online.py'
   - label: "XPU GPQA Eval (GPT-OSS)"
     depends_on:
       - image-build-xpu
@@ -190,14 +190,14 @@ steps:
       VLLM_TEST_DEVICE: "xpu"
     source_file_dependencies:
       - vllm/
-      - tests/quantization/test_compressed_tensors.py
+      - tests/quantization/compressed_tensors/test_compressed_tensors.py
       - .buildkite/intel_jobs/test-intel.yaml
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
-        pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8 &&
-        pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8_block_enabled'
+        pytest -v -s quantization/compressed_tensors/test_compressed_tensors.py::test_compressed_tensors_fp8 &&
+        pytest -v -s quantization/compressed_tensors/test_compressed_tensors.py::test_compressed_tensors_fp8_block_enabled'
   - label: "XPU Graph"
     depends_on:
       - image-build-xpu

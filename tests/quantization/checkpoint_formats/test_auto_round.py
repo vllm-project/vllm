@@ -5,7 +5,7 @@ on the AutoRound.
 
 Validating the configuration and printing results for manual checking.
 
-Run `pytest tests/quantization/test_auto_round.py`.
+Run `pytest tests/quantization/checkpoint_formats/test_auto_round.py`.
 """
 
 from types import SimpleNamespace

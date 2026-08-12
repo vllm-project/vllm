@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests whether vllm correctly load and run gptq_v2 format checkpoints.
 
-Run `pytest tests/quantization/test_gptq_v2.py --forked`.
+Run `pytest tests/quantization/checkpoint_formats/test_gptq_v2.py --forked`.
 
 Note: 2/3-bit GPTQ models are no longer supported after the consolidation
 to Marlin kernels. Only 4/8-bit symmetric GPTQ models are supported.

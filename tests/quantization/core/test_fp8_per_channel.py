@@ -6,7 +6,7 @@ Per-output-channel weight scale + dynamic per-token activation scale.
 bf16/fp16 checkpoints are quantized at load time with one fp32 scale per
 output channel for weights and one fp32 scale per token for activations
 (computed dynamically inside the kernel). Run via
-`pytest tests/quantization/test_fp8_per_channel.py --forked`.
+`pytest tests/quantization/core/test_fp8_per_channel.py --forked`.
 """
 
 import pytest

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test model set-up and weight loading for llmcompressor-quantized models.
 
-Run `pytest tests/quantization/test_compressed_tensors.py`.
+Run `pytest tests/quantization/compressed_tensors/test_compressed_tensors.py`.
 """
 
 from contextlib import contextmanager

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests that the auto_gptq quantization method works correctly.
 
-Run `pytest tests/quantization/test_auto_gptq.py -v -s`.
+Run `pytest tests/quantization/checkpoint_formats/test_auto_gptq.py -v -s`.
 """
 
 from types import SimpleNamespace

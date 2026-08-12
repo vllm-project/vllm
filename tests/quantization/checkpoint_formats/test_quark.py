@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test model set-up and weight loading for quark-quantized models.
 
-Run `pytest tests/quantization/test_quark.py`.
+Run `pytest tests/quantization/checkpoint_formats/test_quark.py`.
 
 See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 """
@@ -49,7 +49,7 @@ else:
         return False
 
 
-from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
+from tests.quantization.reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 # Minimum amd-quark version for MXFP4/OCP_MX tests (single source of truth).
 QUARK_MXFP4_MIN_VERSION = "0.12"

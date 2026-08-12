@@ -4,7 +4,7 @@
 
 See https://github.com/vllm-project/vllm/issues/11926 for more details.
 
-Run `pytest tests/quantization/test_register_quantization_config.py`.
+Run `pytest tests/quantization/core/test_register_quantization_config.py`.
 """
 
 import logging

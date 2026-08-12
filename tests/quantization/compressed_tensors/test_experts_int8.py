@@ -10,7 +10,7 @@ import pytest
 
 from tests.quantization.utils import is_quant_method_supported
 
-from ..models.registry import HF_EXAMPLE_MODELS
+from tests.models.registry import HF_EXAMPLE_MODELS
 
 MODELS = ["ai21labs/Jamba-tiny-random"]
 

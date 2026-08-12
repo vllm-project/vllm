@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests whether Marlin models can be loaded from the autogptq config.
 
-Run `pytest tests/quantization/test_configs.py --forked`.
+Run `pytest tests/quantization/core/test_configs.py --forked`.
 """
 
 from dataclasses import dataclass

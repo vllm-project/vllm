@@ -7,8 +7,7 @@
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
-
-from ..utils import compare_two_settings
+from tests.utils import compare_two_settings
 
 
 @pytest.mark.skipif(

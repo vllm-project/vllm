@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for TurboQuant KV-cache quantization.
 
-Run: .venv/bin/python -m pytest tests/quantization/test_turboquant.py -v
+Run:
+.venv/bin/python -m pytest tests/quantization/compressed_tensors/test_turboquant.py -v
 """
 
 import math

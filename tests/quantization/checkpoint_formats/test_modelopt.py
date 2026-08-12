@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test ModelOpt quantization method setup and weight loading.
 
-Run `pytest tests/quantization/test_modelopt.py`.
+Run `pytest tests/quantization/checkpoint_formats/test_modelopt.py`.
 """
 
 import os

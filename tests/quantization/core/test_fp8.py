@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests whether FP8 computation is enabled correctly.
 
-Run `pytest tests/quantization/test_fp8.py --forked`.
+Run `pytest tests/quantization/core/test_fp8.py --forked`.
 """
 
 import logging

@@ -65,7 +65,7 @@ function cpu_tests() {
   # Run quantized model tests
   docker exec cpu-test bash -c "
     set -e
-    pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
+    pytest -x -v -s tests/quantization/compressed_tensors/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
 
   # basic online serving
   docker exec cpu-test bash -c '

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test quark-quantized {MXFP4, FP8} mixed precision models.
 
-Run `pytest tests/quantization/test_mixed_precision.py`.
+Run `pytest tests/quantization/checkpoint_formats/test_mixed_precision.py`.
 
 """
 
