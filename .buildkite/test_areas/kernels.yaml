@@ -933,6 +933,7 @@ steps:
   - tests/kernels/quantization/test_flashinfer_mxfp8_unaligned_n.py
   - tests/kernels/quantization/test_flashinfer_mxfp8_trtllm.py
   - tests/kernels/moe/test_cutedsl_moe.py
+  - tests/quantization/test_trtllm_nvfp4_dynamic_gemm2.py
   - tests/models/quantization/test_nvfp4.py
   - vllm/model_executor/kernels/linear/nvfp4/
   - vllm/model_executor/layers/quantization/compressed_tensors/transform/
@@ -970,7 +971,10 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
-    - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
+    - >-
+      pytest -v -s
+      tests/kernels/moe/test_trtllm_nvfp4_moe.py
+      tests/quantization/test_trtllm_nvfp4_dynamic_gemm2.py
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   mirror:
     amd:

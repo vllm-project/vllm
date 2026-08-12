@@ -622,6 +622,18 @@ def make_nvfp4_moe_kernel(
     per_token_activation: bool = False,
     csf_scales: bool = False,
 ) -> mk.FusedMoEKernel:
+    dynamic_gemm2 = envs.VLLM_FLASHINFER_MOE_NVFP4_DYNAMIC_GEMM2
+    if dynamic_gemm2 and backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        raise ValueError(
+            "VLLM_FLASHINFER_MOE_NVFP4_DYNAMIC_GEMM2 requires the "
+            "FlashInfer TRTLLM NVFP4 MoE backend."
+        )
+    if dynamic_gemm2:
+        logger.info_once(
+            "Using dynamic per-token GEMM2 input quantization for "
+            "FlashInfer TRTLLM NVFP4 MoE."
+        )
+
     # Marlin consumes A16 and must not receive per-token A4 metadata.
     if backend == NvFp4MoeBackend.MARLIN and moe_quant_config.use_nvfp4_w4a16:
         per_token_activation = False
@@ -638,6 +650,8 @@ def make_nvfp4_moe_kernel(
                 f"{backend.value}."
             )
         extra_kwargs["per_token_activation"] = True
+    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        extra_kwargs["dynamic_gemm2"] = dynamic_gemm2
     if csf_scales:
         extra_kwargs["csf_scales"] = True
 
