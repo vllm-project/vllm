@@ -33,6 +33,7 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_ep_v2,
+    has_moonep,
     has_mori,
     has_nixl_ep,
 )
@@ -54,6 +55,13 @@ if current_platform.is_cuda_alike():
         from .prepare_finalize.nixl_ep import (
             NIXL_EP_QUANT_BLOCK_SHAPE,
             NixlEPPrepareAndFinalize,
+        )
+    if has_moonep():
+        from .prepare_finalize.moonep import (
+            MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
+            MOONEP_DEFAULT_NUM_SMS,
+            MOONEP_DEFAULT_TOKEN_PADDING,
+            MoonEPPrepareAndFinalize,
         )
 
 
@@ -230,6 +238,27 @@ def maybe_make_prepare_finalize(
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
+        )
+
+    elif moe.use_moonep_kernels:
+        all_to_all_args = dict(
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            token_hidden_size=moe.hidden_dim,
+            num_topk=moe.experts_per_token,
+            num_global_experts=moe.num_experts,
+            num_prefetch_slots=MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
+            token_padding=MOONEP_DEFAULT_TOKEN_PADDING,
+            num_sms=MOONEP_DEFAULT_NUM_SMS,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+
+        # PoC: the [E+B] replicated weight layout is attached later by the
+        # MoE layer (after weight loading); engine use is not supported yet.
+        prepare_finalize = MoonEPPrepareAndFinalize(
+            buffer=handle,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
+            num_global_experts=moe.num_experts,
         )
 
     elif moe.use_mori_kernels:
