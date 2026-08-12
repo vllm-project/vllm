@@ -18,7 +18,7 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 import functools
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, ClassVar
 
 try:
@@ -54,7 +54,7 @@ from vllm.v1.kv_offload.tiering.fs.io import (
     batch_store_block,
     probe_o_direct,
 )
-from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool, Task
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -195,6 +195,13 @@ class FileSystemTierManager(SecondaryTierManager):
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
 
+    def _tasks_from_jobmetadata(self, job_metadata: TransferJob) -> Iterable[Task]:
+        for key, bid in zip(job_metadata.keys, job_metadata.block_ids):
+            yield Task(
+                key=key,
+                offset=int(bid) * self._block_size,
+            )
+
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
@@ -211,15 +218,23 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = keys
-        task = functools.partial(
-            batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in keys],
-            self._primary_kv_view,
-            [int(bid) * self._block_size for bid in job_metadata.block_ids],
-            self._block_size,
-            self._use_o_direct,
+
+        def make_io_fn(batch: list[Task]) -> Callable[[], None]:
+            return functools.partial(
+                batch_store_block,
+                paths=[self.file_mapper.get_file_name(t.key) for t in batch],
+                offsets=[t.offset for t in batch],
+                view=self._primary_kv_view,
+                block_size=self._block_size,
+                use_o_direct=self._use_o_direct,
+            )
+
+        self._pool.enqueue_store(
+            job_metadata.job_id,
+            len(keys),
+            self._tasks_from_jobmetadata(job_metadata),
+            make_io_fn=make_io_fn,
         )
-        self._pool.enqueue_store(job_metadata.job_id, 1, [(task, keys)])
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
@@ -228,15 +243,23 @@ class FileSystemTierManager(SecondaryTierManager):
         # keys as a miss (see get_finished_jobs).
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
-        task = functools.partial(
-            batch_load_block,
-            [self.file_mapper.get_file_name(key) for key in keys],
-            self._primary_kv_view,
-            [int(bid) * self._block_size for bid in job_metadata.block_ids],
-            self._block_size,
-            self._use_o_direct,
+
+        def make_io_fn(batch: list[Task]) -> Callable[[], None]:
+            return functools.partial(
+                batch_load_block,
+                paths=[self.file_mapper.get_file_name(t.key) for t in batch],
+                offsets=[t.offset for t in batch],
+                view=self._primary_kv_view,
+                block_size=self._block_size,
+                use_o_direct=self._use_o_direct,
+            )
+
+        self._pool.enqueue_load(
+            job_metadata.job_id,
+            len(keys),
+            self._tasks_from_jobmetadata(job_metadata),
+            make_io_fn=make_io_fn,
         )
-        self._pool.enqueue_load(job_id, 1, [(task, keys)])
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -260,10 +283,9 @@ class FileSystemTierManager(SecondaryTierManager):
             if load_keys is not None and not finished.success:
                 # Keys the pool reported as failed are marked as a MISS in
                 # the lookup cache.
-                self._lookup_manager.mark_miss(finished.failed_keys)
-                successful = tuple(
-                    k for k in load_keys if k not in finished.failed_keys
-                )
+                failed = set([t.key for t in finished.failed_tasks])
+                self._lookup_manager.mark_miss(failed)
+                successful = tuple(k for k in load_keys if k not in failed)
                 results.append(
                     JobResult(
                         job_id=job_id,
