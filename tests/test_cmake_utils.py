@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _get_cmake_bin() -> str:
     cmake = shutil.which("cmake")
@@ -73,7 +75,8 @@ if(NOT "${{CMAKE_CUDA_FLAGS}}" STREQUAL "-Wall ")
   message(FATAL_ERROR "Expected '-Wall ', got '${{CMAKE_CUDA_FLAGS}}'")
 endif()
 if(NOT "${{CUDA_ARCH_FLAGS}}" STREQUAL "-gencode arch=compute_80,code=sm_80")
-  message(FATAL_ERROR "Expected '-gencode arch=compute_80,code=sm_80', got '${{CUDA_ARCH_FLAGS}}'")
+  message(FATAL_ERROR "Expected '-gencode arch=compute_80,code=sm_80', "
+    "got '${{CUDA_ARCH_FLAGS}}'")
 endif()
 """
     )
@@ -81,7 +84,17 @@ endif()
     subprocess.run([_get_cmake_bin(), "-P", script], check=True)
 
 
-def test_warn_if_ptx_arch_requested(tmp_path: Path):
+@pytest.mark.parametrize(
+    "cuda_arch_flags, expect_warning",
+    [
+        ("-gencode arch=compute_80,code=sm_80", False),
+        ("-gencode arch=compute_80,code=compute_80", True),
+        ("-gencode arch=compute_90a,code=[sm_90a,compute_90a]", True),
+    ],
+)
+def test_warn_if_ptx_arch_requested(
+    tmp_path: Path, cuda_arch_flags: str, expect_warning: bool
+):
     repo_root = Path(__file__).parents[1]
     script = tmp_path / "test_warn_ptx.cmake"
     script.write_text(
@@ -89,13 +102,7 @@ def test_warn_if_ptx_arch_requested(tmp_path: Path):
 cmake_minimum_required(VERSION 3.26)
 include("{repo_root / "cmake" / "utils.cmake"}")
 
-set(CUDA_ARCH_FLAGS "-gencode arch=compute_80,code=sm_80")
-warn_if_ptx_arch_requested("${{CUDA_ARCH_FLAGS}}")
-
-set(CUDA_ARCH_FLAGS "-gencode arch=compute_80,code=compute_80")
-warn_if_ptx_arch_requested("${{CUDA_ARCH_FLAGS}}")
-
-set(CUDA_ARCH_FLAGS "-gencode arch=compute_90a,code=[sm_90a,compute_90a]")
+set(CUDA_ARCH_FLAGS "{cuda_arch_flags}")
 warn_if_ptx_arch_requested("${{CUDA_ARCH_FLAGS}}")
 """
     )
@@ -106,9 +113,8 @@ warn_if_ptx_arch_requested("${{CUDA_ARCH_FLAGS}}")
         text=True,
         check=True,
     )
-    assert (
-        "PTX code generation requested in CUDA architecture flags"
-        in result.stderr
-    )
-
-
+    warning_msg = "PTX code generation requested in CUDA architecture flags"
+    if expect_warning:
+        assert warning_msg in result.stderr
+    else:
+        assert warning_msg not in result.stderr
