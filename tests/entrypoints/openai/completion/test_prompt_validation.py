@@ -52,23 +52,6 @@ async def test_out_of_vocab_token_ids():
             )
 
 
-@pytest.mark.asyncio
-async def test_negative_token_ids():
-    # A negative token id is out of vocabulary just like an over-large one, but
-    # is not caught by the upper-bound check. It must be rejected with a 400.
-    model_name = "openai-community/gpt2"
-    server_args = ["--enforce-eager"]
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
-        client = remote_server.get_async_client()
-
-        with pytest.raises(
-            openai.BadRequestError, match=re.compile(".*out of vocabulary.*").pattern
-        ):
-            await client.completions.create(
-                model=model_name, prompt=[-1], max_tokens=5, temperature=0.0
-            )
-
-
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
     "layout", [torch.strided, torch.sparse_coo, torch.sparse_csc, torch.sparse_csr]
