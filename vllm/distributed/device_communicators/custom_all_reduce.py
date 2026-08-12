@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import threading
 from contextlib import contextmanager
 from typing import cast
 
@@ -33,6 +34,17 @@ except ImportError:
 
 logger = init_logger(__name__)
 
+# Nesting-safe disable of expandable_segments for custom-AR capture.
+# Depth is process-global (allocator settings are process-global). Only the
+# outermost disable applies/restores the setting so nested capture() calls
+# cannot re-enable expandable_segments while an outer capture still needs it
+# off.
+_expandable_segments_disable_lock = threading.Lock()
+_expandable_segments_disable_depth = 0
+
+# Cached CUDA driver entry point for legacy-IPC probes (CUDA only).
+_cu_pointer_get_attribute = None
+
 
 def _set_expandable_segments(enabled: bool) -> None:
     """Best-effort toggle of PyTorch expandable_segments allocator setting."""
@@ -44,55 +56,94 @@ def _set_expandable_segments(enabled: bool) -> None:
         torch.cuda.memory._set_allocator_settings(conf)
 
 
+def _env_expandable_segments_enabled() -> bool:
+    conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    return "expandable_segments:True" in conf
+
+
 @contextmanager
 def _disable_expandable_segments_for_cuda_ipc(active: bool):
     """Temporarily disable expandable_segments during custom-AR graph capture.
 
     ``cudaIpcGetMemHandle`` only accepts ``cudaMalloc`` allocations. With
     ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``, *new* device tensors
-    come from CUDA VMM segments and cannot be legacy-IPC exported (see
-    https://github.com/vllm-project/vllm/issues/42609).
+    come from CUDA VMM segments and cannot be legacy-IPC exported (see issue
+    #42609).
 
     Pre-existing VMM tensors are unchanged by this toggle; the capture path
-    must fall back to the pre-registered scratch buffer when
-    ``_tensor_is_legacy_ipc_capable`` is false.
+    must fall back to the pre-registered scratch buffer when the input is not
+    legacy-IPC-capable.
 
-    No-op when custom AR is disabled, platform is non-CUDA, or expandable
-    segments are not enabled.
+    Nested uses are refcounted so only the outermost disable/restores the
+    process-global allocator setting. No-op when custom AR is disabled,
+    platform is non-CUDA, or expandable segments are not enabled in the env.
     """
-    conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    global _expandable_segments_disable_depth
+
     should_disable = (
-        active and current_platform.is_cuda() and "expandable_segments:True" in conf
+        active and current_platform.is_cuda() and _env_expandable_segments_enabled()
     )
     if not should_disable:
         yield
         return
 
-    logger.info_once(
-        "Temporarily disabling expandable_segments during custom allreduce "
-        "CUDA graph capture for CUDA IPC compatibility."
-    )
-    try:
-        _set_expandable_segments(False)
-    except Exception as e:
-        logger.warning_once(
-            "Could not disable expandable_segments for custom AR capture: %s",
-            e,
-        )
+    entered = False
+    with _expandable_segments_disable_lock:
+        if _expandable_segments_disable_depth == 0:
+            logger.info_once(
+                "Temporarily disabling expandable_segments during custom "
+                "allreduce CUDA graph capture for CUDA IPC compatibility."
+            )
+            try:
+                _set_expandable_segments(False)
+            except Exception as e:
+                logger.warning_once(
+                    "Could not disable expandable_segments for custom AR "
+                    "capture: %s",
+                    e,
+                )
+                # Leave depth at 0; do not restore what we never changed.
+                should_disable = False
+        if should_disable:
+            _expandable_segments_disable_depth += 1
+            entered = True
+
+    if not entered:
         yield
         return
 
     try:
         yield
     finally:
-        try:
-            _set_expandable_segments(True)
-        except Exception as e:
-            logger.warning(
-                "Failed to restore expandable_segments:True after custom AR "
-                "capture: %s",
-                e,
-            )
+        with _expandable_segments_disable_lock:
+            _expandable_segments_disable_depth -= 1
+            if _expandable_segments_disable_depth == 0:
+                try:
+                    # Env still has expandable_segments:True; restore runtime.
+                    _set_expandable_segments(True)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to restore expandable_segments:True after "
+                        "custom AR capture: %s",
+                        e,
+                    )
+
+
+def _get_cu_pointer_get_attribute():
+    """Lazily load and cache ``cuPointerGetAttribute`` from libcuda."""
+    global _cu_pointer_get_attribute
+    if _cu_pointer_get_attribute is not None:
+        return _cu_pointer_get_attribute
+
+    import ctypes
+
+    # CU_POINTER_ATTRIBUTE_IS_LEGACY_IPC_CAPABLE = 10 (cuda.h).
+    libcuda = ctypes.CDLL("libcuda.so.1")
+    fn = libcuda.cuPointerGetAttribute
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+    fn.restype = ctypes.c_int
+    _cu_pointer_get_attribute = fn
+    return fn
 
 
 def _tensor_is_legacy_ipc_capable(t: torch.Tensor) -> bool:
@@ -110,12 +161,8 @@ def _tensor_is_legacy_ipc_capable(t: torch.Tensor) -> bool:
     try:
         import ctypes
 
-        # CU_POINTER_ATTRIBUTE_IS_LEGACY_IPC_CAPABLE = 10 (cuda.h).
-        # A compiled helper is preferable long-term; ctypes is sufficient for
-        # the capture-time fail-closed probe.
-        libcuda = ctypes.CDLL("libcuda.so.1")
         val = ctypes.c_int(0)
-        rc = libcuda.cuPointerGetAttribute(
+        rc = _get_cu_pointer_get_attribute()(
             ctypes.byref(val),
             ctypes.c_int(10),
             ctypes.c_void_p(ptr),
@@ -125,6 +172,18 @@ def _tensor_is_legacy_ipc_capable(t: torch.Tensor) -> bool:
         return bool(val.value)
     except Exception:
         return False
+
+
+def _should_use_registered_buffer_for_capture(inp: torch.Tensor) -> bool:
+    """Whether graph capture should zero-copy IPC-export ``inp``.
+
+    - CUDA: only when the allocation is legacy-IPC-capable.
+    - Non-CUDA (e.g. ROCm): preserve historical zero-copy ``registered=True``
+      behavior; do not apply the NVIDIA VMM probe.
+    """
+    if not current_platform.is_cuda():
+        return True
+    return _tensor_is_legacy_ipc_capable(inp)
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
@@ -483,12 +542,11 @@ class CustomAllreduce:
             return None
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
-                # Zero-copy only when the activation is legacy-IPC-capable.
-                # Pre-capture VMM tensors (expandable_segments) must use the
-                # pre-registered cudaMalloc scratch buffer (registered=False),
-                # same D2D path as eager — otherwise cudaIpcGetMemHandle fails
-                # during get_graph_buffer_ipc_meta (issue #42609).
-                use_zero_copy = _tensor_is_legacy_ipc_capable(input)
+                # CUDA + VMM: zero-copy only if legacy IPC can export the
+                # activation. Otherwise use the pre-registered cudaMalloc
+                # scratch buffer (registered=False), same as eager.
+                # ROCm/non-CUDA: keep historical registered=True.
+                use_zero_copy = _should_use_registered_buffer_for_capture(input)
                 if not use_zero_copy:
                     logger.debug_once(
                         "Custom allreduce graph capture: activation is not "
