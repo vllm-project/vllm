@@ -155,6 +155,26 @@ pull_request_rules:
       add:
         - mistral
 
+- name: label-new-model
+  description: Automatically apply new-model label
+  conditions:
+    - label != stale
+    - or:
+      # A model file is added alongside a registry entry. added-files rather
+      # than files: touching an existing model file is a fix or a refactor,
+      # and a PR that removes a model is not a new one.
+      - and:
+        - added-files~=^vllm/model_executor/models/.*\.py$
+        - files=vllm/model_executor/models/registry.py
+      # A new top-level package under vllm/models/. common/ is shared kernel
+      # code rather than a model, and nested packages belong to a model that
+      # already exists.
+      - added-files~=^vllm/models/(?!common/)[^/]+/__init__\.py$
+  actions:
+    label:
+      add:
+        - new-model
+
 - name: label-performance
   description: Automatically apply performance label
   conditions:

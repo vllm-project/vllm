@@ -44,25 +44,36 @@ def check(files: list[str]) -> list[tuple[str, str, str]]:
     with open(MERGIFY) as f:
         rules = yaml.safe_load(f)["pull_request_rules"]
 
+    # removed-files is excluded: it names paths the tree no longer has.
+    attrs = ("files", "added-files", "modified-files")
+
     dead = []
     for rule in rules:
         for cond in file_conditions(rule.get("conditions", []), []):
             cond = cond.strip()
             # Negated conditions (label-tpu-remove) are expected to match nothing.
-            if cond.startswith("-files"):
+            if cond.startswith("-"):
                 continue
-            if cond.startswith("files~="):
-                pattern = cond[len("files~=") :]
+            attr = next(
+                (
+                    a
+                    for a in attrs
+                    if cond.startswith(f"{a}~=") or cond.startswith(f"{a}=")
+                ),
+                None,
+            )
+            if attr is None:
+                continue
+            if cond.startswith(f"{attr}~="):
+                pattern = cond[len(attr) + 2 :]
                 try:
                     regex = re.compile(pattern)
                 except re.error as exc:
                     dead.append((rule["name"], cond, f"invalid regex: {exc}"))
                     continue
                 matched = any(regex.search(f) for f in files)
-            elif cond.startswith("files="):
-                matched = cond[len("files=") :] in files
             else:
-                continue
+                matched = cond[len(attr) + 1 :] in files
             if not matched:
                 dead.append((rule["name"], cond, "matches no tracked file"))
     return dead
