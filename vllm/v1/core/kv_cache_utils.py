@@ -665,15 +665,27 @@ def resolve_kv_cache_block_sizes(
     ):
         return scheduler_block_size, scheduler_block_size
 
+    # Groups that opt out of prefix caching (e.g. GLM5Next's KpoolTailSpec, a
+    # 1-block/req scratch buffer) never have block_hashes computed, so their
+    # block_size must not constrain the hash granularity. Including them would
+    # drag the GCD down to the scratch size (kpool=4), which in turn makes the
+    # mamba-align splitter chop every prefill at that fine grain -- producing
+    # short trailing chunks. Exclude them from both the GCD and the divisibility
+    # check; fall back to all groups if nothing participates.
+    hashing_sizes = [
+        bs
+        for g, bs in zip(groups, group_block_sizes)
+        if g.kv_cache_spec.participates_in_prefix_caching
+    ] or group_block_sizes
+
     requested = cache_config.prefix_match_unit
-    hash_block_size = (
-        requested if requested is not None else math.gcd(*group_block_sizes)
-    )
-    if any(bs % hash_block_size != 0 for bs in group_block_sizes):
+    hash_block_size = requested if requested is not None else math.gcd(*hashing_sizes)
+    if any(bs % hash_block_size != 0 for bs in hashing_sizes):
         raise ValueError(
-            f"Invalid prefix_match_unit={hash_block_size}; all KV cache group "
-            f"block sizes must be divisible by prefix_match_unit. "
-            f"Got group block sizes={group_block_sizes}."
+            f"Invalid prefix_match_unit={hash_block_size}; all participating KV "
+            f"cache group block sizes must be divisible by prefix_match_unit. "
+            f"Got group block sizes={group_block_sizes}, "
+            f"participating={hashing_sizes}."
         )
     return scheduler_block_size, hash_block_size
 
