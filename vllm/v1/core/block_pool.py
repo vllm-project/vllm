@@ -6,6 +6,7 @@ from typing import Any
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
     AllBlocksCleared,
+    BlockInactive,
     BlockRemoved,
     BlockStored,
     KVCacheEvent,
@@ -156,6 +157,10 @@ class BlockPool:
             where different KV cache groups have different block sizes, the
             actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
+        enable_block_inactive_events: Whether to emit BlockInactive when a
+            block's ref_cnt drops to 0. Prefill-only (kv_producer) instances
+            should disable this so decode load signals are not driven by
+            prefill free_blocks; BlockStored/BlockRemoved are unaffected.
         metrics_collector: Optional metrics collector for tracking block residency.
     """
 
@@ -166,6 +171,7 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        enable_block_inactive_events: bool = True,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
@@ -191,6 +197,9 @@ class BlockPool:
         self.null_block.is_null = True
 
         self.enable_kv_cache_events = enable_kv_cache_events
+        # Gated separately from enable_kv_cache_events so prefill can still
+        # publish Stored/Removed while omitting Inactive.
+        self.enable_block_inactive_events = enable_block_inactive_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
@@ -727,15 +736,37 @@ class BlockPool:
         # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_with_hash = []
         blocks_without_hash = []
+        inactive_block_hashes: list[ExternalBlockHash] = []
         for block in ordered_blocks:
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
+                # Emit BlockInactive for GPU blocks that had a hash
+                # (prefix-cached blocks) when ref_cnt drops to zero.
+                # Prefill-only (kv_producer) disables enable_block_inactive_events.
+                if (
+                    self.enable_kv_cache_events
+                    and self.enable_block_inactive_events
+                    and block.block_hash is not None
+                ):
+                    inactive_block_hashes.append(
+                        maybe_convert_block_hash(
+                            get_block_hash(block.block_hash)
+                        )
+                    )
                 # When caching is disabled we always append for better
                 # GPU cache locality from reusing recently used blocks
                 if block.block_hash is None or not self.enable_caching:
                     blocks_without_hash.append(block)
                 else:
                     blocks_with_hash.append(block)
+
+        if inactive_block_hashes:
+            self.kv_event_queue.append(
+                BlockInactive(
+                    block_hashes=inactive_block_hashes,
+                    medium=MEDIUM_GPU,
+                )
+            )
 
         # Blocks without hash get evicted first - prepend them last to the tail
         self.free_block_queue.prepend_n(blocks_without_hash)

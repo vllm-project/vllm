@@ -118,6 +118,11 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
+        # Prefill-only (kv_producer) skips BlockInactive; decode/both/non-PD emit.
+        ktc = self.vllm_config.kv_transfer_config
+        self.enable_block_inactive_events = (
+            True if ktc is None else ktc.should_emit_block_inactive
+        )
         # Diffusion models may not sample any tokens for a denoising step.
         self.num_sampled_tokens_per_step = (
             1 if not vllm_config.model_config.is_diffusion else 0
@@ -274,6 +279,7 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
+            enable_block_inactive_events=self.enable_block_inactive_events,
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
@@ -2694,6 +2700,17 @@ class Scheduler(SchedulerInterface):
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+
+            # When prefix caching is off, cache_blocks is a no-op and does not
+            # emit BlockStored. Decode (kv_consumer) still occupies HBM after
+            # remote recv; emit events so external consumers (e.g. Conductor)
+            # can update active_blocks. Skip when caching is on to avoid
+            # double-emitting with cache_full_blocks.
+            ktc = self.vllm_config.kv_transfer_config
+            if ktc is not None and ktc.is_kv_consumer:
+                self.kv_cache_manager.emit_remote_recv_block_stored(
+                    request, request.num_computed_tokens
+                )
 
             # on a full prompt hit, we need to re-compute the last token
             # in order to be able to sample the next token

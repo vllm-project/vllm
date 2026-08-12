@@ -15,6 +15,7 @@ import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
     AllBlocksCleared,
+    BlockInactive,
     BlockRemoved,
     BlockStored,
 )
@@ -2579,6 +2580,211 @@ def test_emit_cached_block_events_zero_cached():
     )
 
     assert pool.take_events() == []
+
+
+def test_emit_remote_recv_block_stored_when_caching_disabled():
+    """Decode remote-recv path emits BlockStored when prefix caching is off."""
+    block_size = 4
+    num_full_blocks = 3
+    num_tokens = block_size * num_full_blocks
+    kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=16)
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=128,
+        enable_caching=False,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_remote_recv",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    manager.emit_remote_recv_block_stored(req, num_tokens)
+
+    events = manager.take_events()
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, BlockStored)
+    assert event.medium == MEDIUM_GPU
+    assert event.group_idx == 0
+    assert event.block_size == block_size
+    assert len(event.block_hashes) == num_full_blocks
+    assert event.token_ids == list(req.all_token_ids[:num_tokens])
+
+
+def test_emit_remote_recv_block_stored_skipped_when_caching_enabled():
+    """Avoid double-emit: caching on already emits via cache_full_blocks."""
+    block_size = 4
+    num_tokens = block_size * 3
+    kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=16)
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_remote_recv_cached",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    manager.emit_remote_recv_block_stored(req, num_tokens)
+    assert manager.take_events() == []
+
+
+def test_emit_remote_recv_block_stored_skipped_when_events_disabled():
+    block_size = 4
+    num_tokens = block_size * 2
+    kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=16)
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=128,
+        enable_caching=False,
+        hash_block_size=block_size,
+        enable_kv_cache_events=False,
+    )
+    req = make_request(
+        "req_remote_recv_no_events",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    manager.emit_remote_recv_block_stored(req, num_tokens)
+    assert manager.take_events() == []
+
+
+def test_update_waiting_for_remote_kv_emits_for_consumer():
+    """Scheduler success path calls emit_remote_recv_block_stored on Decode."""
+    from unittest.mock import MagicMock
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.connector = MagicMock()
+    scheduler.needs_kv_cache_zeroing = False
+    scheduler.kv_cache_manager = MagicMock()
+    scheduler.failed_recving_kv_req_ids = set()
+    scheduler.finished_recving_kv_req_ids = {"req-1"}
+    scheduler.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=True)
+    )
+
+    request = MagicMock()
+    request.request_id = "req-1"
+    request.num_computed_tokens = 12
+    request.num_tokens = 16
+
+    scheduler._update_waiting_for_remote_kv(request)
+
+    scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(request, 12)
+    scheduler.kv_cache_manager.emit_remote_recv_block_stored.assert_called_once_with(
+        request, 12
+    )
+    assert "req-1" not in scheduler.finished_recving_kv_req_ids
+
+
+def test_update_waiting_for_remote_kv_skips_emit_for_producer():
+    from unittest.mock import MagicMock
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.connector = MagicMock()
+    scheduler.needs_kv_cache_zeroing = False
+    scheduler.kv_cache_manager = MagicMock()
+    scheduler.failed_recving_kv_req_ids = set()
+    scheduler.finished_recving_kv_req_ids = {"req-1"}
+    scheduler.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=False)
+    )
+
+    request = MagicMock()
+    request.request_id = "req-1"
+    request.num_computed_tokens = 12
+    request.num_tokens = 16
+
+    scheduler._update_waiting_for_remote_kv(request)
+
+    scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(request, 12)
+    scheduler.kv_cache_manager.emit_remote_recv_block_stored.assert_not_called()
+
+
+def test_free_blocks_emits_block_inactive_when_enabled():
+    """BlockInactive is emitted on ref_cnt→0 when enable_block_inactive_events."""
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+        enable_block_inactive_events=True,
+    )
+    req = make_request(
+        "req_inactive",
+        prompt_token_ids=list(range(block_size)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    blocks = pool.get_new_blocks(1)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    pool.take_events()  # drain BlockStored
+
+    pool.free_blocks(blocks)
+    events = pool.take_events()
+    assert len(events) == 1
+    assert isinstance(events[0], BlockInactive)
+    assert events[0].medium == MEDIUM_GPU
+
+
+def test_free_blocks_skips_block_inactive_when_disabled():
+    """Prefill-style gate: Stored still works; Inactive is suppressed."""
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+        enable_block_inactive_events=False,
+    )
+    req = make_request(
+        "req_no_inactive",
+        prompt_token_ids=list(range(block_size)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    blocks = pool.get_new_blocks(1)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    stored = pool.take_events()
+    assert any(isinstance(e, BlockStored) for e in stored)
+
+    pool.free_blocks(blocks)
+    assert pool.take_events() == []
+
+
+def test_kv_transfer_should_emit_block_inactive():
+    from vllm.config.kv_transfer import KVTransferConfig
+
+    assert KVTransferConfig(kv_role="kv_producer").should_emit_block_inactive is False
+    assert KVTransferConfig(kv_role="kv_consumer").should_emit_block_inactive is True
+    assert KVTransferConfig(kv_role="kv_both").should_emit_block_inactive is True
+    assert KVTransferConfig().should_emit_block_inactive is True
 
 
 def test_eagle_enabled_removes_last_block():
