@@ -68,7 +68,7 @@ def flashinfer_one_sided_dispatch_layout(
     ):
         if hidden_dim % 128 != 0:
             raise NotImplementedError(
-                "flashinfer_nvlink_one_sided native 128x128 block-fp8 dispatch "
+                "flashinfer_nvlink_one_sided DeepSeek Blockwise FP8 dispatch "
                 f"requires hidden_dim divisible by 128; got {hidden_dim}"
             )
         scale_elems = hidden_dim // 128
@@ -76,7 +76,7 @@ def flashinfer_one_sided_dispatch_layout(
         return FlashInferOneSidedDispatchLayout(hidden_dim, scale_bytes)
     raise NotImplementedError(
         "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
-        "native E4M3+FP32-scale 128x128 block-fp8, and bf16 "
+        "DeepSeek Blockwise FP8 (E4M3 with FP32 1x128 scales), and bf16 "
         "(quant_dtype=None) today; got "
         f"quant_dtype={quant_config.quant_dtype!r}, "
         f"use_fp8_w8a8={quant_config.use_fp8_w8a8!r}, "

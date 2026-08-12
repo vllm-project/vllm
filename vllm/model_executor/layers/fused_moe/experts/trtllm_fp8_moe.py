@@ -37,7 +37,7 @@ logger = init_logger(__name__)
 
 
 def prepare_deepseek_fp8_x_sf(x: torch.Tensor, x_sf: torch.Tensor) -> torch.Tensor:
-    """Validate native 1x128 activation tensors and return TRTLLM layout."""
+    """Validate DeepSeek Blockwise FP8 tensors and return TRTLLM layout."""
     if x.dtype != current_platform.fp8_dtype():
         raise ValueError(
             f"DeepSeekFp8 activations must use the platform E4M3 dtype; got {x.dtype}"
@@ -176,13 +176,6 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
     Fp8 TRTLLM-Gen MoE kernels. Supports modular interface.
     """
 
-    @property
-    def expects_unquantized_inputs(self) -> bool:
-        # Native one-sided block-FP8 dispatch quantizes before communication
-        # and passes the received E4M3 values and FP32 1x128 scales directly
-        # to TRTLLM DeepSeekFp8/BlockMajorK.
-        return False
-
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return (
@@ -270,9 +263,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
 
         if a1q_scale is None:
             raise RuntimeError(
-                "TRT-LLM FP8 experts require precomputed activation scales; "
-                "native one-sided block-FP8 dispatch must transport FP32 "
-                "1x128 scales with the E4M3 activations"
+                "TRT-LLM FP8 experts require precomputed activation scales"
             )
         assert a1q_scale is not None
 
