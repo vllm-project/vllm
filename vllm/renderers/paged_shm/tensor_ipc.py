@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import Callable
 from dataclasses import asdict
-from typing import Any
 
 import torch
 
@@ -11,7 +9,6 @@ from vllm.config import ModelConfig
 from vllm.inputs import MultiModalInput
 from vllm.multimodal.inputs import (
     MultiModalFieldElem,
-    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.utils import random_uuid
@@ -78,16 +75,20 @@ class PagedShmTensorIPC:
         assert self.client_sync is not None
 
         elements: list[MultiModalFieldElem] = []
+        mm_kwargs: MultiModalKwargsItems = mm_inputs["mm_kwargs"]
+        for modality, items in mm_kwargs.items():
+            for item in items:
+                if items is None:
+                    continue
+                if "pixel_values" not in item:
+                    continue
 
-        def _func(elem: MultiModalFieldElem):
-            if not isinstance(elem.data, torch.Tensor):
-                return
-            if elem.data.nbytes < self.block_size:
-                return
-
-            elements.append(elem)
-
-        self._traversal(mm_inputs, _func)
+                elem: MultiModalFieldElem = item["pixel_values"]
+                if not isinstance(elem.data, torch.Tensor):
+                    continue
+                if elem.data.nbytes < self.block_size:
+                    continue
+                elements.append(elem)
 
         items: list[ShmItem] = []
         for elem in elements:
@@ -123,29 +124,6 @@ class PagedShmTensorIPC:
         print(
             f"PagedShmTensorIPC.write {elapsed_time * 1000} ms",
         )
-        return None
-
-    def _traversal(self, obj: Any, func: Callable[[MultiModalFieldElem], None]):
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                self._traversal(v, func)
-            return None
-        elif isinstance(obj, (list, tuple)):
-            for v in obj:
-                self._traversal(v, func)
-            return None
-        elif isinstance(obj, MultiModalKwargsItem):
-            for k, v in obj.items():
-                self._traversal(v, func)
-            return None
-        elif isinstance(obj, MultiModalFieldElem):
-            func(obj)
-            return None
-        elif isinstance(obj, MultiModalKwargsItems):
-            for modality, itemlist in obj.items():
-                for item in itemlist:
-                    self._traversal(item, func)
-            return None
         return None
 
     def shutdown(self):
