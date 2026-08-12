@@ -379,6 +379,60 @@ def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
         PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_pynvvideocodec_h200_recovers_after_unsupported_8k():
+    import PyNvVideoCodec as nvc
+    import torch
+
+    if "H200" not in torch.cuda.get_device_name(0):
+        pytest.skip("Requires H200 NVDEC resolution limits")
+
+    valid_video = create_long_gop_video(num_frames=2, width=64, height=64)
+    unsupported_video = (ASSETS_DIR / "unsupported_8k_h264.mp4").read_bytes()
+
+    old_slots = PyNvVideoCodecVideoBackend._decoder_slots
+    old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
+    old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
+    old_max_slots = PyNvVideoCodecVideoBackend._max_decoder_slots
+    try:
+        PyNvVideoCodecVideoBackend._decoder_slots = []
+        PyNvVideoCodecVideoBackend._active_decoder_slots = 0
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
+        PyNvVideoCodecVideoBackend._max_decoder_slots = None
+
+        loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
+        frames_before, _ = loader.load_bytes(
+            valid_video,
+            num_frames=1,
+            hw_decoders=1,
+        )
+
+        with pytest.raises(
+            nvc.PyNvVCExceptionUnsupported,
+            match="MBCount not supported",
+        ):
+            loader.load_bytes(
+                unsupported_video,
+                num_frames=1,
+                hw_decoders=1,
+            )
+
+        frames_after, _ = loader.load_bytes(
+            valid_video,
+            num_frames=1,
+            hw_decoders=1,
+        )
+
+        assert frames_after.shape == frames_before.shape
+    finally:
+        for slot in PyNvVideoCodecVideoBackend._decoder_slots:
+            slot.invalidate()
+        PyNvVideoCodecVideoBackend._decoder_slots = old_slots
+        PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
+        PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
+
+
 @pytest.mark.parametrize("hw_decoders", [0, -1, 1.5, True, "2"])
 def test_pynvvideocodec_rejects_invalid_hw_decoders(hw_decoders: object):
     with pytest.raises(ValueError, match="hw_decoders must be a positive integer"):
