@@ -76,6 +76,8 @@ class InputBatch:
     num_computed_prefill_tokens_np: np.ndarray
     # [num_reqs] CPU bool array == (num_computed_prefill_tokens_np < prefill_len_np).
     is_prefilling_np: np.ndarray
+    # == np.any(is_prefilling_np)
+    has_prefill: bool
 
     # [num_reqs] only populated when pipeline parallelism is enabled.
     max_seq_len_np: np.ndarray | None
@@ -101,17 +103,14 @@ class InputBatch:
 
     @classmethod
     def make_dummy(
-        cls,
-        num_reqs: int,
-        num_tokens: int,
-        input_buffers: InputBuffers,
+        cls, num_reqs: int, num_tokens: int, input_buffers: InputBuffers
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
-        idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+        idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
@@ -175,6 +174,7 @@ class InputBatch:
             prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
+            has_prefill=False,
             max_seq_len_np=None,
             input_ids=input_ids,
             positions=positions,

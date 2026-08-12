@@ -16,13 +16,6 @@ env:
   # please use CUDA 13 wheels or compile yourself on these new devices
   CUDA_ARCH_X86_CU129: "7.5 8.0 8.6 8.9 9.0 10.0 12.0"
   CUDA_ARCH_AARCH64_CU129: "8.0 8.7 8.9 9.0 10.0 12.0"
-  
-  # pre-built mooncake wheels
-  # the manylinux_2_35 wheel has compatibility issue on Ubuntu 24.04
-  # so we use different wheels for the time being
-  MOONCAKE_WHEEL_AARCH64_2_35: "https://vllm-wheels.s3.amazonaws.com/mooncake/mooncake_transfer_engine-0.3.10.post2-0da9dfea3-cp312-cp312-manylinux_2_35_aarch64.whl"
-  MOONCAKE_WHEEL_AARCH64_2_39: "https://vllm-wheels.s3.amazonaws.com/mooncake/mooncake_transfer_engine-0.3.10.post2-0da9dfea3-cp312-cp312-manylinux_2_39_aarch64.whl"
-  MOONCAKE_WHEEL_X86_64: "https://vllm-wheels.s3.amazonaws.com/mooncake/mooncake_transfer_engine-0.3.10.post2-0da9dfea3-cp312-cp312-manylinux_2_35_x86_64.whl"
 
 steps:
   - input: "Provide Release version here"
@@ -40,7 +33,7 @@ steps:
         agents:
           queue: arm64_cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64}\" --build-arg BUILD_OS=manylinux --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh"
@@ -54,7 +47,7 @@ steps:
         agents:
           queue: cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86}\" --build-arg BUILD_OS=manylinux --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh"
@@ -78,7 +71,7 @@ steps:
         agents:
           queue: arm64_cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64_CU129}\" --build-arg BUILD_OS=manylinux --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64_CU129}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh"
@@ -149,7 +142,7 @@ steps:
         agents:
           queue: cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86_CU129}\" --build-arg BUILD_OS=manylinux --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86_CU129}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh"
@@ -170,6 +163,14 @@ steps:
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "s3://vllm-wheels/$$BUILDKITE_COMMIT/$(cd artifacts/dist && echo *.whl)" release-wheels'
         env:
           DOCKER_BUILDKIT: "1"
+
+  - label: "Publish XPU Triton shim index"
+    key: publish-xpu-triton-shim
+    depends_on: ~
+    agents:
+      queue: cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/xpu/publish-triton-shim.sh"
 
   - label: "Generate and upload wheel indices"
     key: generate-wheel-indices
@@ -219,9 +220,7 @@ steps:
               --build-arg CUDA_VERSION=13.0.2 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
-              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
-              --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -247,9 +246,7 @@ steps:
               --build-arg CUDA_VERSION=13.0.2 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
-              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
-              --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -270,10 +267,9 @@ steps:
               --build-arg USE_SCCACHE=1 \
               --build-arg GIT_REPO_CHECK=1 \
               --build-arg CUDA_VERSION=12.9.1 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86_CU129}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
-              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -297,10 +293,9 @@ steps:
               --build-arg USE_SCCACHE=1 \
               --build-arg GIT_REPO_CHECK=1 \
               --build-arg CUDA_VERSION=12.9.1 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64_CU129}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
-              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -325,9 +320,7 @@ steps:
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
-              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
-              --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu24.04 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -354,9 +347,7 @@ steps:
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
-              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
-              --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu24.04 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -377,12 +368,11 @@ steps:
               --build-arg USE_SCCACHE=1 \
               --build-arg GIT_REPO_CHECK=1 \
               --build-arg CUDA_VERSION=12.9.1 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9 \
               --build-arg UBUNTU_VERSION=24.04 \
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86_CU129}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
-              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -405,12 +395,11 @@ steps:
               --build-arg USE_SCCACHE=1 \
               --build-arg GIT_REPO_CHECK=1 \
               --build-arg CUDA_VERSION=12.9.1 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9 \
               --build-arg UBUNTU_VERSION=24.04 \
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64_CU129}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
-              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -978,14 +967,22 @@ steps:
       - step: build-cpu-release-image-arm64
         allow_failure: true
 
-  - label: "Publish release images to DockerHub"
+  - label: "Publish {{matrix}} release images to DockerHub"
     depends_on:
       - block-publish-release-images
     key: publish-release-images-dockerhub
     agents:
       queue: small_cpu_queue_release
     commands:
-      - "bash .buildkite/scripts/publish-release-images.sh"
+      - "bash .buildkite/scripts/publish-release-images.sh {{matrix}}"
+    matrix:
+      - "cuda-13-0"
+      - "cuda-12-9"
+      - "cuda-13-0-ubuntu-24-04"
+      - "cuda-12-9-ubuntu-24-04"
+      - "rocm"
+      - "xpu"
+      - "cpu"
     plugins:
       - docker-login#v3.0.0:
           username: vllmbot

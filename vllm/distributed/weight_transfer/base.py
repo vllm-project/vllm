@@ -77,6 +77,15 @@ class WeightSource(ABC):
 
     @abstractmethod
     def metadata(self) -> list[ParamMeta]:
+        """Declare what iteration will yield, without transferring anything.
+
+        Must agree with iteration element for element: the same parameters, in
+        the same order, with the same dtypes and shapes. Backends may read both
+        channels and trust that they match (dense NCCL sizes the worker's receive
+        buffers and its packed chunk boundaries from this, then sends the bytes
+        from iteration), so a source that disagrees between the two splits the
+        stream differently on each side.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -341,32 +350,6 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         raise NotImplementedError
 
-    @staticmethod
-    @abstractmethod
-    def trainer_send_weights(
-        iterator: Iterator[Any],
-        trainer_args: dict[str, Any] | Any,
-    ) -> None:
-        """
-        Send weights from trainer to inference workers.
-
-        This is a static method that can be called from the trainer process
-        to send weights to all inference workers.
-
-        Args:
-            iterator: Iterator of backend-specific items to send.
-            trainer_args: Dictionary containing backend-specific arguments needed
-                         to send weights. The structure depends on the backend:
-                         - NCCL: Contains 'group', 'src', 'packed', etc.
-                         - IPC: Contains 'mode' ('http' or 'ray'),
-                                'llm_handle' (for Ray), 'url' (for HTTP), etc.
-
-        Example:
-            >>> param_iter = ((n, p) for n, p in model.named_parameters())
-            >>> engine.trainer_send_weights(param_iter, trainer_args)
-        """
-        raise NotImplementedError
-
 
 @runtime_checkable
 class VLLMWeightSyncClient(Protocol):
@@ -402,8 +385,7 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
     Symmetric to `WeightTransferEngine` but lives in the training process.
     Constructed via the `trainer_init` factory classmethod; carries any
     backend-specific state (NCCL communicators, IPC device info, transfer
-    plans) on `self`. The `WeightSource` is required at `trainer_init`,
-    then replayed each round by the no-argument `send_weights()`.
+    plans) on `self`.
 
     Unlike the worker engine, the trainer side does not take a
     `WeightTransferConfig`: the backend is selected from the init info's
@@ -431,7 +413,7 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
         self,
         *,
         client: "VLLMWeightSyncClient",
-        source: "WeightSource",
+        source: "WeightSource | None" = None,
         is_sender: bool = True,
     ) -> None:
         self.is_sender = is_sender
@@ -447,24 +429,24 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
         init_info: TTrainerInitInfo,
         *,
         client: "VLLMWeightSyncClient",
-        source: "WeightSource",
+        source: "WeightSource | None" = None,
     ) -> Self:
         """Rendezvous with the inference side and return a ready instance.
 
         Called on every trainer rank. The sender drives the full handshake via
         `client` (build the worker-side init info, call
         `client.init_weight_transfer_engine`, open the trainer-side endpoint);
-        non-sender ranks skip the rendezvous and the RPC. `source` is stored on
-        `self.source`; after return, `send_weights()` is callable.
+        non-sender ranks skip the rendezvous and the RPC.
         """
         raise NotImplementedError
 
     @abstractmethod
     def send_weights(self) -> None:
-        """Push `self.source`'s weights to inference workers and drive the full
-        update round trip: `start_weight_update`, `update_weights` (run
-        concurrently with the trainer-side broadcast when the backend requires
-        it), then `finish_weight_update`. Called on every trainer rank."""
+        """Push weights to inference workers and drive the full update round
+        trip: `start_weight_update`, `update_weights` (run concurrently with the
+        trainer-side broadcast when the backend requires it), then
+        `finish_weight_update`. Called on every trainer rank.
+        """
         raise NotImplementedError
 
     def shutdown(self) -> None:
