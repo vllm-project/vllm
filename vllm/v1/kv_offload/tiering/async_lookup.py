@@ -109,7 +109,7 @@ class AsyncLookupManager(ABC):
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
         """
-        Check whether a batch of blocks exist in this tier.
+        Check whether a batch of chunks exist in this tier.
 
         Called from the worker thread — must be synchronous and must not
         touch the primary tier or scheduler state.
@@ -127,8 +127,8 @@ class AsyncLookupManager(ABC):
         Non-blocking lookup called from the scheduler thread.
 
         Returns:
-            True  — block is present in this tier.
-            False — block is not present in this tier.
+            True  — chunk is present in this tier.
+            False — chunk is not present in this tier.
             None  — result not yet available; retry next step.
         """
         if self._need_to_drain:

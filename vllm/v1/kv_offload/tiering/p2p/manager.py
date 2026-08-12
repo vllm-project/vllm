@@ -45,7 +45,7 @@ logger = init_logger(__name__)
 
 # Reap unbound store batches that have been parked without a FetchMsg
 # binding them to a session for longer than this. Protects against the
-# prefiller buffering blocks for a decoder that never asks (decoder died,
+# prefiller buffering chunks for a decoder that never asks (decoder died,
 # network partition, lost kv_request_id). Must be longer than the per-store
 # deadline so the store-timeout path fires first for individual jobs.
 _UNBOUND_STORE_TIMEOUT_S = 60.0
@@ -114,7 +114,7 @@ class P2PSourceInfo:
 
 @dataclass(slots=True)
 class P2PDestInfo:
-    """Producer side: a remote fetches this request's blocks from us.
+    """Producer side: a remote fetches this request's chunks from us.
 
     ``kv_request_id`` is None when the ``remote_decoder`` block is present
     but malformed (no id); the block's presence still marks the request as
@@ -181,7 +181,7 @@ class _UnboundStoreBatch:
 
     job_id: int
     keys: list[OffloadKey]
-    block_ids: Sequence[int]
+    chunk_slot_ids: Sequence[int]
     submitted_at: float = field(default_factory=time.monotonic)
 
 
@@ -189,7 +189,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     """Secondary tier for P2P KV cache sharing.
 
     A single P2PSession per remote peer handles both client-role (loading
-    blocks from the peer) and server-role (serving blocks to the peer)
+    chunks from the peer) and server-role (serving chunks to the peer)
     over the same control connection.
 
     Single-threaded: every public method runs on the scheduler thread, and
@@ -350,7 +350,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 return LookupResult.MISS
             return LookupResult.RETRY
 
-        # PD consumer (we are the decoder): all kv blocks should be on the
+        # PD consumer (we are the decoder): all kv chunks should be on the
         # prefiller side. Return HIT immediately.
         return LookupResult.HIT
 
@@ -414,17 +414,17 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
-        block_ids = job_metadata.block_ids
+        chunk_slot_ids = job_metadata.chunk_slot_ids
 
-        assert len(keys) == len(block_ids)
+        assert len(keys) == len(chunk_slot_ids)
 
         dest = job_metadata.req_context.get_state(P2PDestInfo)
         logger.debug(
-            "P2P %s: submit_store ENTRY job_id=%d blocks=%d "
+            "P2P %s: submit_store ENTRY job_id=%d chunks=%d "
             "remote_decoder=%s kv_request_id=%s",
             self._local_id,
             job_id,
-            len(block_ids),
+            len(chunk_slot_ids),
             dest is not None,
             dest.kv_request_id if dest is not None else None,
         )
@@ -448,7 +448,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # so we can route the batch straight into its ServerRole.
         session = self._kv_to_session.get(kv_request_id)
         if session is not None:
-            session.add_stored_blocks(kv_request_id, keys, block_ids, job_id)
+            session.add_stored_blocks(kv_request_id, keys, chunk_slot_ids, job_id)
             return
 
         # No session bound yet — park the batch keyed by kv_request_id.
@@ -458,29 +458,29 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             _UnboundStoreBatch(
                 job_id=job_id,
                 keys=keys,
-                block_ids=block_ids,
+                chunk_slot_ids=chunk_slot_ids,
             )
         )
         logger.debug(
-            "P2P %s: parked submit_store kv_request_id=%s job_id=%d blocks=%d",
+            "P2P %s: parked submit_store kv_request_id=%s job_id=%d chunks=%d",
             self._local_id,
             kv_request_id,
             job_id,
-            len(block_ids),
+            len(chunk_slot_ids),
         )
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
-        block_ids = job_metadata.block_ids
+        chunk_slot_ids = job_metadata.chunk_slot_ids
 
         source = job_metadata.req_context.get_state(P2PSourceInfo)
         logger.debug(
-            "P2P %s: submit_load ENTRY job_id=%d blocks=%d kv_request_id=%s peer=%s",
+            "P2P %s: submit_load ENTRY job_id=%d chunks=%d kv_request_id=%s peer=%s",
             self._local_id,
             job_id,
-            len(block_ids),
+            len(chunk_slot_ids),
             source.kv_request_id if source is not None else None,
             source.peer_id if source is not None else None,
         )
@@ -518,15 +518,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return
         logger.debug(
             "P2P %s: submit_load job_id=%d -> request_blocks peer=%s "
-            "kv_request_id=%s blocks=%d session_ready=%s",
+            "kv_request_id=%s chunks=%d session_ready=%s",
             self._local_id,
             job_id,
             peer_id,
             kv_request_id,
-            len(block_ids),
+            len(chunk_slot_ids),
             session.ready,
         )
-        session.request_blocks(job_id, kv_request_id, keys, block_ids)
+        session.request_blocks(job_id, kv_request_id, keys, chunk_slot_ids)
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -773,7 +773,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._kv_to_session[kv_request_id] = session
                 for batch in self._unbound_stores.pop(kv_request_id, ()):
                     session.add_stored_blocks(
-                        kv_request_id, batch.keys, batch.block_ids, batch.job_id
+                        kv_request_id, batch.keys, batch.chunk_slot_ids, batch.job_id
                     )
 
         self._reap_dead_sessions()

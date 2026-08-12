@@ -4,7 +4,7 @@
 Unit tests for FileSystemTierManager.
 
 These tests use real disk I/O to verify the filesystem tier implementation.
-The tier manager writes KV cache blocks to disk and reads them back, verifying
+The tier manager writes KV cache chunks to disk and reads them back, verifying
 data integrity throughout the process.
 """
 
@@ -46,8 +46,8 @@ from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 # Helpers
 # ---------------------------------------------------------------------------
 
-_NUM_BLOCKS = 8
-_BLOCK_ELEMENTS = 128 * mmap.PAGESIZE  # 2MB per block for pagesize 4096.
+_NUM_CHUNKS = 8
+_CHUNK_ELEMENTS = 128 * mmap.PAGESIZE  # 2MB per chunk for pagesize 4096.
 _DTYPE: torch.dtype = torch.float32
 _CTX = ReqContext(req_id="test")
 
@@ -105,15 +105,15 @@ def key(n: int) -> OffloadKey:
 def make_job(
     job_id: int,
     keys: list[OffloadKey],
-    block_ids: list[int] | None = None,
+    chunk_slot_ids: list[int] | None = None,
     is_promotion: bool = False,
 ) -> TransferJob:
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
+    if chunk_slot_ids is None:
+        chunk_slot_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids, dtype=np.int64),
+        chunk_slot_ids=np.array(chunk_slot_ids, dtype=np.int64),
         is_promotion=is_promotion,
         req_context=_CTX,
     )
@@ -144,12 +144,12 @@ def lookup_and_wait(
 
 
 def _page_aligned_zero_tensor(
-    num_blocks: int, block_elements: int, dtype: torch.dtype = _DTYPE
+    num_chunks: int, chunk_elements: int, dtype: torch.dtype = _DTYPE
 ) -> torch.Tensor:
     page_size = mmap.PAGESIZE
     dtype_num_bytes = torch.tensor([], dtype=dtype).element_size()
 
-    num_bytes = num_blocks * block_elements * dtype_num_bytes
+    num_bytes = num_chunks * chunk_elements * dtype_num_bytes
     num_bytes_aligned = num_bytes + page_size
     t = torch.zeros(num_bytes_aligned, dtype=torch.uint8)
 
@@ -158,14 +158,14 @@ def _page_aligned_zero_tensor(
     # Move tensor to next page regardless.
     shift = page_size - alignment_offset
     t = t[shift : shift + num_bytes]
-    return t.view(dtype).view(num_blocks, block_elements)
+    return t.view(dtype).view(num_chunks, chunk_elements)
 
 
 def _page_aligned_rand_tensor(
-    num_blocks: int, block_elements: int, dtype: torch.dtype = _DTYPE
+    num_chunks: int, chunk_elements: int, dtype: torch.dtype = _DTYPE
 ) -> torch.Tensor:
-    rand_tensor = _page_aligned_zero_tensor(num_blocks, block_elements)
-    rand_tensor[:] = torch.rand(num_blocks, block_elements, dtype=dtype)
+    rand_tensor = _page_aligned_zero_tensor(num_chunks, chunk_elements)
+    rand_tensor[:] = torch.rand(num_chunks, chunk_elements, dtype=dtype)
     return rand_tensor
 
 
@@ -176,7 +176,7 @@ def _page_aligned_rand_tensor(
 
 @pytest.fixture
 def fs_tier(tmp_path):
-    tensor = _page_aligned_zero_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    tensor = _page_aligned_zero_tensor(_NUM_CHUNKS, _CHUNK_ELEMENTS)
     mock_view = memoryview(tensor.numpy())
     tier = FileSystemTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
@@ -192,7 +192,7 @@ def fs_tier(tmp_path):
 
 @pytest.fixture
 def fs_tier_with_events(tmp_path):
-    tensor = _page_aligned_zero_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    tensor = _page_aligned_zero_tensor(_NUM_CHUNKS, _CHUNK_ELEMENTS)
     mock_view = memoryview(tensor.numpy())
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
@@ -248,11 +248,11 @@ def test_store_then_load_roundtrip(fs_tier):
     load_results = drain(tier)
     assert all(r.success for r in load_results)
     # A successful load must NOT touch the file: the delete path fires only on
-    # a provable short read, so a good block stays on disk (guards against an
+    # a provable short read, so a good chunk stays on disk (guards against an
     # over-eager delete regressing to upstream's delete-on-any-error).
     for k in (key(1), key(2)):
         assert os.path.exists(tier.file_mapper.get_file_name(k))
-    # Blocks stay on disk after load
+    # Chunks stay on disk after load
     assert lookup_and_wait(tier, [key(1), key(2)]) == [
         LookupResult.HIT,
         LookupResult.HIT,
@@ -261,7 +261,7 @@ def test_store_then_load_roundtrip(fs_tier):
 
 def test_invalid_path_raises_at_construction():
     """Construction must fail immediately when the config file cannot be written."""
-    tensor = _page_aligned_zero_tensor(32, _BLOCK_ELEMENTS)
+    tensor = _page_aligned_zero_tensor(32, _CHUNK_ELEMENTS)
     mock_view = memoryview(tensor.numpy())
 
     with pytest.raises(OSError):
@@ -275,7 +275,7 @@ def test_invalid_path_raises_at_construction():
 
 @pytest.mark.parametrize("locality", ["local", ""])
 def test_invalid_locality_raises_at_construction(tmp_path, locality):
-    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    tensor = _page_aligned_zero_tensor(4, _CHUNK_ELEMENTS)
 
     with pytest.raises(ValueError, match="Locality"):
         FileSystemTierManager(
@@ -288,7 +288,7 @@ def test_invalid_locality_raises_at_construction(tmp_path, locality):
 
 
 def test_factory_forwards_locality_to_fs_tier(tmp_path):
-    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    tensor = _page_aligned_zero_tensor(4, _CHUNK_ELEMENTS)
     tier = SecondaryTierFactory.create_secondary_tier(
         {
             "type": "fs",
@@ -308,7 +308,7 @@ def test_factory_forwards_locality_to_fs_tier(tmp_path):
 
 
 def test_failed_load_missing_file(fs_tier):
-    """Test that loading a block whose file does not exist results in a failed job."""
+    """Test that loading a chunk whose file does not exist results in a failed job."""
     tier, _ = fs_tier
     job = make_job(1, [key(99)], [0], is_promotion=True)
     tier.submit_load(job)
@@ -332,8 +332,8 @@ def test_multiple_jobs_tracked_independently(fs_tier):
     ]
 
 
-def test_multi_block_job_partial_failure(fs_tier):
-    """A load job where one block file is missing yields a single failed JobResult."""
+def test_multi_chunk_job_partial_failure(fs_tier):
+    """A load job where one chunk file is missing yields a single failed JobResult."""
     tier, _ = fs_tier
     # Store two of three keys
     tier.submit_store(make_job(1, [key(10), key(11)], [0, 1]))
@@ -379,14 +379,14 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
 
     tier, tensor = fs_tier
     # Populate tensor with random data
-    tensor[:] = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    tensor[:] = _page_aligned_rand_tensor(_NUM_CHUNKS, _CHUNK_ELEMENTS)
 
     keys = [key(i) for i in range(batch_size)]
-    store_block_ids = list(range(batch_size))
-    load_block_ids = list(range(_NUM_BLOCKS - batch_size, _NUM_BLOCKS))
+    store_chunk_slot_ids = list(range(batch_size))
+    load_chunk_slot_ids = list(range(_NUM_CHUNKS - batch_size, _NUM_CHUNKS))
     expected = tensor[:batch_size].clone()
 
-    tier.submit_store(make_job(1, keys, store_block_ids))
+    tier.submit_store(make_job(1, keys, store_chunk_slot_ids))
     store_results = drain(tier)
     assert len(store_results) == 1
     assert store_results[0].success
@@ -396,15 +396,15 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     tensor[:] = 0.0
 
     # Load into a range disjoint by index from the store ids, to also
-    # exercise loading a block into a different id than it was stored from.
-    tier.submit_load(make_job(2, keys, load_block_ids, is_promotion=True))
+    # exercise loading a chunk into a different slot than it was stored from.
+    tier.submit_load(make_job(2, keys, load_chunk_slot_ids, is_promotion=True))
     load_results = drain(tier)
     assert len(load_results) == 1
     assert load_results[0].success
 
-    for i, bid in enumerate(load_block_ids):
-        assert torch.allclose(tensor[bid], expected[i]), (
-            f"Block {bid} data mismatch after store+load"
+    for i, sid in enumerate(load_chunk_slot_ids):
+        assert torch.allclose(tensor[sid], expected[i]), (
+            f"Chunk slot {sid} data mismatch after store+load"
         )
 
 
@@ -418,7 +418,7 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
         "vllm.v1.kv_offload.tiering.fs.manager.probe_o_direct",
         lambda _dir: False,
     )
-    tensor = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
+    tensor = _page_aligned_rand_tensor(4, _CHUNK_ELEMENTS)
     tier = FileSystemTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
         primary_kv_view=memoryview(tensor.numpy()),
@@ -439,8 +439,8 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
         tier.submit_load(make_job(2, keys, [2, 3], is_promotion=True))
         assert all(r.success for r in drain(tier))
 
-        for i, bid in enumerate([2, 3]):
-            assert torch.allclose(tensor[bid], expected[i])
+        for i, sid in enumerate([2, 3]):
+            assert torch.allclose(tensor[sid], expected[i])
     finally:
         tier.shutdown()
 
@@ -529,8 +529,8 @@ def test_batch_lookup_dispatch(fs_tier, monkeypatch, use_c_ext):
 
 
 @pytest.mark.parametrize("use_c_ext", [True, False])
-def test_out_of_bounds_block_id_smoke(fs_tier, monkeypatch, use_c_ext):
-    """Smoke test: a block id beyond the primary tensor's block count must
+def test_out_of_bounds_chunk_slot_id_smoke(fs_tier, monkeypatch, use_c_ext):
+    """Smoke test: a chunk slot id beyond the primary tensor's chunk count must
     fail the job, for both the C extension and the Python fallback."""
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
@@ -539,14 +539,14 @@ def test_out_of_bounds_block_id_smoke(fs_tier, monkeypatch, use_c_ext):
     monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
 
     tier, tensor = fs_tier
-    out_of_bounds_bid = tensor.shape[0]  # one past the last valid block
+    out_of_bounds_sid = tensor.shape[0]  # one past the last valid chunk slot
 
-    tier.submit_store(make_job(1, [key(1)], [out_of_bounds_bid]))
+    tier.submit_store(make_job(1, [key(1)], [out_of_bounds_sid]))
     store_results = drain(tier)
     assert len(store_results) == 1
     assert not store_results[0].success
 
-    tier.submit_load(make_job(2, [key(1)], [out_of_bounds_bid], is_promotion=True))
+    tier.submit_load(make_job(2, [key(1)], [out_of_bounds_sid], is_promotion=True))
     load_results = drain(tier)
     assert len(load_results) == 1
     assert not load_results[0].success
@@ -760,7 +760,7 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     [(None, None), ("REMOTE", Locality.REMOTE)],
 )
 def test_store_event_uses_configured_locality(tmp_path, locality, expected):
-    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    tensor = _page_aligned_zero_tensor(4, _CHUNK_ELEMENTS)
     locality_config = {} if locality is None else {"locality": locality}
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
@@ -805,14 +805,14 @@ def test_mixed_job_results_emit_event_only_for_successful_job(
 
     tier = fs_tier_with_events
     failing_path = tier.file_mapper.get_file_name(key(1))
-    original_batch_store_block = mgr_mod.batch_store_block
+    original_batch_store_chunks = mgr_mod.batch_store_chunks
 
-    def flaky_batch_store_block(paths, *args, **kwargs):
+    def flaky_batch_store_chunks(paths, *args, **kwargs):
         if failing_path in paths:
             raise OSError("injected store failure")
-        return original_batch_store_block(paths, *args, **kwargs)
+        return original_batch_store_chunks(paths, *args, **kwargs)
 
-    monkeypatch.setattr(mgr_mod, "batch_store_block", flaky_batch_store_block)
+    monkeypatch.setattr(mgr_mod, "batch_store_chunks", flaky_batch_store_chunks)
 
     tier.submit_store(make_job(1, [key(1)], [0]))
     tier.submit_store(make_job(2, [key(2)], [1]))
@@ -828,19 +828,19 @@ def test_mixed_job_results_emit_event_only_for_successful_job(
 
 
 def test_partially_failed_store_emits_no_event(fs_tier_with_events, monkeypatch):
-    """A store job with any failed block emits no event for the whole job."""
+    """A store job with any failed chunk emits no event for the whole job."""
     import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
 
     tier = fs_tier_with_events
     failing_path = tier.file_mapper.get_file_name(key(2))
-    original_batch_store_block = mgr_mod.batch_store_block
+    original_batch_store_chunks = mgr_mod.batch_store_chunks
 
-    def flaky_batch_store_block(paths, *args, **kwargs):
+    def flaky_batch_store_chunks(paths, *args, **kwargs):
         if failing_path in paths:
             raise OSError("injected store failure")
-        return original_batch_store_block(paths, *args, **kwargs)
+        return original_batch_store_chunks(paths, *args, **kwargs)
 
-    monkeypatch.setattr(mgr_mod, "batch_store_block", flaky_batch_store_block)
+    monkeypatch.setattr(mgr_mod, "batch_store_chunks", flaky_batch_store_chunks)
 
     tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
     results = drain(tier)
@@ -863,7 +863,7 @@ def test_events_disabled_by_default(fs_tier):
 
 def test_events_require_global_kv_events_flag(tmp_path):
     """Tier-level opt-in alone is not enough; the global flag gates events."""
-    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    tensor = _page_aligned_zero_tensor(4, _CHUNK_ELEMENTS)
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=False),
         primary_kv_view=memoryview(tensor.numpy()),
@@ -891,11 +891,11 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         TieringOffloadingManager,
     )
 
-    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    tensor = _page_aligned_zero_tensor(4, _CHUNK_ELEMENTS)
     view = memoryview(tensor.numpy())
     mock_region = MagicMock()
     mock_region.create_kv_memoryview.return_value = view
-    primary = CPUPrimaryTierOffloadingManager(num_blocks=4, mmap_region=mock_region)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=mock_region)
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
         primary_kv_view=primary.get_kv_memoryview(),
@@ -929,7 +929,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
 def test_fs_tier_cross_tp_round_trip(tmp_path):
     """TP=2 replicated writer and TP=4 reader share namespace and bytes."""
     root = str(tmp_path)
-    writer_tensor = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
+    writer_tensor = _page_aligned_rand_tensor(4, _CHUNK_ELEMENTS)
     expected = writer_tensor[0].clone()
     writer = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(
@@ -949,7 +949,7 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
     finally:
         writer.shutdown()
 
-    reader_tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    reader_tensor = _page_aligned_zero_tensor(4, _CHUNK_ELEMENTS)
     reader = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(
             tp_size=4, world_size=4, rank=3, replicated_layout=True

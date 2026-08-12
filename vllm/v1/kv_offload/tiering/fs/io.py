@@ -10,10 +10,10 @@ import threading
 
 try:
     from vllm.fs_io_C import (  # pyright: ignore[reportMissingImports]
-        batch_load_block as batch_load_block_C,
+        batch_load_chunks as batch_load_chunks_C,
     )
     from vllm.fs_io_C import (
-        batch_store_block as batch_store_block_C,
+        batch_store_chunks as batch_store_chunks_C,
     )
 
     _HAS_FSIO_C = True
@@ -45,7 +45,7 @@ def probe_o_direct(directory: str) -> bool:
     a container ``/tmp``, older tmpfs, or some NFS mounts), where opening or
     writing a file with it fails with ``EINVAL``. Probe once with an aligned
     single-page write so callers can fall back to buffered I/O instead of
-    failing on every block.
+    failing on every chunk.
     """
     if not O_DIRECT:
         return False
@@ -71,8 +71,10 @@ def _ensure_dirs(path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
 
-def _validate_offsets(view: memoryview, offsets: list[int], block_size: int) -> None:
-    """Raise if any block would read/write past the bounds of `view`.
+def _validate_offsets(
+    view: memoryview, offsets: list[int], chunk_byte_size: int
+) -> None:
+    """Raise if any chunk would read/write past the bounds of `view`.
 
     Without this, an out-of-range offset silently clips to a shorter (or
     empty) slice instead of failing, since memoryview slicing follows
@@ -80,24 +82,24 @@ def _validate_offsets(view: memoryview, offsets: list[int], block_size: int) -> 
     """
     total_len = len(view.cast("B"))
     for offset in offsets:
-        if offset < 0 or offset + block_size > total_len:
+        if offset < 0 or offset + chunk_byte_size > total_len:
             raise ValueError(
-                f"block offset {offset} (block_size {block_size}) is out of "
-                f"bounds for a buffer of size {total_len}"
+                f"chunk offset {offset} (chunk_byte_size {chunk_byte_size}) "
+                f"is out of bounds for a buffer of size {total_len}"
             )
 
 
-def _store_block(
+def _store_chunk(
     dest_path: str,
     buffer: memoryview,
     offset: int,
-    block_size: int,
+    chunk_byte_size: int,
     use_o_direct: bool = True,
 ) -> None:
     """
     Store callback: Writes to a temp file then atomically replaces the destination.
     """
-    # Check if block already exists to avoid redundant writes
+    # Check if chunk already exists to avoid redundant writes
     if os.path.exists(dest_path):
         return
 
@@ -105,9 +107,9 @@ def _store_block(
     # Ensure parent directories exist
     _ensure_dirs(dest_path)
 
-    # Write block atomically. Cast to a flat byte view so the slice uses byte
+    # Write chunk atomically. Cast to a flat byte view so the slice uses byte
     # indices; the raw memoryview may be multi-dimensional with itemsize > 1.
-    view_slice = buffer.cast("B")[offset : offset + block_size]
+    view_slice = buffer.cast("B")[offset : offset + chunk_byte_size]
     o_direct = O_DIRECT if use_o_direct else 0
     try:
         fd = os.open(
@@ -132,24 +134,24 @@ def _store_block(
         raise
 
 
-def _load_block(
+def _load_chunk(
     source_path: str,
     view: memoryview,
     offset: int,
-    block_size: int,
+    chunk_byte_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """Read one KV block from disk; remove the file only on a provable short
+    """Read one KV chunk from disk; remove the file only on a provable short
     read (a too-short file is genuine corruption) and leave it untouched on any
     other error."""
     fd: int | None = None
-    view_slice = view.cast("B")[offset : offset + block_size]
+    view_slice = view.cast("B")[offset : offset + chunk_byte_size]
     o_direct = O_DIRECT if use_o_direct else 0
 
     try:
         fd = os.open(source_path, os.O_RDONLY | o_direct)
         bytes_read = os.readv(fd, [view_slice])
-        if bytes_read < block_size:
+        if bytes_read < chunk_byte_size:
             # A failure to remove must not mask the short-read error below.
             try:
                 os.remove(source_path)
@@ -159,64 +161,67 @@ def _load_block(
                     source_path,
                     cleanup_exc,
                 )
-            raise OSError(f"Short read: expected {block_size} bytes, read {bytes_read}")
+            raise OSError(
+                f"Short read: expected {chunk_byte_size} bytes, read {bytes_read}"
+            )
     finally:
         if fd is not None:
             os.close(fd)
 
 
-def batch_store_block(
+def batch_store_chunks(
     paths: list[str],
     view: memoryview,
     offsets: list[int],
-    block_size: int,
+    chunk_byte_size: int,
     use_o_direct: bool = True,
 ) -> None:
     """
-    Store a batch of KV blocks from a shared buffer to disk in one call.
+    Store a batch of KV chunks from a shared buffer to disk in one call.
 
-    Each block buffer[offsets[i] : offsets[i]+block_size] is written atomically
-    to dest_paths[i] via a temp-file rename.  Raises on first error.
+    Each chunk buffer[offsets[i] : offsets[i]+chunk_byte_size] is written
+    atomically to dest_paths[i] via a temp-file rename.  Raises on first error.
     """
-    _validate_offsets(view, offsets, block_size)
+    _validate_offsets(view, offsets, chunk_byte_size)
 
     if _HAS_FSIO_C:
         view_B = view.cast("B")
-        view_slices = [view_B[x : x + block_size] for x in offsets]
+        view_slices = [view_B[x : x + chunk_byte_size] for x in offsets]
         tmp_paths = [p + _get_tmp_suffix() for p in paths]
-        return batch_store_block_C(tmp_paths, paths, view_slices, use_o_direct)
+        return batch_store_chunks_C(tmp_paths, paths, view_slices, use_o_direct)
     else:
         for path, offset in zip(paths, offsets):
-            _store_block(path, view, offset, block_size, use_o_direct)
+            _store_chunk(path, view, offset, chunk_byte_size, use_o_direct)
 
 
-def batch_load_block(
+def batch_load_chunks(
     paths: list[str],
     view: memoryview,
     offsets: list[int],
-    block_size: int,
+    chunk_byte_size: int,
     use_o_direct: bool = True,
 ) -> None:
     """
-    Load a batch of KV blocks from disk into a shared buffer in one call.
+    Load a batch of KV chunks from disk into a shared buffer in one call.
 
-    Block i is read from source_paths[i] into view[offsets[i] : offsets[i]+block_size].
-    Raises on first error (see _load_block for the delete-on-short-read policy).
+    Chunk i is read from source_paths[i] into
+    view[offsets[i] : offsets[i]+chunk_byte_size].
+    Raises on first error (see _load_chunk for the delete-on-short-read policy).
     On failure the raised OSError carries ``num_succeeded`` = the number of
-    blocks loaded before the failing one, so the tier can keep them.
+    chunks loaded before the failing one, so the tier can keep them.
     """
-    _validate_offsets(view, offsets, block_size)
+    _validate_offsets(view, offsets, chunk_byte_size)
 
     if _HAS_FSIO_C:
         view_B = view.cast("B")
-        view_slices = [view_B[x : x + block_size] for x in offsets]
-        return batch_load_block_C(paths, view_slices, use_o_direct)
+        view_slices = [view_B[x : x + chunk_byte_size] for x in offsets]
+        return batch_load_chunks_C(paths, view_slices, use_o_direct)
     else:
         for i, (path, offset) in enumerate(zip(paths, offsets)):
             try:
-                _load_block(path, view, offset, block_size, use_o_direct)
+                _load_chunk(path, view, offset, chunk_byte_size, use_o_direct)
             except OSError as exc:
-                # Blocks 0..i-1 loaded fine; record the count for partial keep.
+                # Chunks 0..i-1 loaded fine; record the count for partial keep.
                 # The C path sets the same attribute via PyObject_SetAttrString.
                 exc.num_succeeded = i  # type: ignore[attr-defined]
                 raise

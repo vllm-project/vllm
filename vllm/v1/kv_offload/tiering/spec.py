@@ -300,16 +300,16 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 # primary tier can eagerly create a memoryview over _base.
                 scheduler_mmap = SharedOffloadRegion(
                     engine_id=self._engine_id,
-                    num_blocks=self.num_blocks,
+                    num_chunks=self.num_chunks,
                     rank=None,
-                    kv_bytes_per_block=self.kv_bytes_per_chunk,
+                    kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
                 )
                 self._scheduler_mmap = scheduler_mmap
 
                 # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(
-                    num_blocks=self.num_blocks,
+                    num_chunks=self.num_chunks,
                     cache_policy=self.eviction_policy,
                     cache_policy_module_path=self.cache_policy_module_path,
                     enable_events=self.kv_events_config.enable_kv_cache_events,
@@ -367,9 +367,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
             logger.info(
                 "Created TieringOffloadingManager with primary tier "
-                "(%s, %s blocks) and %s secondary tier(s)",
+                "(%s, %s chunks) and %s secondary tier(s)",
                 self.eviction_policy,
-                self.num_blocks,
+                self.num_chunks,
                 len(secondary_tiers),
             )
 
@@ -393,9 +393,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
-            num_blocks=self.num_blocks,
+            num_chunks=self.num_chunks,
             rank=rank,
-            kv_bytes_per_block=self.kv_bytes_per_chunk,
+            kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
         try:
@@ -404,7 +404,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             return CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,
-                num_cpu_blocks=self.num_blocks,
+                num_cpu_chunks=self.num_chunks,
                 mmap_region=worker_mmap,
                 canonical_layout=self.config.canonical_layout,
             )

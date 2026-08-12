@@ -5,9 +5,9 @@ Unit tests for TieringOffloadingManager and ExampleSecondaryTierManager.
 
 These tests verify:
 1. Basic tiered offloading operations (store, load, lookup)
-2. Cascade behavior (blocks stored to all secondary tiers)
-3. Promotion behavior (blocks loaded from secondary to primary to GPU)
-4. ref_cnt management (blocks protected during async transfers)
+2. Cascade behavior (chunks stored to all secondary tiers)
+3. Promotion behavior (chunks loaded from secondary to primary to GPU)
+4. ref_cnt management (chunks protected during async transfers)
 5. Eviction coordination between tiers
 """
 
@@ -57,10 +57,10 @@ _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
 
 
-def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
+def _mock_mmap_region(num_chunks: int, row_bytes: int = 16):
     """Create a mock SharedOffloadRegion for testing."""
     mock = MagicMock()
-    view = memoryview(torch.zeros((num_blocks, row_bytes), dtype=torch.int8).numpy())
+    view = memoryview(torch.zeros((num_chunks, row_bytes), dtype=torch.int8).numpy())
     mock.create_kv_memoryview.return_value = view
     return mock
 
@@ -183,7 +183,7 @@ def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
 def test_tiering_manager_aggregates_secondary_stats():
     mock_region = _mock_mmap_region(5)
     primary_tier = CPUPrimaryTierOffloadingManager(
-        num_blocks=5, mmap_region=mock_region
+        num_chunks=5, mmap_region=mock_region
     )
     secondary_tier = MetricsSecondaryTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
@@ -232,19 +232,19 @@ class TestExampleSecondaryTierManager:
         )
 
         # Initially empty
-        blocks = to_keys(range(3))
-        assert tier.lookup(blocks[0], _CTX) is LookupResult.MISS
+        chunks = to_keys(range(3))
+        assert tier.lookup(chunks[0], _CTX) is LookupResult.MISS
 
-        # Store blocks (simulate with direct insertion for testing)
-        tier.blocks[blocks[0]] = True
-        tier.blocks[blocks[1]] = True
+        # Store chunks (simulate with direct insertion for testing)
+        tier.chunks[chunks[0]] = True
+        tier.chunks[chunks[1]] = True
 
-        # Lookup should find first two blocks
-        assert tier.lookup(blocks[0], _CTX) is LookupResult.HIT
-        assert tier.lookup(blocks[1], _CTX) is LookupResult.HIT
+        # Lookup should find first two chunks
+        assert tier.lookup(chunks[0], _CTX) is LookupResult.HIT
+        assert tier.lookup(chunks[1], _CTX) is LookupResult.HIT
 
-        # Third block not present
-        assert tier.lookup(blocks[2], _CTX) is LookupResult.MISS
+        # Third chunk not present
+        assert tier.lookup(chunks[2], _CTX) is LookupResult.MISS
 
 
 class TestTieringOffloadingManager:
@@ -255,7 +255,7 @@ class TestTieringOffloadingManager:
         # Create primary tier (CPU-based)
         mock_region = _mock_mmap_region(5)
         self.primary_tier = CPUPrimaryTierOffloadingManager(
-            num_blocks=5, mmap_region=mock_region
+            num_chunks=5, mmap_region=mock_region
         )
 
         mock_view = mock_region.create_kv_memoryview()
@@ -363,23 +363,23 @@ class TestTieringOffloadingManager:
 
     def test_basic_store_to_primary(self, manager_setup):
         """Test basic store operation to primary tier."""
-        blocks = to_keys(range(3))
+        chunks = to_keys(range(3))
 
         # Prepare store
         self._start_request()
-        result = self.manager.prepare_store(blocks, _CTX)
+        result = self.manager.prepare_store(chunks, _CTX)
         assert result is not None
         assert len(result.keys_to_store) == 3
 
         # Complete store
-        self.manager.complete_store(blocks, _CTX, success=True)
+        self.manager.complete_store(chunks, _CTX, success=True)
 
         # Blocks should be in primary tier
-        assert count_hits(self.primary_tier, blocks) == 3
+        assert count_hits(self.primary_tier, chunks) == 3
 
     def test_cascade_to_all_secondary_tiers(self, manager_setup):
-        """Test that blocks are cascaded to ALL secondary tiers."""
-        blocks = to_keys(range(3))
+        """Test that chunks are cascaded to ALL secondary tiers."""
+        chunks = to_keys(range(3))
 
         self.secondary_tier1.submit_store = MagicMock(
             wraps=self.secondary_tier1.submit_store
@@ -390,44 +390,44 @@ class TestTieringOffloadingManager:
 
         # Store to primary
         self._start_request()
-        result = self.manager.prepare_store(blocks, _CTX)
+        result = self.manager.prepare_store(chunks, _CTX)
         assert result is not None
 
         # Complete store (triggers cascade via submit_store on each tier)
-        self.manager.complete_store(blocks, _CTX, success=True)
+        self.manager.complete_store(chunks, _CTX, success=True)
 
         # submit_store was called once per secondary tier
         self.secondary_tier1.submit_store.assert_called_once()
         self.secondary_tier2.submit_store.assert_called_once()
 
         # Blocks should be in both secondary tiers
-        assert self.secondary_tier1.get_num_blocks() == 3
-        assert self.secondary_tier2.get_num_blocks() == 3
+        assert self.secondary_tier1.get_num_chunks() == 3
+        assert self.secondary_tier2.get_num_chunks() == 3
 
-        # Verify blocks are present
+        # Verify chunks are present
         assert all(
-            self.secondary_tier1.lookup(b, _CTX) is LookupResult.HIT for b in blocks
+            self.secondary_tier1.lookup(b, _CTX) is LookupResult.HIT for b in chunks
         )
         assert all(
-            self.secondary_tier2.lookup(b, _CTX) is LookupResult.HIT for b in blocks
+            self.secondary_tier2.lookup(b, _CTX) is LookupResult.HIT for b in chunks
         )
 
     def test_ref_cnt_protection_during_cascade(self, manager_setup):
-        """Test that ref_cnt protects blocks during cascade."""
-        blocks = to_keys(range(3))
+        """Test that ref_cnt protects chunks during cascade."""
+        chunks = to_keys(range(3))
 
         # Store to primary
         self._start_request()
-        result = self.manager.prepare_store(blocks, _CTX)
+        result = self.manager.prepare_store(chunks, _CTX)
         assert result is not None
-        self.manager.complete_store(blocks, _CTX, success=True)
+        self.manager.complete_store(chunks, _CTX, success=True)
 
-        # After complete_store, blocks should have ref_cnt > 0
+        # After complete_store, chunks should have ref_cnt > 0
         # (one for each secondary tier)
-        for block_hash in blocks:
-            block = self.primary_tier._policy.get(block_hash)
+        for k in chunks:
+            chunk_slot = self.primary_tier._policy.get(k)
             # ref_cnt should be 2 (one for each secondary tier)
-            assert block.ref_cnt == 2
+            assert chunk_slot.ref_cnt == 2
 
         # End of step 1: _maybe_process_finished_jobs() was already called by
         # prepare_store() above (setting the per-step flag), so on_schedule_end()
@@ -437,9 +437,9 @@ class TestTieringOffloadingManager:
 
         # ref_cnt still held: cascade jobs finished (sync tier) but haven't
         # been polled yet because the per-step guard skipped the second call.
-        for block_hash in blocks:
-            block = self.primary_tier._policy.get(block_hash)
-            assert block.ref_cnt == 2
+        for k in chunks:
+            chunk_slot = self.primary_tier._policy.get(k)
+            assert chunk_slot.ref_cnt == 2
 
         # Secondary tiers have completed jobs waiting to be drained
         assert len(self.secondary_tier1.completed_jobs) > 0
@@ -450,37 +450,37 @@ class TestTieringOffloadingManager:
         self._simulate_on_schedule_end()
 
         # After cascade completes, ref_cnt should be 0
-        for block_hash in blocks:
-            block = self.primary_tier._policy.get(block_hash)
-            assert block.ref_cnt == 0
+        for k in chunks:
+            chunk_slot = self.primary_tier._policy.get(k)
+            assert chunk_slot.ref_cnt == 0
 
         # All completed jobs have been drained
         assert len(self.secondary_tier1.completed_jobs) == 0
         assert len(self.secondary_tier2.completed_jobs) == 0
 
     def test_lookup_from_primary(self, manager_setup):
-        """Test lookup when blocks are in primary tier."""
-        blocks = to_keys(range(3))
+        """Test lookup when chunks are in primary tier."""
+        chunks = to_keys(range(3))
 
-        # Store blocks
+        # Store chunks
         self._start_request()
-        self.manager.prepare_store(blocks, _CTX)
-        self.manager.complete_store(blocks, _CTX, success=True)
+        self.manager.prepare_store(chunks, _CTX)
+        self.manager.complete_store(chunks, _CTX, success=True)
 
-        # Lookup should find all blocks in primary
-        assert count_hits(self.manager, blocks) == 3
+        # Lookup should find all chunks in primary
+        assert count_hits(self.manager, chunks) == 3
 
     def test_promotion_from_secondary(self, manager_setup):
-        """Test promotion of blocks from secondary to primary tier."""
-        blocks = to_keys(range(3))
+        """Test promotion of chunks from secondary to primary tier."""
+        chunks = to_keys(range(3))
 
-        # Manually add blocks to secondary tier (simulate previous cascade)
-        for block in blocks:
-            self.secondary_tier1.blocks[block] = True
+        # Manually add chunks to secondary tier (simulate previous cascade)
+        for chunk in chunks:
+            self.secondary_tier1.chunks[chunk] = True
 
-        # Lookup each block to initiate promotion for all of them
-        for block in blocks:
-            result = self.manager.lookup(block, _CTX)
+        # Lookup each chunk to initiate promotion for all of them
+        for chunk in chunks:
+            result = self.manager.lookup(chunk, _CTX)
             assert result is LookupResult.HIT_PENDING  # promotion initiated
 
         # End of step 1: flushes deferred submit_load() calls
@@ -489,11 +489,11 @@ class TestTieringOffloadingManager:
         # End of step 2: processes the completed promotion jobs
         self._simulate_on_schedule_end()
 
-        # Now blocks should be in primary tier
-        assert count_hits(self.primary_tier, blocks) == 3
+        # Now chunks should be in primary tier
+        assert count_hits(self.primary_tier, chunks) == 3
 
         # Next lookup should succeed
-        assert count_hits(self.manager, blocks) == 3
+        assert count_hits(self.manager, chunks) == 3
 
     @pytest.mark.parametrize(
         ("successful_indices", "expected_results"),
@@ -509,18 +509,18 @@ class TestTieringOffloadingManager:
         ],
         ids=["partial", "legacy-full-failure"],
     )
-    def test_failed_promotion_keeps_only_successful_blocks(
+    def test_failed_promotion_keeps_only_successful_chunks(
         self, manager_setup, successful_indices, expected_results
     ):
-        blocks = to_keys(range(3))
-        for block in blocks:
-            self.secondary_tier1.blocks[block] = True
+        chunks = to_keys(range(3))
+        for chunk in chunks:
+            self.secondary_tier1.chunks[chunk] = True
 
         def submit_partial(job_metadata: TransferJob) -> None:
             successful_keys = (
                 None
                 if successful_indices is None
-                else tuple(blocks[i] for i in successful_indices)
+                else tuple(chunks[i] for i in successful_indices)
             )
             self.secondary_tier1.completed_jobs.append(
                 JobResult(
@@ -532,24 +532,24 @@ class TestTieringOffloadingManager:
 
         self.secondary_tier1.submit_load = submit_partial
 
-        for block in blocks:
-            assert self.manager.lookup(block, _CTX) is LookupResult.HIT_PENDING
+        for chunk in chunks:
+            assert self.manager.lookup(chunk, _CTX) is LookupResult.HIT_PENDING
 
         self._simulate_on_schedule_end()
         self._simulate_on_schedule_end()
 
         assert [
-            self.primary_tier.lookup(block, _CTX) for block in blocks
+            self.primary_tier.lookup(chunk, _CTX) for chunk in chunks
         ] == expected_results
 
     def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
         """Resolved lookups report one sync delay sample per tier and block."""
         self._start_request()
-        blocks = to_keys(range(2))
+        chunks = to_keys(range(2))
 
-        # No tier has these blocks: they resolve immediately as misses.
-        for block in blocks:
-            assert self.manager.lookup(block, _CTX) is LookupResult.MISS
+        # No tier has these chunks: they resolve immediately as misses.
+        for chunk in chunks:
+            assert self.manager.lookup(chunk, _CTX) is LookupResult.MISS
 
         stats = self.manager.get_stats()
         assert stats is not None
@@ -585,11 +585,11 @@ class TestTieringOffloadingManager:
     def test_lookup_does_not_report_async_delay_for_promotion(self, manager_setup):
         """Promotion time is not included in lookup async delay."""
         self._start_request()
-        block = to_keys(range(1))[0]
-        self.secondary_tier1.blocks[block] = True
+        chunk = to_keys(range(1))[0]
+        self.secondary_tier1.chunks[chunk] = True
 
-        # First lookup finds the block in a secondary tier and defers.
-        assert self.manager.lookup(block, _CTX) is LookupResult.HIT_PENDING
+        # First lookup finds the chunk in a secondary tier and defers.
+        assert self.manager.lookup(chunk, _CTX) is LookupResult.HIT_PENDING
 
         # Promotion is not treated as unresolved secondary lookup time.
         self._simulate_on_schedule_end(new_req_ids=[_CTX.req_id])
@@ -619,8 +619,8 @@ class TestTieringOffloadingManager:
         # Promotion completes on the next scheduler step.
         self._simulate_on_schedule_end()
 
-        # Next lookup resolves via the now-promoted primary-tier block.
-        assert self.manager.lookup(block, _CTX) is LookupResult.HIT
+        # Next lookup resolves via the now-promoted primary-tier chunk.
+        assert self.manager.lookup(chunk, _CTX) is LookupResult.HIT
 
         stats = self.manager.get_stats()
         if stats is not None:
@@ -634,13 +634,13 @@ class TestTieringOffloadingManager:
         """Async delay is observed when a RETRY lookup later resolves."""
         ctx = ReqContext(req_id="req_lookup_finish")
         self._start_request(ctx)
-        block = to_keys(range(1))[0]
+        chunk = to_keys(range(1))[0]
         self.secondary_tier1.lookup = MagicMock(
             side_effect=[LookupResult.RETRY, LookupResult.HIT]
         )
 
         # First lookup is deferred by the secondary tier.
-        assert self.manager.lookup(block, ctx) is LookupResult.RETRY
+        assert self.manager.lookup(chunk, ctx) is LookupResult.RETRY
 
         stats = self.manager.get_stats()
         if stats is not None:
@@ -648,7 +648,7 @@ class TestTieringOffloadingManager:
                 stats.reduce(), TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY
             )
 
-        assert self.manager.lookup(block, ctx) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(chunk, ctx) is LookupResult.HIT_PENDING
 
         stats = self.manager.get_stats()
         assert stats is not None
@@ -672,68 +672,68 @@ class TestTieringOffloadingManager:
 
     def test_partial_lookup(self, manager_setup):
         """Test lookup with partial hits."""
-        blocks = to_keys(range(5))
+        chunks = to_keys(range(5))
 
-        # Store first 3 blocks to primary
+        # Store first 3 chunks to primary
         self._start_request()
-        self.manager.prepare_store(blocks[:3], _CTX)
-        self.manager.complete_store(blocks[:3], _CTX, success=True)
+        self.manager.prepare_store(chunks[:3], _CTX)
+        self.manager.complete_store(chunks[:3], _CTX, success=True)
 
-        # Lookup all 5 blocks should return 3 (first 3 found)
-        assert count_hits(self.manager, blocks) == 3
+        # Lookup all 5 chunks should return 3 (first 3 found)
+        assert count_hits(self.manager, chunks) == 3
 
     def test_eviction_in_primary_tier(self, manager_setup):
         """Test eviction in primary tier when capacity is exceeded."""
-        # Primary tier has capacity of 5 blocks
+        # Primary tier has capacity of 5 chunks
         # First, fill the primary tier
-        blocks = to_keys(range(5))
+        chunks = to_keys(range(5))
         self._start_request()
-        result = self.manager.prepare_store(blocks, _CTX)
+        result = self.manager.prepare_store(chunks, _CTX)
         assert result is not None
         assert len(result.keys_to_store) == 5
-        self.manager.complete_store(blocks, _CTX, success=True)
+        self.manager.complete_store(chunks, _CTX, success=True)
 
         # End of step: release ref_cnt from cascade
         self._simulate_on_schedule_end()
 
-        # Now try to store 2 more blocks (should trigger eviction)
-        more_blocks = to_keys(range(5, 7))
-        result = self.manager.prepare_store(more_blocks, _CTX)
+        # Now try to store 2 more chunks (should trigger eviction)
+        more_chunks = to_keys(range(5, 7))
+        result = self.manager.prepare_store(more_chunks, _CTX)
 
-        # Should evict 2 blocks from primary tier
+        # Should evict 2 chunks from primary tier
         assert result is not None
         assert len(result.evicted_keys) == 2
         assert len(result.keys_to_store) == 2
 
     def test_touch_propagates_to_all_tiers(self, manager_setup):
         """Test that touch() propagates to all tiers."""
-        blocks = to_keys(range(3))
+        chunks = to_keys(range(3))
 
-        # Store blocks
+        # Store chunks
         self._start_request()
-        self.manager.prepare_store(blocks, _CTX)
-        self.manager.complete_store(blocks, _CTX, success=True)
+        self.manager.prepare_store(chunks, _CTX)
+        self.manager.complete_store(chunks, _CTX, success=True)
         self._simulate_on_schedule_end()
-        # for secondary tiers to drain jobs, so primary tier's blocks are evictable.
+        # for secondary tiers to drain jobs, so primary tier's chunks are evictable.
         self._simulate_on_schedule_end()
 
         self.secondary_tier1.touch = MagicMock(wraps=self.secondary_tier1.touch)
         self.secondary_tier2.touch = MagicMock(wraps=self.secondary_tier2.touch)
 
-        # Touch blocks
-        self.manager.touch(blocks, _CTX)
+        # Touch chunks
+        self.manager.touch(chunks, _CTX)
 
         # Verify touch was called on primary tier (check LRU order)
-        primary_keys = list(self.primary_tier._policy.evictable_blocks.keys())
-        assert primary_keys[-3:] == list(reversed(blocks))
+        primary_keys = list(self.primary_tier._policy.evictable_chunks.keys())
+        assert primary_keys[-3:] == list(reversed(chunks))
 
         # Verify touch was propagated to all secondary tiers
-        self.secondary_tier1.touch.assert_called_once_with(blocks, _CTX)
-        self.secondary_tier2.touch.assert_called_once_with(blocks, _CTX)
+        self.secondary_tier1.touch.assert_called_once_with(chunks, _CTX)
+        self.secondary_tier2.touch.assert_called_once_with(chunks, _CTX)
 
     def test_failed_store_no_cascade(self, manager_setup):
         """Test that failed GPU→primary store doesn't cascade."""
-        blocks = to_keys(range(3))
+        chunks = to_keys(range(3))
 
         self.secondary_tier1.submit_store = MagicMock(
             wraps=self.secondary_tier1.submit_store
@@ -744,11 +744,11 @@ class TestTieringOffloadingManager:
 
         # Prepare store
         self._start_request()
-        result = self.manager.prepare_store(blocks, _CTX)
+        result = self.manager.prepare_store(chunks, _CTX)
         assert result is not None
 
         # Complete store with failure — cascade must not happen
-        self.manager.complete_store(blocks, _CTX, success=False)
+        self.manager.complete_store(chunks, _CTX, success=False)
 
         # submit_store was never called on either secondary tier
         self.secondary_tier1.submit_store.assert_not_called()
@@ -760,9 +760,9 @@ class TestTieringOffloadingManager:
         Blocks from different requests each get their own submit_load call, each
         carrying the correct req_context.
         """
-        blocks = to_keys(range(4))
-        for block in blocks:
-            self.secondary_tier1.blocks[block] = True
+        chunks = to_keys(range(4))
+        for chunk in chunks:
+            self.secondary_tier1.chunks[chunk] = True
 
         self.secondary_tier1.submit_load = MagicMock(
             wraps=self.secondary_tier1.submit_load
@@ -772,10 +772,10 @@ class TestTieringOffloadingManager:
         ctx_b = ReqContext(req_id="req_b")
 
         # All lookups return HIT_PENDING: secondary hit triggers promotion
-        assert self.manager.lookup(blocks[0], ctx_a) is LookupResult.HIT_PENDING
-        assert self.manager.lookup(blocks[1], ctx_a) is LookupResult.HIT_PENDING
-        assert self.manager.lookup(blocks[2], ctx_b) is LookupResult.HIT_PENDING
-        assert self.manager.lookup(blocks[3], ctx_b) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(chunks[0], ctx_a) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(chunks[1], ctx_a) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(chunks[2], ctx_b) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(chunks[3], ctx_b) is LookupResult.HIT_PENDING
 
         # submit_load must not fire during lookup - only at end of step
         self.secondary_tier1.submit_load.assert_not_called()
@@ -787,20 +787,20 @@ class TestTieringOffloadingManager:
         calls = self.secondary_tier1.submit_load.call_args_list
         jm_a = calls[0].args[0]
         jm_b = calls[1].args[0]
-        assert set(jm_a.keys) == {blocks[0], blocks[1]}
+        assert set(jm_a.keys) == {chunks[0], chunks[1]}
         assert jm_a.req_context is ctx_a
-        assert set(jm_b.keys) == {blocks[2], blocks[3]}
+        assert set(jm_b.keys) == {chunks[2], chunks[3]}
         assert jm_b.req_context is ctx_b
 
-    def test_lookup_shared_block_no_duplicate_promotion(self, manager_setup):
-        """A block looked up by two requests in the same step is promoted once.
+    def test_lookup_shared_chunk_no_duplicate_promotion(self, manager_setup):
+        """A chunk looked up by two requests in the same step is promoted once.
 
         The first lookup initiates promotion (returns None via secondary hit).
         The second lookup sees ref_cnt=-1 on the primary slot and returns None
         via the primary in-flight path — without triggering a second promotion.
         """
-        shared_block = to_keys([0])[0]
-        self.secondary_tier1.blocks[shared_block] = True
+        shared_chunk = to_keys([0])[0]
+        self.secondary_tier1.chunks[shared_chunk] = True
 
         self.secondary_tier1.submit_load = MagicMock(
             wraps=self.secondary_tier1.submit_load
@@ -809,10 +809,10 @@ class TestTieringOffloadingManager:
         ctx_a = ReqContext(req_id="req_a")
         ctx_b = ReqContext(req_id="req_b")
 
-        result_a = self.manager.lookup(shared_block, ctx_a)
-        result_b = self.manager.lookup(shared_block, ctx_b)
+        result_a = self.manager.lookup(shared_chunk, ctx_a)
+        result_b = self.manager.lookup(shared_chunk, ctx_b)
 
-        # Both lookups find the shared_block and trigger promotion
+        # Both lookups find the shared_chunk and trigger promotion
         # returning HIT_PENDING.
         assert result_a is LookupResult.HIT_PENDING
         assert result_b is LookupResult.HIT_PENDING
@@ -822,12 +822,12 @@ class TestTieringOffloadingManager:
         # Only one submit_load call despite two lookups
         self.secondary_tier1.submit_load.assert_called_once()
         job_metadata = self.secondary_tier1.submit_load.call_args.args[0]
-        assert list(job_metadata.keys) == [shared_block]
+        assert list(job_metadata.keys) == [shared_chunk]
         assert job_metadata.req_context is ctx_a
 
     def test_complete_store_forwards_req_context_to_submit_store(self, manager_setup):
         """complete_store cascades to secondary tiers with the correct req_context."""
-        blocks = to_keys(range(2))
+        chunks = to_keys(range(2))
 
         self.secondary_tier1.submit_store = MagicMock(
             wraps=self.secondary_tier1.submit_store
@@ -836,8 +836,8 @@ class TestTieringOffloadingManager:
         ctx = ReqContext(req_id="req_ctx", kv_transfer_params={"key": "value"})
 
         self._start_request(ctx)
-        self.manager.prepare_store(blocks, ctx)
-        self.manager.complete_store(blocks, ctx, success=True)
+        self.manager.prepare_store(chunks, ctx)
+        self.manager.complete_store(chunks, ctx, success=True)
 
         assert self.secondary_tier1.submit_store.call_count == 1
         job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
@@ -847,7 +847,7 @@ class TestTieringOffloadingManager:
         self, manager_setup
     ):
         """Manager hook is eager; secondary hooks wait for cascade submission."""
-        blocks = to_keys(range(2))
+        chunks = to_keys(range(2))
         ctx = ReqContext(req_id="req_delayed_secondary")
         calls: list[tuple[str, str]] = []
 
@@ -882,14 +882,14 @@ class TestTieringOffloadingManager:
         )
 
         self._start_request(ctx)
-        self.manager.prepare_store(blocks, ctx)
+        self.manager.prepare_store(chunks, ctx)
         self.manager.on_request_finished(ctx)
 
         assert calls == [("primary_finish", ctx.req_id)]
         self.secondary_tier1.on_request_finished.assert_not_called()
         self.secondary_tier2.on_request_finished.assert_not_called()
 
-        self.manager.complete_store(blocks, ctx, success=True)
+        self.manager.complete_store(chunks, ctx, success=True)
 
         assert calls == [
             ("primary_finish", ctx.req_id),
@@ -901,7 +901,7 @@ class TestTieringOffloadingManager:
 
     def test_failed_store_finalizes_finished_request(self, manager_setup):
         """Failed primary stores still unblock secondary finalization."""
-        blocks = to_keys(range(2))
+        chunks = to_keys(range(2))
         ctx = ReqContext(req_id="req_failed_store_finalize")
 
         self.secondary_tier1.submit_store = MagicMock(
@@ -918,13 +918,13 @@ class TestTieringOffloadingManager:
         )
 
         self._start_request(ctx)
-        self.manager.prepare_store(blocks, ctx)
+        self.manager.prepare_store(chunks, ctx)
         self.manager.on_request_finished(ctx)
 
         self.secondary_tier1.on_request_finished.assert_not_called()
         self.secondary_tier2.on_request_finished.assert_not_called()
 
-        self.manager.complete_store(blocks, ctx, success=False)
+        self.manager.complete_store(chunks, ctx, success=False)
 
         self.secondary_tier1.submit_store.assert_not_called()
         self.secondary_tier2.submit_store.assert_not_called()
@@ -952,7 +952,7 @@ class TestTieringOffloadingManager:
 
     def test_reset_cache_finalizes_delayed_secondary_request(self, manager_setup):
         """reset_cache abandons pending primary stores and finalizes secondaries."""
-        blocks = to_keys(range(2))
+        chunks = to_keys(range(2))
         ctx = ReqContext(req_id="req_reset_finalize_secondary")
 
         self.secondary_tier1.on_request_finished = MagicMock(
@@ -963,7 +963,7 @@ class TestTieringOffloadingManager:
         )
 
         self._start_request(ctx)
-        self.manager.prepare_store(blocks, ctx)
+        self.manager.prepare_store(chunks, ctx)
         self.manager.on_request_finished(ctx)
 
         self.secondary_tier1.on_request_finished.assert_not_called()
@@ -979,8 +979,8 @@ class TestTieringOffloadingManager:
         self, manager_setup
     ):
         """reset_cache drops active pending stores so resumed requests finalize."""
-        initial_blocks = to_keys(range(2))
-        resumed_blocks = to_keys(range(2, 4))
+        initial_chunks = to_keys(range(2))
+        resumed_chunks = to_keys(range(2, 4))
         ctx = ReqContext(req_id="req_reset_resume")
 
         self.secondary_tier1.on_request_finished = MagicMock(
@@ -991,7 +991,7 @@ class TestTieringOffloadingManager:
         )
 
         self._start_request(ctx)
-        self.manager.prepare_store(initial_blocks, ctx)
+        self.manager.prepare_store(initial_chunks, ctx)
         assert self.manager._req_state[ctx.req_id].pending_primary_stores == 1
 
         self.manager.reset_cache()
@@ -1001,8 +1001,8 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.on_request_finished.assert_not_called()
         self.secondary_tier2.on_request_finished.assert_not_called()
 
-        self.manager.prepare_store(resumed_blocks, ctx)
-        self.manager.complete_store(resumed_blocks, ctx, success=True)
+        self.manager.prepare_store(resumed_chunks, ctx)
+        self.manager.complete_store(resumed_chunks, ctx, success=True)
         self.manager.on_request_finished(ctx)
 
         self.secondary_tier1.on_request_finished.assert_called_once_with(ctx)
@@ -1010,12 +1010,12 @@ class TestTieringOffloadingManager:
         assert ctx.req_id not in self.manager._req_state
 
     def test_on_new_request_lifecycle(self, manager_setup):
-        """Policy defaults to BLOCK_LEVEL, escalates when a tier requests it,
+        """Policy defaults to CHUNK_LEVEL, escalates when a tier requests it,
         and is cleaned up on on_request_finished."""
-        # Default: all tiers return BLOCK_LEVEL
+        # Default: all tiers return CHUNK_LEVEL
         ctx = ReqContext(req_id="req_policy_lifecycle")
         result = self.manager.on_new_request(ctx)
-        assert result.policy == OffloadPolicy.BLOCK_LEVEL
+        assert result.policy == OffloadPolicy.CHUNK_LEVEL
         assert self.manager._req_state[ctx.req_id].request_level_tiers is None
         self.manager.on_request_finished(ctx)
         assert ctx.req_id not in self.manager._req_state
@@ -1034,20 +1034,20 @@ class TestTieringOffloadingManager:
         self.manager.on_request_finished(ctx)
         assert ctx.req_id not in self.manager._req_state
 
-    def test_prepare_store_cascades_existing_blocks_to_request_level_tiers(
+    def test_prepare_store_cascades_existing_chunks_to_request_level_tiers(
         self, manager_setup
     ):
-        """prepare_store cascades hit blocks to request-level tiers only."""
-        # Store some blocks to primary first
-        existing_blocks = to_keys(range(3))
+        """prepare_store cascades hit chunks to request-level tiers only."""
+        # Store some chunks to primary first
+        existing_chunks = to_keys(range(3))
         self._start_request()
-        result = self.manager.prepare_store(existing_blocks, _CTX)
+        result = self.manager.prepare_store(existing_chunks, _CTX)
         assert result is not None
-        self.manager.complete_store(existing_blocks, _CTX, success=True)
+        self.manager.complete_store(existing_chunks, _CTX, success=True)
         # Drain cascade completions
         self._simulate_on_schedule_end()
 
-        # Make tier1 request-level, tier2 stays block-level
+        # Make tier1 request-level, tier2 stays chunk-level
         self.secondary_tier1.on_new_request = lambda req_context: (
             RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         )
@@ -1063,41 +1063,41 @@ class TestTieringOffloadingManager:
             wraps=self.secondary_tier2.submit_store
         )
 
-        # Call prepare_store with existing + new blocks
-        new_blocks = to_keys(range(3, 5))
-        all_blocks = existing_blocks + new_blocks
-        result = self.manager.prepare_store(all_blocks, ctx)
+        # Call prepare_store with existing + new chunks
+        new_chunks = to_keys(range(3, 5))
+        all_chunks = existing_chunks + new_chunks
+        result = self.manager.prepare_store(all_chunks, ctx)
         assert result is not None
-        assert set(result.keys_to_store) == set(new_blocks)
+        assert set(result.keys_to_store) == set(new_chunks)
 
-        # Only tier1 (request-level) should get existing blocks cascaded now.
-        # New blocks are cascaded to ALL tiers later via complete_store().
+        # Only tier1 (request-level) should get existing chunks cascaded now.
+        # New chunks are cascaded to ALL tiers later via complete_store().
         self.secondary_tier1.submit_store.assert_called_once()
         job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
-        assert set(job_metadata.keys) == set(existing_blocks)
+        assert set(job_metadata.keys) == set(existing_chunks)
 
-        # tier2 (block-level) does not get existing blocks here.
+        # tier2 (chunk-level) does not get existing chunks here.
         self.secondary_tier2.submit_store.assert_not_called()
 
     def test_reset_cache_clears_orchestrator_state(self, manager_setup):
         """reset_cache wipes every kind of orchestrator state and resets
         primary tier; pending submissions are dropped without being sent
         to the secondary tier. Active request state is retained."""
-        # Cascade — populates primary blocks and leaves cascade jobs
+        # Cascade — populates primary chunks and leaves cascade jobs
         # in _jobs (the synchronous example tier has already
         # queued completions); reset_cache's drain loop will pick them up.
-        blocks = to_keys(range(3))
+        chunks = to_keys(range(3))
         self._start_request()
-        self.manager.prepare_store(blocks, _CTX)
-        self.manager.complete_store(blocks, _CTX, success=True)
+        self.manager.prepare_store(chunks, _CTX)
+        self.manager.complete_store(chunks, _CTX, success=True)
         assert self.manager._jobs
 
         # Pending promotion submission (deferred — no on_schedule_end after
         # the lookup that staged it).
-        promo_block = to_keys([99])[0]
-        self.secondary_tier1.blocks[promo_block] = True
+        promo_chunk = to_keys([99])[0]
+        self.secondary_tier1.chunks[promo_chunk] = True
         assert (
-            self.manager.lookup(promo_block, ReqContext(req_id="pending"))
+            self.manager.lookup(promo_chunk, ReqContext(req_id="pending"))
             is LookupResult.HIT_PENDING
         )
         assert self.manager._pending_load_submissions
@@ -1127,10 +1127,10 @@ class TestTieringOffloadingManager:
         assert self.manager._processed_jobs_this_step is False
 
         # Primary tier reset to a fresh state.
-        assert self.primary_tier._num_allocated_blocks == 0
+        assert self.primary_tier._num_allocated_chunk_slots == 0
         assert self.primary_tier._free_list == []
-        for block in blocks:
-            assert self.primary_tier.lookup(block, _CTX) is LookupResult.MISS
+        for chunk in chunks:
+            assert self.primary_tier.lookup(chunk, _CTX) is LookupResult.MISS
 
         # Pending submission was dropped, not submitted.
         self.secondary_tier1.submit_load.assert_not_called()
@@ -1150,10 +1150,10 @@ class TestTieringOffloadingManager:
         )
 
         # Drive a cascade so a job lands in _jobs.
-        blocks = to_keys(range(3))
+        chunks = to_keys(range(3))
         self._start_request()
-        self.manager.prepare_store(blocks, _CTX)
-        self.manager.complete_store(blocks, _CTX, success=True)
+        self.manager.prepare_store(chunks, _CTX)
+        self.manager.complete_store(chunks, _CTX, success=True)
         assert self.manager._jobs
 
         self.manager.reset_cache()
@@ -1174,20 +1174,20 @@ class TestTieringOffloadingManager:
         self, manager_setup, load_tier_filter
     ):
         """Filter excluding secondary medium returns MISS from secondaries
-        even when they hold the block; primary is unaffected."""
-        blocks = to_keys(range(2))
-        # Put one block in primary, one only in secondary
+        even when they hold the chunk; primary is unaffected."""
+        chunks = to_keys(range(2))
+        # Put one chunk in primary, one only in secondary
         self._start_request()
-        self.manager.prepare_store(blocks[:1], _CTX)
-        self.manager.complete_store(blocks[:1], _CTX, success=True)
-        self.secondary_tier1.blocks[blocks[1]] = True
+        self.manager.prepare_store(chunks[:1], _CTX)
+        self.manager.complete_store(chunks[:1], _CTX, success=True)
+        self.secondary_tier1.chunks[chunks[1]] = True
 
         # Secondaries have medium=CPU, so load_tier_filter skips them.
         self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
 
         ctx = ReqContext(req_id="r1", load_tier_filter=load_tier_filter)
-        assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT
-        assert self.manager.lookup(blocks[1], ctx) is LookupResult.MISS
+        assert self.manager.lookup(chunks[0], ctx) is LookupResult.HIT
+        assert self.manager.lookup(chunks[1], ctx) is LookupResult.MISS
         self.secondary_tier1.lookup.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -1203,13 +1203,13 @@ class TestTieringOffloadingManager:
         self, manager_setup, load_tier_filter
     ):
         """Filter that matches the secondary's medium allows lookup."""
-        blocks = to_keys(range(1))
-        self.secondary_tier1.blocks[blocks[0]] = True
+        chunks = to_keys(range(1))
+        self.secondary_tier1.chunks[chunks[0]] = True
 
         self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
 
         ctx = ReqContext(req_id="r2", load_tier_filter=load_tier_filter)
-        assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(chunks[0], ctx) is LookupResult.HIT_PENDING
         self.secondary_tier1.lookup.assert_called()
 
 
@@ -1219,7 +1219,7 @@ class TestTieringOffloadingWithoutSecondaryTiers:
     def test_works_without_secondary_tiers(self):
         """Test that manager works with empty secondary_tiers list."""
         primary_tier = CPUPrimaryTierOffloadingManager(
-            num_blocks=5, mmap_region=_mock_mmap_region(5)
+            num_chunks=5, mmap_region=_mock_mmap_region(5)
         )
 
         # Create manager with no secondary tiers
@@ -1227,15 +1227,15 @@ class TestTieringOffloadingWithoutSecondaryTiers:
             primary_tier=primary_tier, secondary_tiers=[]
         )
 
-        blocks = to_keys(range(3))
+        chunks = to_keys(range(3))
 
         # Should work like a regular OffloadingManager
         manager.on_new_request(_CTX)
-        result = manager.prepare_store(blocks, _CTX)
+        result = manager.prepare_store(chunks, _CTX)
         assert result is not None
-        manager.complete_store(blocks, _CTX, success=True)
+        manager.complete_store(chunks, _CTX, success=True)
 
-        assert count_hits(manager, blocks) == 3
+        assert count_hits(manager, chunks) == 3
 
 
 @pytest.mark.parametrize(
