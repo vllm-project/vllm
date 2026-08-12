@@ -193,7 +193,9 @@ def _kpool_softmax_rotate_write_cache_kernel(
     x = tl.where(do_write, x, 0.0).to(tl.bfloat16).to(tl.float32)
 
     # Hadamard-128 rotation (spreads energy for uniform fp8 quant error).
-    x = _hadamard128(x)
+    # Match sglang: bf16 round-trip after the Hadamard so the fp8 absmax/scale
+    # sees the same precision as the unfused (bf16-stored) pooled-K path.
+    x = _hadamard128(x).to(tl.bfloat16).to(tl.float32)
 
     # --- per-vector absmax fp8 quant ---
     fp8_max = 448.0
