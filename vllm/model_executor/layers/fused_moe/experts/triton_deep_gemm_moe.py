@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
 )
@@ -29,6 +30,12 @@ class TritonOrDeepGemmExperts(FallbackExperts):
             experts=DeepGemmExperts(moe_config, quant_config),
             fallback_experts=TritonExperts(moe_config, quant_config),
         )
+
+    @property
+    def input_quant_key(self) -> QuantKey | None:
+        if is_deep_gemm_e8m0_used():
+            return self.experts.input_quant_key
+        return None
 
     @staticmethod
     def get_clses() -> tuple[

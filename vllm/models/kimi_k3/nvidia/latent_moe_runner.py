@@ -12,6 +12,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -273,13 +274,18 @@ class LatentMoERunner(MoERunner):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        quantized_hidden_states: QuantizedActivation | None = None,
     ) -> torch.Tensor:
-        if self._use_fused_path():
+        if quantized_hidden_states is None and self._use_fused_path():
             return self._fused_forward(
                 hidden_states, router_logits, input_ids, shared_experts_input
             )
         return super().forward(
-            hidden_states, router_logits, input_ids, shared_experts_input
+            hidden_states,
+            router_logits,
+            input_ids,
+            shared_experts_input,
+            quantized_hidden_states,
         )
 
     def _fused_forward(
@@ -309,6 +315,8 @@ class LatentMoERunner(MoERunner):
             router_logits,
             shared_experts_input,
             input_ids,
+            None,
+            None,
             self._encode_layer_name(),
             self.moe_config.hidden_dim_unpadded
             if self._quant_method.has_unpadded_output

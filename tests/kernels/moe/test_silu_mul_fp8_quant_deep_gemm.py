@@ -150,7 +150,7 @@ def pack_scales(x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tenso
 
     # Add i32_padding here so we can view it as a i32 tensor later on.
     i32_padding = round_up(G, 4) - G
-    ref_s_i8 = torch.empty((E, T, G + i32_padding), dtype=torch.uint8, device=DEVICE)
+    ref_s_i8 = torch.zeros((E, T, G + i32_padding), dtype=torch.uint8, device=DEVICE)
     for e in range(E):
         nt = tokens_per_expert[e].item()
         ref_s_i8[e, :nt, :G] = x[e, :nt].view(torch.int32) >> 23
@@ -184,7 +184,7 @@ def ref_with_scale_fmt(
     ]
 
     ref_q = torch.empty((E, T, H), dtype=fp8_dtype, device=DEVICE)
-    ref_s_f32 = torch.empty(
+    ref_s_f32 = torch.zeros(
         (E, T, cdiv(H, group_size)), dtype=torch.float32, device=DEVICE
     )
 

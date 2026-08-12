@@ -148,6 +148,15 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
         )
 
+    @property
+    def input_quant_key(self) -> QuantKey | None:
+        if (
+            self.mxfp8
+            or DeepGemmQuantScaleFMT.from_oracle() != DeepGemmQuantScaleFMT.UE8M0
+        ):
+            return None
+        return kFp8Dynamic128Sym
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard

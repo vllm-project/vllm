@@ -1230,6 +1230,30 @@ class RoutedExperts(PluggableLayer):
             shared_experts_input=shared_experts_input,
         )
 
+    def forward_modular_prequantized(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        data: torch.Tensor,
+        scale: torch.Tensor,
+        shared_experts: "SharedExperts | None" = None,
+        shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert not self.quant_method.is_monolithic
+        apply_prequantized = getattr(self.quant_method, "apply_prequantized", None)
+        assert apply_prequantized is not None
+        return apply_prequantized(
+            layer=self,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
+            data=data,
+            scale=scale,
+        )
+
     def forward_monolithic(
         self,
         x: torch.Tensor,

@@ -261,6 +261,10 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     described above for the Modular case.
     """
 
+    def supports_prequantized_input(self) -> bool:
+        """Whether prepare may be bypassed with matching quantized input."""
+        return False
+
     @abstractmethod
     def prepare(
         self,
@@ -527,6 +531,11 @@ class FusedMoEExperts(ABC):
         Sample subclasses that override are AITER and FlashInfer CUTLASS.
         """
         return False
+
+    @property
+    def input_quant_key(self) -> QuantKey | None:
+        """Quantization contract accepted from an upstream fused producer."""
+        return None
 
     @staticmethod
     @abstractmethod
@@ -1433,6 +1442,8 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool = False,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        prequantized_data: torch.Tensor | None = None,
+        prequantized_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
@@ -1468,14 +1479,24 @@ class FusedMoEKernelModularImpl:
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            global_num_experts,
-            expert_map,
-            apply_router_weight_on_input,
-        )
+        if prequantized_data is None:
+            assert prequantized_scale is None
+            a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+            )
+        else:
+            assert prequantized_scale is not None
+            assert self.prepare_finalize.supports_prequantized_input()
+            assert not apply_router_weight_on_input
+            assert prequantized_data.shape == hidden_states.shape
+            a1q = prequantized_data
+            a1q_scale = prequantized_scale
+            expert_tokens_meta = None
 
         # Stash the original unquantized hidden states on the LoRA context
         # so apply_w13_lora sees correct-magnitude activations instead of
@@ -1633,6 +1654,15 @@ class FusedMoEKernel:
         return self.impl.fused_experts
 
     @property
+    def input_quant_key(self) -> QuantKey | None:
+        if (
+            isinstance(self.impl, FusedMoEKernelModularImpl)
+            and self.impl.prepare_finalize.supports_prequantized_input()
+        ):
+            return self.fused_experts.input_quant_key
+        return None
+
+    @property
     def moe_config(self) -> FusedMoEConfig:
         return self.fused_experts.moe_config
 
@@ -1702,6 +1732,8 @@ class FusedMoEKernel:
         apply_router_weight_on_input: bool,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        prequantized_data: torch.Tensor | None = None,
+        prequantized_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert isinstance(self.impl, FusedMoEKernelModularImpl)
         return self.impl.apply(
@@ -1716,4 +1748,6 @@ class FusedMoEKernel:
             apply_router_weight_on_input=apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            prequantized_data=prequantized_data,
+            prequantized_scale=prequantized_scale,
         )
