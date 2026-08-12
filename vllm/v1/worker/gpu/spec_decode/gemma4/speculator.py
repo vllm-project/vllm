@@ -109,15 +109,19 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
 
         target_num_kv_shared = getattr(target_text_config, "num_kv_shared_layers", 0)
         num_non_shared = len(target_layer_types) - target_num_kv_shared
-        type_to_target_indices: dict[str, list[int]] = defaultdict(list)
-        for idx, lt in enumerate(target_layer_types[:num_non_shared]):
-            type_to_target_indices[lt].append(idx)
-
-        target_prefix = "model.layers"
+        target_names_by_index: dict[int, str] = {}
         for name in target_attn_layer_names:
-            if ".layers." in name:
-                target_prefix = name.split(".layers.")[0] + ".layers"
-                break
+            _, separator, layer_suffix = name.partition(".layers.")
+            if not separator:
+                continue
+            layer_index, _, _ = layer_suffix.partition(".")
+            if layer_index.isdigit():
+                target_names_by_index[int(layer_index)] = name
+
+        type_to_target_names: dict[str, list[str]] = defaultdict(list)
+        for idx, lt in enumerate(target_layer_types[:num_non_shared]):
+            if target_name := target_names_by_index.get(idx):
+                type_to_target_names[lt].append(target_name)
 
         draft_layer_types = getattr(draft_text_config, "layer_types", [])
         for draft_idx, layer in enumerate(model.model.layers):
@@ -132,7 +136,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
                 if draft_idx < len(draft_layer_types)
                 else "full_attention"
             )
-            candidates = type_to_target_indices.get(draft_layer_type, [])
+            candidates = type_to_target_names.get(draft_layer_type, [])
             if not candidates:
                 logger.warning(
                     "No target layer of type '%s' for draft layer %d",
@@ -141,8 +145,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
                 )
                 continue
 
-            target_idx = candidates[-1]
-            target_layer_name = f"{target_prefix}.{target_idx}.self_attn.attn"
+            target_layer_name = candidates[-1]
             attn.kv_sharing_target_layer_name = target_layer_name
 
             # KV-cache sharing aliases the cache tensor during allocation, but

@@ -940,13 +940,16 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-        # FA4's SM90 fp8-KV path consumes fp16 Q (q_descale=None) and dequants fp8 K/V
-        # in-kernel. So for FA4 impls we report False here: the layer then skips
-        # creating/applying query_quant, leaving Q in its native (bf16) dtype, which the
-        # flash_attn_interface FA4 branch casts to fp16.
-        self.supports_quant_query_input = (
-            flash_attn_supports_quant_query_input()
-            and self.vllm_flash_attn_version != 4
+        # FA4's SM90 FP8-KV path consumes native FP16/BF16 Q and dequantizes
+        # FP8 K/V in-kernel. Other FA4 paths (notably SM100) still require Q,
+        # K, and V to have the same FP8 dtype.
+        uses_sm90_fa4_fp8_kv_dequant = (
+            self.vllm_flash_attn_version == 4
+            and current_platform.is_device_capability_family(90)
+            and self.kv_cache_dtype in ("fp8", "fp8_e4m3")
+        )
+        self.supports_quant_query_input = flash_attn_supports_quant_query_input() and (
+            not uses_sm90_fa4_fp8_kv_dequant
         )
 
         vllm_config = get_current_vllm_config_or_none()
