@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import os
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1361,3 +1362,86 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
+def test_large_request_gate_uses_largest_kv_group_block_count():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.shutdown = lambda: None
+    worker._large_request_semaphore = object()
+    worker.large_request_threshold_tokens = 32768
+    worker.block_size = 256
+
+    long_meta = SimpleNamespace(req_blocks={"request": ("transfer", [[0] * 256])})
+    short_meta = SimpleNamespace(req_blocks={"request": ("transfer", [[0] * 14])})
+    multi_group_meta = SimpleNamespace(
+        req_blocks={"request": ("transfer", [[0] * 100, [0] * 256])}
+    )
+
+    assert worker._is_large_request_meta(long_meta)
+    assert not worker._is_large_request_meta(short_meta)
+    assert worker._is_large_request_meta(multi_group_meta)
+
+
+def test_node_large_request_slots_are_mutually_exclusive(tmp_path):
+    async def run_test():
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.shutdown = lambda: None
+        worker._node_large_request_slot_paths = (
+            MooncakeConnectorWorker._get_node_large_request_slot_paths(
+                str(tmp_path), "engine-a", 1
+            )
+        )
+        assert worker._node_large_request_slot_paths != (
+            MooncakeConnectorWorker._get_node_large_request_slot_paths(
+                str(tmp_path), "engine-b", 1
+            )
+        )
+
+        first_slot = await worker._acquire_node_large_request_slot()
+        assert first_slot is not None
+
+        waiting_for_slot = asyncio.create_task(
+            worker._acquire_node_large_request_slot()
+        )
+        await asyncio.sleep(0.01)
+        assert not waiting_for_slot.done()
+
+        worker._release_node_large_request_slot(first_slot)
+        second_slot = await asyncio.wait_for(waiting_for_slot, timeout=1)
+        assert second_slot is not None
+        worker._release_node_large_request_slot(second_slot)
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize("num_slots", [0, -1])
+def test_node_large_request_slot_paths_empty_for_non_positive_slots(num_slots):
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.shutdown = lambda: None
+    assert (
+        MooncakeConnectorWorker._get_node_large_request_slot_paths(
+            "/tmp", "engine-a", num_slots
+        )
+        == []
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW unavailable")
+@pytest.mark.asyncio
+async def test_node_large_request_slots_skip_symlinks(tmp_path):
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker._node_large_request_slot_paths = (
+        MooncakeConnectorWorker._get_node_large_request_slot_paths(
+            str(tmp_path), "engine-a", 2
+        )
+    )
+    unsafe_target = tmp_path / "unsafe-target"
+    os.symlink(unsafe_target, worker._node_large_request_slot_paths[0])
+
+    slot = await asyncio.wait_for(worker._acquire_node_large_request_slot(), timeout=1)
+    assert slot is not None
+    assert not unsafe_target.exists()
+    assert os.path.samefile(
+        f"/proc/self/fd/{slot}", worker._node_large_request_slot_paths[1]
+    )
+    worker._release_node_large_request_slot(slot)
