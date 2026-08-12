@@ -9,13 +9,19 @@ import vllm.config
 import vllm.ir.ops
 import vllm.plugins
 from tests.compile.backend import TestBackend
+from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
 from tests.utils import TestFP8Layer
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
+from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
     FUSED_OPS,
     FusedRMSQuantKey,
     RMSNormQuantFusionPass,
+)
+from vllm.compilation.passes.fx_utils import find_auto_fn_maybe
+from vllm.compilation.passes.utility.fix_functionalization import (
+    FixFunctionalizationPass,
 )
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
@@ -244,6 +250,31 @@ class TestModel(torch.nn.Module):
         ]
 
 
+class AddRMSNormNvfp4Model(torch.nn.Module):
+    def __init__(self, hidden_size: int, eps: float):
+        super().__init__()
+        self.norm = RMSNorm(hidden_size, eps)
+        self.activation_scale = torch.rand((1, 1), dtype=torch.float32)
+
+        weight = torch.rand((hidden_size, hidden_size))
+        self.weight, self.weight_scale, weight_global_scale = quant_nvfp4_tensor(weight)
+        self.alpha = (1 / (weight_global_scale * self.activation_scale)).reshape(1)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x = residual = torch.relu(x)
+        x, residual = self.norm(x, residual)
+        x, block_scale = scaled_fp4_quant(x, self.activation_scale)
+        x = cutlass_scaled_fp4_mm(
+            x,
+            self.weight,
+            block_scale,
+            self.weight_scale,
+            self.alpha,
+            out_dtype=torch.get_default_dtype(),
+        )
+        return x, residual
+
+
 def _run_fusion_test(
     model,
     fusion_pass,
@@ -377,6 +408,79 @@ def test_fusion_rmsnorm_quant(
         )
         backend.check_before_ops(
             model.ops_in_model_before_partial(), fully_replaced=False
+        )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize(
+    ("num_tokens", "hidden_size"),
+    [(1, 256), (32, 1024), (257, 4096)],
+)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_fusion_add_rmsnorm_nvfp4_quant(
+    dtype: torch.dtype, eps: float, num_tokens: int, hidden_size: int
+):
+    fused_op = getattr(
+        torch.ops.vllm,
+        "flashinfer_fused_add_rms_norm_nvfp4_quant",
+        None,
+    )
+    if not current_platform.has_device_capability(100) or fused_op is None:
+        pytest.skip("FlashInfer add-RMSNorm NVFP4 fusion is not available")
+    assert fused_op is not None
+    fused_op_default = fused_op.default
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config=PassConfig(
+                fuse_norm_quant=True,
+                fuse_add_rms_norm_nvfp4=True,
+                eliminate_noops=True,
+            ),
+        ),
+    )
+
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
+
+        fusion_pass = RMSNormQuantFusionPass(vllm_config)
+        fused_backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            fusion_pass,
+            PostCleanupPass(vllm_config),
+            FixFunctionalizationPass(vllm_config),
+        )
+        unfused_backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            PostCleanupPass(vllm_config),
+            FixFunctionalizationPass(vllm_config),
+        )
+
+        model = AddRMSNormNvfp4Model(hidden_size=hidden_size, eps=eps)
+        x = torch.rand(num_tokens, hidden_size)
+        torch._dynamo.mark_dynamic(x, 0)
+
+        result_fused = torch.compile(model, backend=fused_backend)(x)
+        result_unfused = torch.compile(model, backend=unfused_backend)(x)
+
+        torch.testing.assert_close(result_fused, result_unfused, atol=2e-1, rtol=2e-1)
+        assert fusion_pass.matched_count == 1
+        fused_backend.check_before_ops([torch.ops._C.scaled_fp4_quant.out])
+        fused_backend.check_after_ops([fused_op_default])
+        assert (
+            find_auto_fn_maybe(
+                fused_backend.graph_post_pass.nodes,
+                fused_op_default,
+            )
+            is None
         )
 
 
