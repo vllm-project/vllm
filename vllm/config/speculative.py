@@ -1415,7 +1415,7 @@ class SpeculativeConfig:
     def max_num_new_slots_for_drafting(self) -> int:
         """Return the maximum additional drafting slots per request.
 
-        The scheduler already reserves one slot for the request's next token.
+        The scheduler budget already includes one query slot per decoding request.
         Let K be ``num_speculative_tokens``. Standard configurations require:
 
         ==================== ============= ======== ================
@@ -1439,7 +1439,8 @@ class SpeculativeConfig:
 
         if self.parallel_drafting:
             if self.uses_draft_model():
-                # PARD retains the input query instead of reusing its slot.
+                # PARD does not shift the existing input, so all K query
+                # positions require additional slots.
                 return num_draft_tokens
 
             # The existing query is reused; only masked queries need new slots.
