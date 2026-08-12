@@ -18,7 +18,11 @@ from flashinfer import (
 )
 from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
-from flashinfer.utils import FP4Tensor
+from flashinfer.utils import (
+    FP4Tensor,
+    get_device_sm_count,
+    get_trtllm_gen_multi_ctas_kv_counter_bytes,
+)
 from typing_extensions import override
 
 from vllm import _custom_ops as custom_ops
@@ -1890,6 +1894,28 @@ class FlashInferImpl(AttentionImpl):
             and vllm_config is not None
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         )
+        # The kernel self-resets these semaphores after each launch. Keep one
+        # zero-initialized, graph-stable buffer per layer instead of allocating
+        # and clearing one on every decode step.
+        self._trtllm_multi_ctas_kv_counter_buffer = None
+        if (
+            self.supports_xqa_or_trtllm_gen_decode
+            and vllm_config is not None
+            and current_platform.is_device_capability_family(100)
+        ):
+            device = torch.device("cuda", torch.cuda.current_device())
+            max_runtime_heads = (
+                num_heads
+                * vllm_config.parallel_config.decode_context_parallel_size
+            )
+            counter_bytes = get_trtllm_gen_multi_ctas_kv_counter_bytes(
+                vllm_config.scheduler_config.max_num_seqs,
+                max_runtime_heads,
+                get_device_sm_count(device),
+            )
+            self._trtllm_multi_ctas_kv_counter_buffer = torch.zeros(
+                counter_bytes, dtype=torch.uint8, device=device
+            )
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
@@ -2602,6 +2628,9 @@ class FlashInferImpl(AttentionImpl):
                     ),
                     lse=lse,
                     return_lse=self.need_to_return_lse_for_decode,
+                    multi_ctas_kv_counter_buffer=(
+                        self._trtllm_multi_ctas_kv_counter_buffer
+                    ),
                 )
 
                 if use_dcp:
