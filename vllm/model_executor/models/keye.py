@@ -871,28 +871,33 @@ def _keye_field_config(
     return dict(
         pixel_values=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
         image_embeds=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
-        image_grid_thw=MultiModalFieldConfig.batched("image"),
+        image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
             "video", video_grid_sizes
         ),
         video_embeds=MultiModalFieldConfig.flat_from_sizes("video", video_grid_sizes),
-        video_grid_thw=MultiModalFieldConfig.batched("video"),
+        video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
     )
 
 
 class KeyeMultiModalDataParser(MultiModalDataParser):
+    # The patch grid is what sizes the placeholder range.
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
+        "video": {"video_embeds": "values", "video_grid_thw": "metadata"},
+    }
+
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={
-                    "image_embeds",
-                    "image_grid_thw",
-                },
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_keye_field_config,
             )
 
@@ -903,13 +908,12 @@ class KeyeMultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[VideoItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("video")
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields={
-                    "video_embeds",
-                    "video_grid_thw",
-                },
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_keye_field_config,
             )
 
@@ -929,6 +933,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return KeyeMultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     def get_supported_mm_limits(
@@ -1286,8 +1291,9 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
         image_grid_thw = image_input["image_grid_thw"]
         assert image_grid_thw.ndim == 2
 
-        for idx, thaw in enumerate(image_grid_thw):
-            thw_tuple = tuple(thaw.detach().cpu().numpy().tolist())
+        image_grid_thw_list = image_grid_thw.tolist()
+        for idx, thw in enumerate(image_grid_thw_list):
+            thw_tuple = tuple(thw)
             numel = np.prod(thw_tuple)
             image_grid_hws.append(thw_tuple)
             image_position_ids = torch.arange(numel) % np.prod(thw_tuple[1:])
@@ -1460,6 +1466,14 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
             connector="mlp_AR.",
             tower_model="visual.",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        merge_size = self.config.vision_config.spatial_merge_size
+        return num_image_tokens * merge_size**2
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        merge_size = self.config.vision_config.spatial_merge_size
+        return num_vision_tokens // merge_size**2
 
 
 @MULTIMODAL_REGISTRY.register_processor(

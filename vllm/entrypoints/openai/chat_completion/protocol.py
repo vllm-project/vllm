@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionDefinition,
     OpenAIBaseModel,
     PerRequestTimingMetrics,
+    StopParam,
     StreamOptions,
     ToolCall,
     UsageInfo,
@@ -228,7 +229,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     presence_penalty: float | None = 0.0
     response_format: AnyResponseFormat | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = []
+    stop: StopParam = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
     temperature: float | None = None
@@ -392,6 +393,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."
+        ),
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable session identity shared by related requests. Unlike "
+            "request_id, this value is expected to remain stable across "
+            "multiple requests in the same conversation or agent session."
         ),
     )
 
@@ -737,6 +746,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_response_format(cls, data):
+        if not isinstance(data, dict):
+            return data
         response_format = data.get("response_format")
         if response_format is None:
             return data
@@ -768,6 +779,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_stream_options(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("stream_options") and not data.get("stream"):
             raise VLLMValidationError(
                 "Stream options can only be defined when `stream=True`.",
@@ -779,6 +792,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("logprob_token_ids") and data.get("use_beam_search"):
             raise VLLMValidationError(
                 "`logprob_token_ids` is not supported with beam search.",
@@ -837,6 +852,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     def check_structured_outputs_count(cls, data):
         if isinstance(data, ValueError):
             raise data
+        if not isinstance(data, dict):
+            return data
 
         if data.get("structured_outputs", None) is None:
             return data
@@ -962,6 +979,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_generation_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
             raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
@@ -1059,7 +1078,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     presence_penalty: float | None = 0.0
     response_format: Any | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = Field(default_factory=list)
+    stop: StopParam = Field(default_factory=list)
     temperature: float | None = None
     top_p: float | None = None
     user: str | None = None
@@ -1097,6 +1116,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     def check_batch_mode(cls, data: Any) -> Any:
         if isinstance(data, BatchChatCompletionRequest):
             data = data.model_dump(exclude_unset=True)
+        if not isinstance(data, dict):
+            return data
         if data.get("use_beam_search"):
             raise VLLMValidationError(
                 "Batch chat completions do not support beam search. "
@@ -1109,13 +1130,14 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 parameter="logprob_token_ids",
             )
         response_format = data.get("response_format")
-        rf_type = (
-            response_format.get("type")
-            if isinstance(response_format, dict)
-            else getattr(response_format, "type", None)
-        )
-        if rf_type == "structural_tag":
-            validate_structural_tag_response_format(response_format)
+        if response_format is not None:
+            rf_type = (
+                response_format.get("type")
+                if isinstance(response_format, dict)
+                else getattr(response_format, "type", None)
+            )
+            if rf_type == "structural_tag":
+                validate_structural_tag_response_format(response_format)
         if (structured_outputs := data.get("structured_outputs")) is not None:
             validate_structured_outputs_structural_tag(structured_outputs)
         n = data.get("n", 1)

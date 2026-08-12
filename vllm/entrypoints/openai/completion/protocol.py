@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     OpenAIBaseModel,
     PerRequestTimingMetrics,
+    StopParam,
     StreamOptions,
     UsageInfo,
     structured_outputs_from_response_format,
@@ -61,7 +62,7 @@ class CompletionRequest(OpenAIBaseModel):
     n: int = 1
     presence_penalty: float | None = 0.0
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = []
+    stop: StopParam = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
     suffix: str | None = None
@@ -145,6 +146,14 @@ class CompletionRequest(OpenAIBaseModel):
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."
+        ),
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable session identity shared by related requests. Unlike "
+            "request_id, this value is expected to remain stable across "
+            "multiple requests in the same conversation or agent session."
         ),
     )
 
