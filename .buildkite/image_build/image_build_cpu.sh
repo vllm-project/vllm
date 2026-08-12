@@ -84,6 +84,7 @@ else
     --build-arg max_jobs=16 \
     --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
     --build-arg VLLM_CPU_X86=true \
+    --build-arg USE_SCCACHE=1 \
     --tag "$IMAGE" \
     --target vllm-test \
     "${CACHE_FROM_ARGS[@]}" \
