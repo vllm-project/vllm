@@ -84,9 +84,20 @@ class DeepGemmQuantScaleFMT(Enum):
 
     @classmethod
     def from_oracle(cls) -> "DeepGemmQuantScaleFMT":
-        """Return the pre-initialized oracle decision"""
+        """Return the oracle decision, initializing it on first use.
+
+        The cache is normally populated by ``_lazy_init()`` (e.g. during
+        engine startup), but standalone consumers such as ``QuantFP8`` with an
+        explicit ``use_ue8m0=True`` can reach this before any DeepGEMM kernel
+        wrapper has run. Resolve the DeepGEMM symbols and initialize the
+        decision here instead of asserting; without DeepGEMM this yields
+        FLOAT32, matching ``is_deep_gemm_e8m0_used()``.
+        """
         cached = getattr(cls, "_oracle_cache", None)
-        assert cached is not None, "DeepGemmQuantScaleFMT oracle cache not initialized"
+        if cached is None:
+            _lazy_init()
+            cls.init_oracle_cache()
+            cached = cls._oracle_cache  # type: ignore[attr-defined]
         return cached
 
 
