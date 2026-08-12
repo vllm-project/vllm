@@ -13,8 +13,9 @@ from vllm.third_party.flash_linear_attention.ops import (
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("strided_mixed_qkv", [False, True])
+@pytest.mark.parametrize("strided_gates", [False, True])
 def test_fused_recurrent_packed_decode_matches_reference(
-    dtype: torch.dtype, strided_mixed_qkv: bool
+    dtype: torch.dtype, strided_mixed_qkv: bool, strided_gates: bool
 ):
     torch.manual_seed(0)
 
@@ -36,8 +37,14 @@ def test_fused_recurrent_packed_decode_matches_reference(
     else:
         mixed_qkv = torch.randn((B, qkv_dim), device=device, dtype=dtype)
 
-    a = torch.randn((B, HV), device=device, dtype=dtype)
-    b = torch.randn((B, HV), device=device, dtype=dtype)
+    if strided_gates:
+        gates = torch.randn((B, 4 * HV), device=device, dtype=dtype)
+        b_global, a_global = gates.chunk(2, dim=-1)
+        b = b_global[:, :HV]
+        a = a_global[:, :HV]
+    else:
+        a = torch.randn((B, HV), device=device, dtype=dtype)
+        b = torch.randn((B, HV), device=device, dtype=dtype)
     A_log = torch.randn((HV,), device=device, dtype=dtype)
     dt_bias = torch.randn((HV,), device=device, dtype=dtype)
 
