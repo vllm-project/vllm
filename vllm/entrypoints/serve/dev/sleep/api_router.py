@@ -125,7 +125,8 @@ async def wake_up_ep_ranks_by_tags(raw_request: Request):
     tags = required_tags(payload, "tags")
     level = optional_level(payload)
 
-    await engine_client(raw_request).collective_rpc(
+    client = engine_client(raw_request)
+    await client.collective_rpc(
         "wake_up_ep_ranks",
         kwargs={
             "sleeping_ep_ranks": sleeping_ep_ranks,
@@ -133,6 +134,13 @@ async def wake_up_ep_ranks_by_tags(raw_request: Request):
             "level": level,
         },
     )
+    if level == 2:
+        # Local wake leaves L2-discarded weights as garbage; refill them
+        # from active peers (collective across all EP ranks).
+        await client.collective_rpc(
+            "finalize_l2_wake",
+            kwargs={"sleeping_ep_ranks": sleeping_ep_ranks},
+        )
     return JSONResponse(
         content={
             "ok": True,

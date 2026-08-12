@@ -66,6 +66,18 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind],
         ),
+        # ​cudaError_t cudaMemcpyAsync ( void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream ) # noqa
+        Function(
+            "cudaMemcpyAsync",
+            cudaError_t,
+            [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_size_t,
+                cudaMemcpyKind,
+                ctypes.c_void_p,
+            ],
+        ),
         # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr ) # noqa
         Function(
             "cudaIpcGetMemHandle",
@@ -90,6 +102,7 @@ class CudaRTLibrary:
         "cudaFree": "hipFree",
         "cudaMemset": "hipMemset",
         "cudaMemcpy": "hipMemcpy",
+        "cudaMemcpyAsync": "hipMemcpyAsync",
         "cudaIpcGetMemHandle": "hipIpcGetMemHandle",
         "cudaIpcOpenMemHandle": "hipIpcOpenMemHandle",
     }
@@ -171,6 +184,21 @@ class CudaRTLibrary:
         cudaMemcpyDefault = 4
         kind = cudaMemcpyDefault
         self.CUDART_CHECK(self.funcs["cudaMemcpy"](dst, src, count, kind))
+
+    def cudaMemcpyAsync(
+        self,
+        dst: ctypes.c_void_p,
+        src: ctypes.c_void_p,
+        count: int,
+        stream: int,
+    ) -> None:
+        cudaMemcpyDefault = 4
+        kind = cudaMemcpyDefault
+        self.CUDART_CHECK(
+            self.funcs["cudaMemcpyAsync"](
+                dst, src, count, kind, ctypes.c_void_p(stream)
+            )
+        )
 
     def cudaIpcGetMemHandle(self, devPtr: ctypes.c_void_p) -> cudaIpcMemHandle_t:
         handle = cudaIpcMemHandle_t()

@@ -25,6 +25,7 @@ If you only need to use the distributed environment without model/pipeline
 
 import contextlib
 import gc
+import os
 import pickle
 import weakref
 from collections import namedtuple
@@ -1372,6 +1373,39 @@ def _get_dp_pynccl_comm(group: GroupCoordinator):
     return getattr(device_communicator, "pynccl_comm", None)
 
 
+def resume_max_dp_comm() -> None:
+    """Resume the max DP communicator's NCCL resources if suspended.
+
+    Must run on every DP rank before any operation that uses the max DP
+    communicator (split, P2P weight transfer, full-size collectives).
+    """
+    if _DP_MAX is None:
+        return
+    comm = _get_dp_pynccl_comm(_DP_MAX)
+    if comm is not None:
+        comm.resume()
+
+
+def _maybe_suspend_max_dp_comm() -> None:
+    """Release the max DP communicator's NCCL resources while scaled down.
+
+    Only takes effect with an NCCL build exposing ncclCommSuspend; can be
+    disabled via VLLM_FLASH_EPSCALE_SUSPEND_MAX_DP=0. The suspended
+    communicator is resumed automatically on the next resize or via
+    `resume_max_dp_comm()`.
+    """
+    if os.environ.get("VLLM_FLASH_EPSCALE_SUSPEND_MAX_DP", "1") != "1":
+        return
+    if _DP_MAX is None:
+        return
+    comm = _get_dp_pynccl_comm(_DP_MAX)
+    if comm is None or not comm.supports_suspend:
+        return
+    if _DP_MAX.device.type != "cpu":
+        torch.accelerator.synchronize()
+    comm.suspend()
+
+
 def _destroy_split_dp_group(group: GroupCoordinator | None) -> None:
     if group is None or group is _DP_MAX:
         return
@@ -1440,6 +1474,7 @@ def get_dp_group(new_comm_size: int | None = None) -> GroupCoordinator:
         )
 
     if new_comm_size == parent.world_size:
+        resume_max_dp_comm()
         _destroy_split_dp_group(_DP)
         _DP = parent
         _DP_SPLIT_SIZE = new_comm_size
@@ -1448,6 +1483,9 @@ def get_dp_group(new_comm_size: int | None = None) -> GroupCoordinator:
     parent_pynccl_comm = _get_dp_pynccl_comm(parent)
     if parent_pynccl_comm is None or parent_pynccl_comm.disabled:
         raise RuntimeError("DP NCCL split requires an enabled PyNCCL communicator")
+
+    # the parent may have been suspended by a previous scale-down
+    parent_pynccl_comm.resume()
 
     if parent.device.type != "cpu":
         torch.accelerator.synchronize()
@@ -1465,6 +1503,9 @@ def get_dp_group(new_comm_size: int | None = None) -> GroupCoordinator:
         _DP = _make_split_dp_group(parent, split_comm, new_comm_size)
     _DP_SPLIT_SIZE = new_comm_size
     _destroy_split_dp_group(old_dp)
+    # scaled below max: the max comm is only needed again at the next
+    # resize / scale-up, so release its GPU resources until then
+    _maybe_suspend_max_dp_comm()
     return _DP
 
 

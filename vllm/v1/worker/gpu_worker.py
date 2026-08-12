@@ -19,6 +19,7 @@ import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
 from vllm.device_allocator import get_mem_allocator_instance
+from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -68,7 +69,6 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.sleep_tags import WEIGHT_SLEEP_TAGS, expand_weight_sleep_tags
-from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -177,23 +177,7 @@ class Worker(WorkerBase):
         self.model_runner.skip_dummy_model_forward = True
 
         allocator = get_mem_allocator_instance()
-        graph_offload = self._graph_offload_active()
-        if level == 1:
-            selected_tags = expand_weight_sleep_tags(tags)
-            offload_tags = tuple(selected_tags) if selected_tags else WEIGHT_SLEEP_TAGS
-            # CUDA graphs live in the "graphs"-tagged cumem pool. Always
-            # offload them to CPU at L1 so they can be restored in place on
-            # wake without re-capture (cumem preserves virtual addresses).
-            # Skip when graphs are disabled: no such pool exists, so injecting
-            # the tag would be a misleading no-op.
-            if graph_offload:
-                offload_tags = tuple(set(offload_tags) | {CuMemAllocator.graphs_tag})
-        else:
-            # L2: keep graphs CPU-backed so wake restores them in place.
-            # Weights + KV are discarded and refilled by peer transfer. With
-            # graphs disabled there is nothing to back up, so offload nothing.
-            offload_tags = (CuMemAllocator.graphs_tag,) if graph_offload else tuple()
-        allocator.sleep(offload_tags=offload_tags)
+        allocator.sleep(offload_tags=self._sleep_offload_tags(level, tags))
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -230,6 +214,55 @@ class Worker(WorkerBase):
         self.model_runner.skip_dummy_model_forward = False
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
+
+    def _sleep_offload_tags(
+        self, level: int, tags: list[str] | None
+    ) -> tuple[str, ...]:
+        """CuMem tags that get a CPU backup for the given sleep request.
+
+        L1 backs up the selected weight tags; L2 discards weights + KV
+        (peer transfer refills them on wake). CUDA graphs, when the cumem
+        graph pool is active, are always CPU-backed so they can be
+        restored in place without re-capture (cumem preserves vaddrs);
+        with graphs disabled no such pool exists and injecting the tag
+        would be a misleading no-op.
+        """
+        graph_offload = self._graph_offload_active()
+        if level == 1:
+            selected_tags = expand_weight_sleep_tags(tags)
+            offload_tags = tuple(selected_tags) if selected_tags else WEIGHT_SLEEP_TAGS
+            if graph_offload:
+                offload_tags = tuple(set(offload_tags) | {CuMemAllocator.graphs_tag})
+            return offload_tags
+        return (CuMemAllocator.graphs_tag,) if graph_offload else tuple()
+
+    def warm_sleep_backup(
+        self,
+        sleeping_ep_ranks: list[int],
+        tags: list[str],
+        level: int = 1,
+    ) -> int:
+        """Pre-pin the host backup buffers a later sleep will offload into.
+
+        Rank-local and idempotent; run off the critical path (e.g. while
+        the rank drains before scaling down) so the first sleep skips the
+        seconds-scale page-pinning cost. Returns bytes newly pinned.
+        """
+        from vllm.distributed.parallel_state import get_ep_group
+
+        if get_ep_group().rank not in sleeping_ep_ranks:
+            return 0
+        allocator = get_mem_allocator_instance()
+        warm = getattr(allocator, "warm_backup_cache", None)
+        if warm is None:
+            return 0
+        warmed = warm(self._sleep_offload_tags(level, tags))
+        if warmed:
+            logger.info(
+                "warm_sleep_backup: pre-pinned %.1f GiB of host backup",
+                warmed / 1024**3,
+            )
+        return warmed
 
     def empty_cache(self) -> None:
         """Return cached-but-unused allocator blocks to the driver.
@@ -539,22 +572,35 @@ class Worker(WorkerBase):
         tags: list[str] | None = None,
         level: int = 1,
     ) -> None:
+        """Rank-local CuMem wake on ranks in ``sleeping_ep_ranks``.
+
+        Contains no collectives, so it may run outside the pause window
+        while active ranks keep serving. At level 2 the remapped weights
+        hold garbage until ``finalize_l2_wake`` refills them; the waking
+        ranks stay logically slept (and skip forwards) until the
+        subsequent ``resize_sleep_ep_ranks``.
+        """
+        del level  # local wake is identical for both levels
         from vllm.distributed.parallel_state import get_ep_group
 
-        is_waking = get_ep_group().rank in sleeping_ep_ranks
-        if is_waking:
+        if get_ep_group().rank in sleeping_ep_ranks:
             self.wake_up(tags=tags)
-        print("Woke up EP ranks %s with tags %s at level %d", sleeping_ep_ranks, tags, level, flush=True)
-        if level != 2:
-            return
 
-        # L2 wake: vaddrs are preserved by CuMem; refill dense weights
-        # from an active peer in the same DP group. Experts are filled
-        # later by resize_sleep_ep_ranks -> EPLB rearrange.
+    def finalize_l2_wake(self, sleeping_ep_ranks: list[int]) -> None:
+        """Collective L2 refill after ``wake_up_ep_ranks``.
+
+        Must run on every EP rank inside the pause window: the EPLB map
+        broadcast and dense-weight P2P are NCCL group calls that must not
+        interleave with active ranks' forward-pass collectives. Experts
+        are refilled later by resize_sleep_ep_ranks -> EPLB rearrange.
+        """
         from vllm.distributed.elastic_ep.peer_weight_transfer import (
             get_max_dp_group,
             transfer_dense_to_waking_ranks,
         )
+        from vllm.distributed.parallel_state import get_ep_group
+
+        is_waking = get_ep_group().rank in sleeping_ep_ranks
 
         # Refill EPLB GPU maps on waking ranks (collective, all EP ranks).
         # L2 sleep wiped their physical pages with no CPU backup, so the
@@ -571,22 +617,15 @@ class Worker(WorkerBase):
         # to active_ep_size, so the current _DP cannot reach the waking
         # peers. Reading _DP_MAX avoids mutating any global DP state, so
         # the subsequent resize_sleep_ep_ranks can manage _DP as usual.
-        dp_group = get_max_dp_group()
-
-        waking_dp_ranks = self._ep_ranks_to_dp_ranks(sleeping_ep_ranks)
         model = self.model_runner.get_model()
         transfer_dense_to_waking_ranks(
             model=model,
             expert_weights=model.expert_weights,
-            dp_group=dp_group,
-            waking_dp_ranks=waking_dp_ranks,
+            dp_group=get_max_dp_group(),
+            waking_dp_ranks=self._ep_ranks_to_dp_ranks(sleeping_ep_ranks),
         )
-        print("Transferred dense weights to waking EP ranks %s (DP ranks %s)",
-              sleeping_ep_ranks, waking_dp_ranks, flush=True)
         if is_waking:
             self._maybe_nixl_eplb_on_l2_wake()
-            print("[L2 wake] done _maybe_nixl_eplb_on_l2_wake", flush=True)
-        print("[L2 wake] wake_up_ep_ranks returning", flush=True)
 
     def _ep_ranks_to_dp_ranks(self, ep_ranks: list[int]) -> list[int]:
         """Translate EP ranks into DP-local indices for the current DP group.
@@ -605,10 +644,10 @@ class Worker(WorkerBase):
         to be destroyed. Waking / sleeping ranks skip. Called before
         destroy_nixl_buffer during scale-down.
         """
-        from vllm.distributed.parallel_state import get_ep_group
         from vllm.distributed.device_communicators.all2all import (
             NixlEPAll2AllManager,
         )
+        from vllm.distributed.parallel_state import get_ep_group
 
         if get_ep_group().rank in sleeping_ep_ranks:
             return 0
@@ -623,10 +662,10 @@ class Worker(WorkerBase):
         Must be called from the flash_epscale pause window so no dispatch/
         combine is in flight. Returns MiB freed (0 if not applicable).
         """
-        from vllm.distributed.parallel_state import get_ep_group
         from vllm.distributed.device_communicators.all2all import (
             NixlEPAll2AllManager,
         )
+        from vllm.distributed.parallel_state import get_ep_group
 
         if get_ep_group().rank not in sleeping_ep_ranks:
             return 0
@@ -640,10 +679,10 @@ class Worker(WorkerBase):
         group: every rank must call this (the destroyed-buffer ranks rebuild,
         the live-buffer ranks reconnect to them). Returns per-rank action.
         """
-        from vllm.distributed.parallel_state import get_ep_group
         from vllm.distributed.device_communicators.all2all import (
             NixlEPAll2AllManager,
         )
+        from vllm.distributed.parallel_state import get_ep_group
 
         ep_rank = get_ep_group().rank
         logger.info(

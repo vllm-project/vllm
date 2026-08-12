@@ -3,6 +3,7 @@
 
 
 import asyncio
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -18,6 +19,12 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 DEFAULT_TAGS = ["shared_weights", "expert_weights", "kv_cache"]
+
+
+class _PostResizeError(RuntimeError):
+    """A failure after the resize is live: the new EP topology is serving,
+    only the post-resume memory release failed. Callers must not roll back
+    routing to the old size."""
 
 
 def _elapsed_ms(start: float) -> float:
@@ -109,21 +116,27 @@ async def _timed(timing: dict[str, float], key: str):
         timing[key] = _elapsed_ms(start)
 
 
+async def _rpc(
+    client: EngineClient, timing: dict[str, float], key: str, method: str, **kwargs
+):
+    logger.info("flash_epscale: %s(%s)", method, kwargs)
+    async with _timed(timing, key):
+        return await client.collective_rpc(method, kwargs=kwargs)
+
+
 @asynccontextmanager
 async def _paused(client: EngineClient, timing: dict[str, float]):
     """Stop-the-world only around the steps that require global quiescence
-    (NCCL split, EPLB remap, sleep/wake RPCs). Always attempts resume on exit;
-    resume failures propagate so the endpoint cannot report false success."""
-    logger.info("flash_epscale: entering pause_generation(mode=abort)")
+    (NCCL split, EPLB remap/refill, NIXL reconnect). Always attempts resume
+    on exit; resume failures propagate so the endpoint cannot report false
+    success."""
+    logger.info("flash_epscale: entering pause_generation(mode=wait)")
     async with _timed(timing, "pause"):
         await client.pause_generation(mode="wait", clear_cache=False)
-    logger.info("flash_epscale: pause_generation done")
-    # Free cached-but-unused activation blocks so wake-up / weight transfer
-    # has headroom. Best-effort: it refills lazily on resume, so never fail
-    # the transition over it.
+    # Free cached-but-unused activation blocks so the weight transfers in
+    # the window have headroom. Best-effort: the cache refills lazily.
     try:
-        async with _timed(timing, "empty_cache"):
-            await client.collective_rpc("empty_cache")
+        await _rpc(client, timing, "empty_cache", "empty_cache")
     except Exception:
         logger.warning("flash_epscale: empty_cache failed (ignored)", exc_info=True)
     try:
@@ -132,7 +145,181 @@ async def _paused(client: EngineClient, timing: dict[str, float]):
         logger.info("flash_epscale: entering resume_generation")
         async with _timed(timing, "resume"):
             await client.resume_generation()
-        logger.info("flash_epscale: resume_generation done")
+
+
+async def _sleep_ranks(
+    client: EngineClient,
+    timing: dict[str, float],
+    key: str,
+    ranks: list[int],
+    tags: list[str],
+    level: int,
+) -> None:
+    await _rpc(
+        client,
+        timing,
+        key,
+        "sleep_ep_ranks_by_tags",
+        sleeping_ep_ranks=ranks,
+        tags=tags,
+        level=level,
+    )
+
+
+async def _transition(
+    client: EngineClient,
+    *,
+    current_sleeping: list[int],
+    target_sleeping: list[int],
+    tags: list[str],
+    level: int,
+    timing: dict[str, float],
+) -> None:
+    """Move the EP sleep state from ``current_sleeping`` to
+    ``target_sleeping`` (either direction).
+
+    Phases:
+      1. Pre-pause: rank-local CuMem wake of the currently sleeping ranks.
+         No collectives, so active ranks keep serving; the woken ranks stay
+         logically slept (and skip forwards) until the resize below.
+      2. Pause window: everything that must not interleave with forward
+         collectives — NIXL reconnect, L2 dense/EPLB-map refill, EPLB
+         expert remap + DP NCCL split, NIXL disconnect from new sleepers.
+      3. Post-resume: rank-local CuMem sleep + NIXL buffer destroy on the
+         new sleeping ranks. They are masked and skipped by then, so
+         active ranks serve while the memory is released.
+
+    Failures in phase 1/2 roll back to ``current_sleeping`` best-effort.
+    Phase 3 failures raise ``_PostResizeError``: the resize is live and
+    must not be rolled back; only the memory release failed.
+    """
+    if current_sleeping:
+        try:
+            await _rpc(
+                client,
+                timing,
+                "wake",
+                "wake_up_ep_ranks",
+                sleeping_ep_ranks=current_sleeping,
+                tags=tags,
+                level=level,
+            )
+        except Exception:
+            try:
+                await _sleep_ranks(
+                    client, timing, "rollback_sleep", current_sleeping, tags, level
+                )
+            except Exception:
+                logger.exception("flash_epscale wake rollback failed")
+            raise
+
+    if target_sleeping:
+        # Pre-pin the host backup buffers the post-resume sleep will
+        # offload into, while the soon-to-sleep ranks are already drained.
+        # Best-effort: the sleep itself pins on demand if this fails.
+        try:
+            await _rpc(
+                client,
+                timing,
+                "warm_backup",
+                "warm_sleep_backup",
+                sleeping_ep_ranks=target_sleeping,
+                tags=tags,
+                level=level,
+            )
+        except Exception:
+            logger.warning(
+                "flash_epscale: warm_sleep_backup failed (ignored)", exc_info=True
+            )
+
+    async with _paused(client, timing):
+        try:
+            if current_sleeping:
+                # Restore NIXL all2all state before the refill/resize:
+                # destroyed-buffer ranks rebuild, live ranks reconnect.
+                await _rpc(
+                    client,
+                    timing,
+                    "nixl_ensure",
+                    "ensure_nixl_buffer",
+                    sleeping_ep_ranks=current_sleeping,
+                )
+                if level == 2:
+                    # L2 discarded weights with no CPU backup; refill dense
+                    # weights and EPLB maps from active peers (collective).
+                    await _rpc(
+                        client,
+                        timing,
+                        "l2_refill",
+                        "finalize_l2_wake",
+                        sleeping_ep_ranks=current_sleeping,
+                    )
+            await _rpc(
+                client,
+                timing,
+                "resize",
+                "resize_sleep_ep_ranks",
+                sleeping_ep_ranks=target_sleeping,
+            )
+            if target_sleeping:
+                # Alive ranks must forget the sleeping peers' NIXL endpoints
+                # now, or a later wake hangs in the connect handshake. Cheap
+                # and touches the live agents, so it stays in the window.
+                await _rpc(
+                    client,
+                    timing,
+                    "nixl_disconnect",
+                    "disconnect_nixl_from_sleeping",
+                    sleeping_ep_ranks=target_sleeping,
+                )
+        except Exception:
+            # Still inside the pause window: collectives are safe here.
+            try:
+                async with _timed(timing, "rollback"):
+                    await client.collective_rpc(
+                        "resize_sleep_ep_ranks",
+                        kwargs={"sleeping_ep_ranks": current_sleeping},
+                    )
+                    if current_sleeping:
+                        await client.collective_rpc(
+                            "sleep_ep_ranks_by_tags",
+                            kwargs={
+                                "sleeping_ep_ranks": current_sleeping,
+                                "tags": tags,
+                                "level": level,
+                            },
+                        )
+            except Exception:
+                logger.exception("flash_epscale rollback failed")
+            raise
+
+    if not target_sleeping:
+        return
+    try:
+        await _sleep_ranks(client, timing, "sleep", target_sleeping, tags, level)
+        if os.environ.get("VLLM_FLASH_EPSCALE_SKIP_NIXL_TEARDOWN") == "1":
+            logger.info(
+                "flash_epscale: skipping NIXL buffer destroy (env override); "
+                "disconnect already applied"
+            )
+        else:
+            try:
+                await _rpc(
+                    client,
+                    timing,
+                    "nixl_destroy",
+                    "destroy_nixl_buffer",
+                    sleeping_ep_ranks=target_sleeping,
+                )
+            except Exception:
+                logger.warning(
+                    "flash_epscale: nixl destroy failed (ignored)", exc_info=True
+                )
+    except Exception as e:
+        raise _PostResizeError(
+            f"resize to sleeping={target_sleeping} is live, but releasing "
+            f"memory on the sleeping ranks failed: {e}"
+        ) from e
 
 
 router = APIRouter()
@@ -167,26 +354,12 @@ async def flash_epscale(raw_request: Request):
                 ),
             )
 
-        if target_ep_size == active_ep_size:
-            client.set_active_data_parallel_size(target_ep_size)
-            timing["total"] = _elapsed_ms(total_start)
-            logger.info("flash_epscale noop timing_ms=%s", timing)
-            return JSONResponse(
-                content={
-                    "ok": True,
-                    "ep_world_size": ep_world_size,
-                    "active_ep_size": active_ep_size,
-                    "sleeping_ep_ranks": current_sleeping,
-                    "changed": False,
-                    "action": "noop",
-                    "tags": tags,
-                    "timing_ms": timing,
-                }
-            )
-
         target_sleeping = list(range(target_ep_size, ep_world_size))
 
-        if target_ep_size < active_ep_size:
+        if target_ep_size == active_ep_size:
+            client.set_active_data_parallel_size(target_ep_size)
+            action = "noop"
+        elif target_ep_size < active_ep_size:
             action = "scale_down"
             await _scale_down(
                 client,
@@ -211,22 +384,23 @@ async def flash_epscale(raw_request: Request):
                 level=level,
             )
 
-        async with _timed(timing, "final_state"):
-            final = await _query_ep_state(client)
-        _, final_active, final_sleeping = _parse_ep_state(final)
-        if final_active != target_ep_size or final_sleeping != target_sleeping:
-            timing["total"] = _elapsed_ms(total_start)
-            logger.error("flash_epscale final state mismatch timing_ms=%s", timing)
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "flash_epscale finished with unexpected EP sleep state: "
-                    f"expected active_ep_size={target_ep_size}, "
-                    f"sleeping_ep_ranks={target_sleeping}, got "
-                    f"active_ep_size={final_active}, "
-                    f"sleeping_ep_ranks={final_sleeping}"
-                ),
-            )
+        if action != "noop":
+            async with _timed(timing, "final_state"):
+                final = await _query_ep_state(client)
+            _, final_active, final_sleeping = _parse_ep_state(final)
+            if final_active != target_ep_size or final_sleeping != target_sleeping:
+                timing["total"] = _elapsed_ms(total_start)
+                logger.error("flash_epscale final state mismatch timing_ms=%s", timing)
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "flash_epscale finished with unexpected EP sleep state: "
+                        f"expected active_ep_size={target_ep_size}, "
+                        f"sleeping_ep_ranks={target_sleeping}, got "
+                        f"active_ep_size={final_active}, "
+                        f"sleeping_ep_ranks={final_sleeping}"
+                    ),
+                )
 
         timing["total"] = _elapsed_ms(total_start)
         logger.info("flash_epscale %s timing_ms=%s", action, timing)
@@ -234,9 +408,11 @@ async def flash_epscale(raw_request: Request):
             content={
                 "ok": True,
                 "ep_world_size": ep_world_size,
-                "active_ep_size": final_active,
-                "sleeping_ep_ranks": final_sleeping,
-                "changed": True,
+                "active_ep_size": target_ep_size,
+                "sleeping_ep_ranks": target_sleeping
+                if action != "noop"
+                else current_sleeping,
+                "changed": action != "noop",
                 "action": action,
                 "tags": tags,
                 "timing_ms": timing,
@@ -258,190 +434,42 @@ async def _scale_down(
 ) -> None:
     """Shrink the active EP set.
 
-    Active ranks keep serving while the soon-to-sleep ranks drain.  Only the
-    NCCL split / EPLB remap / sleep RPCs run inside the pause window.
+    Routing shrinks first so active ranks keep serving while the
+    soon-to-sleep ranks drain; only the collective steps run inside the
+    pause window (see ``_transition``).
     """
-    # 1. Stop routing to the ranks that will sleep; they finish in flight.
-    #    Active ranks are unaffected.
     try:
         async with _timed(timing, "route_shrink"):
             client.set_active_data_parallel_size(target_ep_size)
-        # 1b. Reroute eligible in-flight requests off the soon-to-sleep ranks
-        # onto the new active prefix, so we don't have to wait for them to
-        # naturally finish under reduced throughput. Best-effort: requests
-        # that cannot be safely re-issued (n>1, pooling, streaming input,
-        # non-DELTA output) fall through to the drain step below.
+        # Reroute eligible in-flight requests off the soon-to-sleep ranks
+        # onto the active prefix. Best-effort: requests that cannot be
+        # safely re-issued (n>1, pooling, streaming input, non-DELTA
+        # output) fall through to the drain step below.
         async with _timed(timing, "reroute"):
             rerouted = await client.reroute_inflight_to_active(target_sleeping)
         timing["reroute_count"] = float(len(rerouted))
         async with _timed(timing, "drain"):
             await client.wait_for_dp_ranks_to_drain(target_sleeping, drain_timeout)
+        await _transition(
+            client,
+            current_sleeping=current_sleeping,
+            target_sleeping=target_sleeping,
+            tags=tags,
+            level=level,
+            timing=timing,
+        )
     except Exception as e:
-        # Restore routing so requests are not stranded.
-        try:
-            client.set_active_data_parallel_size(active_ep_size)
-        except Exception:
-            logger.exception("flash_epscale scale_down route restore failed")
-        logger.exception("flash_epscale scale_down drain failed")
-        raise HTTPException(
-            status_code=500, detail=f"flash_epscale scale_down drain failed: {e}"
-        ) from e
-
-    transition_completed = False
-    try:
-        # 2. Stop-the-world only for steps that require global quiescence.
-        async with _paused(client, timing):
-            sleep_started = False
-            try:
-                if current_sleeping:
-                    logger.info("flash_epscale: wake_up_ep_ranks(%s)", current_sleeping)
-                    async with _timed(timing, "nixl_ensure"):
-                        await client.collective_rpc(
-                            "ensure_nixl_buffer",
-                            kwargs={"sleeping_ep_ranks": current_sleeping},
-                        )
-                    async with _timed(timing, "wake"):
-                        await client.collective_rpc(
-                            "wake_up_ep_ranks",
-                            kwargs={
-                                "sleeping_ep_ranks": current_sleeping,
-                                "tags": tags,
-                                "level": level,
-                            },
-                        )
-                    logger.info("flash_epscale: wake_up_ep_ranks done")
-                logger.info("flash_epscale: resize_sleep_ep_ranks(%s)", target_sleeping)
-                async with _timed(timing, "resize"):
-                    await client.collective_rpc(
-                        "resize_sleep_ep_ranks",
-                        kwargs={"sleeping_ep_ranks": target_sleeping},
-                    )
-                logger.info("flash_epscale: resize_sleep_ep_ranks done")
-                logger.info(
-                    "flash_epscale: sleep_ep_ranks_by_tags(%s, level=%d)",
-                    target_sleeping,
-                    level,
-                )
-                async with _timed(timing, "sleep"):
-                    sleep_started = True
-                    await client.collective_rpc(
-                        "sleep_ep_ranks_by_tags",
-                        kwargs={
-                            "sleeping_ep_ranks": target_sleeping,
-                            "tags": tags,
-                            "level": level,
-                        },
-                    )
-                logger.info("flash_epscale: sleep_ep_ranks_by_tags done")
-                # NIXL scale-down teardown.
-                #
-                # disconnect_nixl_from_sleeping (alive-only) invalidates
-                # the sleeping peers' UCX endpoints in each alive rank's
-                # nixl agent. This is REQUIRED for a later wake -- without
-                # it, connect_ranks on the waking side sees stale remote
-                # metadata and hangs on the two-way handshake. Do it even
-                # when full teardown is skipped, because CuMem-only sleep
-                # still requires that the alive side has forgotten the
-                # sleeping peers (see NixlEPAll2AllManager.ensure_buffer
-                # branch B).
-                #
-                # destroy_nixl_buffer (sleeping-only) releases the ~2 GiB
-                # RDMA buffer. Optional -- CuMem-only sleep skips it via
-                # the env override, in which case ensure_buffer's branch B
-                # rebinds the surviving buffer at wake time.
-                try:
-                    async with _timed(timing, "nixl_disconnect"):
-                        await client.collective_rpc(
-                            "disconnect_nixl_from_sleeping",
-                            kwargs={"sleeping_ep_ranks": target_sleeping},
-                        )
-                except Exception:
-                    logger.warning(
-                        "flash_epscale: nixl disconnect failed (ignored)",
-                        exc_info=True,
-                    )
-                import os as _os
-                if _os.environ.get("VLLM_FLASH_EPSCALE_SKIP_NIXL_TEARDOWN") == "1":
-                    logger.info(
-                        "flash_epscale: SKIP nixl buffer destroy "
-                        "(env override); disconnect still applied"
-                    )
-                else:
-                    try:
-                        async with _timed(timing, "nixl_destroy"):
-                            await client.collective_rpc(
-                                "destroy_nixl_buffer",
-                                kwargs={"sleeping_ep_ranks": target_sleeping},
-                            )
-                    except Exception:
-                        logger.warning(
-                            "flash_epscale: nixl destroy failed (ignored)",
-                            exc_info=True,
-                        )
-                transition_completed = True
-            except Exception:
-                await _restore_scale_down_sleep_state(
-                    client,
-                    current_sleeping=current_sleeping,
-                    target_sleeping=target_sleeping,
-                    tags=tags,
-                    timing=timing,
-                    wake_target_sleeping=sleep_started,
-                    level=level,
-                )
-                raise
-    except Exception as e:
-        if not transition_completed:
+        # Restore routing so requests are not stranded — unless the resize
+        # is already live, in which case the shrunk routing is correct.
+        if not isinstance(e, _PostResizeError):
             try:
                 client.set_active_data_parallel_size(active_ep_size)
             except Exception:
                 logger.exception("flash_epscale scale_down route restore failed")
-        logger.exception("flash_epscale scale_down transition failed")
+        logger.exception("flash_epscale scale_down failed")
         raise HTTPException(
-            status_code=500,
-            detail=f"flash_epscale scale_down transition failed: {e}",
+            status_code=500, detail=f"flash_epscale scale_down failed: {e}"
         ) from e
-
-
-async def _restore_scale_down_sleep_state(
-    client: EngineClient,
-    *,
-    current_sleeping: list[int],
-    target_sleeping: list[int],
-    tags: list[str],
-    timing: dict[str, float],
-    wake_target_sleeping: bool,
-    level: int = 1,
-) -> None:
-    """Best-effort rollback for failures after scale_down routing shrinks."""
-    try:
-        if wake_target_sleeping and target_sleeping:
-            async with _timed(timing, "rollback_wake"):
-                await client.collective_rpc(
-                    "wake_up_ep_ranks",
-                    kwargs={
-                        "sleeping_ep_ranks": target_sleeping,
-                        "tags": tags,
-                        "level": level,
-                    },
-                )
-        async with _timed(timing, "rollback_resize"):
-            await client.collective_rpc(
-                "resize_sleep_ep_ranks",
-                kwargs={"sleeping_ep_ranks": current_sleeping},
-            )
-        if current_sleeping:
-            async with _timed(timing, "rollback_sleep"):
-                await client.collective_rpc(
-                    "sleep_ep_ranks_by_tags",
-                    kwargs={
-                        "sleeping_ep_ranks": current_sleeping,
-                        "tags": tags,
-                        "level": level,
-                    },
-                )
-    except Exception:
-        logger.exception("flash_epscale scale_down rollback failed")
 
 
 async def _scale_up(
@@ -456,119 +484,26 @@ async def _scale_up(
 ) -> None:
     """Grow the active EP set.
 
-    Routing is opened to the new ranks only after the NCCL group is resized
-    and they are awake, so requests never reach a rank that is not ready.
+    Routing opens to the new ranks only after the transition completes, so
+    requests never reach a rank that is not ready.
     """
     try:
-        async with _paused(client, timing):
-            wake_completed = False
-            resize_completed = False
-            sleep_started = False
-            try:
-                if current_sleeping:
-                    # Rebuild NIXL RDMA buffer on waking ranks before wake,
-                    # so the first post-wake all2all can succeed. Failure
-                    # here IS fatal -- without the buffer the rank cannot
-                    # participate in dispatch/combine.
-                    async with _timed(timing, "nixl_ensure"):
-                        await client.collective_rpc(
-                            "ensure_nixl_buffer",
-                            kwargs={"sleeping_ep_ranks": current_sleeping},
-                        )
-                    async with _timed(timing, "wake"):
-                        await client.collective_rpc(
-                            "wake_up_ep_ranks",
-                            kwargs={
-                                "sleeping_ep_ranks": current_sleeping,
-                                "tags": tags,
-                                "level": level,
-                            },
-                        )
-                    wake_completed = True
-                async with _timed(timing, "resize"):
-                    await client.collective_rpc(
-                        "resize_sleep_ep_ranks",
-                        kwargs={"sleeping_ep_ranks": target_sleeping},
-                    )
-                resize_completed = True
-                if target_sleeping:
-                    async with _timed(timing, "sleep"):
-                        sleep_started = True
-                        await client.collective_rpc(
-                            "sleep_ep_ranks_by_tags",
-                            kwargs={
-                                "sleeping_ep_ranks": target_sleeping,
-                                "tags": tags,
-                                "level": level,
-                            },
-                        )
-            except Exception:
-                await _restore_scale_up_sleep_state(
-                    client,
-                    current_sleeping=current_sleeping,
-                    target_sleeping=target_sleeping,
-                    tags=tags,
-                    timing=timing,
-                    wake_completed=wake_completed,
-                    resize_completed=resize_completed,
-                    sleep_started=sleep_started,
-                    level=level,
-                )
-                raise
+        await _transition(
+            client,
+            current_sleeping=current_sleeping,
+            target_sleeping=target_sleeping,
+            tags=tags,
+            level=level,
+            timing=timing,
+        )
     except Exception as e:
-        logger.exception("flash_epscale scale_up transition failed")
+        logger.exception("flash_epscale scale_up failed")
         raise HTTPException(
-            status_code=500,
-            detail=f"flash_epscale scale_up transition failed: {e}",
+            status_code=500, detail=f"flash_epscale scale_up failed: {e}"
         ) from e
 
-    # Open routing to the newly active ranks only after the group is ready.
     async with _timed(timing, "route_grow"):
         client.set_active_data_parallel_size(target_ep_size)
-
-
-async def _restore_scale_up_sleep_state(
-    client: EngineClient,
-    *,
-    current_sleeping: list[int],
-    target_sleeping: list[int],
-    tags: list[str],
-    timing: dict[str, float],
-    wake_completed: bool,
-    resize_completed: bool,
-    sleep_started: bool,
-    level: int = 1,
-) -> None:
-    """Best-effort rollback for failures before scale_up routing opens."""
-    try:
-        if sleep_started and target_sleeping:
-            async with _timed(timing, "rollback_wake"):
-                await client.collective_rpc(
-                    "wake_up_ep_ranks",
-                    kwargs={
-                        "sleeping_ep_ranks": target_sleeping,
-                        "tags": tags,
-                        "level": level,
-                    },
-                )
-        if resize_completed:
-            async with _timed(timing, "rollback_resize"):
-                await client.collective_rpc(
-                    "resize_sleep_ep_ranks",
-                    kwargs={"sleeping_ep_ranks": current_sleeping},
-                )
-        if wake_completed and current_sleeping:
-            async with _timed(timing, "rollback_sleep"):
-                await client.collective_rpc(
-                    "sleep_ep_ranks_by_tags",
-                    kwargs={
-                        "sleeping_ep_ranks": current_sleeping,
-                        "tags": tags,
-                        "level": level,
-                    },
-                )
-    except Exception:
-        logger.exception("flash_epscale scale_up rollback failed")
 
 
 def attach_router(app: FastAPI):

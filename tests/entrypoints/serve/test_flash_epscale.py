@@ -65,12 +65,19 @@ def _build_client(
             final_state["active_ep_size"] = ep_world_size - len(new_sleeping)
         return None
 
+    async def pause(*args, **kwargs):
+        rpc_calls.append(("<pause>", {}))
+
+    async def resume(*args, **kwargs):
+        rpc_calls.append(("<resume>", {}))
+
     engine = MagicMock()
     engine.collective_rpc = AsyncMock(side_effect=collective_rpc)
-    engine.pause_generation = AsyncMock(return_value=None)
-    engine.resume_generation = AsyncMock(return_value=None)
+    engine.pause_generation = AsyncMock(side_effect=pause)
+    engine.resume_generation = AsyncMock(side_effect=resume)
     engine.set_active_data_parallel_size = MagicMock()
     engine.wait_for_dp_ranks_to_drain = AsyncMock(return_value=None)
+    engine.reroute_inflight_to_active = AsyncMock(return_value={})
 
     app = FastAPI()
     app.state.engine_client = engine
@@ -156,10 +163,15 @@ def test_scale_down_runs_drain_before_pause(monkeypatch):
     # No wake step when nothing was previously sleeping.
     methods = [m for m, _ in rpc_calls]
     assert "wake_up_ep_ranks" not in methods
-    # resize comes before sleep.
-    resize_idx = methods.index("resize_sleep_ep_ranks")
-    sleep_idx = methods.index("sleep_ep_ranks_by_tags")
-    assert resize_idx < sleep_idx
+    # resize runs inside the pause window; the rank-local CuMem sleep and
+    # NIXL teardown run after resume so active ranks are already serving.
+    assert (
+        methods.index("<pause>")
+        < methods.index("resize_sleep_ep_ranks")
+        < methods.index("<resume>")
+        < methods.index("sleep_ep_ranks_by_tags")
+        < methods.index("destroy_nixl_buffer")
+    )
 
 
 def test_scale_up_opens_routing_after_resume(monkeypatch):
@@ -180,10 +192,14 @@ def test_scale_up_opens_routing_after_resume(monkeypatch):
     assert body["active_ep_size"] == 4
     assert body["sleeping_ep_ranks"] == []
 
-    # Order must be: pause → wake → resize → resume → set_active_dp.
+    # Rank-local wake runs before the pause window; the collective resize
+    # runs inside it.
     rpc_methods = [m for m, _ in rpc_calls]
-    assert rpc_methods.index("wake_up_ep_ranks") < rpc_methods.index(
-        "resize_sleep_ep_ranks"
+    assert (
+        rpc_methods.index("wake_up_ep_ranks")
+        < rpc_methods.index("<pause>")
+        < rpc_methods.index("resize_sleep_ep_ranks")
+        < rpc_methods.index("<resume>")
     )
 
     # Pause/resume pair fired exactly once.
@@ -321,19 +337,22 @@ def test_scale_up_resleeps_current_ranks_when_resize_fails(monkeypatch):
     assert methods == [
         "get_ep_sleep_state",
         "wake_up_ep_ranks",
+        "warm_sleep_backup",
+        "empty_cache",
+        "ensure_nixl_buffer",
         "resize_sleep_ep_ranks",
-        "sleep_ep_ranks_by_tags",
+        # In-window rollback re-attempts the resize back to the previous
+        # sleeping set (it fails again here and is logged best-effort).
+        "resize_sleep_ep_ranks",
     ]
-    assert rpc_calls[-1][1] == {
-        "sleeping_ep_ranks": [2, 3],
-        "tags": ["shared_weights", "expert_weights", "kv_cache"],
-    }
+    assert rpc_calls[-1][1] == {"sleeping_ep_ranks": [2, 3]}
     engine.set_active_data_parallel_size.assert_not_called()
 
 
-def test_scale_up_restores_previous_state_when_sleep_fails(monkeypatch):
-    """If the final scale_up sleep fails, rollback should resize back and
-    re-sleep the originally sleeping ranks."""
+def test_scale_up_post_resume_sleep_failure_is_not_rolled_back(monkeypatch):
+    """A failure in the post-resume CuMem sleep must not roll back the
+    already-live resize: the endpoint reports 500 and leaves the new EP
+    topology serving (routing stays closed until a retry)."""
     client, engine, _ = _build_client(
         monkeypatch,
         ep_world_size=4,
@@ -368,36 +387,23 @@ def test_scale_up_restores_previous_state_when_sleep_fails(monkeypatch):
     resp = client.post("/flash_epscale", json={"ep_size": 3})
 
     assert resp.status_code == 500
+    tags = ["shared_weights", "expert_weights", "kv_cache"]
     assert rpc_calls[1:] == [
         (
             "wake_up_ep_ranks",
-            {
-                "sleeping_ep_ranks": [2, 3],
-                "tags": ["shared_weights", "expert_weights", "kv_cache"],
-            },
+            {"sleeping_ep_ranks": [2, 3], "tags": tags, "level": 1},
         ),
+        (
+            "warm_sleep_backup",
+            {"sleeping_ep_ranks": [3], "tags": tags, "level": 1},
+        ),
+        ("empty_cache", {}),
+        ("ensure_nixl_buffer", {"sleeping_ep_ranks": [2, 3]}),
         ("resize_sleep_ep_ranks", {"sleeping_ep_ranks": [3]}),
+        ("disconnect_nixl_from_sleeping", {"sleeping_ep_ranks": [3]}),
         (
             "sleep_ep_ranks_by_tags",
-            {
-                "sleeping_ep_ranks": [3],
-                "tags": ["shared_weights", "expert_weights", "kv_cache"],
-            },
-        ),
-        (
-            "wake_up_ep_ranks",
-            {
-                "sleeping_ep_ranks": [3],
-                "tags": ["shared_weights", "expert_weights", "kv_cache"],
-            },
-        ),
-        ("resize_sleep_ep_ranks", {"sleeping_ep_ranks": [2, 3]}),
-        (
-            "sleep_ep_ranks_by_tags",
-            {
-                "sleeping_ep_ranks": [2, 3],
-                "tags": ["shared_weights", "expert_weights", "kv_cache"],
-            },
+            {"sleeping_ep_ranks": [3], "tags": tags, "level": 1},
         ),
     ]
     engine.set_active_data_parallel_size.assert_not_called()

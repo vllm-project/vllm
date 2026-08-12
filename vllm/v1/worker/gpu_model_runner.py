@@ -5807,10 +5807,14 @@ class GPUModelRunner(
         ep_world_size = int(ep_sleep_state["ep_world_size"])
         self._sync_dp_group_to_active_ep_size(active_ep_size)
         logical_sleep_active = active_ep_size < ep_world_size
+        # A logically slept rank must not execute a forward, regardless of
+        # whether its CuMem sleep/wake has happened yet: flash_epscale runs
+        # the (rank-local) CuMem sleep after resume and wake before pause,
+        # so the window where experts are gone but memory state lags must
+        # also skip.
         if (
-            _sleep_skip_forward
-            and self.parallel_config.data_parallel_rank >= active_ep_size
-        ):
+            logical_sleep_active or _sleep_skip_forward
+        ) and self.parallel_config.data_parallel_rank >= active_ep_size:
             return torch.tensor([]), torch.tensor([])
 
         _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (

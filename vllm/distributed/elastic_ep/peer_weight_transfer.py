@@ -27,6 +27,9 @@ def get_max_dp_group() -> GroupCoordinator:
     any DP global state. Falls back to `_DP` if no split ever happened.
     """
     if parallel_state._DP_MAX is not None:
+        # the max comm may have been suspended after a scale-down split;
+        # restore its NCCL resources before anyone communicates over it
+        parallel_state.resume_max_dp_comm()
         return parallel_state._DP_MAX
     assert parallel_state._DP is not None, "DP group not initialized"
     return parallel_state._DP

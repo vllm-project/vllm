@@ -47,6 +47,8 @@ ncclComm_t = ctypes.c_void_p
 ncclWindow_t = ctypes.c_void_p
 ncclConfig_t = ctypes.c_void_p
 NCCL_SPLIT_NOCOLOR = -1
+# ncclCommSuspend flag: release dynamic GPU memory allocations
+NCCL_SUSPEND_MEM = 0x01
 
 
 class ncclUniqueId(ctypes.Structure):
@@ -324,6 +326,13 @@ class NCCLLibrary:
         # shutdown when peer ranks may already be gone.
         # ncclResult_t  ncclCommAbort(ncclComm_t comm);
         Function("ncclCommAbort", ncclResult_t, [ncclComm_t]),
+        # Custom NCCL extension (not in stock NCCL releases): temporarily
+        # release / restore a communicator's dynamic GPU resources while
+        # keeping the communicator handle valid.
+        # ncclResult_t ncclCommSuspend(ncclComm_t comm, int flags);
+        Function("ncclCommSuspend", ncclResult_t, [ncclComm_t, ctypes.c_int]),
+        # ncclResult_t ncclCommResume(ncclComm_t comm);
+        Function("ncclCommResume", ncclResult_t, [ncclComm_t]),
         # ncclResult_t ncclGroupStart();
         Function("ncclGroupStart", ncclResult_t, []),
         # ncclResult_t ncclGroupEnd();
@@ -393,6 +402,10 @@ class NCCLLibrary:
                             "unavailable.",
                             so_file,
                         )
+                        continue
+                    if func.name in ["ncclCommSuspend", "ncclCommResume"]:
+                        # optional custom extension; suspend()/resume() on
+                        # PyNcclCommunicator will be no-ops without it
                         continue
                     if func.name in [
                         "ncclCommWindowRegister",
@@ -613,6 +626,19 @@ class NCCLLibrary:
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm))
 
+    def hasCommSuspend(self) -> bool:
+        return "ncclCommSuspend" in self._funcs and "ncclCommResume" in self._funcs
+
+    def ncclCommSuspend(self, comm: ncclComm_t, flags: int = NCCL_SUSPEND_MEM) -> None:
+        if not self.hasCommSuspend():
+            raise RuntimeError("ncclCommSuspend is not available in this NCCL library")
+        self.NCCL_CHECK(self._funcs["ncclCommSuspend"](comm, flags))
+
+    def ncclCommResume(self, comm: ncclComm_t) -> None:
+        if not self.hasCommSuspend():
+            raise RuntimeError("ncclCommResume is not available in this NCCL library")
+        self.NCCL_CHECK(self._funcs["ncclCommResume"](comm))
+
     def ncclCommAbort(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommAbort"](comm))
 
@@ -644,6 +670,7 @@ __all__ = [
     "ncclUniqueId",
     "ncclComm_t",
     "NCCL_SPLIT_NOCOLOR",
+    "NCCL_SUSPEND_MEM",
     "cudaStream_t",
     "buffer_type",
 ]

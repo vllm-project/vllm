@@ -18,6 +18,10 @@ class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
+    # Retained (pinned) host buffer from a previous sleep/wake cycle,
+    # reused by the next sleep to skip the expensive host allocation +
+    # page-pinning. See CuMemAllocator._acquire_backup_buffer.
+    cpu_backup_cache: torch.Tensor | None = None
 
 
 class MemAllocator(Protocol):

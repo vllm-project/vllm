@@ -122,11 +122,79 @@ class CuMemAllocator:
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
+        # Dedicated stream for sleep/wake bulk copies so per-allocation
+        # cudaMemcpy calls don't serialize on implicit synchronization.
+        self._copy_stream: torch.cuda.Stream | None = None
         # Creating strong references to the two callbacks here to prevent
         # these ephemeral bound-method objects being garbage collected.
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
         self.python_malloc_callback = self._python_malloc_callback
         self.python_free_callback = self._python_free_callback
+
+    @staticmethod
+    def _async_copy_available() -> bool:
+        # Test doubles for libcudart may only provide the synchronous
+        # cudaMemcpy; fall back transparently in that case.
+        return hasattr(libcudart, "cudaMemcpyAsync")
+
+    @staticmethod
+    def _reuse_pinned_backup() -> bool:
+        """Whether to keep pinned CPU backup buffers across sleep cycles.
+
+        Enabled by default: page-pinning tens of GiB on every sleep costs
+        seconds, and periodic sleep/wake (flash EP scaling, RL rollouts)
+        pays it repeatedly. Costs the same amount of host RAM held pinned
+        between cycles; disable with VLLM_CUMEM_PINNED_CACHE=0.
+        """
+        return os.environ.get("VLLM_CUMEM_PINNED_CACHE", "1") == "1"
+
+    def _get_copy_stream(self) -> torch.cuda.Stream:
+        if self._copy_stream is None:
+            self._copy_stream = torch.cuda.Stream()
+        return self._copy_stream
+
+    def _acquire_backup_buffer(self, data: AllocationData) -> torch.Tensor:
+        size_in_bytes = data.handle[1]
+        cached = data.cpu_backup_cache
+        data.cpu_backup_cache = None
+        if cached is not None and cached.numel() == size_in_bytes:
+            return cached
+        return torch.empty(
+            size_in_bytes,
+            dtype=torch.uint8,
+            device="cpu",
+            pin_memory=is_pin_memory_available(),
+        )
+
+    def _release_backup_buffer(self, data: AllocationData) -> None:
+        if self._reuse_pinned_backup():
+            data.cpu_backup_cache = data.cpu_backup_tensor
+        data.cpu_backup_tensor = None
+
+    def warm_backup_cache(self, offload_tags: tuple[str, ...]) -> int:
+        """Pre-allocate pinned host backup buffers for the given tags.
+
+        Page-pinning is the dominant cost of the first sleep (seconds for
+        tens of GiB); calling this off the critical path (e.g. while a
+        rank drains before scaling down) makes the first sleep as fast as
+        subsequent cached ones. Idempotent; returns bytes newly pinned.
+        """
+        warmed = 0
+        for data in self.pointer_to_data.values():
+            if data.tag not in offload_tags or data.cpu_backup_tensor is not None:
+                continue
+            size_in_bytes = data.handle[1]
+            cached = data.cpu_backup_cache
+            if cached is not None and cached.numel() == size_in_bytes:
+                continue
+            data.cpu_backup_cache = torch.empty(
+                size_in_bytes,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=is_pin_memory_available(),
+            )
+            warmed += size_in_bytes
+        return warmed
 
     def _python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
@@ -206,6 +274,7 @@ class CuMemAllocator:
         backup_bytes = 0
         per_tag_total: dict[str, int] = {}
         per_tag_backup: dict[str, int] = {}
+        offload_items: list[tuple[int, AllocationData]] = []
 
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
@@ -224,17 +293,36 @@ class CuMemAllocator:
             if data.tag in offload_tags:
                 backup_bytes += handle[1]
                 per_tag_backup[data.tag] = per_tag_backup.get(data.tag, 0) + handle[1]
-                size_in_bytes = handle[1]
-                cpu_backup_tensor = torch.empty(
-                    size_in_bytes,
-                    dtype=torch.uint8,
-                    device="cpu",
-                    pin_memory=is_pin_memory_available(),
-                )
-                cpu_ptr = cpu_backup_tensor.data_ptr()
-                libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
-                data.cpu_backup_tensor = cpu_backup_tensor
-            unmap_and_release(handle)
+                offload_items.append((ptr, data))
+            else:
+                unmap_and_release(handle)
+
+        if offload_items:
+            if self._async_copy_available():
+                # Enqueue every D2H copy on a dedicated stream and sync once,
+                # instead of one implicitly-synchronizing cudaMemcpy per
+                # allocation. The full device sync keeps the old null-stream
+                # semantics: the copies must observe writes from all streams.
+                torch.cuda.synchronize()
+                copy_stream = self._get_copy_stream()
+                for ptr, data in offload_items:
+                    data.cpu_backup_tensor = self._acquire_backup_buffer(data)
+                    libcudart.cudaMemcpyAsync(
+                        data.cpu_backup_tensor.data_ptr(),
+                        ptr,
+                        data.handle[1],
+                        copy_stream.cuda_stream,
+                    )
+                copy_stream.synchronize()
+            else:
+                for ptr, data in offload_items:
+                    data.cpu_backup_tensor = self._acquire_backup_buffer(data)
+                    libcudart.cudaMemcpy(
+                        data.cpu_backup_tensor.data_ptr(), ptr, data.handle[1]
+                    )
+            # Unmap only after every copy has drained.
+            for _, data in offload_items:
+                unmap_and_release(data.handle)
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -272,19 +360,32 @@ class CuMemAllocator:
                 back to GPU memory. If None, all memory allocation will be loaded
                 back to GPU memory.
         """
+        restore_items: list[tuple[int, AllocationData]] = []
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
-                handle = data.handle
-                create_and_map(handle)
+                create_and_map(data.handle)
                 if data.cpu_backup_tensor is not None:
-                    cpu_backup_tensor = data.cpu_backup_tensor
-                    if cpu_backup_tensor is not None:
-                        size_in_bytes = (
-                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        )
-                        cpu_ptr = cpu_backup_tensor.data_ptr()
-                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                        data.cpu_backup_tensor = None
+                    restore_items.append((ptr, data))
+
+        if not restore_items:
+            return
+        if self._async_copy_available():
+            copy_stream = self._get_copy_stream()
+            for ptr, data in restore_items:
+                libcudart.cudaMemcpyAsync(
+                    ptr,
+                    data.cpu_backup_tensor.data_ptr(),
+                    data.handle[1],
+                    copy_stream.cuda_stream,
+                )
+            copy_stream.synchronize()
+        else:
+            for ptr, data in restore_items:
+                libcudart.cudaMemcpy(
+                    ptr, data.cpu_backup_tensor.data_ptr(), data.handle[1]
+                )
+        for _, data in restore_items:
+            self._release_backup_buffer(data)
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
