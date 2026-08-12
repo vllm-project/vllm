@@ -181,7 +181,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
         git clone --recurse-submodules "https://github.com/triton-lang/triton-cpu.git"; \
         cd triton-cpu; \
-        git checkout "270e696d"; \
+        git checkout "a00d6c44ec55906cf2e66107621265d410b5f6a0"; \
         uv build --wheel --out-dir=../dist; \
     fi
 
