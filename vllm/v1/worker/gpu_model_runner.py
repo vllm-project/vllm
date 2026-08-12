@@ -4314,18 +4314,17 @@ class GPUModelRunner(
                     return make_empty_encoder_model_runner_output(scheduler_output)
 
             if not num_scheduled_tokens:
-                if (
-                    self.parallel_config.distributed_executor_backend
-                    == "external_launcher"
-                    and self.parallel_config.data_parallel_size > 1
-                ):
-                    # this is a corner case when both external launcher
-                    # and DP are enabled, num_scheduled_tokens could be
-                    # 0, and has_unfinished_requests in the outer loop
-                    # returns True. before returning early here we call
-                    # dummy run to ensure coordinate_batch_across_dp
-                    # is called into to avoid out of sync issues.
-                    self._dummy_run(1)
+                if self.parallel_config.data_parallel_size > 1:
+                    # Extend #44601 to all DP ranks (MoRI disagg is not
+                    # external_launcher; headless decode ranks still need B).
+                    coordinate_batch_across_dp(
+                        num_tokens_unpadded=0,
+                        parallel_config=self.parallel_config,
+                        allow_microbatching=True,
+                        num_tokens_padded=0,
+                        uniform_decode=False,
+                        cudagraph_mode=CUDAGraphMode.NONE.value,
+                    )
                 if not has_kv_transfer_group():
                     # Return empty ModelRunnerOutput if no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
@@ -5953,6 +5952,21 @@ class GPUModelRunner(
                 of max_query_len. Used to profile attention workspace that
                 scales with context length.
         """
+        if (
+            uniform_decode
+            and num_tokens == getattr(self, "uniform_decode_query_len", 1)
+            and self.parallel_config.data_parallel_size > 1
+        ):
+            coordinate_batch_across_dp(
+                num_tokens_unpadded=0,
+                parallel_config=self.parallel_config,
+                allow_microbatching=True,
+                num_tokens_padded=0,
+                uniform_decode=False,
+                cudagraph_mode=CUDAGraphMode.NONE.value,
+            )
+            return torch.tensor([]), torch.tensor([])
+
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
             # The current dummy run only covers LM execution, so we can skip it.
