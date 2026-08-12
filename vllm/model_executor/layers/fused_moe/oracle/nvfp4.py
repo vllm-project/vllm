@@ -237,12 +237,11 @@ def select_nvfp4_moe_backend(
         activation_key: QuantKey | None,
     ) -> QuantKey | None:
         # W4A16 checkpoints do not carry calibrated activation scales and enter
-        # selection with activation_key=None. CuTeDSL can still run them by
-        # doing runtime activation quantization, but its support predicate is
-        # keyed as (kNvfp4Static, kNvfp4Dynamic). Use kNvfp4Dynamic only for the
-        # CuTeDSL capability check; the ModelOpt path still treats activation
-        # scales as missing and later materializes identity scales for the
-        # kernel wrapper.
+        # selection with activation_key=None. CuTeDSL's supported W4A16 path is
+        # keyed as (kNvfp4Static, kNvfp4Dynamic), so use kNvfp4Dynamic only for
+        # the CuTeDSL capability check. The ModelOpt path still treats
+        # activation scales as missing and later materializes identity scales
+        # for the kernel wrapper.
         if (
             backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
             and weight_key is kNvfp4Static
