@@ -151,9 +151,7 @@ def test_h24_output_discards_h32_padding_heads():
 
 
 def test_native_h24_is_zero_copy(monkeypatch):
-    monkeypatch.setattr(
-        rocm_aiter_mla, "_aiter_mla_native_h24_supported", lambda: True
-    )
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_native_h24_supported", lambda: True)
     q = torch.arange(2 * 24 * 4, dtype=torch.float32).view(2, 24, 4)
 
     assert AiterMLAHelper.get_actual_mla_num_heads(24) == 24
