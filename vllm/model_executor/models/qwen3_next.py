@@ -836,6 +836,7 @@ class Qwen3NextAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        per_layer_sliding_window: int | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -888,6 +889,7 @@ class Qwen3NextAttention(nn.Module):
             dual_chunk_attention_config=self.dual_chunk_attention_config,
         )
 
+        # TriangleMix: forward sliding window to vLLM's Attention class.
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -896,6 +898,7 @@ class Qwen3NextAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            per_layer_sliding_window=per_layer_sliding_window,
             **{
                 "layer_idx": extract_layer_index(prefix),
                 "dual_chunk_attention_config": self.dual_chunk_attention_config,
@@ -951,6 +954,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         layer_type: str,
         prefix: str = "",
+        per_layer_sliding_window: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -979,6 +983,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
+                per_layer_sliding_window=per_layer_sliding_window,
             )
         else:
             raise ValueError(f"Invalid layer_type {self.layer_type}")

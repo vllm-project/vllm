@@ -24,6 +24,17 @@
 # limitations under the License.
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
+# TriangleMix: enable sliding-window attention on a calibrated subset of
+# `full_attention` layers in Qwen3.5 hybrid models to accelerate prefilling.
+# Disable via `VLLM_QWEN35_TRIANGLE=0`.
+import os
+
+_TRIANGLE_ATTENTION_ENABLED = os.environ.get("VLLM_QWEN35_TRIANGLE", "1") != "0"
+# Indices of `full_attention` layers using sliding-window attention.
+# Calibrated for Qwen3.5-2B: deepest three contiguous `full_attention` layers.
+_TRIANGLE_ATTENTION_LAYERS: frozenset[int] = frozenset({15, 19, 23})
+_TRIANGLE_ATTENTION_WINDOW: int = 128
+
 import typing
 from collections.abc import Callable, Iterable
 
@@ -210,6 +221,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         vllm_config: VllmConfig,
         layer_type: str,
         prefix: str = "",
+        per_layer_sliding_window: int | None = None,
     ) -> None:
         super(Qwen3NextDecoderLayer, self).__init__()
 
@@ -232,12 +244,14 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 prefix=f"{prefix}.linear_attn",
             )
         elif self.layer_type == "full_attention":
+            # TriangleMix: forward sliding window for calibrated layers.
             self.self_attn = Qwen3NextAttention(
                 config,
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
+                per_layer_sliding_window=per_layer_sliding_window,
             )
         else:
             raise ValueError(f"Invalid layer_type {self.layer_type}")
@@ -317,10 +331,21 @@ class Qwen3_5Model(Qwen3NextModel):
         )
 
         def get_layer(prefix: str):
+            layer_idx = extract_layer_index(prefix)
+            layer_type = config.layer_types[layer_idx]
+            # TriangleMix: sliding window for calibrated full_attention layers.
+            per_layer_sliding_window: int | None = None
+            if (
+                _TRIANGLE_ATTENTION_ENABLED
+                and layer_type == "full_attention"
+                and layer_idx in _TRIANGLE_ATTENTION_LAYERS
+            ):
+                per_layer_sliding_window = _TRIANGLE_ATTENTION_WINDOW
             return Qwen3_5DecoderLayer(
                 vllm_config,
-                layer_type=config.layer_types[extract_layer_index(prefix)],
+                layer_type=layer_type,
                 prefix=prefix,
+                per_layer_sliding_window=per_layer_sliding_window,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
