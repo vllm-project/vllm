@@ -73,6 +73,7 @@ def get_flash_attn_version(
     head_size_v: int | None = None,
     has_sinks: bool = False,
     requires_local_attention: bool = False,
+    requires_sequence_lengths: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -181,6 +182,18 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
+        if (
+            fa_version == 4
+            and device_capability.major >= 10
+            and head_size == 256
+            and requires_sequence_lengths
+        ):
+            logger.warning_once(
+                "FA4 on Blackwell does not support sequence lengths with "
+                "head_size=256, defaulting to FA version 2."
+            )
+            fa_version = 2
+
         # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
         # supported head dimensions to ≤128, with exceptions for 256 and 192/128 (MLA
         # prefill). Development of symmetric 192, 384, and 512 support is being tracked
@@ -230,6 +243,7 @@ def flash_attn_supports_kv_cache_dtype(
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
+    requires_sequence_lengths: bool = False,
 ) -> bool:
     if kv_cache_dtype == "fp8_e5m2":
         return False
@@ -240,6 +254,7 @@ def flash_attn_supports_kv_cache_dtype(
         head_size=head_size,
         head_size_v=head_size_v,
         has_sinks=has_sinks,
+        requires_sequence_lengths=requires_sequence_lengths,
     )
     return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
         fa_version == 4 and current_platform.is_device_capability_family(100)
