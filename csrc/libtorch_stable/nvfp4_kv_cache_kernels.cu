@@ -19,6 +19,7 @@
 
 #include "libtorch_stable/dispatch_utils.h"
 #include "../quantization/w8a8/fp8/nvidia/quant_utils.cuh"
+#include "libtorch_stable/quantization/vectorization_utils.cuh"
 #include "libtorch_stable/torch_utils.h"
 
 #include <cmath>
@@ -304,6 +305,17 @@ __global__ void reshape_and_cache_nvfp4_kernel(
 }
 
 template <typename scalar_t>
+struct FP8KCopyWithScaleOp {
+  float scale;
+
+  __device__ __forceinline__ void operator()(uint8_t& dst,
+                                             const scalar_t src) const {
+    dst = fp8::scaled_convert<uint8_t, scalar_t,
+                              Fp8KVCacheDataType::kFp8E4M3>(src, scale);
+  }
+};
+
+template <typename scalar_t>
 __global__ void reshape_and_cache_fp8_k_nvfp4_v_kernel(
     const scalar_t* __restrict__ key, const scalar_t* __restrict__ value,
     uint8_t* __restrict__ key_cache, uint8_t* __restrict__ value_data_cache,
@@ -335,14 +347,16 @@ __global__ void reshape_and_cache_fp8_k_nvfp4_v_kernel(
       reinterpret_cast<const CudaType*>(key) + token_idx * key_stride;
   uint8_t* __restrict__ key_block = key_cache + block_idx * key_block_stride;
   const float k_scale = *k_scale_ptr;
-  for (int i = tid; i < num_heads * head_size; i += blockDim.x) {
-    const int head = i / head_size;
-    const int dim = i - head * head_size;
+  constexpr int K_VEC_SIZE = sizeof(CudaType) == 2 ? 8 : 4;
+  const int lane = tid & 31;
+  const int warp_id = tid >> 5;
+  const int warps_per_block = blockDim.x >> 5;
+  FP8KCopyWithScaleOp<CudaType> k_op{k_scale};
+  for (int head = warp_id; head < num_heads; head += warps_per_block) {
+    const CudaType* src = key_src + head * head_size;
     uint8_t* dst = key_block + head * key_head_stride +
-                   token_offset * key_token_stride + dim;
-    *dst = fp8::scaled_convert<uint8_t, CudaType,
-                              Fp8KVCacheDataType::kFp8E4M3>(key_src[i],
-                                                            k_scale);
+                   token_offset * key_token_stride;
+    vectorize_with_alignment<K_VEC_SIZE>(src, dst, head_size, lane, 32, k_op);
   }
 
   const int groups_per_head = head_size / CVT_FP4_SF_VEC_SIZE;
@@ -479,8 +493,8 @@ void reshape_and_cache_nvfp4_dispatch(
         CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD;
     int value_threads =
         num_heads * (head_size / CVT_FP4_SF_VEC_SIZE) * THREADS_PER_SF;
-    int num_threads =
-        std::min(std::max(num_heads * head_size, value_threads), 512);
+    int key_threads = num_heads * 32;
+    int num_threads = std::min(std::max(key_threads, value_threads), 512);
     num_threads = ((num_threads + 31) / 32) * 32;
 
     const torch::stable::accelerator::DeviceGuard device_guard(
