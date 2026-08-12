@@ -144,6 +144,7 @@ from vllm.v1.attention.backends.linear_attn import (
     BailingLinearAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba_attn import ReplaySSMSpecMetadata
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     create_fast_prefill_custom_backend,
@@ -493,6 +494,9 @@ class ExecuteModelState(NamedTuple):
     aux_hidden_states: list[torch.Tensor] | None
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
+    # Stateful backends may need forward metadata after sampling to commit the
+    # accepted prefix without retaining row-keyed state across model steps.
+    state_commit_attn_metadata: AttnMetadataDict | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
 
 
@@ -1611,7 +1615,10 @@ class GPUModelRunner(
             return None
 
     def _update_states_after_model_execute(
-        self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
+        self,
+        output_token_ids: torch.Tensor,
+        scheduler_output: "SchedulerOutput",
+        state_commit_attn_metadata: AttnMetadataDict | None,
     ) -> None:
         """Update the cached states after model execution.
 
@@ -1629,6 +1636,13 @@ class GPUModelRunner(
         # tokens gives us the first -1 position (i.e., number of accepted).
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
+
+        if self.cache_config.use_replayssm_spec:
+            assert state_commit_attn_metadata is not None
+            for attn_group in self._attn_group_iterator():
+                metadata = state_commit_attn_metadata[attn_group.layer_names[0]]
+                if isinstance(metadata, ReplaySSMSpecMetadata):
+                    metadata.commit_replayssm_state(self.num_accepted_tokens.gpu)
 
         if self.cache_config.mamba_cache_mode == "align":
             # Fused GPU postprocess: state copies + per-request accepted-token
@@ -2546,7 +2560,17 @@ class GPUModelRunner(
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(
+            # use_spec_decode is step-level: it is False whenever the drafter
+            # proposed nothing anywhere in the batch. ReplaySSM still uses the
+            # stateful speculative convolution path on those steps.
+            needs_replayssm_spec_args = (
+                self.cache_config.use_replayssm_spec
+                and isinstance(
+                    builder,
+                    (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
+                )
+            )
+            if (use_spec_decode or needs_replayssm_spec_args) and isinstance(
                 builder,
                 (
                     Mamba2AttentionMetadataBuilder,
@@ -4606,6 +4630,10 @@ class GPUModelRunner(
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
+        state_commit_attn_metadata = None
+        if self.cache_config.use_replayssm_spec:
+            assert isinstance(attn_metadata, dict)
+            state_commit_attn_metadata = attn_metadata
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
             logits,
@@ -4616,6 +4644,7 @@ class GPUModelRunner(
             aux_hidden_states,
             ec_connector_output,
             cudagraph_stats,
+            state_commit_attn_metadata,
             slot_mappings,
         )
         self.kv_connector_output = kv_connector_output
@@ -4667,6 +4696,7 @@ class GPUModelRunner(
             aux_hidden_states,
             ec_connector_output,
             cudagraph_stats,
+            state_commit_attn_metadata,
             slot_mappings,
         ) = self.execute_model_state
         # Clear ephemeral state.
@@ -4682,7 +4712,9 @@ class GPUModelRunner(
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         self._update_states_after_model_execute(
-            sampler_output.sampled_token_ids, scheduler_output
+            sampler_output.sampled_token_ids,
+            scheduler_output,
+            state_commit_attn_metadata,
         )
         if self.use_async_scheduling:
             pp = get_pp_group()

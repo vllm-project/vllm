@@ -289,23 +289,37 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
     def get_state_dtype(
         self,
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        return MambaStateDtypeCalculator.kda_state_dtype(
+        base_dtypes = MambaStateDtypeCalculator.kda_state_dtype(
             self.model_config.dtype, self.cache_config.mamba_cache_dtype
         )
+        if self.cache_config.use_replayssm_spec:
+            return MambaStateDtypeCalculator.append_kda_replayssm_spec_record(
+                base_dtypes, self.model_config.dtype
+            )
+        return base_dtypes
 
     def get_state_shape(
         self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        return MambaStateShapeCalculator.kda_state_shape(
+    ) -> tuple[tuple[int, ...], ...]:
+        base_shapes = MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
         )
+        if self.cache_config.use_replayssm_spec:
+            return MambaStateShapeCalculator.append_kda_replayssm_spec_record(
+                base_shapes,
+                self.num_heads,
+                self.head_dim,
+                self.tp_size,
+                1 + self.num_spec,
+            )
+        return base_shapes
 
     def __init__(
         self,
@@ -314,6 +328,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         prefix: str = "",
     ) -> None:
         super().__init__(config, vllm_config, prefix)
+        self.use_replayssm_spec = self.cache_config.use_replayssm_spec
+        if self.cache_config.use_replayssm and not self.use_replayssm_spec:
+            raise ValueError(
+                "Kimi-K3 supports --use-replayssm only with speculative decoding"
+            )
+        self.spec_query_len = 1 + self.num_spec
 
         kda_config = config.linear_attn_config  # type: ignore[attr-defined]
         assert kda_config is not None, "linear_attn_config must be set"
@@ -377,7 +397,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
         # Keep a width-major copy for fused decode without changing the layout
         # consumed by the prefill and fallback decode kernels.
-        conv_state_dtype, _ = self.get_state_dtype()
+        conv_state_dtype = self.get_state_dtype()[0]
         decode_conv1d_weight = None
         if is_fused_kda_decode_supported(
             self.local_num_heads,
@@ -543,7 +563,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
-        conv_state, recurrent_state = self.kv_cache
+        conv_state, recurrent_state, *replayssm_records = self.kv_cache
         # The convolution kernels consume (..., dim, width - 1).
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
@@ -610,7 +630,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             spec_conv_indices = spec_state_indices_tensor[:, 0][: m.num_spec_decodes]
-            spec_max_query_len = spec_state_indices_tensor.size(-1)
+            spec_max_query_len = (
+                self.spec_query_len
+                if self.use_replayssm_spec
+                else spec_state_indices_tensor.size(-1)
+            )
             spec_conv_out = torch.empty_like(mixed_qkv_spec)
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
@@ -635,21 +659,45 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 if m.num_prefills == 0 and m.num_decodes == 0
                 else None
             )
-            core_attn_out_spec, _ = fused_recurrent_kda(
-                q=q_spec,
-                k=k_spec,
-                v=v_spec,
-                raw_g=g1_spec,
-                raw_beta=beta_spec,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                lower_bound=self.gate_lower_bound,
-                initial_state=recurrent_state,
-                cu_seqlens=spec_cu_seqlens,
-                ssm_state_indices=spec_state_indices_tensor,
-                num_accepted_tokens=num_accepted_tokens,
-                out=spec_out,
-            )
+            if self.use_replayssm_spec:
+                from vllm.models.kimi_k3.nvidia.ops.replayssm import (
+                    kda_replayssm_spec_decode,
+                )
+
+                if len(replayssm_records) != 1:
+                    raise ValueError("KDA ReplaySSM requires one replay-record buffer")
+                core_attn_out_spec = kda_replayssm_spec_decode(
+                    q=q_spec,
+                    k=k_spec,
+                    v=v_spec,
+                    raw_g=g1_spec,
+                    raw_beta=beta_spec,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    lower_bound=self.gate_lower_bound,
+                    checkpoint_state=recurrent_state,
+                    replay_cache=replayssm_records[0],
+                    query_start_loc=spec_cu_seqlens,
+                    state_indices=spec_state_indices_tensor[: m.num_spec_decodes, 0],
+                    spec_query_len=self.spec_query_len,
+                    out=spec_out,
+                )
+            else:
+                core_attn_out_spec, _ = fused_recurrent_kda(
+                    q=q_spec,
+                    k=k_spec,
+                    v=v_spec,
+                    raw_g=g1_spec,
+                    raw_beta=beta_spec,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    lower_bound=self.gate_lower_bound,
+                    initial_state=recurrent_state,
+                    cu_seqlens=spec_cu_seqlens,
+                    ssm_state_indices=spec_state_indices_tensor,
+                    num_accepted_tokens=num_accepted_tokens,
+                    out=spec_out,
+                )
 
         # Prefill or plain-decode path.
         core_attn_out_non_spec = None

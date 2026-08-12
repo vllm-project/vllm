@@ -35,6 +35,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backends.mamba_attn import ReplaySSMSpecMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -680,6 +681,42 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
 
     assert _is_req_added(model_runner, req_ids[1])
     assert not _is_req_scheduled(model_runner, req_ids[1])
+
+
+def test_replayssm_spec_commits_accepted_window_after_sampling():
+    """Accepted state is folded before scheduling can remove a request row."""
+    metadata = Mock(spec=ReplaySSMSpecMetadata)
+    attn_group = SimpleNamespace(layer_names=["kda_layer"])
+    runner = SimpleNamespace(
+        speculative_config=object(),
+        model_config=SimpleNamespace(is_hybrid=True),
+        cache_config=SimpleNamespace(
+            use_replayssm_spec=True,
+            mamba_cache_mode="none",
+        ),
+        num_accepted_tokens=SimpleNamespace(gpu=torch.zeros(3, dtype=torch.int32)),
+        input_batch=SimpleNamespace(
+            num_accepted_tokens_cpu_tensor=torch.zeros(3, dtype=torch.int32)
+        ),
+        num_accepted_tokens_event=Mock(),
+        _attn_group_iterator=lambda: iter((attn_group,)),
+    )
+    output_token_ids = torch.tensor([[10, 11, -1], [20, -1, -1]], dtype=torch.int32)
+
+    GPUModelRunner._update_states_after_model_execute(
+        runner,
+        output_token_ids,
+        Mock(),
+        {"kda_layer": metadata},
+    )
+
+    (accepted,) = metadata.commit_replayssm_state.call_args.args
+    expected = torch.tensor([2, 1], dtype=torch.int32)
+    torch.testing.assert_close(accepted[:2], expected)
+    torch.testing.assert_close(
+        runner.input_batch.num_accepted_tokens_cpu_tensor[:2],
+        expected,
+    )
 
 
 def test_update_states_pp_non_async_multi_request_keeps_token_buffers_consistent(

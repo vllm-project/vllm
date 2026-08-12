@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import fields
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -47,6 +48,9 @@ PRUNED_METADATA_FIELDS = {
 def _assert_matches_shared_gdn(reference, actual: KimiK3KDAMetadata):
     for field in fields(KimiK3KDAMetadata):
         actual_value = getattr(actual, field.name)
+        if field.name in {"replayssm_commit", "_replayssm_committer"}:
+            assert actual_value is None
+            continue
         expected_value = getattr(reference, field.name)
         if field.name in PRUNED_METADATA_FIELDS:
             assert actual_value is None
@@ -78,6 +82,7 @@ def _make_builder(
     full_cuda_graph: bool,
     device: torch.device = DEVICE,
     mamba_cache_mode: str = "none",
+    use_replayssm_spec: bool = False,
 ) -> AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -92,12 +97,17 @@ def _make_builder(
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.use_replayssm = use_replayssm_spec
+    vllm_config.cache_config.use_replayssm_spec = use_replayssm_spec
     return builder_cls(
         kv_cache_spec=MambaSpec(
             block_size=BLOCK_SIZE,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
-            num_speculative_blocks=num_speculative_tokens,
+            mamba_cache_mode=mamba_cache_mode,
+            num_speculative_blocks=(
+                0 if use_replayssm_spec else num_speculative_tokens
+            ),
         ),
         layer_names=["layer.0"],
         vllm_config=vllm_config,
@@ -244,6 +254,118 @@ def test_mixed_regular_and_spec_decode_excludes_request_padding():
     torch.testing.assert_close(actual.spec_token_indx, torch.tensor([1, 2, 3]))
 
 
+def test_replayssm_spec_uses_one_state_slot_and_current_window():
+    batch = BatchSpec(seq_lens=[100, 65, 20], query_lens=[1, 1, 3])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor([False, False, False]))
+    actual = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=2,
+        full_cuda_graph=False,
+        use_replayssm_spec=True,
+    ).build(
+        0,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu=torch.tensor([-1, -1, 2], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([3, 2, 2], dtype=torch.int32),
+    )
+
+    assert actual.spec_state_indices_tensor is not None
+    assert actual.spec_state_indices_tensor.shape == (1, 1)
+    torch.testing.assert_close(
+        actual.num_accepted_tokens, torch.ones(1, dtype=torch.int32)
+    )
+    commit_metadata = actual.replayssm_commit
+    assert commit_metadata is not None
+    torch.testing.assert_close(
+        commit_metadata.request_indices, torch.tensor([2], dtype=torch.int32)
+    )
+    assert commit_metadata.align is None
+    committer = actual._replayssm_committer
+    assert committer is not None
+    context = Mock()
+    committer._context = context
+    num_accepted_tokens = torch.tensor([3, 2, 1], dtype=torch.int32)
+
+    actual.commit_replayssm_state(num_accepted_tokens)
+
+    args = context.commit.call_args.args
+    assert args[0] is num_accepted_tokens
+    torch.testing.assert_close(args[1], commit_metadata.state_indices[:, 0])
+    torch.testing.assert_close(args[2], commit_metadata.query_start_loc)
+
+
+def test_replayssm_spec_keeps_draftless_decode_on_spec_path():
+    batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor([False, False]))
+    actual = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=2,
+        full_cuda_graph=False,
+        use_replayssm_spec=True,
+    ).build(
+        0,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu=torch.zeros(2, dtype=torch.int32),
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32),
+    )
+
+    assert actual.num_spec_decodes == 2
+    assert actual.num_decodes == 0
+    assert actual.spec_state_indices_tensor is not None
+    assert actual.spec_state_indices_tensor.shape == (2, 1)
+    torch.testing.assert_close(
+        actual.spec_query_start_loc,
+        torch.tensor([0, 1, 2], dtype=torch.int32),
+    )
+
+
+def test_replayssm_spec_builds_pure_prefill_metadata():
+    batch = BatchSpec(seq_lens=[4, 7], query_lens=[4, 7])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor([True, True]))
+    actual = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=2,
+        full_cuda_graph=False,
+        use_replayssm_spec=True,
+    ).build(
+        0,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu=torch.full((2,), -1, dtype=torch.int32),
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32),
+    )
+
+    assert actual.num_spec_decodes == 0
+    assert actual.num_prefills == 2
+    torch.testing.assert_close(actual.has_initial_state, torch.tensor([False, False]))
+
+
+def test_replayssm_spec_rejects_query_wider_than_activation_window():
+    batch = BatchSpec(seq_lens=[20], query_lens=[4])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor([False]))
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=2,
+        full_cuda_graph=False,
+        use_replayssm_spec=True,
+    )
+
+    with pytest.raises(ValueError, match="activation capacity"):
+        builder.build(
+            0,
+            common_attn_metadata,
+            num_decode_draft_tokens_cpu=torch.tensor([3], dtype=torch.int32),
+            num_accepted_tokens=torch.ones(1, dtype=torch.int32),
+        )
+
+
 @pytest.mark.parametrize(
     ("seq_len", "expected_has_initial_state"),
     [
@@ -305,6 +427,32 @@ def test_kimi_k3_kda_cudagraph_capture_matches_shared_gdn():
 
     assert isinstance(actual, KimiK3KDAMetadata)
     _assert_matches_shared_gdn(reference, actual)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_replayssm_spec_cudagraph_stages_one_checkpoint_per_request():
+    device = torch.device("cuda")
+    batch = BatchSpec(seq_lens=[50, 30], query_lens=[3, 3])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device
+    ).replace(is_prefilling=torch.tensor([False, False]))
+    actual = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=2,
+        full_cuda_graph=True,
+        device=device,
+        use_replayssm_spec=True,
+    ).build_for_cudagraph_capture(common_attn_metadata)
+
+    assert actual.spec_state_indices_tensor is not None
+    assert actual.spec_state_indices_tensor.shape == (batch.batch_size, 1)
+    assert actual.num_accepted_tokens is not None
+    torch.testing.assert_close(
+        actual.num_accepted_tokens,
+        torch.ones(batch.batch_size, dtype=torch.int32, device=device),
+    )
+    assert actual.replayssm_commit is not None
+    assert actual.replayssm_commit.request_indices is None
 
 
 def test_kimi_k3_kda_backend_uses_private_metadata_builder():

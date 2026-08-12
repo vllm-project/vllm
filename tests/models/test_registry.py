@@ -138,8 +138,10 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
 @pytest.mark.parametrize(
     "model_arch,supported",
     [
-        # ReplaySSM is opt-in per model; only Nemotron-H sets the flag today.
+        # ReplaySSM is opt-in per model.
         ("NemotronHForCausalLM", True),
+        ("KimiLinearForCausalLM", True),
+        ("KimiK3ForConditionalGeneration", True),
         ("Mamba2ForCausalLM", False),
         ("Zamba2ForCausalLM", False),
     ],

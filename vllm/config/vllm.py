@@ -2511,22 +2511,52 @@ class VllmConfig:
     @model_validator(mode="after")
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
+            self.cache_config.use_replayssm_spec = False
             return self
-        # ReplaySSM adds a 3-tensor ring to the mamba state; only models that
-        # opt in (supports_replayssm) build a consistent shape on both the layer
-        # and config paths. Reject others so the mamba page size cannot desync.
+        self.cache_config.use_replayssm_spec = self.num_speculative_tokens > 0
+
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
-                "--use-replayssm is only supported for Nemotron-H models "
-                f"(got architecture {self.model_config.architecture!r})"
+                "--use-replayssm is not supported for architecture "
+                f"{self.model_config.architecture!r}"
             )
-        if self.cache_config.mamba_cache_mode == "all":
+        if self.cache_config.use_replayssm_spec:
+            if self.model_config is not None and self.model_config.architecture not in (
+                "KimiLinearForCausalLM",
+                "KimiK3ForConditionalGeneration",
+            ):
+                raise ValueError(
+                    "ReplaySSM speculative decoding is only supported for Kimi-K3 KDA"
+                )
+            if self.mamba_config.enable_stochastic_rounding:
+                raise ValueError(
+                    "ReplaySSM speculative decoding supports bfloat16/float32 "
+                    "SSM state caches, not --enable-mamba-cache-stochastic-"
+                    "rounding, which requires an explicit float16 cache"
+                )
+            if self.cache_config.mamba_cache_mode not in ("none", "align"):
+                raise ValueError(
+                    "ReplaySSM speculative decoding supports only none and align "
+                    "Mamba cache modes"
+                )
+            if (
+                self.cache_config.mamba_cache_mode == "align"
+                and not self.use_v2_model_runner
+            ):
+                raise ValueError(
+                    "ReplaySSM speculative decoding with align mode requires "
+                    "VLLM_USE_V2_MODEL_RUNNER=1"
+                )
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "ReplaySSM speculative decoding currently requires "
+                    "pipeline_parallel_size=1"
+                )
+        elif self.cache_config.mamba_cache_mode == "all":
             raise ValueError(
                 "--use-replayssm supports prefix caching only in align mode; "
                 "pass --mamba-cache-mode align"
             )
-        if self.num_speculative_tokens > 0:
-            raise ValueError("--use-replayssm does not support speculative decoding")
         if self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError("--use-replayssm requires --mamba-backend triton")
         if (

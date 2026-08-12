@@ -26,6 +26,26 @@ from vllm.v1.kv_cache_interface import MambaSpec
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
 
+@dataclass(frozen=True)
+class ReplaySSMAlignCommitMetadata:
+    num_spec_decodes: int
+    request_indices: torch.Tensor | None
+    block_table: torch.Tensor
+    num_computed_tokens: torch.Tensor
+    block_size: int
+
+
+class ReplaySSMSpecMetadata(abc.ABC):
+    @abc.abstractmethod
+    def commit_replayssm_state(self, num_accepted_tokens: torch.Tensor) -> None:
+        raise NotImplementedError
+
+    def get_replayssm_align_commit_metadata(
+        self,
+    ) -> ReplaySSMAlignCommitMetadata | None:
+        return None
+
+
 @dataclass
 class BaseMambaAttentionMetadata:
     num_prefills: int

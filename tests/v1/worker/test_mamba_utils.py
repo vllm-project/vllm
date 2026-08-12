@@ -489,6 +489,42 @@ def test_stage_postprocess_inputs_to_gpu_asserts_on_missing_state_idx():
         )
 
 
+def test_gpu_context_ignores_auxiliary_cache_tensors() -> None:
+    device = torch.device("cpu")
+    config = _TestConfig(num_layers=1)
+    layer_names = ["layer_0"]
+    kv_cache_config = _make_kv_cache_config(config, layer_names)
+    conv_state = torch.empty(
+        config.num_blocks,
+        config.conv_width,
+        config.conv_inner_dim,
+        dtype=config.dtype,
+    )
+    temporal_state = torch.empty(
+        config.num_blocks, config.temporal_state_dim, dtype=config.dtype
+    )
+    attention = MagicMock()
+    attention.kv_cache = [
+        conv_state,
+        temporal_state,
+        *(torch.empty(config.num_blocks, 1) for _ in range(4)),
+    ]
+    context = _make_gpu_ctx(config, kv_cache_config, device)
+
+    context.initialize_from_forward_context(
+        kv_cache_config,
+        {"layer_0": attention},
+        _COPY_FUNCS,
+        [torch.zeros(1, 1, dtype=torch.int32)],
+    )
+
+    assert context.is_initialized
+    assert context.state_base_addrs.tolist() == [
+        conv_state.data_ptr(),
+        temporal_state.data_ptr(),
+    ]
+
+
 def _run_gpu_postprocess(
     gpu_ctx: MambaSpecDecodeGPUContext,
     *,

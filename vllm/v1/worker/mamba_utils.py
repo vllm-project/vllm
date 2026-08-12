@@ -762,7 +762,13 @@ class MambaSpecDecodeGPUContext:
                 attention = forward_context[layer_name]
                 kv_caches: list[torch.Tensor] = attention.kv_cache
 
-                for state_type_idx, state in enumerate(kv_caches):
+                if len(kv_caches) < self.num_state_types:
+                    raise ValueError(
+                        f"Expected at least {self.num_state_types} Mamba state "
+                        f"tensors, got {len(kv_caches)}"
+                    )
+                for state_type_idx, copy_func in enumerate(mamba_state_copy_funcs):
+                    state = kv_caches[state_type_idx]
                     # Base address
                     self.state_base_addrs[idx] = state.data_ptr()
 
@@ -779,7 +785,6 @@ class MambaSpecDecodeGPUContext:
                     # Element size
                     self.state_elem_sizes[idx] = state.element_size()
 
-                    copy_func = mamba_state_copy_funcs[state_type_idx]
                     assert (
                         copy_func is get_conv_copy_spec
                         or copy_func is get_temporal_copy_spec
