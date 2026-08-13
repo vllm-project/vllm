@@ -6,7 +6,9 @@ import sys
 import threading
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from typing import cast
 
+import cv2
 import numpy as np
 import numpy.typing as npt
 import pytest
@@ -672,6 +674,60 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
             f"Expected fewer than {metadata['total_num_frames']} frames, "
             f"but loaded {frames.shape[0]} frames"
         )
+
+
+class _ZeroFrameVideoCapture:
+    """cv2.VideoCapture stand-in for a degenerate video with no frames."""
+
+    WIDTH = 320
+    HEIGHT = 240
+
+    def get(self, prop):
+        return {
+            cv2.CAP_PROP_FRAME_WIDTH: self.WIDTH,
+            cv2.CAP_PROP_FRAME_HEIGHT: self.HEIGHT,
+            cv2.CAP_PROP_FRAME_COUNT: 0,
+        }.get(prop, 0)
+
+    def grab(self):
+        return False
+
+    def retrieve(self):
+        return (False, None)
+
+
+@pytest.mark.parametrize("frame_recovery", [False, True])
+def test_read_frames_handles_empty_frame_indices(frame_recovery: bool):
+    """Empty frame list (e.g. a 0-frame video) must not crash read_frames.
+
+    Qwen3VLVideoBackend.compute_frames_index_to_sample() returns an empty list
+    for a 0-frame video (it lacks the base class's max(1, ...) floor), which
+    previously crashed read_frames (IndexError in the recovery path, ValueError
+    from max() otherwise).
+    """
+    cap = cast(cv2.VideoCapture, _ZeroFrameVideoCapture())
+    frames, valid_frame_indices = VideoBackend.read_frames(
+        cap, [], total_frames_num=0, frame_recovery=frame_recovery
+    )
+    assert frames.shape == (0, cap.HEIGHT, cap.WIDTH, 3)
+    assert valid_frame_indices == []
+
+
+def test_qwen3vl_zero_frame_video_does_not_crash():
+    """Qwen3VL zero-frame video flows through read_frames without error."""
+    source = VideoSourceMetadata(total_frames_num=0, original_fps=30, duration=1)
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=10)
+    frame_idx = Qwen3VLVideoBackend.compute_frames_index_to_sample(source, target)
+    assert frame_idx == []  # current behavior for a zero-frame video
+
+    frames, valid_frame_indices = VideoBackend.read_frames(
+        cast(cv2.VideoCapture, _ZeroFrameVideoCapture()),
+        frame_idx,
+        total_frames_num=0,
+        frame_recovery=True,
+    )
+    assert frames.shape[0] == 0
+    assert valid_frame_indices == []
 
 
 # ============================================================================
