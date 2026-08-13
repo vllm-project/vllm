@@ -198,6 +198,7 @@ async def run_server_worker(
     try:
         await shutdown_task
     finally:
+        # Shutdown failures must propagate to preserve the process exit status.
         sock.close()
 
 

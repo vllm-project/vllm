@@ -123,6 +123,7 @@ async def serve_http(
         if shutdown_event.is_set():
             return
         logger.info_once("[shutdown] API server: shutdown triggered")
+        # Record signal precedence synchronously before teardown can complete.
         shutdown_event.set()
 
     async def dummy_shutdown() -> None:
