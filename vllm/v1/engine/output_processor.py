@@ -175,6 +175,8 @@ class RequestState:
         self.queue = queue
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
+        self.num_local_cached_tokens: int | None = None
+        self.num_external_cached_tokens: int | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -655,6 +657,12 @@ class OutputProcessor:
                     )
                     req_state.num_cache_creation_tokens = (
                         engine_core_output.prefill_stats.num_cache_creation_tokens
+                    )
+                    req_state.num_local_cached_tokens = (
+                        engine_core_output.prefill_stats.num_local_cached_tokens
+                    )
+                    req_state.num_external_cached_tokens = (
+                        engine_core_output.prefill_stats.num_external_cached_tokens
                     )
                 req_state.is_prefilling = False
 
