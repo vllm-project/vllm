@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.transformers.fuser import get_fuser
+from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
@@ -306,7 +307,7 @@ class MoEMixin(MixtureOfExperts):
                         # Store shared experts for later down projection adjustment
                         if shared_experts is not None:
                             hf_shared = shared_experts.shared_experts
-                            glu_fuser = get_fuser(hf_shared)
+                            glu_fuser = get_fuser(hf_shared, GLUFuser)
                             down_name = getattr(glu_fuser, "down_name", None)
                             if down_name is not None:
                                 shared_down_projs.append((hf_shared, down_name))

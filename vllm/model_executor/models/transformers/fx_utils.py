@@ -187,17 +187,27 @@ class _AllLeafTracer(fx.Tracer):
 def _as_leaf_call(fn: Callable, length: int | None = None) -> Callable:
     """Wrap any callable so tracing records it as one opaque `call_function` node.
 
-    Lets the trace continue past untraceable bodies. Only the proxy arguments carry into
-    the node's dataflow; the rest are dropped rather than lifted into the graph.
-    `length` declares how many values the callable returns, so unpacking its result also
-    traces. Called without proxies (i.e. outside tracing), the wrapper is a passthrough.
+    Lets the trace continue past untraceable bodies. Positional proxies carry into the
+    node's dataflow, as do keyword arguments naming a graph value or a parameter of the
+    traced module (e.g. an attention interface's `s_aux`); the rest are dropped rather
+    than lifted into the graph. `length` declares how many values the callable returns,
+    so unpacking its result also traces. Called without proxies (i.e. outside tracing),
+    the wrapper is a passthrough.
     """
 
     def leaf(*args, **kwargs):
         proxies = tuple(arg for arg in args if isinstance(arg, fx.Proxy))
         if not proxies:
             return fn(*args, **kwargs)
-        proxy = proxies[0].tracer.create_proxy("call_function", fn, proxies, {})
+        # A parameter becomes a `get_attr` node; any other non-proxy value has either
+        # no dataflow to record or no representation fx can build without stashing a
+        # constant on the module.
+        named = {
+            name: value
+            for name, value in kwargs.items()
+            if isinstance(value, (fx.Proxy, nn.Parameter))
+        }
+        proxy = proxies[0].tracer.create_proxy("call_function", fn, proxies, named)
         proxy.node.meta["leaf_call"] = True
         if length is not None:
             # The body never executes, so fabricate a value of the declared length.

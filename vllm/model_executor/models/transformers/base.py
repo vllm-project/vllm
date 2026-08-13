@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from functools import cached_property
 from itertools import chain
 from operator import attrgetter
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import regex as re
 import torch
@@ -48,7 +48,6 @@ from vllm.model_executor.layers.attention import (
 from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import MoERunner
-from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
@@ -58,7 +57,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.fuser import BaseFuser, Fusers
-from vllm.model_executor.models.transformers.fusers import MLAFuser
+from vllm.model_executor.models.transformers.fusers import MLAFuser, SinkFuser
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
@@ -78,7 +77,6 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -88,8 +86,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-SINK_PARAM_NAMES = ("sinks", "sink")
-"""Names Transformers gives the learnable per-head attention sink parameter."""
+_F = TypeVar("_F", bound=BaseFuser)
 
 
 class PreTrainedModelClasses(NamedTuple):
@@ -138,8 +135,8 @@ class Base(
         self.packed_modules_mapping: dict[str, list[str]] = {}
         """Fused module -> constituent projections, populated by `recursive_replace`
         for the quantization machinery and loaders (e.g. bitsandbytes)."""
-        self.fusers: dict[str, BaseFuser] = {}
-        """Module qualname -> the fuser applied to it, populated
+        self.fusers: dict[str, list[BaseFuser]] = {}
+        """Module qualname -> the fusers applied to it, populated
         by `recursive_replace` for `create_attention_instances`."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
@@ -469,7 +466,7 @@ class Base(
 
         def register_fusion(fuser: BaseFuser, prefix: str):
             """Register a fused layer's mappings just before it is built."""
-            self.fusers[prefix] = fuser
+            self.fusers.setdefault(prefix, []).append(fuser)
 
             orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
             self.hf_to_vllm_mapper.orig_to_new_stacked.update(orig_to_new_stacked)
@@ -516,10 +513,11 @@ class Base(
                     )
                 elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
                     new_module = replace_conv_class(child_module)
-                elif (fuser := fusers[child_module]) is not None:
-                    register_fusion(fuser, qual_name)
-                    new_module = fuser.fuse(child_module, qual_name, self.vllm_config)
-                    logger.info_once(fuser.info(child_name))
+                elif child_fusers := fusers[child_module]:
+                    for fuser in child_fusers:
+                        register_fusion(fuser, qual_name)
+                        new_module = fuser.fuse(new_module, qual_name, self.vllm_config)
+                        logger.info_once(fuser.info(child_name))
                     _recursive_replace(new_module, prefix=qual_name)
                 elif not isinstance(child_module, MoERunner):
                     # MoERunner can contain aliases of shared experts and gates,
@@ -532,41 +530,17 @@ class Base(
 
         _recursive_replace(self.model, prefix="model")
 
-    def find_sinks(self) -> dict[int, tuple[nn.Module, str]]:
-        """Layer index -> its attention module and the name of that module's sink.
+    def find_fusers(self, fuser_cls: type[_F]) -> dict[int, tuple[str, _F]]:
+        """Layer index -> qualname and fuser, for every `fuser_cls` that was applied.
 
-        Models with attention sinks (e.g. GPT-OSS, GraniteSWA) pass a learnable
-        per-head bias to the attention interface as `s_aux`. Only the attention
-        impl can apply it, so it must be given to `Attention` when it is created.
-        Layers without a sink are absent, as are models without sinks entirely.
+        Only meaningful for fusers that match modules living inside a layer.
         """
-        sinks = {}
-        for module in self.model.get_decoder().modules():
-            if (layer_idx := getattr(module, "layer_idx", None)) is None:
-                continue
-            names = {name for name, _ in module.named_parameters(recurse=False)}
-            if name := next((n for n in SINK_PARAM_NAMES if n in names), None):
-                sinks[layer_idx] = (module, name)
-        return sinks
-
-    def init_sink(self, module: nn.Module, name: str, num_heads: int) -> nn.Parameter:
-        """Materialize a sink parameter as this rank's slice of the model's heads.
-
-        `Attention` holds a reference to the tensor the checkpoint is loaded into,
-        so the parameter is replaced here rather than in `init_parameters`, which
-        runs after the attention instances have been created.
-        """
-        param = nn.Parameter(
-            torch.empty(
-                num_heads,
-                dtype=self.model_config.dtype,
-                device=self.device_config.device,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(param, {"weight_loader": sharded_weight_loader(0)})
-        setattr(module, name, param)
-        return param
+        return {
+            extract_layer_index(prefix): (prefix, fuser)
+            for prefix, fusers in self.fusers.items()
+            for fuser in fusers
+            if isinstance(fuser, fuser_cls)
+        }
 
     def create_attention_instances(self) -> dict[int, Attention]:
         """
@@ -579,11 +553,7 @@ class Base(
 
         # kv_lora_rank indicates that this is an MLA model
         if getattr(text_config, "kv_lora_rank", None) is not None:
-            mla_fusers = {
-                extract_layer_index(prefix): (prefix, fuser)
-                for prefix, fuser in self.fusers.items()
-                if isinstance(fuser, MLAFuser)
-            }
+            mla_fusers = self.find_fusers(MLAFuser)
             if attn_cls is MLAAttention:
                 text_config._attn_implementation = "vllm_mla"
             else:
@@ -594,7 +564,11 @@ class Base(
                     self.model_config.model_arch_config.head_size = qk_head_dim
 
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
-        sinks = self.find_sinks()
+        # Learnable per-head sinks, which only the attention impl can apply
+        sinks = {
+            i: fuser.sink(self.get_submodule(prefix))
+            for i, (prefix, fuser) in self.find_fusers(SinkFuser).items()
+        }
 
         pp_rank = self.pp_group.rank_in_group
         pp_size = self.pp_group.world_size
@@ -649,9 +623,8 @@ class Base(
                 ):
                     kwargs["per_layer_sliding_window"] = text_config.sliding_window
 
-                # Handle learnable attention sinks
                 if (sink := sinks.get(i)) is not None:
-                    kwargs["sinks"] = self.init_sink(*sink, num_heads)
+                    kwargs["sinks"] = sink
 
             attention_instances[i] = attn_cls(**kwargs)
         return attention_instances
@@ -669,7 +642,7 @@ class Base(
             return EncoderOnlyAttention
         if self.model_config.use_mla:
             self.check_version("5.15.0.dev0", "optimized MLA support")
-            if any(isinstance(fuser, MLAFuser) for fuser in self.fusers.values()):
+            if self.find_fusers(MLAFuser):
                 return MLAAttention
             logger.warning_once(
                 "This model uses MLA but `MLAFuser` failed to match and/or fuse any "

@@ -151,10 +151,12 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
 
 def get_sinks(model) -> dict[int, torch.Tensor]:
     """The sink tensor each attention layer was handed, keyed by layer index."""
+    from vllm.model_executor.models.transformers.fusers import SinkFuser
+
     assert all(attn.has_sink for attn in model.attention_instances.values())
     return {
-        i: module.get_parameter(name).float().cpu()
-        for i, (module, name) in model.find_sinks().items()
+        i: fuser.sink(model.get_submodule(prefix)).float().cpu()
+        for i, (prefix, fuser) in model.find_fusers(SinkFuser).items()
     }
 
 

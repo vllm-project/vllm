@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm.model_executor.models.transformers.fuser import get_fuser
+from vllm.model_executor.models.transformers.fuser import get_fuser, get_fusers
 from vllm.model_executor.models.transformers.fusers import (
     GLUFuser,
     PackedQKVFuser,
@@ -328,9 +328,9 @@ class FakeMQASelfAttn(FakeSelfAttn):
 
 @pytest.fixture(autouse=True)
 def _clear_fuser_cache():
-    get_fuser.cache_clear()
+    get_fusers.cache_clear()
     yield
-    get_fuser.cache_clear()
+    get_fusers.cache_clear()
 
 
 def _apply_glu_fuser_with_stubs(module: nn.Module, fuser: GLUFuser):
@@ -536,7 +536,7 @@ def test_fuser_is_cached_per_class_and_structure():
         fuser_a = get_fuser(GLUMLP())
         fuser_b = get_fuser(GLUMLP())
     assert fuser_a is fuser_b
-    assert any(key[0] is GLUMLP for key in get_fuser.cache)
+    assert any(key[0] is GLUMLP for key in get_fusers.cache)
 
 
 @pytest.mark.parametrize("cls", [NotAnMLP, UntraceableMLP])
