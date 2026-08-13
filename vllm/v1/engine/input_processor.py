@@ -108,6 +108,17 @@ class InputProcessor:
                 self.tokenizer,
             )
 
+            if self.model_config.return_sampling_mask:
+                if params.temperature <= 0:
+                    raise ValueError(
+                        "sampling distribution replay requires temperature > 0"
+                    )
+                if params.top_k <= 0:
+                    raise ValueError(
+                        "sampling distribution replay requires top_k > 0 to "
+                        "bound sampling mask size, reduce transfer overhead, "
+                        "and avoid potential OOMs"
+                    )
             if params.thinking_token_budget is not None and (
                 self.vllm_config.reasoning_config is None
                 or not self.vllm_config.reasoning_config.enabled

@@ -98,6 +98,7 @@ class EngineCoreOutput(
     routed_experts: object | None = None
     num_nans_in_logits: int = 0
     mm_cache_miss_hashes: list[str] | None = None
+    new_sampling_mask: object | None = None
 
 
 class EngineCoreOutputs(
@@ -200,6 +201,29 @@ outputs = EngineCoreOutputs(
         )
     ],
     finished_requests={"req-1"},
+)
+
+sampling_mask_wire = [
+    [
+        "<i4",
+        [5],
+        msgpack.ExtType(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
+    ],
+    [
+        "<i8",
+        [2],
+        msgpack.ExtType(3, np.array([0, 5], dtype=np.int64).tobytes()),
+    ],
+    None,
+]
+outputs_with_sampling_mask = EngineCoreOutputs(
+    outputs=[
+        EngineCoreOutput(
+            request_id="req-mask",
+            new_token_ids=[16],
+            new_sampling_mask=sampling_mask_wire,
+        )
+    ]
 )
 
 
@@ -422,6 +446,7 @@ print(msgspec.msgpack.encode(request).hex())
 print(msgspec.msgpack.encode(defaults_request).hex())
 print(msgpack.packb(multimodal_request_wire, use_bin_type=True).hex())
 print(msgspec.msgpack.encode(outputs).hex())
+print(msgspec.msgpack.encode(outputs_with_sampling_mask).hex())
 print(" ".join(frame.hex() for frame in encode_output_frames(inline_logprobs)))
 print(
     " ".join(
