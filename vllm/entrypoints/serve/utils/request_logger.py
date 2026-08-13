@@ -15,8 +15,14 @@ logger = init_logger(__name__)
 
 
 class RequestLogger:
-    def __init__(self, *, max_log_len: int | None) -> None:
+    def __init__(
+        self,
+        *,
+        max_log_len: int | None,
+        enable_log_output_token_ids: bool = True,
+    ) -> None:
         self.max_log_len = max_log_len
+        self.enable_log_output_token_ids = enable_log_output_token_ids
 
         if not logger.isEnabledFor(logging.INFO):
             logger.warning_once(
@@ -81,7 +87,7 @@ class RequestLogger:
             if outputs is not None:
                 outputs = outputs[:max_log_len]
 
-            if output_token_ids is not None:
+            if self.enable_log_output_token_ids and output_token_ids is not None:
                 # Convert to list and apply truncation
                 output_token_ids = list(output_token_ids)[:max_log_len]
 
@@ -89,12 +95,21 @@ class RequestLogger:
         if is_streaming:
             stream_info = " (streaming delta)" if delta else " (streaming complete)"
 
-        logger.info(
-            "Generated response %s%s: output: %r, "
-            "output_token_ids: %s, finish_reason: %s",
-            request_id,
-            stream_info,
-            outputs,
-            output_token_ids,
-            finish_reason,
-        )
+        if self.enable_log_output_token_ids:
+            logger.info(
+                "Generated response %s%s: output: %r, "
+                "output_token_ids: %s, finish_reason: %s",
+                request_id,
+                stream_info,
+                outputs,
+                output_token_ids,
+                finish_reason,
+            )
+        else:
+            logger.info(
+                "Generated response %s%s: output: %r, finish_reason: %s",
+                request_id,
+                stream_info,
+                outputs,
+                finish_reason,
+            )

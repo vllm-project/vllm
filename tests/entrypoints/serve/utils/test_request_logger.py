@@ -3,6 +3,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 
@@ -120,6 +122,41 @@ def test_request_logger_log_outputs_with_truncation():
         logged_token_ids = call_args[0][4]
         assert logged_token_ids == list(range(10))
         assert len(logged_token_ids) == 10
+
+
+@pytest.mark.parametrize(
+    ("is_streaming", "delta", "stream_info"),
+    [
+        (False, False, ""),
+        (True, True, " (streaming delta)"),
+        (True, False, " (streaming complete)"),
+    ],
+)
+def test_request_logger_log_outputs_without_token_ids(is_streaming, delta, stream_info):
+    mock_logger = MagicMock()
+
+    with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
+        request_logger = RequestLogger(max_log_len=4, enable_log_output_token_ids=False)
+
+        request_logger.log_outputs(
+            request_id="test-no-token-ids",
+            outputs="Test output",
+            output_token_ids=[1, 2, 3],
+            finish_reason="stop",
+            is_streaming=is_streaming,
+            delta=delta,
+        )
+
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args.args
+        assert "output_token_ids" not in call_args[0]
+        assert call_args == (
+            "Generated response %s%s: output: %r, finish_reason: %s",
+            "test-no-token-ids",
+            stream_info,
+            "Test",
+            "stop",
+        )
 
 
 def test_request_logger_log_outputs_none_values():

@@ -144,6 +144,9 @@ class BaseFrontendArgs:
     """If set to True, log model outputs (generations).
     Requires `--enable-log-requests`. As with `--enable-log-requests`,
     information is only logged at INFO level at maximum."""
+    enable_log_output_token_ids: bool = True
+    """If set to False, omit output token IDs from model output logs.
+    Relevant only if `--enable-log-outputs` is set."""
     enable_log_deltas: bool = True
     """If set to False, output deltas will not be logged. Relevant only if 
     --enable-log-outputs is set.
