@@ -306,6 +306,43 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 _FP8_DTYPE = current_platform.fp8_dtype()
+_AITER_FP8_BMM_PRECOMPILE_MAX_BATCH_SIZE = 1024
+
+
+def _get_aiter_fp8_bmm_precompile_batch_sizes(
+    vllm_config: VllmConfig,
+) -> list[int]:
+    # Keep the old upper bound as a safety cap. The AITER Triton BMM kernels
+    # can still JIT-compile an unseen size later; this only controls startup
+    # warming for the decode-token counts vLLM can actually schedule.
+    scheduler_config = vllm_config.scheduler_config
+    max_num_seqs = scheduler_config.max_num_seqs or 0
+    decode_query_len = 1 + max(getattr(vllm_config, "num_speculative_tokens", 0), 0)
+    max_decode_tokens = max_num_seqs * decode_query_len
+
+    token_limit = (
+        scheduler_config.max_num_scheduled_tokens
+        or scheduler_config.max_num_batched_tokens
+        or 0
+    )
+    if token_limit > 0 and max_decode_tokens > 0:
+        max_decode_tokens = min(max_decode_tokens, token_limit)
+
+    # MLAAttention.forward_impl strips CUDA-graph padding before calling this
+    # BMM path, so warm a contiguous range of real sizes. Limit that range to
+    # graph-covered decode sizes when CUDA graphs are enabled; larger batches
+    # can still JIT later, but they already leave the captured fast path.
+    graph_limit = (
+        getattr(vllm_config.compilation_config, "max_cudagraph_capture_size", None) or 0
+    )
+    if graph_limit > 0 and max_decode_tokens > 0:
+        max_decode_tokens = min(max_decode_tokens, graph_limit)
+
+    max_size = min(
+        _AITER_FP8_BMM_PRECOMPILE_MAX_BATCH_SIZE,
+        max_decode_tokens or _AITER_FP8_BMM_PRECOMPILE_MAX_BATCH_SIZE,
+    )
+    return list(range(1, max_size + 1))
 
 
 def _detect_output_quant_key(
@@ -1086,17 +1123,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 W_V, dtype=current_platform.fp8_dtype()
             )
 
-            # The kernel operates on non-padded inputs. Hence, pre-compiling
-            # triton kernel to avoid runtime compilation for unseen batch sizes
-            # Pre-compile for batch sizes 1 to 1024 to cover most use-cases.
-            # On DS-R1, this step adds roughly 50s to the model loading time.
-            max_batch_size = 1024  # [ToDo] Find the optimal upper limit
-            pre_compilation_list = list(range(1, max_batch_size + 1))
+            # The kernel operates on non-padded decode tokens. Pre-compile the
+            # real decode-token counts the scheduler can emit; unseen sizes can
+            # still be JIT-compiled later, but skipping unreachable warmup
+            # shapes reduces model loading time.
+            pre_compilation_list = _get_aiter_fp8_bmm_precompile_batch_sizes(
+                self._vllm_config
+            )
             if is_global_first_rank():
                 pre_compilation_list = tqdm(
                     pre_compilation_list,
                     desc="[Aiter Triton] Pre-compiling fp8 BMM kernel",
-                    total=max_batch_size,
+                    total=len(pre_compilation_list),
                 )
 
             for m in pre_compilation_list:
