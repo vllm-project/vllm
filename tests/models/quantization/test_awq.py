@@ -94,6 +94,37 @@ def run_awq_test(
 
 
 @pytest.mark.parametrize(
+    ("model", "quantization", "dtype"),
+    [
+        ("mattbucci/gemma-4-26B-AWQ", "awq", "float16"),
+        ("cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit", "compressed-tensors", "bfloat16"),
+    ],
+    ids=[
+        "gemma4-moe-standard-awq-dot-suffix",
+        "gemma4-moe-compressed-tensors-underscore-suffix",
+    ],
+)
+@torch.inference_mode()
+def test_awq_load(
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+    model: str,
+    quantization: str,
+    dtype: str,
+) -> None:
+    """Regression test: AWQ weight loading must not KeyError."""
+    with vllm_runner(
+        model,
+        quantization=quantization,
+        dtype=dtype,
+        max_model_len=128,
+        enforce_eager=True,
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy(example_prompts[:2], max_tokens=32)
+    assert len(outputs) == 2
+
+
+@pytest.mark.parametrize(
     ("source_model", "quant_model"),
     [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")],
 )

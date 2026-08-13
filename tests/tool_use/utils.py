@@ -201,6 +201,10 @@ CONFIGS: dict[str, ServerConfig] = {
             "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_granite.jinja"),
         ],
+        "system_prompt": "You are a helpful AI assistant with access to tools. "
+        "Use two-letter US state abbreviations in weather tool arguments. "
+        "When a tool is required to answer the user query, respond with "
+        "<|tool_call|> followed by a JSON list of tools used.",
     },
     "granite-3.1-8b": {
         "model": "ibm-granite/granite-3.1-8b-instruct",

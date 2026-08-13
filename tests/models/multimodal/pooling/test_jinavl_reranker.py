@@ -6,14 +6,20 @@ import transformers
 from packaging import version
 from transformers import AutoModel
 
+from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from vllm.entrypoints.pooling.score.utils import ScoreMultiModalParam
+from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 
 from ....conftest import HfRunner, VllmRunner
+
+pytestmark = pytest.mark.skip(
+    reason="jinaai/jina-reranker-m0 custom code is incompatible with "
+    "transformers v5 (missing all_tied_weights_keys)"
+)
 
 MODELS = ["jinaai/jina-reranker-m0"]
 
@@ -28,6 +34,11 @@ CHECKPOINT_TO_HF_MAPPER = {
     "visual.": "model.visual.",
     "model.": "model.language_model.",
 }
+
+HANDELSBLATT_IMAGE_URL = (
+    f"{VLLM_S3_BUCKET_URL}/multimodal_asset/jinavl-handelsblatt-preview.png"
+)
+PAPER_IMAGE_URL = f"{VLLM_S3_BUCKET_URL}/multimodal_asset/jinavl-paper-11.png"
 
 # Shared long text for test data
 LONG_TEXT_DOC = """We present ReaderLM-v2, a compact 1.5 billion parameter language model designed for efficient
@@ -45,12 +56,8 @@ lower computational requirements."""  # noqa: E501
 TEXT_IMAGE_TEST_DATA = {
     "query": [{"text": "slm markdown"}],
     "documents": [
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-        },
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-        },
+        {"image": HANDELSBLATT_IMAGE_URL},
+        {"image": PAPER_IMAGE_URL},
     ],
 }
 
@@ -63,11 +70,7 @@ TEXT_TEXT_TEST_DATA = {
 }
 
 IMAGE_TEXT_TEST_DATA = {
-    "query": [
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-        }
-    ],
+    "query": [{"image": PAPER_IMAGE_URL}],
     "documents": [
         {"text": LONG_TEXT_DOC},
         {"text": "数据提取么?为什么不用正则啊,你用正则不就全解决了么?"},
@@ -75,18 +78,10 @@ IMAGE_TEXT_TEST_DATA = {
 }
 
 IMAGE_IMAGE_TEST_DATA = {
-    "query": [
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-        }
-    ],
+    "query": [{"image": PAPER_IMAGE_URL}],
     "documents": [
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-        },
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-        },
+        {"image": HANDELSBLATT_IMAGE_URL},
+        {"image": PAPER_IMAGE_URL},
     ],
 }
 
@@ -94,13 +89,9 @@ TEXT_MIXED_DOCS_TEST_DATA = {
     "query": [{"text": "slm markdown"}],
     "documents": [
         {"text": LONG_TEXT_DOC},
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-        },
+        {"image": PAPER_IMAGE_URL},
         {"text": "数据提取么？为什么不用正则啊,你用正则不就全解决了么?"},
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-        },
+        {"image": HANDELSBLATT_IMAGE_URL},
     ],
 }
 

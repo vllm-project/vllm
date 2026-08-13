@@ -11,6 +11,7 @@ from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -18,7 +19,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -382,7 +382,14 @@ class Mistral3ForConditionalGeneration(
             # Some PEFT LoRAs are trained against the text submodule directly
             # and produce names like `base_model.model.model.layers.*`.
             "model.": "language_model.model.",
-        }
+        },
+        orig_to_new_suffix={
+            # FP8 quantized HF checkpoints use "activation_scale" and
+            # "weight_scale_inv" but vLLM's FP8 linear layers register
+            # them as "input_scale" and "weight_scale"
+            ".activation_scale": ".input_scale",
+            ".weight_scale_inv": ".weight_scale",
+        },
     )
 
     @classmethod
@@ -402,13 +409,8 @@ class Mistral3ForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
-        # NOTE: These are special cases for Pixtral-12B in the HF-format
+        # NOTE: This is a special case for Pixtral-12B in the HF-format
         # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
-        if (
-            config.text_config.architectures is None
-            and config.text_config.model_type == "mistral"
-        ):
-            config.text_config.architectures = ["MistralForCausalLM"]
         if (
             config.projector_hidden_act is None
             and config.vision_config.hidden_act == "gelu"

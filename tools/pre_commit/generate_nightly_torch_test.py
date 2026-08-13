@@ -3,15 +3,15 @@
 """
 Generates specialized requirements files for nightly PyTorch testing.
 
-This script reads the main test requirements input file (`requirements/test.in`)
+This script reads the main test requirements input file (`requirements/test/cuda.in`)
 and splits its content into two files:
-1.  `requirements/nightly_torch_test.txt`: Contains dependencies
+1.  `requirements/test/nightly-torch.txt`: Contains dependencies
 except PyTorch-related.
 2.  `torch_nightly_test.txt`: Contains only PyTorch-related packages.
 """
 
-input_file = "requirements/test.in"
-output_file = "requirements/nightly_torch_test.txt"
+input_file = "requirements/test/cuda.in"
+output_file = "requirements/test/nightly-torch.txt"
 
 # white list of packages that are not compatible with PyTorch nightly directly
 # with pip install. Please add your package to this list if it is not compatible

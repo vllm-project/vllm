@@ -5,13 +5,13 @@ from collections.abc import Callable
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
+from vllm.model_executor.layers.fusion.quant_activation import (
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
-)
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    apply_nvfp4_linear,
-    convert_to_nvfp4_linear_kernel_format,
-    select_nvfp4_linear_backend,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -19,12 +19,16 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 
+logger = init_logger(__name__)
+
+
 __all__ = ["CompressedTensorsW4A4Fp4"]
 
 
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
-    def __init__(self):
-        self.backend = select_nvfp4_linear_backend()
+    def __init__(self, use_a16: bool = False):
+        self.use_a16 = use_a16
+        self.kernel = init_nvfp4_linear_kernel(use_a16=use_a16)
         self.group_size = 16
 
     @classmethod
@@ -79,36 +83,62 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
         layer.register_parameter("weight_scale", weight_scale)
 
-        input_global_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("input_global_scale", input_global_scale)
+        if not self.use_a16:
+            input_global_scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
+            layer.register_parameter("input_global_scale", input_global_scale)
+
+        expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Rename CT checkpoint names to standardized names
         layer.weight = layer.weight_packed
         del layer.weight_packed
-        # Process global scales (CT stores as divisors, i.e. 1/scale)
-        input_global_scale_inv = layer.input_global_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(
-            (1.0 / input_global_scale_inv).to(torch.float32), requires_grad=False
-        )
+
+        # Check for mismatched weight global scales
+        if torch.unique(layer.weight_global_scale).numel() != 1:
+            logger.warning_once(
+                "In NVFP4 linear, the weight global scale is different"
+                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
+                " will likely result in reduced accuracy. Please verify the model"
+                " accuracy. Consider using a checkpoint with a shared global NVFP4"
+                " scale for fused layers."
+            )
+
+        # Process weight global scale (CT stores as divisors, i.e. 1/scale)
         weight_global_scale = layer.weight_global_scale.max().to(torch.float32)
         layer.weight_global_scale = Parameter(
             1.0 / weight_global_scale, requires_grad=False
         )
 
-        # Pre-compute alpha and inverse for runtime quantization
-        layer.input_global_scale_inv = Parameter(
-            input_global_scale_inv, requires_grad=False
-        )
-        layer.alpha = Parameter(
-            layer.input_global_scale * layer.weight_global_scale, requires_grad=False
-        )
+        if not self.use_a16:
+            if torch.unique(layer.input_global_scale).numel() != 1:
+                logger.warning_once(
+                    "In NVFP4 linear, the input global scale is different"
+                    " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
+                    " will likely result in reduced accuracy. Please verify the model"
+                    " accuracy. Consider using a checkpoint with a shared global NVFP4"
+                    " scale for fused layers."
+                )
+            # Process input global scale and pre-compute alpha for W4A4 mode
+            input_global_scale_inv = layer.input_global_scale.max().to(torch.float32)
+            layer.input_global_scale = Parameter(
+                (1.0 / input_global_scale_inv).to(torch.float32), requires_grad=False
+            )
+
+            # Pre-compute alpha and inverse for runtime quantization
+            layer.input_global_scale_inv = Parameter(
+                input_global_scale_inv, requires_grad=False
+            )
+            layer.alpha = Parameter(
+                layer.input_global_scale * layer.weight_global_scale,
+                requires_grad=False,
+            )
 
         # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
+        self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -116,9 +146,4 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_nvfp4_linear(
-            backend=self.backend,
-            layer=layer,
-            x=x,
-            bias=bias,
-        )
+        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)

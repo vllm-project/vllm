@@ -3,7 +3,6 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
-import numpy as np
 import torch
 from torch import nn
 from transformers import AutoModel, BatchFeature
@@ -19,7 +18,8 @@ from transformers.models.siglip import SiglipImageProcessorFast
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType, TextPrompt
+from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
@@ -32,7 +32,6 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -55,6 +54,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import (
@@ -84,6 +84,52 @@ class Gemma3nImagePixelInputs(TensorSchema):
     pixel_values: Annotated[torch.Tensor, TensorShape("bn", 3, "h", "w")]
 
 
+def batch_audio_features(
+    input_features: torch.Tensor | list[torch.Tensor],
+    input_features_mask: torch.Tensor | list[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return mel features and their validity mask as batched tensors.
+
+    Audio features are unpadded per item so that a multimodal cache entry does
+    not depend on the batch it was first processed in.
+    [`MultiModalFieldConfig.batched`][vllm.multimodal.inputs.MultiModalFieldConfig.batched]
+    stacks items only when their shapes agree, so a batch of clips with
+    differing durations reaches the model as a list and must be re-padded here.
+
+    Padded frames are zero-filled and marked invalid. Audio towers consume the
+    mask, and callers keep only masked-in positions, so padding never reaches
+    the language model.
+
+    Gemma4 shares this helper: its audio path has the same unpad/re-pad
+    contract and the same fields.
+
+    Args:
+        input_features: `(bn, s, f)` tensor, or a list of `(s_i, f)` tensors
+            when clip durations differ.
+        input_features_mask: Matching `(bn, s)` tensor, or list of `(s_i,)`
+            tensors. `True` marks a valid frame.
+
+    Returns:
+        The `(bn, s_max, f)` features and their `(bn, s_max)` mask.
+    """
+    if isinstance(input_features, torch.Tensor):
+        return input_features.squeeze(1), input_features_mask.squeeze(1)
+
+    max_len = max(features.shape[0] for features in input_features)
+    batched_features = input_features[0].new_zeros(
+        (len(input_features), max_len, input_features[0].shape[-1])
+    )
+    batched_mask = input_features_mask[0].new_zeros(
+        (len(input_features_mask), max_len), dtype=torch.bool
+    )
+    for i, (features, mask) in enumerate(
+        zip(input_features, input_features_mask, strict=True)
+    ):
+        batched_features[i, : features.shape[0]] = features
+        batched_mask[i, : mask.shape[0]] = mask
+    return batched_features, batched_mask
+
+
 class Gemma3nAudioInputs(TensorSchema):
     """
     Dimensions:
@@ -93,8 +139,12 @@ class Gemma3nAudioInputs(TensorSchema):
     """
 
     type: Literal["audio"] = "audio"
-    input_features_padded: Annotated[torch.Tensor, TensorShape("bn", "s", "f")]
-    input_features_mask: Annotated[torch.Tensor, TensorShape("bn", "s")]
+    input_features_padded: Annotated[
+        torch.Tensor, TensorShape("bn", "s", "f", dynamic_dims={"s"})
+    ]
+    input_features_mask: Annotated[
+        torch.Tensor, TensorShape("bn", "s", dynamic_dims={"s"})
+    ]
 
 
 Gemma3nImageInputs = Gemma3nImagePixelInputs
@@ -422,6 +472,7 @@ class Gemma3nMultimodalEmbedder(nn.Module):
             self.multimodal_hidden_size,
             self.text_hidden_size,
             bias=False,
+            input_is_parallel=False,  # scatter the full-width input internally
         )
 
         self.embedding_post_projection_norm = RMSNorm(
@@ -615,16 +666,13 @@ class Gemma3nForConditionalGeneration(
         audio_input: Gemma3nAudioInputs,
     ) -> list[torch.Tensor]:
         # Run on padded features to enable batching
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features, input_features_mask = batch_audio_features(
+            audio_input["input_features_padded"],
+            audio_input["input_features_mask"],
+        )
         audio_outputs = self.audio_tower(input_features, ~input_features_mask)
-        if isinstance(audio_outputs, tuple):
-            # Transformers v4
-            audio_encodings, audio_mask = audio_outputs
-        else:
-            # Transformers v5
-            audio_encodings = audio_outputs.last_hidden_state
-            audio_mask = audio_outputs.audio_mel_mask
+        audio_encodings = audio_outputs.last_hidden_state
+        audio_mask = audio_outputs.audio_mel_mask
         audio_features = self.embed_audio(inputs_embeds=audio_encodings)
 
         # The Gemma3nProcessor expects all audio will be 30s in length and
@@ -636,10 +684,18 @@ class Gemma3nForConditionalGeneration(
         # We handle both cases:
         # - If fewer tokens: pad with the embedding of the last vocab token
         # - If more tokens: truncate to the expected count
-        # TODO precompute and cache padding
-        audio_padding_toks = torch.tensor(
-            [[self.vocab_size - 1]], dtype=torch.long, device=audio_features.device
-        )
+        # Cache the single-scalar padding-token tensor per-device to avoid a
+        # synchronous H2D tensor construction on every forward.
+        cache = getattr(self, "_audio_padding_toks_cache", None)
+        if cache is None:
+            cache = {}
+            self._audio_padding_toks_cache = cache
+        audio_padding_toks = cache.get(audio_features.device)
+        if audio_padding_toks is None:
+            audio_padding_toks = async_tensor_h2d(
+                [[self.vocab_size - 1]], dtype=torch.long, device=audio_features.device
+            )
+            cache[audio_features.device] = audio_padding_toks
         audio_padding_embs = self.embed_audio(input_ids=audio_padding_toks)
         audio_features = torch.where(
             audio_mask.unsqueeze(-1), audio_padding_embs, audio_features
@@ -770,21 +826,17 @@ class Gemma3nForConditionalGeneration(
             raise ValueError(f"Unsupported modality: {modality}")
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
-        model_config: ModelConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """
         Gemma3n supports "free-form" transcription.
         We fix its prompt here to standardize transcriptions/translations
         requests.
         """
+        audio = stt_params.audio
+        stt_config = stt_params.stt_config
+        language = stt_params.language
+        task_type = stt_params.task_type
+        to_language = stt_params.to_language
         # Transcribe this audio [into <>] | for transcription
         # Translate this audio [from <> into <>] | for translation
         prompt = "<start_of_turn>user\n"

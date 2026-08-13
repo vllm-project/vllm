@@ -11,13 +11,13 @@ import os
 import pathlib
 import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
-from dataclasses import MISSING, dataclass, field, fields, is_dataclass
+from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, get_type_hints, overload
 
 import torch
 from pydantic import ConfigDict
-from pydantic.dataclasses import dataclass as pydantic_dataclass
+from pydantic.dataclasses import dataclass
 from pydantic.fields import Field as PydanticField
 from pydantic.fields import FieldInfo
 from typing_extensions import dataclass_transform, runtime_checkable
@@ -34,6 +34,18 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
+
+
+@overload
+@dataclass_transform(field_specifiers=(PydanticField,))
+def config(cls: type[ConfigT]) -> type[ConfigT]: ...
+
+
+@overload
+@dataclass_transform(field_specifiers=(PydanticField,))
+def config(
+    *, config: ConfigDict | None = None, **kwargs: Any
+) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
 
 
 @dataclass_transform(field_specifiers=(PydanticField,))
@@ -59,7 +71,7 @@ def config(
         merged_config.update(config)
 
     def decorator(cls: type[ConfigT]) -> type[ConfigT]:
-        return pydantic_dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
+        return dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
 
     # Called with arguments: @config(config=...)
     if cls is None:
@@ -191,26 +203,62 @@ class SupportsHash(Protocol):
     def compute_hash(self) -> str: ...
 
 
+_config_hash_cache: dict[int, str] = {}
+
+
+def compute_hash_cached(config: SupportsHash) -> str:
+    """Cache config.compute_hash() by object identity.
+
+    Config objects (ModelConfig, etc.) are long-lived singletons that never
+    mutate after construction, but compute_hash() is expensive (JSON
+    serialization + SHA-256).  This utility avoids recomputing the hash on
+    every forward pass while keeping a single consistent key type for all
+    lookup paths.
+    """
+    key = id(config)
+    result = _config_hash_cache.get(key)
+    if result is None:
+        result = config.compute_hash()
+        _config_hash_cache[key] = result
+    return result
+
+
 class SupportsMetricsInfo(Protocol):
     def metrics_info(self) -> dict[str, str]: ...
 
 
-def update_config(config: ConfigT, overrides: dict[str, Any]) -> ConfigT:
-    processed_overrides = {}
+def update_config(config: ConfigT, overrides: Mapping[str, Any]) -> ConfigT:
+    return _update_config(config, overrides, type(config).__name__)
+
+
+def _update_config(
+    config: ConfigT, overrides: Mapping[str, Any], config_path: str
+) -> ConfigT:
+    processed_overrides: dict[str, Any] = {}
+    field_types = get_type_hints(type(config))
     for field_name, value in overrides.items():
-        assert hasattr(config, field_name), (
-            f"{type(config)} has no field `{field_name}`"
-        )
+        field_path = f"{config_path}.{field_name}"
+        if not hasattr(config, field_name):
+            raise ValueError(f"{field_path} is not a valid config field")
+
         current_value = getattr(config, field_name)
-        if is_dataclass(current_value) and not is_dataclass(value):
-            assert isinstance(value, dict), (
-                f"Overrides to {type(config)}.{field_name} must be a dict"
-                f"  or {type(current_value)}, but got {type(value)}"
-            )
-            value = update_config(
-                current_value,  # type: ignore[type-var]
-                value,
-            )
+        if is_dataclass(current_value):
+            expected_type = field_types[field_name]
+            if isinstance(value, Mapping):
+                value = _update_config(
+                    current_value,  # type: ignore[type-var]
+                    value,
+                    field_path,
+                )
+            elif not isinstance(value, expected_type):
+                expected_type_name = getattr(
+                    expected_type, "__name__", str(expected_type)
+                )
+                raise ValueError(
+                    f"Override for {field_path} must be a mapping or "
+                    f"{expected_type_name}, got {type(value).__name__}"
+                )
+
         processed_overrides[field_name] = value
     return replace(config, **processed_overrides)
 
@@ -267,6 +315,18 @@ def normalize_value(x):
         except Exception:
             return str(x)
 
+    # PretrainedConfig (must be before dataclass branch as these are now dataclasses)
+    if hasattr(x, "to_json_string") and callable(x.to_json_string):
+        try:
+            return x.to_json_string()
+        except (TypeError, ValueError):
+            # to_json_string() may fail for trust-remote-code configs
+            # with non-JSON-serializable nested objects. Fall back to
+            # normalizing the dict representation recursively.
+            if hasattr(x, "to_dict") and callable(x.to_dict):
+                return normalize_value(x.to_dict())
+            raise
+
     # Dataclasses: represent as (FQN, sorted(field,value) tuple) for stability.
     if is_dataclass(x):
         type_fqn = f"{x.__class__.__module__}.{x.__class__.__qualname__}"
@@ -283,10 +343,6 @@ def normalize_value(x):
         return tuple(sorted(repr(normalize_value(v)) for v in x))
     if isinstance(x, Sequence) and not isinstance(x, (str, bytes, bytearray)):
         return tuple(normalize_value(v) for v in x)
-
-    # PretrainedConfig
-    if hasattr(x, "to_json_string") and callable(x.to_json_string):
-        return x.to_json_string()
 
     # Unsupported type: e.g., modules, generators, open files, or objects
     # without a stable JSON/UUID representation. Hard-error to avoid

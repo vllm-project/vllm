@@ -10,7 +10,7 @@ embeddings for visual document retrieval.
 import pytest
 import torch
 
-from vllm.entrypoints.pooling.score.utils import compute_maxsim_score
+from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
 MODEL_NAME = "ModernVBERT/colmodernvbert-merged"
 COLBERT_DIM = 128

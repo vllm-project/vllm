@@ -3,18 +3,15 @@
 
 from fastapi import FastAPI
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
 def register_vllm_serve_api_routers(app: FastAPI):
-    if envs.VLLM_SERVER_DEV_MODE:
-        logger.warning(
-            "SECURITY WARNING: Development endpoints are enabled! "
-            "This should NOT be used in production!"
-        )
+    from .instrumentator import register_instrumentator_api_routers
+
+    register_instrumentator_api_routers(app)
 
     from vllm.entrypoints.serve.lora.api_router import (
         attach_router as attach_lora_router,
@@ -28,11 +25,11 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_profile_router(app)
 
-    from vllm.entrypoints.serve.sleep.api_router import (
-        attach_router as attach_sleep_router,
+    from vllm.entrypoints.serve.tokenize.api_router import (
+        attach_router as attach_tokenize_router,
     )
 
-    attach_sleep_router(app)
+    attach_tokenize_router(app)
 
     from vllm.entrypoints.serve.checkpoint.api_router import (
         attach_router as attach_checkpoint_router,
@@ -44,20 +41,30 @@ def register_vllm_serve_api_routers(app: FastAPI):
         attach_router as attach_rpc_router,
     )
 
-    attach_rpc_router(app)
-
-    from vllm.entrypoints.serve.cache.api_router import (
-        attach_router as attach_cache_router,
+def register_vllm_dev_api_routers(app: FastAPI):
+    logger.warning(
+        "SECURITY WARNING: Development endpoints are enabled! "
+        "This should NOT be used in production!"
     )
+
+    from .dev.cache.api_router import attach_router as attach_cache_router
 
     attach_cache_router(app)
 
-    from vllm.entrypoints.serve.tokenize.api_router import (
-        attach_router as attach_tokenize_router,
+    from .dev.rlhf.api_router import attach_router as attach_rlhf_router
+
+    attach_rlhf_router(app)
+
+    from .dev.rpc.api_router import attach_router as attach_rpc_router
+
+    attach_rpc_router(app)
+
+    from .dev.server_info.api_router import (
+        attach_router as attach_server_info_router,
     )
 
-    attach_tokenize_router(app)
+    attach_server_info_router(app)
 
-    from .instrumentator import register_instrumentator_api_routers
+    from .dev.sleep.api_router import attach_router as attach_sleep_router
 
-    register_instrumentator_api_routers(app)
+    attach_sleep_router(app)

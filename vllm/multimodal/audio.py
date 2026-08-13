@@ -17,14 +17,14 @@ except ImportError:
     av = PlaceholderModule("av")  # type: ignore[assignment]
 
 try:
-    import resampy
-except ImportError:
-    resampy = PlaceholderModule("resampy")  # type: ignore[assignment]
-
-try:
     import scipy.signal as scipy_signal
 except ImportError:
     scipy_signal = PlaceholderModule("scipy").placeholder_attr("signal")  # type: ignore[assignment]
+
+try:
+    import soxr as soxr
+except ImportError:
+    soxr = PlaceholderModule("soxr")  # type: ignore[assignment]
 
 
 # ============================================================
@@ -229,26 +229,49 @@ def resample_audio_pyav(
     return result[:expected_len]
 
 
-def resample_audio_resampy(
-    audio: npt.NDArray[np.floating],
-    *,
-    orig_sr: float,
-    target_sr: float,
-) -> npt.NDArray[np.floating]:
-    return resampy.resample(audio, sr_orig=orig_sr, sr_new=target_sr)
-
-
 def resample_audio_scipy(
     audio: npt.NDArray[np.floating],
     *,
     orig_sr: float,
     target_sr: float,
 ) -> npt.NDArray[np.floating]:
-    if orig_sr > target_sr:
-        return scipy_signal.resample_poly(audio, 1, orig_sr // target_sr)
-    elif orig_sr < target_sr:
-        return scipy_signal.resample_poly(audio, target_sr // orig_sr, 1)
-    return audio
+    orig_sr_int = int(round(orig_sr))
+    target_sr_int = int(round(target_sr))
+
+    if orig_sr_int == target_sr_int:
+        return audio
+
+    gcd = math.gcd(orig_sr_int, target_sr_int)
+    return scipy_signal.resample_poly(
+        audio,
+        target_sr_int // gcd,
+        orig_sr_int // gcd,
+        axis=-1,
+    )
+
+
+def resample_audio_soxr(
+    audio: npt.NDArray[np.floating],
+    *,
+    orig_sr: float,
+    target_sr: float,
+) -> npt.NDArray[np.floating]:
+    orig_sr_int = int(round(orig_sr))
+    target_sr_int = int(round(target_sr))
+
+    if orig_sr_int == target_sr_int:
+        return audio
+
+    if audio.ndim == 2:
+        return np.stack(
+            [
+                resample_audio_soxr(ch, orig_sr=orig_sr, target_sr=target_sr)
+                for ch in audio
+            ],
+            axis=0,
+        )
+
+    return soxr.resample(audio, orig_sr_int, target_sr_int)
 
 
 class AudioResampler:
@@ -257,7 +280,7 @@ class AudioResampler:
     def __init__(
         self,
         target_sr: float | None = None,
-        method: Literal["pyav", "resampy", "scipy"] = "resampy",
+        method: Literal["pyav", "scipy", "soxr"] = "pyav",
     ):
         self.target_sr = target_sr
         self.method = method
@@ -281,18 +304,16 @@ class AudioResampler:
             return audio
         if self.method == "pyav":
             return resample_audio_pyav(audio, orig_sr=orig_sr, target_sr=self.target_sr)
-        if self.method == "resampy":
-            return resample_audio_resampy(
-                audio, orig_sr=orig_sr, target_sr=self.target_sr
-            )
         elif self.method == "scipy":
             return resample_audio_scipy(
                 audio, orig_sr=orig_sr, target_sr=self.target_sr
             )
+        elif self.method == "soxr":
+            return resample_audio_soxr(audio, orig_sr=orig_sr, target_sr=self.target_sr)
         else:
             raise ValueError(
                 f"Invalid resampling method: {self.method}. "
-                "Supported methods are 'pyav' and 'scipy'."
+                "Supported methods are 'pyav', 'scipy', and 'soxr'."
             )
 
 
@@ -315,8 +336,8 @@ def split_audio(
     for splitting.
 
     Args:
-        audio_data: Audio array to split. Can be 1D (mono) or multi-dimensional.
-                   Splits along the last dimension (time axis).
+        audio_data: 1D mono audio array to split. ASR models consume mono, so
+                   callers must downmix before chunking.
         sample_rate: Sample rate of the audio in Hz.
         max_clip_duration_s: Maximum duration of each chunk in seconds.
         overlap_duration_s: Overlap duration in seconds between consecutive chunks.
@@ -324,8 +345,10 @@ def split_audio(
         min_energy_window_size: Window size in samples for finding low-energy regions.
 
     Returns:
-        List of audio chunks. Each chunk is a numpy array with the same shape
-        as the input except for the last (time) dimension.
+        List of 1D audio chunks.
+
+    Raises:
+        AssertionError: If ``audio_data`` is not 1D.
 
     Example:
         >>> audio = np.random.randn(1040000)  # 65 seconds at 16kHz
@@ -339,6 +362,11 @@ def split_audio(
         >>> len(chunks)
         3
     """
+    if audio_data.ndim > 1:
+        raise ValueError(
+            f"split_audio expects mono audio, got shape {audio_data.shape}"
+        )
+
     chunk_size = int(sample_rate * max_clip_duration_s)
     overlap_size = int(sample_rate * overlap_duration_s)
     chunks = []
@@ -356,6 +384,11 @@ def split_audio(
         split_point = find_split_point(
             audio_data, search_start, search_end, min_energy_window_size
         )
+
+        # Guarantee forward progress: if split_point didn't advance,
+        # fall back to the hard chunk boundary.
+        if split_point <= i:
+            split_point = min(i + chunk_size, audio_data.shape[-1])
 
         # Extract chunk up to the split point
         chunks.append(audio_data[..., i:split_point])
@@ -376,7 +409,7 @@ def find_split_point(
     RMS energy in sliding windows.
 
     Args:
-        wav: Audio array. Can be 1D or multi-dimensional.
+        wav: 1D mono audio array.
         start_idx: Start index of search region (inclusive).
         end_idx: End index of search region (exclusive).
         min_energy_window: Window size in samples for energy calculation.
@@ -402,12 +435,12 @@ def find_split_point(
 
     # Calculate RMS energy in small windows
     min_energy = math.inf
-    quietest_idx = 0
+    quietest_idx = start_idx
 
     for i in range(0, len(segment) - min_energy_window, min_energy_window):
         window = segment[i : i + min_energy_window]
         energy = (window**2).mean() ** 0.5
-        if energy < min_energy:
+        if not math.isnan(energy) and energy < min_energy:
             quietest_idx = i + start_idx
             min_energy = energy
 

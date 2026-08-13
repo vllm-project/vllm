@@ -25,6 +25,7 @@ from torch import nn
 from vllm.config import PoolerConfig, VllmConfig
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 from .bert import BertEmbeddingModel, BertModel
 from .interfaces import HasInnerState, IsHybrid, SupportsLateInteraction
@@ -217,38 +218,12 @@ class ColBERTModel(ColBERTMixin, BertEmbeddingModel):
         return self._build_colbert_pooler(pooler_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        def _strip(name: str) -> str:
-            for p in ("model.", "bert."):
-                if name.startswith(p):
-                    name = name[len(p) :]
-            return name
-
-        weights_list = list(weights)
-        model_side: list[tuple[str, torch.Tensor]] = []
-        colbert_side: list[tuple[str, torch.Tensor]] = []
-
-        for name, weight in weights_list:
-            stripped = _strip(name)
-            # Handle different checkpoint naming conventions
-            if stripped in ("linear.weight", "colbert_linear.weight"):
-                colbert_side.append(("colbert_linear.weight", weight))
-            elif stripped.startswith("linear.") or stripped.startswith(
-                "colbert_linear."
-            ):
-                new_name = stripped.replace("linear.", "colbert_linear.")
-                colbert_side.append((new_name, weight))
-            else:
-                model_side.append((stripped, weight))
-
-        loaded: set[str] = set()
-        loaded_model = self.model.load_weights(model_side)
-        loaded.update({"model." + n for n in loaded_model})
-
-        if colbert_side:
-            _, colbert_loaded = self._load_colbert_weights(colbert_side)
-            loaded.update(colbert_loaded)
-
-        return loaded
+        other_weights, colbert_loaded = self._load_colbert_weights(weights)
+        # Force "bert." to become "model."
+        mapper = WeightsMapper(orig_to_new_prefix={"bert.": "model."})
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(other_weights, mapper=mapper)
+        return loaded | colbert_loaded
 
 
 # -----------------------------------------------------------------------
@@ -309,18 +284,14 @@ class ColBERTModernBertModel(ColBERTMixin, nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        # Strip "model." prefix added by the embedding adapter
-        model_weights = [
-            (n[len("model.") :] if n.startswith("model.") else n, w)
-            for n, w in other_weights
-        ]
+        loaded_model = self.model.load_weights(other_weights)
+        loaded = {f"model.{name}" for name in loaded_model} | colbert_loaded
 
-        loaded_model = self.model.load_weights(model_weights)
-        loaded = {"model." + n for n in loaded_model} | colbert_loaded
-
-        # When the ST projector was auto-loaded during init
-        # (not from the main checkpoint), mark its params as loaded
-        # so the weight validator doesn't complain.
+        # When the ST projector is loaded via `_build_colbert_pooler`, the weights
+        # might come from `colbert_loaded` or the pooler automatically falls back to
+        # load from `/1_Dense` etc.
+        # We need to mark its params as loaded so the weight validator doesn't complain
+        # when they are loaded via fallback.
         if hasattr(self.pooler, "head"):
             head = self.pooler.head
             projector = getattr(head, "projector", None)
@@ -385,36 +356,15 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        weights_list = list(weights)
-        model_side: list[tuple[str, torch.Tensor]] = []
-        colbert_side: list[tuple[str, torch.Tensor]] = []
+        other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        for name, weight in weights_list:
-            stripped = name
-            # Strip "model." prefix added by the embedding adapter
-            if stripped.startswith("model."):
-                stripped = stripped[len("model.") :]
-            # Strip "roberta." prefix from checkpoint
-            if stripped.startswith("roberta."):
-                stripped = stripped[len("roberta.") :]
+        mapper = WeightsMapper(orig_to_new_prefix={"roberta.": "model."})
 
-            if stripped in ("linear.weight", "colbert_linear.weight"):
-                colbert_side.append(("colbert_linear.weight", weight))
-            elif stripped.startswith("pooler."):
-                # Skip HF pooler weights (not used in ColBERT)
-                continue
-            else:
-                model_side.append((stripped, weight))
+        # Skip HF pooler weights (model.pooler.*) as they not used in ColBERT
+        loader = AutoWeightsLoader(self, skip_prefixes=["model.pooler."])
 
-        loaded: set[str] = set()
-        loaded_model = self.model.load_weights(model_side)
-        loaded.update({"model." + n for n in loaded_model})
-
-        if colbert_side:
-            _, colbert_loaded = self._load_colbert_weights(colbert_side)
-            loaded.update(colbert_loaded)
-
-        return loaded
+        loaded = loader.load_weights(other_weights, mapper=mapper)
+        return loaded | colbert_loaded
 
 
 # -----------------------------------------------------------------------
@@ -491,17 +441,15 @@ class ColBERTLfm2Model(ColBERTMixin, nn.Module, HasInnerState, IsHybrid):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        # Strip "model." prefix added by the embedding adapter
-        model_weights = [
-            (n[len("model.") :] if n.startswith("model.") else n, w)
-            for n, w in other_weights
-        ]
-        loaded_model = self.model.load_weights(model_weights)
+        loaded_model = self.model.load_weights(other_weights)
+
         loaded = {f"model.{name}" for name in loaded_model} | colbert_loaded
 
-        # When the ST projector was auto-loaded during init
-        # (not from the main checkpoint), mark its params as loaded
-        # so the weight validator doesn't complain.
+        # When the ST projector is loaded via `_build_colbert_pooler`, the weights
+        # might come from `colbert_loaded` or the pooler automatically falls back to
+        # load from `/1_Dense` etc.
+        # We need to mark its params as loaded so the weight validator doesn't complain
+        # when they are loaded via fallback.
         if hasattr(self.pooler, "head"):
             head = self.pooler.head
             projector = getattr(head, "projector", None)

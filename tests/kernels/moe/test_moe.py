@@ -14,8 +14,6 @@ import pytest
 import torch
 from torch.nn import Parameter
 from torch.nn import functional as F
-from transformers import MixtralConfig
-from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.moe.utils import (
@@ -24,22 +22,27 @@ from tests.kernels.moe.utils import (
     modular_triton_fused_moe,
 )
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.parallel_state import init_distributed_environment
-from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
     fused_topk,
+)
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    apply_moe_activation,
+    apply_moe_activation_supported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_use_td_hw_supported,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
@@ -56,11 +59,13 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
-from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.triton_utils import tl
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.worker.workspace import init_workspace_manager
+
+DEVICE_TYPE = current_platform.device_type
 
 
 def iterative_moe(
@@ -149,6 +154,14 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
     {
         "a_type": [scalar_types.bfloat16],
         "b_type": scalar_types.float4_e2m1f,
+        "c_type": [scalar_types.bfloat16],
+        "group_blocks": [2],
+    },
+    # MXFP8
+    {
+        "a_type": [scalar_types.bfloat16],
+        "b_type": scalar_types.float8_e4m3fn,
+        "c_type": [scalar_types.bfloat16],
         "group_blocks": [2],
     },
     # AWQ-INT4 with INT8 activation
@@ -287,6 +300,7 @@ def run_moe_test(
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
+@pytest.mark.parametrize("use_td", [False, True])
 def test_fused_moe(
     m: int,
     n: int,
@@ -296,9 +310,19 @@ def test_fused_moe(
     ep_size: int,
     dtype: torch.dtype,
     padding: bool,
+    use_td: bool,
     monkeypatch,
     workspace_init,
 ):
+    if use_td and not hasattr(tl, "make_tensor_descriptor"):
+        pytest.skip("Triton < 3.6 lacks tl.make_tensor_descriptor")
+    if use_td and not moe_use_td_hw_supported():
+        pytest.skip(
+            "tensor_descriptor.gather requires XPU or NVIDIA Blackwell "
+            "(sm100+); lowers to tile::gather4 (tcgen05/TMEM), which ptxas "
+            "rejects on Hopper (sm90) and earlier"
+        )
+    monkeypatch.setenv("VLLM_TRITON_USE_TD", "1" if use_td else "0")
     set_random_seed(7)
 
     #
@@ -309,17 +333,17 @@ def test_fused_moe(
     # Setup test data
     #
 
-    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device=DEVICE_TYPE, dtype=dtype) / 10
 
-    score = torch.randn((m, e), device="cuda", dtype=dtype)
+    score = torch.randn((m, e), device=DEVICE_TYPE, dtype=dtype)
 
     if ep_size > 1:
         local_e = e // ep_size
-        e_ids = torch.randint(0, e, (local_e,), device="cuda", dtype=torch.int32)
-        e_map = torch.full((e,), -1, device="cuda", dtype=torch.int32)
-        e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
+        e_ids = torch.randint(0, e, (local_e,), device=DEVICE_TYPE, dtype=torch.int32)
+        e_map = torch.full((e,), -1, device=DEVICE_TYPE, dtype=torch.int32)
+        e_map[e_ids] = torch.arange(local_e, device=DEVICE_TYPE, dtype=torch.int32)
         w1 = w1[e_ids]
         w2 = w2[e_ids]
     else:
@@ -404,7 +428,7 @@ def test_fused_moe_int64_overflow(workspace_init):
     Reproduces the scenario from PR #34279.
     """
     # ~12 GB GPU memory needed for intermediate caches
-    free_mem = torch.cuda.mem_get_info()[0]
+    free_mem = torch.accelerator.get_memory_info()[0]
     if free_mem < 12 * 1024**3:
         pytest.skip("Insufficient GPU memory for overflow test")
 
@@ -551,6 +575,10 @@ def test_naive_block_assignment_moe(
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("has_zp", [True, False])
 @pytest.mark.parametrize("weight_bits", [4, 8])
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="MoE WNA16 Triton kernels require CUDA/ROCm or XPU.",
+)
 def test_fused_moe_wn16(
     m: int,
     n: int,
@@ -563,10 +591,10 @@ def test_fused_moe_wn16(
     has_zp: bool,
     weight_bits: int,
 ):
-    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-    score = torch.randn((m, e), device="cuda", dtype=dtype)
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device=DEVICE_TYPE, dtype=dtype) / 10
+    score = torch.randn((m, e), device=DEVICE_TYPE, dtype=dtype)
 
     if weight_bits == 4:
         pack_factor = 2
@@ -578,16 +606,22 @@ def test_fused_moe_wn16(
     w1_ref = w1.clone()
     w2_ref = w2.clone()
     w1_qweight = torch.empty(
-        (e, 2 * n, k // pack_factor), device="cuda", dtype=torch.uint8
+        (e, 2 * n, k // pack_factor), device=DEVICE_TYPE, dtype=torch.uint8
     )
-    w2_qweight = torch.empty((e, k, n // pack_factor), device="cuda", dtype=torch.uint8)
-    w1_scales = torch.empty((e, 2 * n, k // group_size), device="cuda", dtype=dtype)
-    w2_scales = torch.empty((e, k, n // group_size), device="cuda", dtype=dtype)
+    w2_qweight = torch.empty(
+        (e, k, n // pack_factor), device=DEVICE_TYPE, dtype=torch.uint8
+    )
+    w1_scales = torch.empty(
+        (e, 2 * n, k // group_size), device=DEVICE_TYPE, dtype=dtype
+    )
+    w2_scales = torch.empty((e, k, n // group_size), device=DEVICE_TYPE, dtype=dtype)
     w1_qzeros = torch.empty(
-        (e, 2 * n // pack_factor, k // group_size), device="cuda", dtype=torch.uint8
+        (e, 2 * n // pack_factor, k // group_size),
+        device=DEVICE_TYPE,
+        dtype=torch.uint8,
     )
     w2_qzeros = torch.empty(
-        (e, k // pack_factor, n // group_size), device="cuda", dtype=torch.uint8
+        (e, k // pack_factor, n // group_size), device=DEVICE_TYPE, dtype=torch.uint8
     )
 
     for i in range(e * 2):
@@ -629,9 +663,9 @@ def test_fused_moe_wn16(
 
     if ep_size > 1:
         local_e = e // ep_size
-        e_ids = torch.randint(0, e, (local_e,), device="cuda", dtype=torch.int32)
-        e_map = torch.full((e,), -1, device="cuda", dtype=torch.int32)
-        e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
+        e_ids = torch.randint(0, e, (local_e,), device=DEVICE_TYPE, dtype=torch.int32)
+        e_map = torch.full((e,), -1, device=DEVICE_TYPE, dtype=torch.int32)
+        e_map[e_ids] = torch.arange(local_e, device=DEVICE_TYPE, dtype=torch.int32)
         w1_ref = w1_ref[e_ids]
         w2_ref = w2_ref[e_ids]
         w1_qweight = w1_qweight[e_ids]
@@ -674,154 +708,35 @@ def test_fused_moe_wn16(
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("padding", [True, False])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
-)
-@torch.inference_mode()
-def test_mixtral_moe(
-    default_vllm_config,
-    dist_init,
-    dtype: torch.dtype,
-    padding: bool,
-    use_rocm_aiter: bool,
-    monkeypatch,
-):
-    """Make sure our Mixtral MoE implementation agrees with the one from
-    huggingface."""
-
-    # Explicitly set AITER env var based on test parameter to ensure
-    # consistent behavior regardless of external environment
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
-    rocm_aiter_ops.refresh_env_variables()
-
-    if use_rocm_aiter and dtype == torch.float32:
-        pytest.skip("AITER ROCm test skip for float32")
-
-    monkeypatch.setenv("RANK", "0")
-    monkeypatch.setenv("LOCAL_RANK", "0")
-    monkeypatch.setenv("WORLD_SIZE", "1")
-    monkeypatch.setenv("MASTER_ADDR", "localhost")
-    monkeypatch.setenv("MASTER_PORT", "12345")
-    init_distributed_environment()
-    init_workspace_manager(torch.accelerator.current_device_index())
-
-    # Instantiate our and huggingface's MoE blocks
-    vllm_config.compilation_config.static_forward_context = dict()
-    with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
-        config = MixtralConfig()
-        hf_moe = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
-        vllm_moe = MixtralMoE(
-            num_experts=config.num_local_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            params_dtype=dtype,
-            tp_size=1,
-            dp_size=1,
-        ).cuda()
-
-        # Load the weights
-        vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
-        if isinstance(hf_moe.experts, torch.nn.ModuleList):
-            # Transformers v4
-            for i in range(config.num_local_experts):
-                weights = (
-                    hf_moe.experts[i].w1.weight.data,
-                    hf_moe.experts[i].w3.weight.data,
-                )
-                vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
-                vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
-        else:
-            # Transformers v5
-            vllm_moe.experts.w13_weight.data[:] = hf_moe.experts.gate_up_proj.data
-            vllm_moe.experts.w2_weight.data[:] = hf_moe.experts.down_proj.data
-            # TODO: remove this line after https://github.com/huggingface/transformers/pull/43622
-            hf_moe.experts.config._experts_implementation = "eager"
-
-        # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
-        hf_inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")
-        # vLLM uses 1D query [num_tokens, hidden_dim]
-        vllm_inputs = hf_inputs.flatten(0, 1)
-
-        # Pad the weight if moe padding is enabled
-        if padding:
-            vllm_moe.experts.w13_weight = Parameter(
-                F.pad(vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[
-                    ..., 0:-128
-                ],
-                requires_grad=False,
-            )
-            vllm_moe.experts.w2_weight = Parameter(
-                F.pad(vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
-                requires_grad=False,
-            )
-            torch.accelerator.synchronize()
-            torch.accelerator.empty_cache()
-
-        # FIXME (zyongye) fix this after we move self.kernel
-        # assignment in FusedMoE.__init__
-
-        vllm_moe.experts.quant_method.process_weights_after_loading(vllm_moe.experts)
-
-        # need to override the forward context for unittests, otherwise it assumes
-        # we're running the model forward pass (the model specified in vllm_config)
-        get_forward_context().all_moe_layers = None
-
-        # Run forward passes for both MoE blocks
-        hf_states = hf_moe.forward(hf_inputs)
-        if isinstance(hf_states, tuple):
-            # Transformers v4
-            hf_states = hf_states[0]
-        vllm_states = vllm_moe.forward(vllm_inputs)
-
-    mixtral_moe_tol = {
-        torch.float32: 1e-3,
-        torch.float16: 1e-3,
-        torch.bfloat16: 1e-2,
-    }
-
-    if use_rocm_aiter:
-        # The values of rtol and atol are set based on the tests in ROCM AITER package.
-        # https://github.com/ROCm/aiter/blob/dfed377f4be7da96ca2d75ac0761f569676f7240/op_tests/test_moe.py#L174
-        torch.testing.assert_close(
-            hf_states.flatten(0, 1), vllm_states, rtol=0.01, atol=100
-        )
-    else:
-        torch.testing.assert_close(
-            hf_states.flatten(0, 1),
-            vllm_states,
-            rtol=mixtral_moe_tol[dtype],
-            atol=mixtral_moe_tol[dtype],
-        )
+MARLIN_MOE_SCENARIOS = [
+    # (m, n, k, e, topk, ep_size, act_order, is_k_full)
+    # No act_order: is_k_full=True matches usual case (marlin_is_k_full).
+    # N>=256 required for Marlin kernel thread config for MXFP8.
+    # Single token, small matrices
+    (1, 128, 256, 5, 2, 1, False, True),
+    # Single token, large matrices
+    (1, 1024, 2048, 5, 2, 1, False, True),
+    # Unaligned m, small matrices
+    (133, 256, 256, 5, 2, 1, False, True),
+    # Unaligned m, large matrices
+    (133, 1024, 2048, 12, 3, 1, False, True),
+    # Aligned batch, small matrices
+    (128, 256, 256, 5, 2, 1, False, True),
+    # Aligned batch, large matrices
+    (128, 1024, 2048, 12, 3, 1, False, True),
+    # Expert parallelism
+    (64, 1024, 2048, 12, 3, 4, False, True),
+    # Act order with is_k_full=True (no tensor parallelism)
+    (1, 1024, 2048, 5, 2, 1, True, True),
+    # Act order with is_k_full=False (tensor parallelism)
+    (133, 256, 256, 5, 2, 1, True, False),
+]
 
 
 def marlin_moe_generate_valid_test_cases():
     import itertools
 
-    m_list = [1, 123, 666]
-    n_list = [128, 1024]
-    k_list = [256, 2048]
-    e_list = [5, 12]
-    topk_list = [2, 3]
-    ep_size_list = [1, 4]
-    act_order_list = [True, False]
-    is_k_full_list = [True, False]
-
-    all_combinations = itertools.product(
-        MOE_MARLIN_QUANT_TEST_CONFIGS,
-        m_list,
-        n_list,
-        k_list,
-        e_list,
-        topk_list,
-        ep_size_list,
-        act_order_list,
-        is_k_full_list,
-    )
-
-    def is_invalid(
+    def is_valid(
         a_type,
         b_type,
         c_type,
@@ -838,39 +753,43 @@ def marlin_moe_generate_valid_test_cases():
         group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
         if group_size > 0 and k % group_size != 0:
             return False
-
         if act_order and group_size in [-1, k, n]:
             return False
         if group_size in [k, n]:
             return False
-        if not act_order and is_k_full:
+        if b_type == scalar_types.float8_e4m3fn and group_size == 32 and is_k_full:
             return False
-
         return a_type.size_bits < 16 or a_type is c_type
 
     cases = []
-    for case in all_combinations:
-        quant_test_config, m, n, k, _, _, _, act_order, *_ = case
-        if act_order and not quant_test_config.get("support_act_order", False):
-            continue
-
+    for quant_test_config in MOE_MARLIN_QUANT_TEST_CONFIGS:
         f16_types = [scalar_types.float16]
-        inner_combinations = itertools.product(
-            quant_test_config.get("a_type", f16_types),
-            [quant_test_config["b_type"]],
-            quant_test_config.get("c_type", f16_types),
-            quant_test_config["group_blocks"],
+        inner_combinations = list(
+            itertools.product(
+                quant_test_config.get("a_type", f16_types),
+                [quant_test_config["b_type"]],
+                quant_test_config.get("c_type", f16_types),
+                quant_test_config["group_blocks"],
+            )
         )
+
+        supports_act_order = quant_test_config.get("support_act_order", False)
 
         for sub_case in inner_combinations:
             if (
                 sub_case[0] == scalar_types.float8_e4m3fn
-                and current_platform.get_device_capability() not in [89, 120]
+                and not current_platform.is_device_capability(89)
+                and not current_platform.is_device_capability_family(120)
             ):
                 continue
-            args = sub_case + (m, n, k) + case[4:]
-            if is_invalid(*args):
-                cases.append(args)
+
+            for scenario in MARLIN_MOE_SCENARIOS:
+                m, n, k, e, topk, ep_size, act_order, is_k_full = scenario
+                if act_order and not supports_act_order:
+                    continue
+                args = sub_case + (m, n, k, e, topk, ep_size, act_order, is_k_full)
+                if is_valid(*args):
+                    cases.append(args)
     return cases
 
 
@@ -1011,6 +930,7 @@ class MarlinMoEWeightData:
     marlin_moe_generate_valid_test_cases(),
 )
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+@pytest.mark.usefixtures("default_vllm_config")
 def test_fused_marlin_moe(
     a_type: ScalarType,
     b_type: ScalarType,
@@ -1025,7 +945,7 @@ def test_fused_marlin_moe(
     act_order: bool,
     is_k_full: bool,
 ):
-    torch.cuda.manual_seed(1)
+    set_random_seed(1)
     group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
 
     if c_type == scalar_types.float16:
@@ -1091,6 +1011,23 @@ def test_fused_marlin_moe(
             per_act_token_quant=True,
         )
 
+    def instance_activation(
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        *,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
+    ) -> None:
+        apply_moe_activation(
+            activation,
+            output,
+            input,
+            activation_config=ApplyMoEActivationConfig(),
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+
     marlin_output = fused_marlin_moe(
         a,
         w1_data.qweight,
@@ -1116,6 +1053,7 @@ def test_fused_marlin_moe(
         input_dtype=a_dtype,
         quant_type_id=b_type.id,
         is_k_full=is_k_full,
+        activation_func=instance_activation,
     )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=4e-2, rtol=0)
@@ -1123,9 +1061,10 @@ def test_fused_marlin_moe(
 
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+@pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("m", [1, 256])
 def test_fused_marlin_moe_with_bias(m):
-    torch.cuda.manual_seed(0)
+    set_random_seed(0)
 
     e, topk = 32, 4
     n, k = 2048, 2048
@@ -1195,6 +1134,7 @@ def test_fused_marlin_moe_with_bias(m):
 
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+@pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("m", [1, 64, 256])
 @pytest.mark.parametrize("n,k", [(1024, 1024), (2048, 2048)])
 @pytest.mark.parametrize("e,topk", [(8, 2), (64, 4)])
@@ -1207,7 +1147,7 @@ def test_fused_marlin_moe_non_gated(
     Non-gated activations like relu2 don't have the gate-up projection pattern,
     so w1 has shape (e, n, k) instead of (e, 2*n, k).
     """
-    torch.cuda.manual_seed(42)
+    set_random_seed(42)
 
     group_size = 16  # NVFP4 group size
     is_k_full = True
@@ -1273,6 +1213,215 @@ def test_fused_marlin_moe_non_gated(
     )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=1e-1, rtol=0)
+
+
+def _make_humming_indexed_experts(activation: MoEActivation):
+    pytest.importorskip("humming")
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingIndexedExperts,
+    )
+    from vllm.model_executor.layers.quantization.utils import humming_utils
+    from vllm.utils import humming
+
+    top_k, num_experts = 6, 12
+    hidden_size, intermediate_size = 2688, 1856
+    gate_up_size = intermediate_size * 2 if activation.is_gated else intermediate_size
+    num_w13_stacks = 2 if activation.is_gated else 1
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=top_k,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        activation=activation,
+    )
+
+    layer = torch.nn.Module()
+    layer.moe_config = moe_config
+    layer.params_dtype = torch.bfloat16
+
+    weight_schema = humming.ModeloptNvfp4WeightSchema()
+    for sublayer_name, shape_n, shape_k, stack_size in (
+        ("w13", gate_up_size, hidden_size, num_w13_stacks),
+        ("w2", hidden_size, intermediate_size, 1),
+    ):
+        tensor_attrs = weight_schema.get_tensors_attrs(
+            shape_n=shape_n,
+            shape_k=shape_k,
+            param_dtype=layer.params_dtype,
+            num_experts=num_experts,
+            stack_size=stack_size,
+        )
+        for tensor_name, attrs in tensor_attrs.items():
+            layer.register_parameter(
+                f"{sublayer_name}_{tensor_name}",
+                Parameter(
+                    torch.ones(
+                        attrs["shape"],
+                        dtype=attrs["dtype"],
+                        device="cuda",
+                    ),
+                    requires_grad=False,
+                ),
+            )
+
+    humming_utils.convert_to_humming_moe_kernel_format(
+        layer,
+        weight_schema=weight_schema,
+        input_schema=humming.HummingInputSchema(a_dtype=humming.dtypes.bfloat16),
+    )
+
+    layer.local_num_experts = layer.global_num_experts = num_experts
+    layer.hidden_size = hidden_size
+    layer.intermediate_size_per_partition = intermediate_size
+    quant_config = humming_utils.get_humming_moe_quant_config(layer)
+    experts = HummingIndexedExperts(
+        moe_config=moe_config,
+        quant_config=quant_config,
+    )
+    return experts, layer
+
+
+@pytest.mark.parametrize("activation", list(MoEActivation))
+def test_humming_activation_metadata_tracks_shared_apply(activation: MoEActivation):
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    assert HummingExpertsBase._supports_activation(
+        activation
+    ) == apply_moe_activation_supported(activation)
+
+
+def test_humming_delegates_to_instance_activation():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    activation_func = Mock()
+    activation_config = ApplyMoEActivationConfig(
+        clamp_limit=7.0,
+        alpha=1.5,
+        beta=0.25,
+        activation_situ_beta=2.0,
+        activation_situ_linear_beta=3.0,
+    )
+    experts = SimpleNamespace(
+        activation=activation_func,
+        activation_config=activation_config,
+    )
+    input = torch.empty(1, 2)
+    output = torch.empty(1, 1)
+
+    HummingExpertsBase.apply_activation(
+        experts, MoEActivation.SWIGLUOAI_UNINTERLEAVE, output, input
+    )
+
+    activation_func.assert_called_once_with(
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        input=input,
+        output=output,
+    )
+
+
+@pytest.mark.parametrize(
+    "activation",
+    [
+        MoEActivation.SILU,
+        MoEActivation.RELU2_NO_MUL,
+    ],
+    ids=["gated", "non_gated"],
+)
+def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
+    from vllm.utils import humming
+
+    experts, layer = _make_humming_indexed_experts(activation)
+    moe_config = experts.moe_config
+    top_k = moe_config.experts_per_token
+    num_experts = moe_config.num_experts
+    hidden_size = moe_config.hidden_dim
+    intermediate_size = moe_config.intermediate_size
+    gate_up_size = intermediate_size * 2 if activation.is_gated else intermediate_size
+
+    w13_meta, w2_meta = (experts.humming_configs[name] for name in ("w13", "w2"))
+    for meta in (w13_meta, w2_meta):
+        assert meta.a_dtype == humming.dtypes.bfloat16
+        assert meta.b_dtype == humming.dtypes.float4e2m1
+
+    assert w13_meta.shape_n - w13_meta.pad_shape_n == gate_up_size
+    assert w2_meta.shape_k - w2_meta.pad_shape_k == intermediate_size
+
+    buffer_metas, _ = experts.get_buffer_metas(
+        M=1,
+        topk=top_k,
+        activation=moe_config.activation,
+    )
+    assert buffer_metas["gate_up_output"]["shape"][-1] == gate_up_size
+    assert buffer_metas["activation_output"]["shape"][-1] == intermediate_size
+    assert experts.moe_problem_size(
+        a1=torch.empty(1, hidden_size),
+        w1=torch.empty(num_experts, 1),
+        w2=torch.empty(num_experts, 1),
+        topk_ids=torch.empty(1, top_k, dtype=torch.long),
+    ) == (num_experts, 1, intermediate_size, hidden_size, top_k)
+
+
+def test_humming_indexed_writes_supplied_output_buffer():
+    from vllm.forward_context import set_forward_context
+
+    activation = MoEActivation.SILU
+    experts, layer = _make_humming_indexed_experts(activation)
+    moe_config = experts.moe_config
+    num_tokens = 1
+    top_k = moe_config.experts_per_token
+    hidden_size = moe_config.hidden_dim
+    num_experts = moe_config.num_experts
+    workspace13_shape, workspace2_shape, _ = experts.workspace_shapes(
+        M=num_tokens,
+        N=moe_config.intermediate_size,
+        K=hidden_size,
+        topk=top_k,
+        global_num_experts=num_experts,
+        local_num_experts=num_experts,
+        expert_tokens_meta=None,
+        activation=activation,
+    )
+
+    device = torch.device("cuda")
+    dtype = layer.params_dtype
+    workspace13 = torch.empty(workspace13_shape, dtype=dtype, device=device)
+    workspace2 = torch.empty(workspace2_shape, dtype=dtype, device=device)
+    hidden_states = torch.ones((num_tokens, hidden_size), dtype=dtype, device=device)
+    output = torch.full_like(hidden_states, torch.nan)
+    topk_weights = torch.full(
+        (num_tokens, top_k),
+        1 / top_k,
+        dtype=dtype,
+        device=device,
+    )
+    topk_ids = torch.arange(top_k, dtype=torch.int32, device=device).unsqueeze(0)
+    with set_forward_context(None, vllm_config, num_tokens=num_tokens):
+        experts.apply(
+            output=output,
+            hidden_states=hidden_states,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=num_experts,
+            expert_map=None,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+
+    assert torch.isfinite(output).all()
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
@@ -1353,15 +1502,27 @@ def test_batched_moe_align_block_size_opcheck():
     )
 
 
+# topk=8 covers topk > 4; k=511 covers the non-vectorized scalar path. The
+# layouts exercise contiguous input plus the two non-contiguous cases: a
+# transpose (strided hidden -> scalar gather) and a topk-slice (hidden still
+# contiguous -> vectorized).
 @pytest.mark.parametrize("m", [1, 33, 222])
-@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("topk", [*TOP_KS, 8])
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
-    input = torch.randn((m, topk, k), device="cuda", dtype=dtype)
+@pytest.mark.parametrize("layout", ["contig", "transpose", "slice"])
+def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype, layout: str):
+    if layout == "transpose":
+        input = torch.randn((m, k, topk), device="cuda", dtype=dtype).transpose(1, 2)
+    elif layout == "slice":
+        input = torch.randn((m, 2 * topk, k), device="cuda", dtype=dtype)[:, ::2, :]
+    else:
+        input = torch.randn((m, topk, k), device="cuda", dtype=dtype)
+    assert input.is_contiguous() == (layout == "contig")
     actual = torch.empty((m, k), device="cuda", dtype=dtype)
 
-    expected = input.sum(dim=1)
+    # Reduction accumulates in fp32.
+    expected = input.float().sum(dim=1).to(dtype)
     torch.ops._moe_C.moe_sum(input, actual)
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
@@ -1369,115 +1530,122 @@ def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
     opcheck(torch.ops._moe_C.moe_sum, (input, actual))
 
 
-@pytest.mark.usefixtures("default_vllm_config")
-@pytest.mark.parametrize("m", [1, 33])
-@pytest.mark.parametrize("n,k", [(128, 128)])
-@pytest.mark.parametrize("e", [8])
-@pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("topk", [2, 8])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("with_bias", [False, True])
-@pytest.mark.parametrize("activation", [MoEActivation.SILU])
-@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only test")
-def test_cpu_fused_moe_basic(
+@pytest.mark.parametrize("topk_ids_dtype", [torch.int32, torch.int64])
+def test_moe_sum_pad_aware(topk: int, dtype: torch.dtype, topk_ids_dtype: torch.dtype):
+    m, k = 17, 128
+    input = torch.randn((m, topk, k), device="cuda", dtype=dtype)
+
+    topk_ids = torch.randint(0, 4, (m, topk), device="cuda", dtype=topk_ids_dtype)
+    # Force some slots unrouted, independent of expert parallelism.
+    topk_ids[0, :] = -1
+    topk_ids[1, 0] = -1
+
+    expert_map = torch.tensor([0, -1, 1, -1], device="cuda", dtype=torch.int32)
+
+    actual = torch.empty((m, k), device="cuda", dtype=dtype)
+    torch.ops._moe_C.moe_sum(input, actual, topk_ids, expert_map)
+
+    routed = expert_map[topk_ids.clamp(min=0).long()] >= 0
+    routed &= topk_ids >= 0
+    expected = (input.float() * routed.unsqueeze(-1)).sum(dim=1).to(dtype)
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
+
+    opcheck(torch.ops._moe_C.moe_sum, (input, actual, topk_ids, expert_map))
+
+
+def _batched_fused_marlin_moe_cases() -> list[Any]:
+    cases = [
+        pytest.param(
+            m,
+            128,
+            128,
+            e,
+            topk,
+            max_tokens_per_batch,
+            torch.bfloat16,
+            scalar_types.float4_e2m1f,
+            None,
+            1e-3,
+            id=(
+                f"m{m}-n128-k128-e{e}-topk{topk}-max_tokens{max_tokens_per_batch}-mxfp4"
+            ),
+        )
+        for m in [16, 32, 64]
+        for e in [8, 12, 16, 32]
+        for topk in [2, 4]
+        for max_tokens_per_batch in [16, 32, 64]
+    ]
+    cases.append(
+        pytest.param(
+            32,
+            128,
+            128,
+            8,
+            2,
+            64,
+            torch.float16,
+            scalar_types.uint4,
+            scalar_types.int8,
+            4e-2,
+            id="awq-int8-activation-metadata",
+        )
+    )
+    return cases
+
+
+@pytest.mark.parametrize(
+    ("m,n,k,e,topk,max_tokens_per_batch,dtype,quant_dtype,input_type,atol"),
+    _batched_fused_marlin_moe_cases(),
+)
+@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+def test_batched_fused_marlin_moe(
     m: int,
     n: int,
     k: int,
     e: int,
     topk: int,
+    max_tokens_per_batch: int,
     dtype: torch.dtype,
-    with_bias: bool,
-    activation: MoEActivation,
-):
-    from vllm.model_executor.layers.fused_moe.cpu_fused_moe import CPUFusedMOE
-
-    device = "cpu"
-    torch.manual_seed(7)
-
-    a = torch.randn((m, k), device=device, dtype=dtype) / 10
-    w13 = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device=device, dtype=dtype) / 10
-    router_logits = torch.randn((m, e), device=device, dtype=dtype)
-
-    b1 = b2 = None
-    if with_bias:
-        b1 = torch.randn((e, 2 * n), device=device, dtype=dtype) / 10
-        b2 = torch.randn((e, k), device=device, dtype=dtype) / 10
-
-    ref = (
-        torch_moe(a, w13, w2, router_logits, topk, b1, b2)
-        if with_bias
-        else torch_moe(a, w13, w2, router_logits, topk)
-    )
-
-    class _Dummy(torch.nn.Module):
-        def __init__(self, w13, w2, b1=None, b2=None):
-            super().__init__()
-            self.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
-            self.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
-            if b1 is not None:
-                self.w13_bias = torch.nn.Parameter(b1, requires_grad=False)
-            if b2 is not None:
-                self.w2_bias = torch.nn.Parameter(b2, requires_grad=False)
-
-    layer = _Dummy(w13, w2, b1, b2).to(dtype)
-    fused = CPUFusedMOE(layer)
-    out = fused(
-        layer=layer,
-        x=a,
-        use_grouped_topk=False,
-        top_k=topk,
-        router_logits=router_logits,
-        renormalize=False,
-        global_num_experts=e,
-        expert_map=None,
-        custom_routing_function=None,
-        scoring_func="softmax",
-        routed_scaling_factor=1.0,
-        e_score_correction_bias=None,
-        apply_router_weight_on_input=False,
-        activation=activation,
-    )
-
-    # Tolerances: fp32 tight; bf16 looser (esp. with bias)
-    if dtype == torch.float32:
-        atol = 1e-3
-    elif with_bias:
-        atol = 8e-2
-    else:
-        atol = 5e-2
-    torch.testing.assert_close(out, ref, atol=atol, rtol=0)
-
-
-@pytest.mark.parametrize("m", [16, 32, 64])
-@pytest.mark.parametrize("n", [128])
-@pytest.mark.parametrize("k", [128])
-@pytest.mark.parametrize("e", [8, 12, 16, 32])
-@pytest.mark.parametrize("topk", [2, 4])
-@pytest.mark.parametrize("max_tokens_per_batch", [16, 32, 64])
-@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
-def test_batched_fused_marlin_moe(
-    m: int, n: int, k: int, e: int, topk: int, max_tokens_per_batch: int
+    quant_dtype: ScalarType,
+    input_type: ScalarType | None,
+    atol: float,
 ):
     print(
         f"testing m={m}, n={n}, k={k}, e={e}, "
         f"topk={topk}, "
-        f"max_tokens_per_batch={max_tokens_per_batch}"
+        f"max_tokens_per_batch={max_tokens_per_batch}, "
+        f"dtype={dtype}, quant_dtype={quant_dtype}, input_type={input_type}"
     )
-    torch.cuda.manual_seed(0)
+    set_random_seed(0)
 
-    dtype = torch.bfloat16
-    quant_dtype = scalar_types.float4_e2m1f
     group_size = 32
+    if input_type == scalar_types.int8:
+        input_dtype = torch.int8
+    elif input_type == scalar_types.float8_e4m3fn:
+        input_dtype = torch.float8_e4m3fn
+    else:
+        input_dtype = None
 
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 20
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 20
 
     w1_data = MarlinMoEWeightData.make(
-        w=w1, quant_type=quant_dtype, group_size=group_size, act_order=None
+        w=w1,
+        quant_type=quant_dtype,
+        group_size=group_size,
+        act_order=None,
+        input_type=input_type,
     )
     w2_data = MarlinMoEWeightData.make(
-        w=w2, quant_type=quant_dtype, group_size=group_size, act_order=None
+        w=w2,
+        quant_type=quant_dtype,
+        group_size=group_size,
+        act_order=None,
+        input_type=input_type,
     )
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
@@ -1597,6 +1765,12 @@ def test_batched_fused_marlin_moe(
         "quant_type_id": quant_dtype.id,
         "is_k_full": True,
     }
+    if input_dtype is not None:
+        kwargs["input_dtype"] = input_dtype
+        if w1_data.a_scales_factor is not None:
+            kwargs["input_global_scale1"] = w1_data.a_scales_factor
+        if w2_data.a_scales_factor is not None:
+            kwargs["input_global_scale2"] = w2_data.a_scales_factor
 
     # Reference
     fused_marlin_moe_kwargs = kwargs | {
@@ -1612,7 +1786,7 @@ def test_batched_fused_marlin_moe(
         pytest.skip("Cannot represent data in Batched Format.")
     marlin_output = br.run(a, kwargs)
 
-    torch.testing.assert_close(marlin_output, ref_marlin_output, atol=1e-3, rtol=0)
+    torch.testing.assert_close(marlin_output, ref_marlin_output, atol=atol, rtol=0)
 
 
 @pytest.mark.parametrize("m,n,k", [(32, 1024, 1024)])
@@ -1629,15 +1803,12 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
     e: int,
     topk: int,
     dtype: torch.dtype,
-    monkeypatch,
     workspace_init,
 ):
     """
     Test BF16 unquantized MoE with FlashInfer TRTLLM backend.
     """
     set_random_seed(7)
-
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
 
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEConfig,
@@ -1661,16 +1832,16 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         num_experts=e,
         experts_per_token=topk,
         hidden_dim=k,
-        intermediate_size_per_partition=n,
+        intermediate_size=n,
         num_local_experts=e,
         num_logical_experts=e,
-        activation="silu",
+        activation=MoEActivation.SILU,
         device="cuda",
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=dtype,
-        is_act_and_mul=True,
         routing_method=RoutingMethodType.Renormalize,
-        max_num_tokens=m,
+        max_num_tokens=next_power_of_2(m),
+        moe_backend="flashinfer_trtllm",
     )
 
     with set_current_vllm_config(vllm_config):
@@ -1695,13 +1866,25 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         layer.topk_group = 1
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
-        layer.activation = "silu"
+        layer.activation = MoEActivation.SILU
         layer.e_score_correction_bias = None
         layer.routing_method_type = RoutingMethodType.Renormalize
+        layer.expert_map = None
+        layer.apply_router_weight_on_input = False
+        layer.routed_scaling_factor = 2.446
+        layer.shared_experts = None
+        layer._expert_routing_tables = lambda: None
 
         quant_method.process_weights_after_loading(layer)
 
-        trtllm_output = quant_method.forward_monolithic_cuda(
+        assert quant_method.moe_kernel is not None, (
+            "moe_kernel should be set after process_weights_after_loading"
+        )
+        assert quant_method.supports_internal_mk, (
+            "supports_internal_mk should be True after setup"
+        )
+
+        trtllm_output = quant_method.apply_monolithic(
             layer=layer,
             x=a,
             router_logits=router_logits,
@@ -1710,7 +1893,10 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         # Compute torch baseline
         w1_original = w1.clone()
         w2_original = w2.clone()
-        baseline_output = torch_moe(a, w1_original, w2_original, router_logits, topk)
+        baseline_output = (
+            torch_moe(a, w1_original, w2_original, router_logits, topk)
+            * layer.routed_scaling_factor
+        )
 
     close = torch.isclose(trtllm_output, baseline_output, atol=1e-1, rtol=0.85)
     assert close.float().mean() > 0.925

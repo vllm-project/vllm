@@ -3,9 +3,11 @@
 """Pydantic models for Anthropic API protocol"""
 
 import time
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+import vllm.envs as envs
 
 
 class AnthropicError(BaseModel):
@@ -39,6 +41,7 @@ class AnthropicContentBlock(BaseModel):
         "image",
         "tool_use",
         "tool_result",
+        "tool_reference",
         "thinking",
         "redacted_thinking",
     ]
@@ -52,6 +55,8 @@ class AnthropicContentBlock(BaseModel):
     input: dict[str, Any] | None = None
     content: str | list[dict[str, Any]] | None = None
     is_error: bool | None = None
+    # For tool_reference content
+    tool_name: str | None = None
     # For thinking content
     thinking: str | None = None
     signature: str | None = None
@@ -62,7 +67,7 @@ class AnthropicContentBlock(BaseModel):
 class AnthropicMessage(BaseModel):
     """Message structure"""
 
-    role: Literal["user", "assistant"]
+    role: Literal["user", "assistant", "system"]
     content: str | list[AnthropicContentBlock]
 
 
@@ -72,6 +77,8 @@ class AnthropicTool(BaseModel):
     name: str
     description: str | None = None
     input_schema: dict[str, Any]
+    strict: bool | None = None
+    defer_loading: bool | None = None
 
     @field_validator("input_schema")
     @classmethod
@@ -88,12 +95,27 @@ class AnthropicToolChoice(BaseModel):
 
     type: Literal["auto", "any", "tool", "none"]
     name: str | None = None
+    disable_parallel_tool_use: bool | None = None
 
     @model_validator(mode="after")
     def validate_name_required_for_tool(self) -> "AnthropicToolChoice":
         if self.type == "tool" and not self.name:
             raise ValueError("tool_choice.name is required when type is 'tool'")
         return self
+
+
+class AnthropicJsonOutputFormat(BaseModel):
+    """JSON output format configuration"""
+
+    json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
+    type: Literal["json_schema"] = "json_schema"
+
+
+class AnthropicOutputConfig(BaseModel):
+    """Configuration options for the model's output, such as the output format."""
+
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    format: AnthropicJsonOutputFormat | None = None
 
 
 class AnthropicMessagesRequest(BaseModel):
@@ -103,7 +125,10 @@ class AnthropicMessagesRequest(BaseModel):
     messages: list[AnthropicMessage]
     max_tokens: int
     metadata: dict[str, Any] | None = None
-    stop_sequences: list[str] | None = None
+    output_config: AnthropicOutputConfig | None = None
+    stop_sequences: (
+        Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
+    ) = None
     stream: bool | None = False
     system: str | list[AnthropicContentBlock] | None = None
     temperature: float | None = None
@@ -113,9 +138,34 @@ class AnthropicMessagesRequest(BaseModel):
     top_p: float | None = None
 
     # vLLM-specific fields that are not in Anthropic spec
+    cache_salt: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
+    )
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
+        ),
     )
 
     @field_validator("model")
@@ -191,6 +241,9 @@ class AnthropicMessagesResponse(BaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="ECTransfer parameters."
+    )
 
     def model_post_init(self, __context):
         if not self.id:
@@ -211,6 +264,15 @@ class AnthropicCountTokensRequest(BaseModel):
     system: str | list[AnthropicContentBlock] | None = None
     tool_choice: AnthropicToolChoice | None = None
     tools: list[AnthropicTool] | None = None
+
+    # vLLM-specific fields that are not in Anthropic spec
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
+        ),
+    )
 
     @field_validator("model")
     @classmethod

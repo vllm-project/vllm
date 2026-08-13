@@ -3,6 +3,7 @@
 
 from collections.abc import Callable, Hashable
 from fractions import Fraction
+from typing import Any
 from weakref import WeakValueDictionary
 
 import torch
@@ -42,10 +43,9 @@ class BasevLLMParameter(Parameter):
         """
         Initialize the BasevLLMParameter
 
-        :param data: torch tensor with the parameter data
-        :param weight_loader: weight loader callable
-
-        :returns: a torch.nn.parameter
+        Args:
+            data: torch tensor with the parameter data
+            weight_loader: weight loader callable
         """
 
         # During weight loading, we often do something like:
@@ -154,8 +154,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         self.data.copy_(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        shard_offset = kwargs.get("shard_offset")
-        shard_size = kwargs.get("shard_size")
+        shard_offset: int = kwargs["shard_offset"]
+        shard_size: int = kwargs["shard_size"]
 
         # TODO: move these to PackedColumnParameter and PackedvLLMParameter
         if (
@@ -176,10 +176,10 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data.copy_(loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        shard_offset = kwargs.get("shard_offset")
-        shard_size = kwargs.get("shard_size")
-        shard_id = kwargs.get("shard_id")
-        num_heads = kwargs.get("num_heads")
+        shard_offset: int = kwargs["shard_offset"]
+        shard_size: int = kwargs["shard_size"]
+        shard_id: str = kwargs["shard_id"]
+        num_heads: int = kwargs["num_heads"]
 
         # TODO: move these to PackedColumnParameter and PackedvLLMParameter
         if (
@@ -191,10 +191,10 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             )
 
         param_data = self.data
-        shard_id = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
+        shard_id_int = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
         loaded_weight = loaded_weight.narrow(
-            self.output_dim, shard_id * shard_size, shard_size
+            self.output_dim, shard_id_int * shard_size, shard_size
         )
 
         assert param_data.shape == loaded_weight.shape
@@ -445,15 +445,16 @@ class SharedWeightParameter(BasevLLMParameter):
                 "currently support tensor parallelism"
             )
 
-    def add_partition(self, index: int, data_key: Hashable, *args, **kwargs):
+    def add_partition(self, index: int, data_key: Hashable, *args: Any, **kwargs: Any):
         """
         Add a partition to the weight parameter. Partitions whose `data_key`
         is the same will share tensor data
 
-        :param index: index of partition to add
-        :param data_key: hashable key used to key shared tensors
-        :param *args: arguments for `torch.empty`
-        :param **kwargs: keyword arguments for `torch.empty`
+        Args:
+            index: index of partition to add
+            data_key: hashable key used to key shared tensors
+            *args: arguments for `torch.empty`
+            **kwargs: keyword arguments for `torch.empty`
         """
         # load (shared) tensor using `data_key`
         if data_key not in self.tensors_registry:
@@ -605,8 +606,8 @@ def _adjust_shard_indexes_for_marlin(shard_size, shard_offset, marlin_tile_size)
 def _adjust_shard_indexes_for_packing(
     shard_size, shard_offset, packed_factor, marlin_tile_size
 ):
-    shard_size = shard_size // packed_factor
-    shard_offset = shard_offset // packed_factor
+    shard_size = round(shard_size // packed_factor)
+    shard_offset = round(shard_offset // packed_factor)
     if marlin_tile_size is not None:
         return _adjust_shard_indexes_for_marlin(
             shard_size=shard_size,

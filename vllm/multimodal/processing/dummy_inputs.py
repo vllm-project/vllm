@@ -14,9 +14,9 @@ from vllm.config.multimodal import (
     ImageDummyOptions,
     VideoDummyOptions,
 )
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 
-from ..inputs import MultiModalDataDict
 from .context import BaseProcessingInfo
 from .inputs import ProcessorInputs
 
@@ -118,8 +118,9 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         width: int,
         height: int,
         num_images: int,
-        overrides: ImageDummyOptions | None = None,
+        overrides: BaseDummyOptions | None = None,
     ) -> list[Image.Image]:
+        assert overrides is None or isinstance(overrides, ImageDummyOptions)
         if num_images == 0:
             return []
         if overrides:

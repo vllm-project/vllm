@@ -48,12 +48,12 @@ def _check_dense_embedding(data, index=0):
 def _check_sparse_embedding(data, check_tokens=False):
     expected_weights = [
         {"token_id": 32, "weight": 0.0552978515625, "token": "?"},
-        {"token_id": 70, "weight": 0.09808349609375, "token": "the"},
-        {"token_id": 83, "weight": 0.08154296875, "token": "is"},
-        {"token_id": 111, "weight": 0.11810302734375, "token": "of"},
-        {"token_id": 4865, "weight": 0.1171875, "token": "What"},
-        {"token_id": 9942, "weight": 0.292236328125, "token": "France"},
-        {"token_id": 10323, "weight": 0.2802734375, "token": "capital"},
+        {"token_id": 70, "weight": 0.09808349609375, "token": " the"},
+        {"token_id": 83, "weight": 0.08154296875, "token": " is"},
+        {"token_id": 111, "weight": 0.11810302734375, "token": " of"},
+        {"token_id": 4865, "weight": 0.1171875, "token": " What"},
+        {"token_id": 9942, "weight": 0.292236328125, "token": " France"},
+        {"token_id": 10323, "weight": 0.2802734375, "token": " capital"},
     ]
     expected_embed = {x["token_id"]: x for x in expected_weights}
 
@@ -102,7 +102,7 @@ async def test_bge_m3_sparse_plugin_online(
     """Test BGE-M3 sparse plugin in online mode via API."""
     request_payload = {
         "model": model_config["model_name"],
-        "task": "token_classify",
+        "task": "plugin",
         "data": {"input": model_config["test_input"], "return_tokens": return_tokens},
     }
 
@@ -166,7 +166,7 @@ def test_bge_m3_sparse_plugin_offline(vllm_runner, return_tokens: bool):
         default_torch_num_threads=1,
     ) as llm_runner:
         llm = llm_runner.get_llm()
-        pooler_output = llm.encode(prompt, pooling_task="token_classify")
+        pooler_output = llm.encode(prompt, pooling_task="plugin")
 
     outputs = pooler_output[0]
 
@@ -213,7 +213,7 @@ def test_bge_m3_sparse_plugin_offline_multiple_inputs(vllm_runner):
         default_torch_num_threads=1,
     ) as llm_runner:
         llm = llm_runner.get_llm()
-        pooler_output = llm.encode(prompts, pooling_task="token_classify")
+        pooler_output = llm.encode(prompts, pooling_task="plugin")
 
     outputs = pooler_output[0]
 

@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 import requests
 
-from tests.utils import ROCM_ENV_OVERRIDES, RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 from tests.v1.utils import check_request_balancing
 from vllm.platforms import current_platform
 
@@ -186,7 +186,6 @@ class MultinodeInternalLBServerManager:
                         auto_port=False,
                         env_dict={
                             "VLLM_SERVER_DEV_MODE": "1",
-                            **ROCM_ENV_OVERRIDES,
                             current_platform.device_control_env_var: ",".join(
                                 str(current_platform.device_id_to_physical_device_id(i))
                                 for i in range(r, r + gpus_per_node)
@@ -228,13 +227,13 @@ class MultinodeInternalLBServerManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Stop all server instances."""
-        while self.servers:
-            if server := self.servers.pop():
-                try:
-                    server[0].__exit__(exc_type, exc_val, exc_tb)
-                except Exception as e:
-                    print(f"Error stopping server: {e}")
-                    traceback.print_exc()
+        servers = [entry[0] for entry in self.servers if entry is not None]
+        self.servers.clear()
+        try:
+            RemoteOpenAIServer.shutdown_many(servers)
+        except Exception as e:
+            print(f"Error stopping servers: {e}")
+            traceback.print_exc()
 
 
 class APIOnlyServerManager:
@@ -308,7 +307,6 @@ class APIOnlyServerManager:
                     auto_port=False,
                     env_dict={
                         "VLLM_SERVER_DEV_MODE": "1",
-                        **ROCM_ENV_OVERRIDES,
                         # No GPUs needed for API-only server
                     },
                 )
@@ -329,7 +327,6 @@ class APIOnlyServerManager:
                     engines_server_args,
                     auto_port=False,
                     env_dict={
-                        **ROCM_ENV_OVERRIDES,
                         current_platform.device_control_env_var: ",".join(
                             str(current_platform.device_id_to_physical_device_id(i))
                             for i in range(self.dp_size * self.tp_size)
@@ -370,13 +367,13 @@ class APIOnlyServerManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Stop both server instances."""
-        while self.servers:
-            if server := self.servers.pop():
-                try:
-                    server[0].__exit__(exc_type, exc_val, exc_tb)
-                except Exception as e:
-                    print(f"Error stopping server: {e}")
-                    traceback.print_exc()
+        servers = [entry[0] for entry in self.servers if entry is not None]
+        self.servers.clear()
+        try:
+            RemoteOpenAIServer.shutdown_many(servers)
+        except Exception as e:
+            print(f"Error stopping servers: {e}")
+            traceback.print_exc()
 
 
 @pytest.fixture(scope="module")

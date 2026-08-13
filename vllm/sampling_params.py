@@ -4,14 +4,17 @@
 
 import copy
 import json as json_mod
+import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any
+from typing import Annotated, Any
 
 import msgspec
+from pydantic import BeforeValidator
 from pydantic.dataclasses import dataclass
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -23,6 +26,55 @@ logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
+
+MAX_LOGPROB_TOKEN_IDS = 128
+"""Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
+the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
+
+
+def _verify_num_sequences(value: int, parameter_name: str) -> None:
+    if not isinstance(value, int):
+        raise VLLMValidationError(
+            f"{parameter_name} must be an int, but is of type {type(value)}"
+        )
+    if value < 1:
+        raise VLLMValidationError(f"{parameter_name} must be at least 1, got {value}.")
+    max_n = envs.VLLM_MAX_N_SEQUENCES
+    if value > max_n:
+        raise VLLMValidationError(
+            f"{parameter_name} must be at most {max_n}, got {value}. "
+            "To increase this limit, set the VLLM_MAX_N_SEQUENCES "
+            "environment variable."
+        )
+
+
+def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
+    """Validate ``thinking_token_budget``; return ``None`` if unset."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, float)) or not isinstance(value, int):
+        raise VLLMValidationError(
+            "`thinking_token_budget` must be a non-negative integer "
+            "or -1 for unlimited.",
+            parameter="thinking_token_budget",
+            value=value,
+        )
+    if value == -1:
+        return None
+    if value < 0:
+        raise VLLMValidationError(
+            "`thinking_token_budget` must be a non-negative integer "
+            "or -1 for unlimited.",
+            parameter="thinking_token_budget",
+            value=value,
+        )
+    return value
+
+
+ThinkingTokenBudget = Annotated[
+    int | None,
+    BeforeValidator(validate_thinking_token_budget),
+]
 
 
 class SamplingType(IntEnum):
@@ -64,12 +116,12 @@ class StructuredOutputsParams:
             ]
         )
         if count > 1:
-            raise ValueError(
+            raise VLLMValidationError(
                 "You can only use one kind of structured outputs constraint "
                 f"but multiple are specified: {self.__dict__}"
             )
         if count < 1:
-            raise ValueError(
+            raise VLLMValidationError(
                 "You must use one kind of structured outputs constraint "
                 f"but none are specified: {self.__dict__}"
             )
@@ -130,13 +182,13 @@ class RepetitionDetectionParams:
             or self.min_pattern_size < 0
             or self.min_pattern_size > self.max_pattern_size
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "max_pattern_size, min_pattern_size must be >=0, "
                 "with min_pattern_size <= max_pattern_size. "
                 "Set both to 0 to disable repetitive pattern detection."
             )
         if self.max_pattern_size > 0 and self.min_count < 2:
-            raise ValueError(
+            raise VLLMValidationError(
                 "min_count must be >= 2 to detect repetitive patterns "
                 "in engine output. If you do not wish to detect repetitive "
                 "patterns, set max_pattern_size to 0."
@@ -150,6 +202,14 @@ class RequestOutputKind(Enum):
     DELTA = 1
     # Do not return intermediate RequestOutput
     FINAL_ONLY = 2
+
+
+def _is_non_tekken_mistral(tokenizer: TokenizerLike) -> bool:
+    return is_mistral_tokenizer(tokenizer) and not tokenizer.is_tekken
+
+
+def _get_llg_tokenizer(tokenizer: TokenizerLike) -> Any:
+    return tokenizer.llg_tokenizer if is_mistral_tokenizer(tokenizer) else None
 
 
 class SamplingParams(
@@ -168,6 +228,9 @@ class SamplingParams(
 
     n: int = 1
     """Number of outputs to return for the given prompt request.
+
+    The maximum allowed value is controlled by the ``VLLM_MAX_N_SEQUENCES``
+    environment variable (default: 16384).
 
     NOTE:
         `AsyncLLM` streams outputs by default. When `n > 1`, all `n` outputs
@@ -228,6 +291,12 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    logprob_token_ids: list[int] | None = None
+    """Specific token IDs to return logprobs for. More efficient than
+    logprobs=-1 when you only need logprobs for a small set of tokens.
+    When set, logprobs for exactly these token IDs will be returned,
+    in addition to the sampled token. This is useful for scoring tasks
+    where you want to compare probabilities of specific label tokens."""
     flat_logprobs: bool = False
     """Whether to return logprobs in flatten format (i.e. FlatLogprob)
     for better performance.
@@ -246,6 +315,11 @@ class SamplingParams(
     include_stop_str_in_output: bool = False
     """Whether to include the stop strings in output text."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
+    stream_interval: int | None = None
+    """Number of newly generated tokens to batch into each streamed
+    `RequestOutput`. Raises the interval above the engine-level
+    `--stream-interval`. Values below engine setting are clamped up to it.
+    The first and final outputs are always emitted immediately."""
     skip_clone: bool = False
     """Internal flag indicating that this SamplingParams instance is safe to
     reuse without cloning. When True, clone() will return self without
@@ -272,6 +346,13 @@ class SamplingParams(
     """Arbitrary additional args, that can be used by custom sampling
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
+    routed_experts_prompt_start: int = 0
+    """When enable_return_routed_experts is active, skip the first
+    routed_experts_prompt_start prompt tokens from the returned routing
+    data. In multi-turn agent scenarios, set this to the length of the
+    already-returned prefix to avoid duplicating routing for prompt tokens
+    covered by earlier turns. Default 0 returns routing for all prompt
+    tokens."""
 
     # Fields used for bad words
     bad_words: list[str] | None = None
@@ -281,6 +362,8 @@ class SamplingParams(
     _bad_words_token_ids: list[list[int]] | None = None
 
     skip_reading_prefix_cache: bool | None = None
+    thinking_token_budget: int | None = None
+    """Maximum number of tokens allowed for thinking operations."""
 
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
@@ -304,6 +387,7 @@ class SamplingParams(
         stop: str | list[str] | None = None,
         stop_token_ids: list[int] | None = None,
         bad_words: list[str] | None = None,
+        thinking_token_budget: int | None = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: int | None = 16,
@@ -314,20 +398,41 @@ class SamplingParams(
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
+        stream_interval: int | None = None,
         structured_outputs: StructuredOutputsParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
+        logprob_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
-            # Convert token_id to integer
-            # Clamp the bias between -100 and 100 per OpenAI API spec
-            logit_bias = {
-                int(token): min(100.0, max(-100.0, bias))
-                for token, bias in logit_bias.items()
-            }
+            # Fast path uses a dict comprehension; on failure we iterate once
+            # to identify the exact offending entry for the error message.
+            try:
+                logit_bias = {
+                    int(token): min(100.0, max(-100.0, bias))
+                    for token, bias in logit_bias.items()
+                }
+            except (ValueError, TypeError):
+                invalid_keys = []
+                converted_logit_bias = {}
+                for token, bias in logit_bias.items():
+                    try:
+                        token_id = int(token)
+                    except (ValueError, TypeError):
+                        invalid_keys.append(token)
+                        continue
+                    converted_logit_bias[token_id] = min(100.0, max(-100.0, bias))
+                if invalid_keys:
+                    raise VLLMValidationError(
+                        f"logit_bias contains key(s) that cannot be "
+                        f"converted to integer token IDs: {invalid_keys!r}",
+                        parameter="logit_bias",
+                        value=invalid_keys,
+                    ) from None
+                logit_bias = converted_logit_bias
 
         return SamplingParams(
             n=1 if n is None else n,
@@ -344,16 +449,19 @@ class SamplingParams(
             stop=stop,
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
+            thinking_token_budget=thinking_token_budget,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
             min_tokens=min_tokens,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
+            logprob_token_ids=logprob_token_ids,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
             output_kind=output_kind,
+            stream_interval=stream_interval,
             structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
@@ -376,6 +484,10 @@ class SamplingParams(
         if self.seed == -1:
             self.seed = None
 
+        self.thinking_token_budget = validate_thinking_token_budget(
+            self.thinking_token_budget
+        )
+
         if self.stop is None:
             self.stop = []
         elif isinstance(self.stop, str):
@@ -383,9 +495,13 @@ class SamplingParams(
 
         if self.stop_token_ids is None:
             self.stop_token_ids = []
+        else:
+            self.stop_token_ids = list(dict.fromkeys(self.stop_token_ids))
 
         if self.bad_words is None:
             self.bad_words = []
+        else:
+            self.bad_words = list(dict.fromkeys(self.bad_words))
 
         if self.logprobs is True:
             self.logprobs = 1
@@ -417,26 +533,40 @@ class SamplingParams(
             self.skip_reading_prefix_cache = self.prompt_logprobs is not None
 
     def _verify_args(self) -> None:
-        if not isinstance(self.n, int):
-            raise ValueError(f"n must be an int, but is of type {type(self.n)}")
-        if self.n < 1:
-            raise ValueError(f"n must be at least 1, got {self.n}.")
+        _verify_num_sequences(self.n, "n")
         if not -2.0 <= self.presence_penalty <= 2.0:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
             )
         if not -2.0 <= self.frequency_penalty <= 2.0:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"frequency_penalty must be in [-2, 2], got {self.frequency_penalty}."
             )
+        if not math.isfinite(self.repetition_penalty):
+            raise VLLMValidationError(
+                "repetition_penalty must be a finite number, "
+                f"got {self.repetition_penalty}."
+            )
         if self.repetition_penalty <= 0.0:
-            raise ValueError(
+            raise VLLMValidationError(
                 "repetition_penalty must be greater than zero, got "
                 f"{self.repetition_penalty}."
+            )
+        if not math.isfinite(self.temperature):
+            raise VLLMValidationError(
+                f"temperature must be a finite number, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
             )
         if self.temperature < 0.0:
             raise VLLMValidationError(
                 f"temperature must be non-negative, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
+            )
+        if self.temperature > 2.0:
+            raise VLLMValidationError(
+                f"temperature must be in [0, 2], got {self.temperature}.",
                 parameter="temperature",
                 value=self.temperature,
             )
@@ -448,15 +578,15 @@ class SamplingParams(
             )
         # quietly accept -1 as disabled, but prefer 0
         if self.top_k < -1:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"top_k must be 0 (disable), or at least 1, got {self.top_k}."
             )
         if not isinstance(self.top_k, int):
-            raise TypeError(
+            raise VLLMValidationError(
                 f"top_k must be an integer, got {type(self.top_k).__name__}"
             )
         if not 0.0 <= self.min_p <= 1.0:
-            raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
+            raise VLLMValidationError(f"min_p must be in [0, 1], got {self.min_p}.")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise VLLMValidationError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.",
@@ -464,13 +594,19 @@ class SamplingParams(
                 value=self.max_tokens,
             )
         if self.min_tokens < 0:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
             )
         if self.max_tokens is not None and self.min_tokens > self.max_tokens:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"min_tokens must be less than or equal to "
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}."
+            )
+        if self.stream_interval is not None and self.stream_interval < 1:
+            raise VLLMValidationError(
+                f"stream_interval must be at least 1, got {self.stream_interval}.",
+                parameter="stream_interval",
+                value=self.stream_interval,
             )
         if self.logprobs is not None and self.logprobs != -1 and self.logprobs < 0:
             raise VLLMValidationError(
@@ -491,21 +627,29 @@ class SamplingParams(
             )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"stop_token_ids must contain only integers, got {self.stop_token_ids}."
             )
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
-            raise ValueError("stop cannot contain an empty string.")
+            raise VLLMValidationError("stop cannot contain an empty string.")
         if self.stop and not self.detokenize:
-            raise ValueError(
+            raise VLLMValidationError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
+            )
+        assert isinstance(self.bad_words, list)
+        if any(not bad_word for bad_word in self.bad_words):
+            raise VLLMValidationError(
+                f"bad_words cannot contain an empty string. "
+                f"Got bad_words={self.bad_words}"
             )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
-            raise ValueError(f"n must be 1 when using greedy sampling, got {self.n}.")
+            raise VLLMValidationError(
+                f"n must be 1 when using greedy sampling, got {self.n}."
+            )
 
     def update_from_generation_config(
         self,
@@ -541,6 +685,7 @@ class SamplingParams(
         if not self.bad_words:
             return
         self._bad_words_token_ids = []
+        max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
         for bad_word in self.bad_words:
             # To prohibit words both at the beginning
             # and in the middle of text
@@ -560,6 +705,14 @@ class SamplingParams(
                     and len(prompt_token_ids) == len(self._bad_words_token_ids[-1])
                 ):
                     self._bad_words_token_ids.append(prompt_token_ids)
+                    if len(self._bad_words_token_ids) > max_num_bad_words:
+                        raise VLLMValidationError(
+                            f"Too many bad words after tokenization: "
+                            f"{len(self._bad_words_token_ids)}. "
+                            f"The max number is {max_num_bad_words}.",
+                            parameter="bad_words",
+                            value=self.bad_words,
+                        )
 
         invalid_token_ids = [
             token_id
@@ -599,6 +752,16 @@ class SamplingParams(
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
 
+    @property
+    def num_logprobs(self) -> int | None:
+        """Number of sample logprobs to return per output token, or `None` if
+        no sample logprobs were requested. Takes `logprob_token_ids` into
+        account: when `logprobs` is unset but `logprob_token_ids` is set,
+        returns `len(logprob_token_ids)`."""
+        if self.logprobs is not None:
+            return self.logprobs
+        return len(self.logprob_token_ids) if self.logprob_token_ids else None
+
     def clone(self) -> "SamplingParams":
         """If skip_clone is True, uses shallow copy instead of deep copy."""
         if self.skip_clone:
@@ -618,7 +781,10 @@ class SamplingParams(
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
-        self._validate_structured_outputs(structured_outputs_config, tokenizer)
+        self._validate_diffusion(model_config)
+        self._validate_structured_outputs(
+            model_config, structured_outputs_config, tokenizer
+        )
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs
@@ -635,6 +801,39 @@ class SamplingParams(
                     f"which is greater than max allowed: {max_logprobs}",
                     parameter="logprobs",
                     value=num_logprobs,
+                )
+
+        # Validate logprob_token_ids.
+        if self.logprob_token_ids is not None:
+            n = len(self.logprob_token_ids)
+            if n > MAX_LOGPROB_TOKEN_IDS:
+                raise VLLMValidationError(
+                    f"Requested logprob_token_ids of length {n}, "
+                    f"which is greater than max allowed: {MAX_LOGPROB_TOKEN_IDS}",
+                    parameter="logprob_token_ids",
+                    value=n,
+                )
+            vocab_size = model_config.get_vocab_size()
+            invalid_token_ids = [
+                token_id
+                for token_id in self.logprob_token_ids
+                if token_id < 0 or token_id >= vocab_size
+            ]
+            if invalid_token_ids:
+                raise VLLMValidationError(
+                    f"token_id(s) {invalid_token_ids} in logprob_token_ids "
+                    f"contain out-of-vocab token ids. Vocabulary size: "
+                    f"{vocab_size}",
+                    parameter="logprob_token_ids",
+                    value=invalid_token_ids,
+                )
+            if self.logprobs is not None and self.logprobs != n:
+                raise VLLMValidationError(
+                    f"When both logprobs and logprob_token_ids are set, "
+                    f"logprobs must equal len(logprob_token_ids). Got "
+                    f"logprobs={self.logprobs}, len(logprob_token_ids)={n}.",
+                    parameter="logprob_token_ids",
+                    value=n,
                 )
 
         # Validate prompt logprobs.
@@ -709,23 +908,72 @@ class SamplingParams(
         if speculative_config is None:
             return
 
+        # Adaptive verification compacts logits after the forward pass, while
+        # compute_topk_scores uses the scheduled layout in cu_num_logits_np.
+        # TODO(lucas): lift this restriction. The true boundaries exist on device as
+        # cu_num_logits; cu_num_generated_tokens is only read host-side after
+        # the logprobs D2H, so it could ride along on that copy.
+        if (
+            speculative_config.enable_adaptive_verification
+            and self.num_logprobs is not None
+        ):
+            raise ValueError(
+                "Output logprobs are not supported with DSpark confidence-based "
+                "verification."
+            )
+
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
-            raise ValueError(
+            raise VLLMValidationError(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
             )
 
+    def _validate_diffusion(self, model_config: ModelConfig) -> None:
+        if not model_config.is_diffusion:
+            return
+
+        # Diffusion models denoise a whole canvas per step with a fixed
+        # temperature schedule, so per-request sampling parameters are not
+        # supported. Penalties are ignored by the sampler with a warning.
+        if (
+            self.temperature != 1.0
+            or self.min_p > _SAMPLING_EPS
+            or self.seed is not None
+            or self.min_tokens > 0
+            or self.logit_bias
+            or self.bad_words
+            or self.allowed_token_ids
+        ):
+            raise VLLMValidationError(
+                "The temperature, min_p, seed, min_tokens, logit_bias, "
+                "bad_words, and allowed_token_ids sampling parameters "
+                "are not yet supported with diffusion models."
+            )
+
     def _validate_structured_outputs(
         self,
+        model_config: ModelConfig,
         structured_outputs_config: StructuredOutputsConfig | None,
         tokenizer: TokenizerLike | None,
     ) -> None:
         if structured_outputs_config is None or self.structured_outputs is None:
             return
 
+        if model_config.is_diffusion:
+            # Diffusion LLMs denoise a whole canvas of tokens in parallel
+            # rather than sampling left-to-right, which the grammar FSM
+            # requires. Without this check, requests fail mid-generation
+            # with an FSM rejection (HTTP 500). See issue #45436.
+            raise VLLMValidationError(
+                "Structured outputs are not yet supported for diffusion "
+                "language models. Remove the structured output constraint "
+                "(e.g. `response_format`, `structured_outputs`) from the "
+                "request."
+            )
+
         if tokenizer is None:
-            raise ValueError(
+            raise VLLMValidationError(
                 "Structured outputs requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
             )
 
@@ -739,7 +987,7 @@ class SamplingParams(
             if backend != _backend and not (
                 backend == "auto" and self.structured_outputs._backend_was_auto
             ):
-                raise ValueError(
+                raise VLLMValidationError(
                     "Request-level structured output backend selection is not "
                     f"supported. The request specified '{_backend}', but vLLM "
                     f"was initialised with '{backend}'. This error can be "
@@ -754,7 +1002,7 @@ class SamplingParams(
             and not self.structured_outputs.choice
         ):
             # It is invalid for choice to be an empty list
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Choice '{self.structured_outputs.choice}' cannot be an empty list"  # noqa: E501
             )
         # Reject empty string grammar early to avoid engine-side crashes
@@ -762,7 +1010,23 @@ class SamplingParams(
             isinstance(self.structured_outputs.grammar, str)
             and self.structured_outputs.grammar.strip() == ""
         ):
-            raise ValueError("structured_outputs.grammar cannot be an empty string")
+            raise VLLMValidationError(
+                "structured_outputs.grammar cannot be an empty string"
+            )
+        # Reject empty string json schema early to avoid engine-side crashes
+        if (
+            isinstance(self.structured_outputs.json, str)
+            and self.structured_outputs.json.strip() == ""
+        ):
+            raise VLLMValidationError(
+                "structured_outputs.json cannot be an empty string"
+            )
+        # Reject json_object=False early to avoid engine-side crashes
+        if self.structured_outputs.json_object is False:
+            raise VLLMValidationError(
+                "structured_outputs.json_object must be True if set; omit "
+                "structured_outputs to disable structured outputs"
+            )
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
@@ -780,24 +1044,28 @@ class SamplingParams(
             # xgrammar with no fallback
             validate_xgrammar_grammar(self)
         elif backend.startswith("guidance"):
+            if _is_non_tekken_mistral(tokenizer=tokenizer):
+                raise VLLMValidationError(
+                    "Non-tekken Mistral tokenizers are not supported for the 'guidance'"
+                    " structured output backend. Please either use a more recent "
+                    "Mistral model, the ['xgrammar', 'outlines'] "
+                    "backends or tokenizer_mode='hf' instead."
+                )
             # TODO: ideally we would have the LLTokenizer here as Lark syntax
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
-            if is_mistral_tokenizer(tokenizer):
-                raise ValueError(
-                    "Mistral tokenizer is not supported for the 'guidance' "
-                    "structured output backend. Please use ['xgrammar', 'outlines'] "
-                    "backends or tokenizer_mode='hf' instead."
-                )
-            validate_guidance_grammar(self, tokenizer=None)
+            validate_guidance_grammar(
+                self,
+                tokenizer=_get_llg_tokenizer(tokenizer),
+            )
         elif backend == "outlines":
             # outlines backend
             validate_structured_output_request_outlines(self)
         elif backend == "lm-format-enforcer":
             # lm format enforcer backend
             if is_mistral_tokenizer(tokenizer):
-                raise ValueError(
+                raise VLLMValidationError(
                     "Mistral tokenizer is not supported for the 'lm-format-enforcer' "
                     "structured output backend. Please use ['xgrammar', 'outlines'] "
                     "backends or tokenizer_mode='hf' instead."
@@ -818,24 +1086,28 @@ class SamplingParams(
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
 
+                skip_guidance = _is_non_tekken_mistral(tokenizer)
+
                 # Check if schema has features unsupported by guidance
                 so_params = self.structured_outputs
-                skip_guidance = False
-                if so_params.json:
+                if not skip_guidance and so_params.json:
                     if isinstance(so_params.json, str):
                         schema = json_mod.loads(so_params.json)
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
 
-                if is_mistral_tokenizer(tokenizer) or skip_guidance:
-                    # Fall back to outlines if the tokenizer is Mistral
-                    # or if schema contains features unsupported by guidance
+                if skip_guidance:
+                    # Fall back to outlines if the tokenizer is non-tekken Mistral or
+                    # the schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(self)
                     self.structured_outputs._backend = "outlines"
                 else:
                     # Fall back to guidance by default.
-                    validate_guidance_grammar(self, tokenizer=None)
+                    validate_guidance_grammar(
+                        self,
+                        tokenizer=_get_llg_tokenizer(tokenizer),
+                    )
                     self.structured_outputs._backend = "guidance"
             # Remember that this backend was set automatically
             self.structured_outputs._backend_was_auto = True
@@ -858,6 +1130,7 @@ class SamplingParams(
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "
+            f"thinking_token_budget={self.thinking_token_budget}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "
@@ -904,3 +1177,7 @@ class BeamSearchParams(
     temperature: float = 0.0
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
+    structured_outputs: StructuredOutputsParams | None = None
+
+    def __post_init__(self) -> None:
+        _verify_num_sequences(self.beam_width, "beam_width")

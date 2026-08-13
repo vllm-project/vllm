@@ -3,8 +3,8 @@
 
 from typing import Any
 
+import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -18,6 +18,7 @@ _ROCM_FLASH_ATTN_AVAILABLE = False
 if current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+        compile_flash_attn_varlen_func_from_specs,
         flash_attn_varlen_func,
         get_scheduler_metadata,
     )
@@ -28,19 +29,32 @@ elif current_platform.is_xpu():
 
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
+    compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
     get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
 elif current_platform.is_rocm():
-    try:
-        from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
+    # On ROCm we use AITER's Triton flash-attention; the upstream flash-attn
+    # package is not installed/available. (Same source as aiter_triton_mla.py.)
+    # The FA4 compile-from-specs API is CUDA-only, so it is unavailable on ROCm
+    # regardless of whether AITER is present.
+    from vllm.platforms.rocm import on_gfx1250
 
-        # Mark that upstream flash-attn is available on ROCm
+    compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
+    try:
+        if on_gfx1250():
+            from aiter.ops.triton.mha import (  # type: ignore[no-redef]
+                flash_attn_varlen_func,
+            )
+        else:
+            from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
+
         _ROCM_FLASH_ATTN_AVAILABLE = True
     except ImportError:
 
         def flash_attn_varlen_func(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef,misc]
+            package = "aiter" if on_gfx1250() else "flash-attn"
             raise ImportError(
-                "ROCm platform requires upstream flash-attn "
-                "to be installed. Please install flash-attn first."
+                f"ROCm platform requires upstream {package} "
+                f"to be installed. Please install {package} first."
             )
 
     # ROCm doesn't use scheduler metadata (FA3 feature), provide stub
@@ -54,7 +68,11 @@ elif current_platform.is_rocm():
 
 
 def get_flash_attn_version(
-    requires_alibi: bool = False, head_size: int | None = None
+    requires_alibi: bool = False,
+    head_size: int | None = None,
+    head_size_v: int | None = None,
+    has_sinks: bool = False,
+    requires_local_attention: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -112,27 +130,67 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
+        # Some FA3 unsupported SM90 cases can use FA4 when available.
+        if (
+            fa_version == 3
+            and device_capability.major == 9
+            and is_fa_version_supported(4)
+        ):
+            upgrade_reason = None
+            if head_size is not None and head_size > 256:
+                upgrade_reason = f"FA3 does not support head_size={head_size} on SM90"
+            elif (
+                has_sinks
+                and head_size is not None
+                and head_size_v is not None
+                and head_size != head_size_v
+            ):
+                upgrade_reason = "Diff-KV with sinks"
+            elif (
+                vllm_config is not None
+                and vllm_config.model_config is not None
+                and vllm_config.model_config.is_diffusion
+            ):
+                upgrade_reason = "Per-sequence causal (dynamic_causal) requires FA4"
+            if upgrade_reason:
+                logger.info_once(
+                    "%s: upgrading FlashAttention 3 -> 4",
+                    upgrade_reason,
+                    scope="local",
+                )
+                fa_version = 4
+
         # FA4 currently uses batch-shape-dependent scheduling
         # heuristics on SM100+, which breaks batch invariance.
-        if vllm_is_batch_invariant() and fa_version == 4:
+        if envs.VLLM_BATCH_INVARIANT and fa_version == 4:
             logger.warning_once(
                 "Cannot use FA version 4 with batch invariance, "
                 "defaulting to FA version 2.",
-                scope="local",
+            )
+            fa_version = 2
+
+        if (
+            fa_version == 4
+            and device_capability.major >= 10
+            and head_size == 256
+            and requires_local_attention
+        ):
+            logger.warning_once(
+                "FA4 on Blackwell does not support local attention with "
+                "head_size=256, defaulting to FA version 2."
             )
             fa_version = 2
 
         # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
-        # supported head dimensions.
-        # See: https://github.com/Dao-AILab/flash-attention/issues/1959
-        # Exception: hdim 192 is supported for MLA's diff-headdim case
-        # (qk=192, v=128), added upstream in commits 1a15733e/1b36ab19.
+        # supported head dimensions to ≤128, with exceptions for 256 and 192/128 (MLA
+        # prefill). Development of symmetric 192, 384, and 512 support is being tracked
+        # in https://github.com/Dao-AILab/flash-attention/issues/2456
         if (
             fa_version == 4
             and device_capability.major >= 10
             and head_size is not None
             and head_size > 128
-            and head_size != 192
+            and not (head_size == 256 or (head_size == 192 and head_size_v == 128))
         ):
             logger.warning_once(
                 "FA4 on Blackwell does not support head_size=%d due to TMEM "
@@ -154,18 +212,48 @@ def get_flash_attn_version(
         return None
 
 
-def flash_attn_supports_fp8() -> bool:
-    return (
-        get_flash_attn_version() == 3
-        and current_platform.is_device_capability_family(90)
+def is_fa_version_supported(fa_version: int) -> bool:
+    try:
+        from vllm.vllm_flash_attn.flash_attn_interface import (
+            is_fa_version_supported as _is_fa_version_supported,
+        )
+
+        return _is_fa_version_supported(fa_version)
+    except ImportError:
+        return False
+
+
+def flash_attn_supports_kv_cache_dtype(
+    kv_cache_dtype: str = "fp8_e4m3",
+    *,
+    requires_alibi: bool = False,
+    head_size: int | None = None,
+    head_size_v: int | None = None,
+    has_sinks: bool = False,
+) -> bool:
+    if kv_cache_dtype == "fp8_e5m2":
+        return False
+    if current_platform.is_xpu():
+        return True
+    fa_version = get_flash_attn_version(
+        requires_alibi=requires_alibi,
+        head_size=head_size,
+        head_size_v=head_size_v,
+        has_sinks=has_sinks,
     )
+    return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
+        fa_version == 4 and current_platform.is_device_capability_family(100)
+    )
+
+
+def flash_attn_supports_quant_query_input() -> bool:
+    return not current_platform.is_xpu()
 
 
 def flash_attn_supports_sinks() -> bool:
     if current_platform.is_xpu():
         return True
-    else:
-        return get_flash_attn_version() == 3
+    return get_flash_attn_version() in (3, 4)
 
 
 def flash_attn_supports_mla():
@@ -198,7 +286,8 @@ def is_flash_attn_varlen_func_available() -> bool:
     Platform-specific sources:
     - CUDA: vllm.vllm_flash_attn.flash_attn_varlen_func
     - XPU: xpu_ops.flash_attn_varlen_func
-    - ROCm: upstream flash_attn.flash_attn_varlen_func (if available)
+    - ROCm: aiter.ops.triton.mha.flash_attn_varlen_func (if AITER available) or
+    upstream flash_attn.flash_attn_varlen_func
 
     Note: This is separate from the AITER flash attention backend (rocm_aiter_fa.py)
     which uses rocm_aiter_ops.flash_attn_varlen_func. The condition to use AITER is

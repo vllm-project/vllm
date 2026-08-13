@@ -10,12 +10,16 @@ from vllm.config.compilation import (
     PassConfig,
 )
 from vllm.config.device import DeviceConfig
+from vllm.config.diffusion import DiffusionConfig
+from vllm.config.ec_manager_config import EncoderCacheManagerConfig
 from vllm.config.ec_transfer import ECTransferConfig
+from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
+from vllm.config.mamba import MambaConfig
 from vllm.config.model import (
     ModelConfig,
     iter_architecture_defaults,
@@ -33,9 +37,10 @@ from vllm.config.offload import (
 from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.profiler import ProfilerConfig
+from vllm.config.reasoning import ReasoningConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.speculative import SpeculativeConfig
-from vllm.config.speech_to_text import SpeechToTextConfig
+from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
 from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.config.utils import (
     ConfigType,
@@ -70,6 +75,10 @@ __all__ = [
     "PassConfig",
     # From vllm.config.device
     "DeviceConfig",
+    # From vllm.config.diffusion
+    "DiffusionConfig",
+    # From vllm.config.ec_manager_config
+    "EncoderCacheManagerConfig",
     # From vllm.config.ec_transfer
     "ECTransferConfig",
     # From vllm.config.kernel
@@ -82,6 +91,8 @@ __all__ = [
     "LoadConfig",
     # From vllm.config.lora
     "LoRAConfig",
+    # From vllm.config.mamba
+    "MambaConfig",
     # From vllm.config.model
     "ModelConfig",
     "iter_architecture_defaults",
@@ -101,16 +112,21 @@ __all__ = [
     "ParallelConfig",
     # From vllm.config.pooler
     "PoolerConfig",
+    # From vllm.config.reasoning
+    "ReasoningConfig",
     # From vllm.config.scheduler
     "SchedulerConfig",
     # From vllm.config.speculative
     "SpeculativeConfig",
     # From vllm.config.speech_to_text
     "SpeechToTextConfig",
+    "SpeechToTextParams",
     # From vllm.config.structured_outputs
     "StructuredOutputsConfig",
     # From vllm.config.profiler
     "ProfilerConfig",
+    # From vllm.config.fault_tolerance
+    "FaultToleranceConfig",
     # From vllm.config.utils
     "ConfigType",
     "SupportsMetricsInfo",

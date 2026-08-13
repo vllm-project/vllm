@@ -3,6 +3,7 @@
 """Attention layer with FlashAttention."""
 
 import copy
+import functools
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -10,21 +11,33 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    canonicalize_singleton_dim_strides,
+    is_quantized_kv_cache,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.fa_utils import (
-    flash_attn_supports_fp8,
+    flash_attn_supports_kv_cache_dtype,
+    flash_attn_supports_quant_query_input,
     get_flash_attn_version,
+    is_fa_version_supported,
     is_flash_attn_varlen_func_available,
+)
+from vllm.v1.attention.backends.utils import (
+    fill_mm_prefix_query_ranges,
+    get_dcp_local_seq_lens,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import (
@@ -33,18 +46,15 @@ if is_flash_attn_varlen_func_available():
         get_scheduler_metadata,
         reshape_and_cache_flash,
     )
+import vllm.envs as envs
 from vllm.config import (
     VllmConfig,
-    get_current_vllm_config,
     get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
 )
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
@@ -52,49 +62,55 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.utils import (
-    get_dcp_local_seq_lens,
-    get_kv_cache_layout,
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.worker.cp_utils import (
+    run_split_fa2_dcp_context_attention,
+    should_skip_dcp_context_attention,
+    should_split_fa2_dcp_context_attention,
+    split_dcp_context_queries,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
 
 class FlashAttentionBackend(AttentionBackend):
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "float16",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        vllm_config = get_current_vllm_config()
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        if (
-            model_config
-            and model_config.is_hybrid
-            and (
-                cache_config.mamba_ssm_cache_dtype == "float32"
-                or cache_config.mamba_cache_dtype == "float32"
-            )
-        ):
-            # NOTE(tdoublep): while in principle, FA supports
-            # MultipleOf(16), these are the block sizes that do not
-            # suffer from the NaN propagation problem described here:
-            # https://github.com/Dao-AILab/flash-attention/issues/1974
-            return [16, 32, 64]
         return [MultipleOf(16)]
 
     forward_includes_kv_cache_update: bool = False
 
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        if current_platform.is_xpu():
+            return max(default_block_size, 64)
+        return super().get_preferred_block_size(default_block_size)
+
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN"
+
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
@@ -129,47 +145,56 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        # K and V are packed into the content dim: logical (B, H, N, 2*D).
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets
-        # us from `get_kv_cache_shape` to the actual memory layout we want.
+        # `stride_order` indicates the permutation that gets us from
+        # `get_kv_cache_shape` (logical (B, H, N, 2*D)) to the actual memory
+        # layout we want.
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
-            return (2, 0, 1, 3, 4, 5)
+            # (num_blocks, num_layers, block_size, num_kv_heads, 2*head_size)
+            return (1, 0, 3, 2, 4)
         elif cache_layout == "NHD":
-            stride_order = (0, 1, 2, 3, 4)
+            # (num_blocks, block_size, num_kv_heads, 2*head_size)
+            stride_order = (0, 2, 1, 3)
         elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers, 2, block_size, head_size)
-            return (2, 4, 0, 1, 3, 5)
+            # (num_blocks, num_kv_heads, num_layers, block_size, 2*head_size)
+            return (1, 2, 0, 3, 4)
         elif cache_layout == "HND":
-            stride_order = (0, 1, 3, 2, 4)
+            # (num_blocks, num_kv_heads, block_size, 2*head_size)
+            stride_order = (0, 1, 2, 3)
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
 
-    @staticmethod
-    def get_fp8_dtype_for_flashattn(kv_cache_dtype: str) -> torch.dtype:
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            return torch.float8_e4m3fn
-        else:
-            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
-
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
-        return head_size % 8 == 0 and head_size <= 256
+        if head_size % 8 != 0:
+            return False
+        if head_size <= 256:
+            return True
+        if is_fa_version_supported(4):
+            return head_size <= 512
+        return False
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
-        if kv_cache_dtype.startswith("fp8"):
-            return flash_attn_supports_fp8()
-        return kv_cache_dtype in ["auto", "float16", "bfloat16"]
+        if kv_cache_dtype not in cls.supported_kv_cache_dtypes:
+            return False
+        if is_quantized_kv_cache(kv_cache_dtype):
+            return flash_attn_supports_kv_cache_dtype(kv_cache_dtype)
+        return True
+
+    @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return is_fa_version_supported(4)
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -191,10 +216,31 @@ class FlashAttentionBackend(AttentionBackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
+        if (
+            kv_cache_dtype is not None
+            and is_quantized_kv_cache(kv_cache_dtype)
+            and not flash_attn_supports_kv_cache_dtype(
+                kv_cache_dtype,
+                head_size=head_size,
+                head_size_v=head_size,
+                has_sinks=has_sink,
+            )
+        ):
+            return "FP8 KV cache requires FA3 on SM90 or FA4 on SM100"
+        if (
+            use_mm_prefix
+            and get_flash_attn_version(head_size=head_size, has_sinks=has_sink) != 4
+        ):
+            return (
+                "mm_prefix (PrefixLM bidirectional attention) requires "
+                "FlashAttention v4, which does not resolve for this "
+                "head_size"
+            )
         return None
 
 
@@ -227,24 +273,65 @@ class FlashAttentionMetadata:
     max_dcp_context_kv_len: int | None = None
     dcp_context_kv_lens: torch.Tensor | None = None
 
+    # Split counts for FA2 DCP context attention. num_prefill_* tracks
+    # context-bearing extend rows; pure prefills do not attend to DCP context.
+    num_decode_reqs: int = 0
+    num_prefill_reqs: int = 0
+    num_decode_tokens: int = 0
+    num_prefill_tokens: int = 0
+
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
 
-    causal: bool = True
+    causal: bool | torch.Tensor = True
+
+    # PrefixLM bidirectional range containing each scheduled query token.
+    # Shape: (num_actual_tokens, 2) int32, absolute [start, end] bounds;
+    # (-1, -1) for query tokens outside every multimodal range.
+    mm_prefix_query_range_tensor: torch.Tensor | None = None
+
+    # Reference Sliding Window Attention (R-SWA) fields.
+    # rswa_prefix_lens:  per-request prompt lengths [num_reqs], int32, CUDA.
+    # rswa_window:       sliding window size (scalar int, for logic checks).
+    # rswa_window_tensor: [1] int32 CUDA tensor — pre-allocated in build() so
+    #   no CPU→CUDA copy is needed inside forward() during CUDA graph capture.
+    # Only populated when the model uses R-SWA (Unlimited-OCR).
+    rswa_prefix_lens: torch.Tensor | None = None
+    rswa_window: int | None = None
+    rswa_window_tensor: torch.Tensor | None = None
 
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
 ) -> set[tuple[int, int] | None]:
-    """Get the set of all sliding window configs used in the model."""
+    """Get the set of all sliding window configs used in the model.
+
+    Only inspects FlashAttentionImpl layers. Other backends (e.g.
+    TurboQuant, MLA) use their own metadata builders and are skipped.
+    """
     sliding_window_configs: set[tuple[int, int] | None] = set()
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer in layers.values():
-        assert isinstance(layer.impl, FlashAttentionImpl)
+        if not isinstance(layer.impl, FlashAttentionImpl):
+            continue
         sliding_window_configs.add(layer.impl.sliding_window)
     return sliding_window_configs
+
+
+def _maybe_symmetrize_window(
+    window: tuple[int, int] | None,
+    causal: bool | torch.Tensor,
+) -> tuple[int, int] | None:
+    """Make a causal sliding window ``(w, 0)`` symmetric ``(w, w)`` when attention
+    is non-causal, so bidirectional queries attend in both directions. Leaves
+    full-attention ``(-1, -1)`` and already-symmetric windows untouched.
+    """
+    non_causal = isinstance(causal, torch.Tensor) or causal is False
+    if window is not None and window[0] >= 0 and window[1] == 0 and non_causal:
+        return (window[0], window[0])
+    return window
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
@@ -277,9 +364,60 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     def get_cudagraph_support(
         cls,
         vllm_config: "VllmConfig",
-        kv_cache_spec: "AttentionSpec",
+        kv_cache_spec: "KVCacheSpec",
     ) -> AttentionCGSupport:
         return cls._cudagraph_support
+
+    def _get_scheduler_metadata(
+        self,
+        *,
+        aot_schedule: bool,
+        batch_size: int,
+        cu_query_lens: torch.Tensor,
+        max_query_len: int,
+        seqlens: torch.Tensor,
+        max_seq_len: int,
+        causal: bool | torch.Tensor,
+        max_num_splits: int,
+    ) -> torch.Tensor | None:
+        if not aot_schedule:
+            return None
+
+        cache_dtype = self.cache_config.cache_dtype
+        if is_quantized_kv_cache(cache_dtype):
+            qkv_dtype = current_platform.fp8_dtype()
+        else:
+            qkv_dtype = self.kv_cache_dtype
+        return get_scheduler_metadata(
+            batch_size=batch_size,
+            max_seqlen_q=max_query_len,
+            max_seqlen_k=max_seq_len,
+            num_heads_q=self.num_heads_q * self.dcp_world_size,
+            num_heads_kv=self.num_heads_kv,
+            headdim=self.headdim,
+            cache_seqlens=seqlens,
+            qkv_dtype=qkv_dtype,
+            cu_seqlens_q=cu_query_lens,
+            page_size=self.block_size,
+            causal=causal,
+            window_size=_maybe_symmetrize_window(self.aot_sliding_window, causal),
+            num_splits=max_num_splits,
+        )
+
+    def _store_scheduler_metadata(
+        self, scheduler_metadata: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        if self.use_full_cuda_graph and scheduler_metadata is not None:
+            n = scheduler_metadata.shape[0]
+            assert self.scheduler_metadata is not None
+            self.scheduler_metadata[:n] = scheduler_metadata
+            # NOTE(woosuk): We should zero out the rest of the scheduler
+            # metadata to guarantee the correctness. Otherwise, some thread
+            # blocks may use the invalid scheduler metadata and overwrite the
+            # output buffer.
+            self.scheduler_metadata[n:] = 0
+            return self.scheduler_metadata[:n]
+        return scheduler_metadata
 
     def __init__(
         self,
@@ -316,6 +454,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
+        # Fused draft decode reuses the captured metadata object across draft
+        # steps. For DCP, build-time host-side decisions such as
+        # skip_dcp_context_attention() can change the metadata shape/control
+        # path (for example max_dcp_context_kv_len), and those Python-side
+        # fields are not refreshed in-place between graph replays. Keep the
+        # fused path disabled until DCP gets a full replay-safe refresh model.
+        self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
+
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
         )
@@ -347,9 +493,45 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 self.attention_config.flash_attn_max_num_splits_for_cuda_graph
             )
 
+        if self.dcp_world_size > 1:
+            max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+            self._dcp_context_kv_lens = torch.zeros(
+                max_num_reqs,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
+
+        # R-SWA: persistent CUDA-graph-safe buffers owned by this builder.
+        self.rswa_window: int | None = self.model_config.rswa_window
+        self.persistent_rswa_prefix_lens: torch.Tensor | None = None
+        self.persistent_rswa_window_tensor: torch.Tensor | None = None
+        if self.rswa_window is not None:
+            max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+            self.persistent_rswa_prefix_lens = torch.zeros(
+                max_num_reqs, dtype=torch.int32, device=self.device
+            )
+            self.persistent_rswa_window_tensor = torch.tensor(
+                [self.rswa_window], dtype=torch.int32, device=self.device
+            )
+
+        # mm_prefix: persistent staging + device buffers owned by this builder,
+        # sized by scheduled query tokens so build() never allocates.
+        self.mm_prefix_query_ranges_cpu: torch.Tensor | None = None
+        self.mm_prefix_query_ranges_np: np.ndarray | None = None
+        self.mm_prefix_query_ranges_gpu: torch.Tensor | None = None
+        if self.model_config.is_mm_prefix_lm:
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            self.mm_prefix_query_ranges_cpu = torch.empty(
+                (max_num_tokens, 2), dtype=torch.int32, pin_memory=PIN_MEMORY
+            )
+            self.mm_prefix_query_ranges_np = self.mm_prefix_query_ranges_cpu.numpy()
+            self.mm_prefix_query_ranges_gpu = torch.empty(
+                (max_num_tokens, 2), dtype=torch.int32, device=self.device
+            )
 
     def build(
         self,
@@ -371,8 +553,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         slot_mapping = common_attn_metadata.slot_mapping
         causal = common_attn_metadata.causal
 
-        # the overhead of the aot schedule is not worth it for spec-decode
-        aot_schedule = self.aot_schedule and not fast_build
+        # Disable AOT schedule for spec-decode proposer (not worth the overhead)
+        # and for batch invariance (schedule varies with max_seqlen_q/k).
+        aot_schedule = (
+            self.aot_schedule and not fast_build and not envs.VLLM_BATCH_INVARIANT
+        )
 
         if self.aot_sliding_window is None:
             self.aot_sliding_window = (-1, -1)
@@ -402,40 +587,16 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # we only set num_splits when using cuda graphs.
             max_num_splits = self.max_num_splits
 
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             max_num_splits = 1
-
-        def schedule(
-            batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
-        ):
-            cache_dtype = self.cache_config.cache_dtype
-            if cache_dtype.startswith("fp8"):
-                qkv_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
-                    cache_dtype
-                )
-            else:
-                qkv_dtype = self.kv_cache_dtype
-            if aot_schedule:
-                return get_scheduler_metadata(
-                    batch_size=batch_size,
-                    max_seqlen_q=max_query_len,
-                    max_seqlen_k=max_seq_len,
-                    num_heads_q=self.num_heads_q * self.dcp_world_size,
-                    num_heads_kv=self.num_heads_kv,
-                    headdim=self.headdim,
-                    cache_seqlens=seqlens,
-                    qkv_dtype=qkv_dtype,
-                    cu_seqlens_q=cu_query_lens,
-                    page_size=self.block_size,
-                    causal=causal,
-                    window_size=self.aot_sliding_window,
-                    num_splits=max_num_splits,
-                )
-            return None
 
         use_cascade = common_prefix_len > 0
         max_dcp_context_kv_len = 0
         dcp_context_kv_lens = None
+        num_decode_reqs = 0
+        num_prefill_reqs = 0
+        num_decode_tokens = 0
+        num_prefill_tokens = 0
 
         cu_prefix_query_lens = None
         prefix_kv_lens = None
@@ -443,32 +604,68 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         prefix_scheduler_metadata = None
 
         if self.dcp_world_size > 1:
-            query_kv_lens = query_start_loc[1:] - query_start_loc[:-1]
-            dcp_context_kv_lens = seq_lens - query_kv_lens
-
-            dcp_context_kv_lens = get_dcp_local_seq_lens(
-                dcp_context_kv_lens,
+            query_lens = query_start_loc[1:] - query_start_loc[:-1]
+            context_kv_lens = seq_lens - query_lens
+            local_context_kv_lens = get_dcp_local_seq_lens(
+                context_kv_lens,
                 self.dcp_world_size,
                 self.dcp_rank,
                 self.cp_kv_cache_interleave_size,
             )
+            self._dcp_context_kv_lens[:num_reqs] = local_context_kv_lens
+            self._dcp_context_kv_lens[num_reqs:] = 0
+            dcp_context_kv_lens = self._dcp_context_kv_lens[:num_reqs]
+
+            skip_dcp_context_attention = False
+            if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
+                query_lens_cpu = (
+                    common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
+                    - common_attn_metadata.query_start_loc_cpu[:num_reqs]
+                )
+                context_kv_lens_cpu = (
+                    common_attn_metadata.seq_lens_cpu_upper_bound[:num_reqs]
+                    - query_lens_cpu
+                )
+                skip_dcp_context_attention = should_skip_dcp_context_attention(
+                    context_kv_lens_cpu
+                )
+
+            if max_query_len > 1:
+                (
+                    num_decode_reqs,
+                    num_prefill_reqs,
+                    num_decode_tokens,
+                    num_prefill_tokens,
+                ) = split_dcp_context_queries(
+                    common_attn_metadata.query_start_loc_cpu,
+                    common_attn_metadata.seq_lens_cpu_upper_bound,
+                    max_query_len,
+                    num_actual_tokens,
+                )
+
             # After DCP distribution, the maximum number of tokens for any rank is
             # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
             # and I is cp_kv_cache_interleave_size.
             # This eliminates GPU->CPU sync while minimizing workspace over-allocation.
-            num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
-            max_dcp_context_kv_len = (
-                (max_seq_len + num_partitions - 1) // num_partitions
-            ) * self.cp_kv_cache_interleave_size
+            if skip_dcp_context_attention:
+                max_dcp_context_kv_len = 0
+                scheduler_metadata = None
+            else:
+                num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
+                max_dcp_context_kv_len = (
+                    (max_seq_len + num_partitions - 1) // num_partitions
+                ) * self.cp_kv_cache_interleave_size
 
-            scheduler_metadata = schedule(
-                batch_size=num_reqs,
-                cu_query_lens=query_start_loc,
-                max_query_len=max_query_len,
-                seqlens=dcp_context_kv_lens,
-                max_seq_len=max_dcp_context_kv_len,
-                causal=False,
-            )
+                scheduler_metadata = self._get_scheduler_metadata(
+                    aot_schedule=aot_schedule,
+                    batch_size=num_reqs,
+                    cu_query_lens=query_start_loc,
+                    max_query_len=max_query_len,
+                    seqlens=dcp_context_kv_lens,
+                    max_seq_len=max_dcp_context_kv_len,
+                    causal=False,
+                    max_num_splits=max_num_splits,
+                )
         elif use_cascade:
             cu_prefix_query_lens = torch.tensor(
                 [0, num_actual_tokens], dtype=torch.int32, device=self.device
@@ -478,41 +675,41 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             )
             # Use GPU tensor directly - no CPU sync needed
             suffix_kv_lens = seq_lens[:num_reqs] - common_prefix_len
-            prefix_scheduler_metadata = schedule(
+            prefix_scheduler_metadata = self._get_scheduler_metadata(
+                aot_schedule=aot_schedule,
                 batch_size=1,
                 cu_query_lens=cu_prefix_query_lens,
                 max_query_len=num_actual_tokens,
                 seqlens=prefix_kv_lens,
                 max_seq_len=common_prefix_len,
                 causal=False,
+                max_num_splits=max_num_splits,
             )
-            scheduler_metadata = schedule(
+            scheduler_metadata = self._get_scheduler_metadata(
+                aot_schedule=aot_schedule,
                 batch_size=num_reqs,
                 cu_query_lens=query_start_loc,
                 max_query_len=max_query_len,
                 seqlens=suffix_kv_lens,
                 max_seq_len=max_seq_len - common_prefix_len,
                 causal=True,
+                max_num_splits=max_num_splits,
             )
         else:
-            scheduler_metadata = schedule(
+            scheduler_metadata = self._get_scheduler_metadata(
+                aot_schedule=aot_schedule,
                 batch_size=num_reqs,
                 cu_query_lens=query_start_loc,
                 max_query_len=max_query_len,
                 seqlens=seq_lens,
                 max_seq_len=max_seq_len,
                 causal=causal,
+                max_num_splits=max_num_splits,
             )
-        # For FA3 + full cudagraph
-        if self.use_full_cuda_graph and scheduler_metadata is not None:
-            n = scheduler_metadata.shape[0]
-            self.scheduler_metadata[:n] = scheduler_metadata
-            # NOTE(woosuk): We should zero out the rest of the scheduler
-            # metadata to guarantee the correctness. Otherwise, some thread
-            # blocks may use the invalid scheduler metadata and overwrite the
-            # output buffer.
-            self.scheduler_metadata[n:] = 0
-            scheduler_metadata = self.scheduler_metadata[:n]
+        scheduler_metadata = self._store_scheduler_metadata(scheduler_metadata)
+
+        if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
+            causal = causal.to(torch.int32)
 
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -524,6 +721,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             slot_mapping=slot_mapping,
             max_dcp_context_kv_len=max_dcp_context_kv_len,
             dcp_context_kv_lens=dcp_context_kv_lens,
+            num_decode_reqs=num_decode_reqs,
+            num_prefill_reqs=num_prefill_reqs,
+            num_decode_tokens=num_decode_tokens,
+            num_prefill_tokens=num_prefill_tokens,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             scheduler_metadata=scheduler_metadata,
@@ -534,6 +735,50 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             max_num_splits=max_num_splits,
             causal=causal,
         )
+
+        # Compute mm_prefix range tensor if the batch contains
+        # multimodal tokens with bidirectional ranges.  Built for every FA
+        # group; Gemma4 nulls the field for its non-sliding layers.
+        mm_ranges = common_attn_metadata.mm_req_doc_ranges
+        if mm_ranges is not None and self.mm_prefix_query_ranges_np is not None:
+            # The upper bound is exact for prefill rows, which is where
+            # mm_prefix ranges live; decode rows only ever get an optimistic
+            # (larger) context, moving them further past every range.
+            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None, (
+                "mm_prefix requires seq_lens_cpu_upper_bound"
+            )
+            num_mm_tokens = fill_mm_prefix_query_ranges(
+                self.mm_prefix_query_ranges_np,
+                mm_ranges,
+                common_attn_metadata.query_start_loc_cpu,
+                common_attn_metadata.seq_lens_cpu_upper_bound,
+            )
+            if num_mm_tokens > 0:
+                assert self.mm_prefix_query_ranges_cpu is not None
+                assert self.mm_prefix_query_ranges_gpu is not None
+                mm_query_ranges = self.mm_prefix_query_ranges_gpu[:num_mm_tokens]
+                mm_query_ranges.copy_(
+                    self.mm_prefix_query_ranges_cpu[:num_mm_tokens],
+                    non_blocking=True,
+                )
+                attn_metadata.mm_prefix_query_range_tensor = mm_query_ranges
+
+        # R-SWA: copy prefix lengths into persistent buffers (outside the
+        # compiled region) so forward() never allocates during CUDA graph
+        # capture.  rswa_window is a static model config scalar read here.
+        if (
+            self.rswa_window is not None
+            and common_attn_metadata.rswa_prefix_lens is not None
+        ):
+            assert self.persistent_rswa_prefix_lens is not None
+            assert self.persistent_rswa_window_tensor is not None
+            src = common_attn_metadata.rswa_prefix_lens
+            rswa_prefix_lens = self.persistent_rswa_prefix_lens[:num_reqs]
+            rswa_prefix_lens.copy_(src[:num_reqs], non_blocking=True)
+            attn_metadata.rswa_prefix_lens = rswa_prefix_lens
+            attn_metadata.rswa_window = self.rswa_window
+            attn_metadata.rswa_window_tensor = self.persistent_rswa_window_tensor
+
         return attn_metadata
 
     def update_block_table(
@@ -546,6 +791,28 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         new_metadata.block_table = blk_table
         new_metadata.slot_mapping = slot_mapping
         return new_metadata
+
+    def update_draft_decode_metadata(self, metadata: FlashAttentionMetadata) -> None:
+        if metadata.scheduler_metadata is None:
+            return
+
+        num_reqs = metadata.num_decode_reqs or metadata.seq_lens.shape[0]
+
+        assert self.dcp_world_size == 1
+        assert not metadata.use_cascade
+
+        scheduler_metadata = self._get_scheduler_metadata(
+            aot_schedule=True,
+            batch_size=num_reqs,
+            cu_query_lens=metadata.query_start_loc,
+            max_query_len=metadata.max_query_len,
+            seqlens=metadata.seq_lens,
+            max_seq_len=metadata.max_seq_len,
+            causal=metadata.causal,
+            max_num_splits=metadata.max_num_splits,
+        )
+
+        metadata.scheduler_metadata = self._store_scheduler_metadata(scheduler_metadata)
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
@@ -593,19 +860,29 @@ class FlashAttentionImpl(AttentionImpl):
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=alibi_slopes is not None,
+            requires_local_attention=sliding_window is not None,
             head_size=head_size,
+            has_sinks=sinks is not None,
         )
         logger.info_once(
             "Using FlashAttention version %s",
             self.vllm_flash_attn_version,
-            scope="local",
         )
         # Cache the batch invariant result for use in forward passes
-        self.batch_invariant_enabled = vllm_is_batch_invariant()
+        self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
 
-        if is_quantized_kv_cache(self.kv_cache_dtype) and not flash_attn_supports_fp8():
+        if is_quantized_kv_cache(
+            self.kv_cache_dtype
+        ) and not flash_attn_supports_kv_cache_dtype(
+            self.kv_cache_dtype,
+            requires_alibi=alibi_slopes is not None,
+            head_size=head_size,
+            head_size_v=head_size,
+            has_sinks=sinks is not None,
+        ):
             raise NotImplementedError(
-                "FlashAttention does not support fp8 kv-cache on this device."
+                f"FlashAttention does not support {self.kv_cache_dtype}"
+                " kv-cache on this device."
             )
 
         self.sinks = sinks
@@ -618,7 +895,7 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-        self.supports_quant_query_input = True
+        self.supports_quant_query_input = flash_attn_supports_quant_query_input()
 
         vllm_config = get_current_vllm_config_or_none()
         dcp_a2a = (
@@ -628,6 +905,14 @@ class FlashAttentionImpl(AttentionImpl):
         )
         self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
 
+        self._dcp_dtype: torch.dtype | None = None
+        self._dcp_max_num_tokens: int = 0
+        if vllm_config is not None and self.dcp_world_size > 1:
+            self._dcp_dtype = vllm_config.model_config.dtype
+            self._dcp_max_num_tokens = (
+                vllm_config.scheduler_config.max_num_batched_tokens
+            )
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -636,7 +921,7 @@ class FlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -647,7 +932,7 @@ class FlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -655,7 +940,6 @@ class FlashAttentionImpl(AttentionImpl):
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
         """
-        assert output is not None, "Output tensor must be provided."
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
         )
@@ -695,16 +979,30 @@ class FlashAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # For decoder and cross-attention, use KV cache as before
-        key_cache, value_cache = kv_cache.unbind(0)
-
-        if self.kv_cache_dtype.startswith("fp8"):
-            # queries are quantized in the attention layer
-            dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
-                self.kv_cache_dtype
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
+        # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
+        # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
+        fixed_k = canonicalize_singleton_dim_strides(key_cache)
+        fixed_v = canonicalize_singleton_dim_strides(value_cache)
+        if fixed_k is not key_cache or fixed_v is not value_cache:
+            logger.debug(
+                "Canonicalized degenerate KV cache strides (FlashAttention): "
+                "shape=%s, key strides before=%s after=%s, "
+                "value strides before=%s after=%s",
+                key_cache.shape,
+                key_cache.stride(),
+                fixed_k.stride(),
+                value_cache.stride(),
+                fixed_v.stride(),
             )
-            key_cache = key_cache.view(dtype)
-            value_cache = value_cache.view(dtype)
+        key_cache, value_cache = fixed_k, fixed_v
+
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            # queries are quantized in the attention layer
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
@@ -716,7 +1014,11 @@ class FlashAttentionImpl(AttentionImpl):
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
 
-            q_descale = layer._q_scale.expand(descale_shape)
+            q_descale = (
+                layer._q_scale.expand(descale_shape)
+                if self.supports_quant_query_input
+                else None
+            )
             k_descale = layer._k_scale.expand(descale_shape)
             v_descale = layer._v_scale.expand(descale_shape)
 
@@ -735,11 +1037,88 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
-                sliding_window_size = (
-                    list(self.sliding_window)
-                    if self.sliding_window is not None
-                    else None
+                causal = attn_metadata.causal
+                is_dynamic_causal = isinstance(causal, torch.Tensor)
+
+                # The layer's own window wins over the group's: one KV cache
+                # group can hold both windowed and global layers (e.g. Gemma-3
+                # with the hybrid KV cache manager disabled), and the group spec
+                # cannot describe both.
+                window = _maybe_symmetrize_window(self.sliding_window, causal)
+                sliding_window_size: list[int] | None = (
+                    list(window) if window is not None else None
                 )
+
+                mm_prefix_query_ranges = attn_metadata.mm_prefix_query_range_tensor
+                mm_mask_mod = None
+                mm_aux = None
+                if (
+                    mm_prefix_query_ranges is not None
+                    and not is_dynamic_causal
+                    and causal is True
+                    and self.vllm_flash_attn_version == 4
+                ):
+                    # Triton convention: 1 + window_size[0]. Global layers store
+                    # (-1, -1) → sw stays None.
+                    layer_window = self.sliding_window
+                    sw_val = (
+                        1 + layer_window[0]
+                        if layer_window is not None and layer_window[0] >= 0
+                        else None
+                    )
+                    # Gemma4: also clamp the bidirectional block to the
+                    # sliding window when the layer opts in
+                    # (mm_prefix_clamp_sliding_window flag from PR #47217).
+                    mm_clamp_sw = 0
+                    if (
+                        getattr(layer, "mm_prefix_clamp_sliding_window", False)
+                        and sw_val is not None
+                    ):
+                        mm_clamp_sw = sw_val
+                    mm_mask_mod = _make_mm_prefix_mask_mod(
+                        sliding_window=mm_clamp_sw,
+                        sliding_window_left=sw_val,
+                    )
+                    mm_aux = [mm_prefix_query_ranges, attn_metadata.query_start_loc]
+                    # mm_prefix is (causal ∧ window) ∨ bidirectional-range —
+                    # not ⊆ causal. FA #155 stopped auto-clearing causal/local
+                    # when mask_mod is set, so the caller must disable them or
+                    # the built-in causal path shorts out / clips the mask_mod.
+                    causal = False
+                    sliding_window_size = None
+
+                # R-SWA: use CuTE-DSL mask_mod on FA4 for exact token-level
+                # mask without block-size approximation.  The mask_mod encodes
+                # "causal AND (kv < prefix_len OR q - kv < rswa_window)", which
+                # supersedes any FA-layer sliding_window_size parameter.
+                rswa_mask_mod_fn = None
+                rswa_aux = None
+                if (
+                    attn_metadata.rswa_prefix_lens is not None
+                    and self.vllm_flash_attn_version == 4
+                    and not is_dynamic_causal
+                ):
+                    rswa_mask_mod_fn = _make_rswa_mask_mod()
+                    rswa_aux = [
+                        attn_metadata.rswa_prefix_lens.to(torch.int32),
+                        attn_metadata.rswa_window_tensor,  # pre-allocated CUDA tensor
+                    ]
+                    # mask_mod fully expresses R-SWA; disable FA's own window.
+                    sliding_window_size = None
+
+                dynamic_causal = None
+                if isinstance(causal, torch.Tensor):
+                    if self.vllm_flash_attn_version != 4:
+                        raise NotImplementedError(
+                            "Per-sequence causal requires FA4. Current version: "
+                            f"FA{self.vllm_flash_attn_version}"
+                        )
+                    dynamic_causal = causal
+                    has_window = (
+                        sliding_window_size is not None and sliding_window_size[1] >= 0
+                    )
+                    causal = not has_window
+
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
                     k=key_cache,
@@ -750,7 +1129,7 @@ class FlashAttentionImpl(AttentionImpl):
                     seqused_k=seqused_k,
                     max_seqlen_k=max_seqlen_k,
                     softmax_scale=self.scale,
-                    causal=attn_metadata.causal,
+                    causal=causal,
                     alibi_slopes=self.alibi_slopes,
                     window_size=sliding_window_size,
                     block_table=block_table,
@@ -760,8 +1139,11 @@ class FlashAttentionImpl(AttentionImpl):
                     q_descale=q_descale,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    dynamic_causal=dynamic_causal,
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
+                    mask_mod=rswa_mask_mod_fn or mm_mask_mod,
+                    aux_tensors=rswa_aux or mm_aux,
                 )
                 return output
 
@@ -807,7 +1189,10 @@ class FlashAttentionImpl(AttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
 
-        key_cache, value_cache = kv_cache.unbind(0)
+        # Scatter write into the KV cache using slot_mapping indices.
+        # No TMA kernel is invoked here, so stride canonicalization is not needed.
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
         # Reshape the input keys and values and store them in the cache.
         # Skip this if sharing KV cache with an earlier attention layer.
@@ -849,33 +1234,120 @@ class FlashAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         query = query.contiguous()
+        if attn_metadata.max_dcp_context_kv_len == 0:
+            flash_attn_varlen_func(
+                q=query,
+                k=key,
+                v=value,
+                out=output,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                cu_seqlens_k=cu_seqlens_q,
+                max_seqlen_k=max_seqlen_q,
+                softmax_scale=self.scale,
+                causal=attn_metadata.causal,
+                alibi_slopes=self.alibi_slopes,
+                window_size=list(self.sliding_window)
+                if self.sliding_window is not None
+                else None,
+                softcap=self.logits_soft_cap,
+                return_softmax_lse=True,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                num_splits=attn_metadata.max_num_splits,
+            )
+            return output
+
         query_across_dcp = get_dcp_group().all_gather(query, dim=1)
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
-        context_attn_out, context_lse = flash_attn_varlen_func(
-            q=query_across_dcp,
-            k=key_cache,
-            v=value_cache,
-            out=None,
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            seqused_k=attn_metadata.dcp_context_kv_lens,
-            max_seqlen_k=attn_metadata.max_dcp_context_kv_len,
-            softmax_scale=self.scale,
-            causal=False,
-            alibi_slopes=self.alibi_slopes,
-            window_size=sliding_window_size,
-            block_table=block_table,
-            softcap=self.logits_soft_cap,
-            return_softmax_lse=True,
-            scheduler_metadata=attn_metadata.scheduler_metadata,
-            fa_version=self.vllm_flash_attn_version,
-            q_descale=q_descale,
-            k_descale=k_descale,
-            v_descale=v_descale,
-            num_splits=attn_metadata.max_num_splits,
+        n = query_across_dcp.shape[0]
+        num_reqs = cu_seqlens_q.shape[0] - 1
+        num_decodes = attn_metadata.num_decode_reqs
+        num_context_prefills = attn_metadata.num_prefill_reqs
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_context_prefill_tokens = attn_metadata.num_prefill_tokens
+        split_dcp_context = should_split_fa2_dcp_context_attention(
+            self.vllm_flash_attn_version,
+            max_seqlen_q,
+            num_reqs,
+            num_decodes,
+            num_context_prefills,
         )
+        dcp_context_out_tokens = max(n, self._dcp_max_num_tokens)
+        dcp_context_out_spec = (
+            (
+                dcp_context_out_tokens,
+                self.num_heads * self.dcp_world_size,
+                self.head_size,
+            ),
+            self._dcp_dtype,
+        )
+        (dcp_context_out_workspace,) = current_workspace_manager().get_simultaneous(
+            dcp_context_out_spec,
+        )
+        dcp_context_out = dcp_context_out_workspace[:n]
+
+        if split_dcp_context:
+            # TODO: Remove this DCP + FA2 mixed decode/prefill workaround once
+            # FA4 supports this Qwen3.5 shape.
+            assert attn_metadata.dcp_context_kv_lens is not None
+            assert attn_metadata.max_dcp_context_kv_len is not None
+            assert self.vllm_flash_attn_version is not None
+            context_attn_out, context_lse = run_split_fa2_dcp_context_attention(
+                flash_attn_varlen_func,
+                query_across_dcp,
+                key_cache,
+                value_cache,
+                dcp_context_out,
+                cu_seqlens_q,
+                max_seqlen_q,
+                attn_metadata.dcp_context_kv_lens,
+                attn_metadata.max_dcp_context_kv_len,
+                self.scale,
+                self.alibi_slopes,
+                sliding_window_size,
+                block_table,
+                self.logits_soft_cap,
+                self.vllm_flash_attn_version,
+                q_descale,
+                k_descale,
+                v_descale,
+                attn_metadata.max_num_splits,
+                self.num_heads,
+                self.dcp_world_size,
+                num_decodes,
+                num_context_prefills,
+                num_decode_tokens,
+                num_context_prefill_tokens,
+            )
+        else:
+            context_attn_out, context_lse = flash_attn_varlen_func(
+                q=query_across_dcp,
+                k=key_cache,
+                v=value_cache,
+                out=dcp_context_out,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=attn_metadata.dcp_context_kv_lens,
+                max_seqlen_k=attn_metadata.max_dcp_context_kv_len,
+                softmax_scale=self.scale,
+                causal=False,
+                alibi_slopes=self.alibi_slopes,
+                window_size=sliding_window_size,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                return_softmax_lse=True,
+                scheduler_metadata=attn_metadata.scheduler_metadata,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                num_splits=attn_metadata.max_num_splits,
+            )
         # FA returns LSE in shape [ H, B ] but DCP combine wants [ B, H ]
         context_attn_out_cor, context_lse_cor = self.dcp_combine(
             context_attn_out,
@@ -889,7 +1361,7 @@ class FlashAttentionImpl(AttentionImpl):
             q=query,
             k=key,
             v=value,
-            out=None,
+            out=output,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             cu_seqlens_k=cu_seqlens_q,
@@ -940,7 +1412,7 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
         # For encoder attention, process FP8 quantization if needed
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantization is not supported for encoder attention"
             )
@@ -975,13 +1447,178 @@ class FlashAttentionImpl(AttentionImpl):
             window_size=sliding_window_size,
             softcap=self.logits_soft_cap,
             fa_version=self.vllm_flash_attn_version,
-            q_descale=layer._q_scale.expand(descale_shape),
-            k_descale=layer._k_scale.expand(descale_shape),
-            v_descale=layer._v_scale.expand(descale_shape),
+            q_descale=layer._q_scale.expand(descale_shape)  # type: ignore[operator]
+            if self.supports_quant_query_input
+            else None,
+            k_descale=layer._k_scale.expand(descale_shape),  # type: ignore[operator]
+            v_descale=layer._v_scale.expand(descale_shape),  # type: ignore[operator]
             num_splits=1 if self.batch_invariant_enabled else 0,
+            s_aux=self.sinks,
         )
 
         return output
+
+
+@functools.cache
+def _make_mm_prefix_mask_mod(
+    sliding_window: int = 0,
+    sliding_window_left: int | None = None,
+):
+    """Build a CuTE-DSL mask_mod implementing
+    ``(causal AND sliding_window) OR mm_prefix``.
+
+    Cached so identical ``(sliding_window, sliding_window_left)`` reuse the
+    same function object. FA4's ``hash_callable`` mixes ``repr()`` of closure
+    cells into the compile key; the nested ``_load_q_range`` would otherwise
+    get a new address each call and force a full JIT recompile every forward.
+
+    The FA4 kernel passes *local* ``q_idx`` (0-based within the current
+    prefill chunk) while ``kv_idx`` is absolute (0-based over the full
+    KV cache).  We recover the absolute Q position via
+    ``q_abs = q_idx + seqlen_k - seqlen_q`` (the context-length offset)
+    so that causal, sliding-window, and mm_prefix range comparisons all
+    use consistent absolute positions.  This matches the Triton
+    reference path (``compute_kv_seq_mask``).
+
+    ``aux_tensors[0]`` holds the absolute ``[start, end]`` bounds of the
+    mm_prefix range containing each scheduled query token (``(-1, -1)`` when
+    none), and ``aux_tensors[1]`` is ``cu_seqlens_q``, used to turn the local
+    ``q_idx`` into a packed row index.  Because mm_prefix ranges never overlap,
+    ``r_start <= kv_idx <= r_end`` is exactly "query and key share a range", so
+    no key-side lookup is needed and ``kv_idx`` is never used as an index.
+    The ``(-1, -1)`` sentinel falls out for free: ``kv_idx <= -1`` is false for
+    every valid key.
+
+    ``sliding_window_left`` enforces the sliding window on the causal
+    term (None = full causal, no window).  ``sliding_window`` clamps the
+    bidirectional block to the window (0 = unclamped; >0 = Gemma4 local
+    layers via ``mm_prefix_clamp_sliding_window``).
+    """
+    import cutlass
+    import cutlass.cute as cute
+    from cutlass import Int32  # type: ignore[attr-defined]
+
+    from vllm.vllm_flash_attn.cute.utils import (  # type: ignore[import-untyped]
+        scalar_to_ssa,
+        ssa_to_scalar,
+    )
+
+    @cute.jit
+    def _load_q_range(q_idx, seqlen_info, aux_tensors, batch_idx):
+        """Load the mm_prefix range bounds for this query row.
+
+        Both loads depend only on the query index, so they hoist out of the
+        unrolled per-element mask loop.  ``ssa_to_scalar`` reads lane 0, so one
+        call must not span query rows (hence the ``__vec_size__`` pin below).
+        Clamping keeps ``token_idx`` in bounds for partial tiles and padded
+        (``seqlen_q == 0``) rows; neither produces output.
+        """
+        q_ranges = aux_tensors[0]
+        cu_seqlens_q = aux_tensors[1]
+        b = batch_idx[0]
+        q_local = cutlass.min(ssa_to_scalar(q_idx), seqlen_info.seqlen_q - Int32(1))
+        token_idx = cutlass.max(cu_seqlens_q[b] + q_local, Int32(0))
+        return (
+            scalar_to_ssa(q_ranges[token_idx, 0], Int32),
+            scalar_to_ssa(q_ranges[token_idx, 1], Int32),
+        )
+
+    if sliding_window_left is not None:
+
+        @cute.jit
+        def mm_prefix_mask_mod(
+            batch_idx: cute.TensorSSA,
+            head_idx: cute.TensorSSA,
+            q_idx: cute.TensorSSA,
+            kv_idx: cute.TensorSSA,
+            seqlen_info,
+            aux_tensors,
+        ):
+            ctx_off = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
+            q_abs = q_idx + ctx_off
+            sw = scalar_to_ssa(Int32(sliding_window_left), Int32)
+            keep = (kv_idx <= q_abs) & ((q_abs - kv_idx) < sw)
+            r_start, r_end = _load_q_range(q_idx, seqlen_info, aux_tensors, batch_idx)
+            mm = (kv_idx >= r_start) & (kv_idx <= r_end)
+            if sliding_window > 0:
+                mm = mm & ((q_abs - kv_idx) < sw)
+            keep = keep | mm
+            return keep
+
+    else:
+
+        @cute.jit
+        def mm_prefix_mask_mod(
+            batch_idx: cute.TensorSSA,
+            head_idx: cute.TensorSSA,
+            q_idx: cute.TensorSSA,
+            kv_idx: cute.TensorSSA,
+            seqlen_info,
+            aux_tensors,
+        ):
+            ctx_off = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
+            q_abs = q_idx + ctx_off
+            keep = kv_idx <= q_abs
+            r_start, r_end = _load_q_range(q_idx, seqlen_info, aux_tensors, batch_idx)
+            keep = keep | ((kv_idx >= r_start) & (kv_idx <= r_end))
+            return keep
+
+    mm_prefix_mask_mod.use_fast_sampling = True
+    mm_prefix_mask_mod.__vec_size__ = 1  # _load_q_range takes lane 0 of q_idx
+    return mm_prefix_mask_mod
+
+
+def _make_rswa_mask_mod():
+    """Build a CuTE-DSL mask_mod for Reference Sliding Window Attention (R-SWA).
+
+    FA4 varlen + paged-KV convention (verified from cute/mask.py apply_mask):
+      q_idx  = LOCAL query-token offset (0 .. seqlen_q - 1) within this sequence.
+      kv_idx = LOCAL KV-token position (0 .. seqlen_k - 1) within this sequence.
+
+    To recover the ABSOLUTE token position (needed for causal and the sliding
+    window distance), use the standard offset:
+      abs_q = q_idx + (seqlen_k - seqlen_q)
+
+    R-SWA keep condition:
+      abs_q >= kv_idx                    (causal: KV at or before the query)
+      AND (kv_idx < prefix_len           (global prefix is always visible)
+           OR  abs_q - kv_idx < window)  (generated tokens: sliding window)
+
+    aux_tensors[0]: prefix_lens [num_reqs] int32 — per-request prefill length.
+    aux_tensors[1]: rswa_window [1]        int32 — decode sliding window size.
+
+    use_fast_sampling=True lets FA4 skip fully-masked KV blocks (gap blocks)
+    without loading their data.
+    """
+    import cutlass.cute as cute
+    from cutlass import Int32  # type: ignore[attr-defined]
+
+    from vllm.vllm_flash_attn.cute.utils import (  # type: ignore[import-untyped]
+        scalar_to_ssa,
+    )
+
+    @cute.jit
+    def rswa_mask_mod(
+        batch_idx: cute.TensorSSA,
+        head_idx: cute.TensorSSA,
+        q_idx: cute.TensorSSA,
+        kv_idx: cute.TensorSSA,
+        seqlen_info,
+        aux_tensors,
+    ):
+        b = batch_idx[0]
+        prefix_len = scalar_to_ssa(aux_tensors[0][b], Int32)
+        window = scalar_to_ssa(aux_tensors[1][0], Int32)
+        # Convert local q offset to absolute token position.
+        offset = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
+        abs_q = q_idx + offset
+        causal = kv_idx <= abs_q
+        in_prefix = kv_idx < prefix_len
+        in_window = (abs_q - kv_idx) < window
+        return causal & (in_prefix | in_window)
+
+    rswa_mask_mod.use_fast_sampling = True
+    return rswa_mask_mod
 
 
 def use_cascade_attention(
@@ -1124,7 +1761,7 @@ def cascade_attention(
         # s_aux is incorporated into prefix_lse inside the GPU kernel,
         # enabling its effect during the final attention merge.
         s_aux=s_aux,
-        num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
+        num_splits=1 if envs.VLLM_BATCH_INVARIANT else max_num_splits,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
@@ -1149,7 +1786,7 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
-        num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
+        num_splits=1 if envs.VLLM_BATCH_INVARIANT else max_num_splits,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.

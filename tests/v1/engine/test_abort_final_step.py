@@ -66,7 +66,7 @@ class DummyKVConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig | None = None,
+        kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         # Get the status file path from extra config
@@ -184,14 +184,31 @@ async def test_abort_during_final_step(async_scheduling: bool):
         original_execute_model = Worker.execute_model
 
         def execute_model_with_wait(self, scheduler_output):
-            # Signal that execute_model has been called by deleting ready_file
-            if ready_file.exists():
-                ready_file.unlink()
+            # V2's `gpu_worker.compile_or_warm_up_model` calls
+            # `warmup_kernels(...)` during engine init, which itself calls
+            # `Worker.execute_model` three times (prefill / decode / cleanup)
+            # to JIT compile triton kernels. None of those carry the test's
+            # request id, so we only stall when our actual request is being
+            # processed.
+            scheduled = scheduler_output.num_scheduled_tokens or {}
+            finished = scheduler_output.finished_req_ids or set()
 
-            # Wait for the block file to be deleted (triggered from test after abort)
-            # This runs in the worker process (after fork), so we poll the filesystem
-            while block_file.exists():
-                time.sleep(0.01)
+            def is_target_request(req_ids):
+                return any(
+                    rid == request_id or rid.startswith(f"{request_id}-")
+                    for rid in req_ids
+                )
+
+            if is_target_request(scheduled) or is_target_request(finished):
+                # Signal that execute_model has been called by deleting ready_file
+                if ready_file.exists():
+                    ready_file.unlink()
+
+                # Wait for the block file to be deleted (triggered from test after
+                # abort). This runs in the worker process (after fork), so we poll
+                # the filesystem.
+                while block_file.exists():
+                    time.sleep(0.01)
             return original_execute_model(self, scheduler_output)
 
         # Patch execute_model to inject the wait
@@ -259,8 +276,25 @@ async def test_abort_during_final_step(async_scheduling: bool):
                 # Wait for generation to complete
                 await gen_task
 
-                # Give the scheduler a moment to finish cleanup
-                await asyncio.sleep(0.1)
+                # Poll for the KV connector to record the finish status
+                timeout = 5.0
+                start = time.time()
+                captured_statuses = []
+                while time.time() - start < timeout:
+                    with open(status_file) as f4:
+                        status_lines = f4.read().strip().split("\n")
+                        captured_statuses = [
+                            line
+                            for line in status_lines
+                            if line and line.startswith("FINISHED_")
+                        ]
+                    if captured_statuses:
+                        break
+                    await asyncio.sleep(0.05)
+                else:
+                    raise TimeoutError(
+                        "Timeout waiting for KV connector to record finish status."
+                    )
 
                 # Verify we got output
                 assert len(outputs) > 0, "Should have received at least one output"
@@ -274,15 +308,6 @@ async def test_abort_during_final_step(async_scheduling: bool):
                     f"Expected finish_reason='abort' but got "
                     f"'{final_output.outputs[0].finish_reason}'. "
                 )
-
-                with open(status_file) as f4:
-                    status_lines = f4.read().strip().split("\n")
-                    # Filter for actual finish statuses (not INIT or empty lines)
-                    captured_statuses = [
-                        line
-                        for line in status_lines
-                        if line and line.startswith("FINISHED_")
-                    ]
 
                 assert len(captured_statuses) >= 1, (
                     f"Expected at least 1 captured finish status, got "

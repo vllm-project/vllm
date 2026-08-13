@@ -1,8 +1,8 @@
 # Pooling Models
 
 !!! note
-    We currently support pooling models primarily for convenience. This is not guaranteed to provide any performance improvements over using Hugging Face Transformers or Sentence Transformers directly.
-
+    We currently support pooling models primarily for convenience. This is not guaranteed to provide any performance
+    improvements over using Hugging Face Transformers or Sentence Transformers directly.
     We plan to optimize pooling models in vLLM. Please comment on <https://github.com/vllm-project/vllm/issues/21796> if you have any suggestions!
 
 ## What are pooling models?
@@ -12,22 +12,44 @@ Natural Language Processing (NLP) can be primarily divided into the following tw
 - Natural Language Understanding (NLU)
 - Natural Language Generation (NLG)
 
-The generative models supported by vLLM cover a variety of task types, such as the large language models (LLMs) we are familiar with, multimodal models (VLM) that handle multimodal inputs like images, videos, and audio, speech-to-text transcription models, and real-time models that support streaming input. Their common feature is the ability to generate text. Taking it a step further, vLLM-Omni supports the generation of multimodal content, including images, videos, and audio.
+The generative models supported by vLLM cover a variety of task types, such as the large language models (LLMs) we are
+familiar with, multimodal models (VLM) that handle multimodal inputs like images, videos, and audio, speech-to-text
+transcription models, and real-time models that support streaming input. Their common feature is the ability to generate
+text. Taking it a step further, vLLM-Omni supports the generation of multimodal content, including images, videos, and audio.
 
-As the capabilities of generative models continue to improve, the boundaries of these models are also constantly expanding. However, certain application scenarios still require specialized small language models to efficiently complete specific tasks. These models typically have the following characteristics:
+As the capabilities of generative models continue to improve, the boundaries of these models are also constantly expanding.
+However, certain application scenarios still require specialized small language models to efficiently complete specific tasks.
+These models typically have the following characteristics:
 
 - They do not require content generation.
 - They only need to perform very limited functions, without requiring strong generalization, creativity, or high intelligence.
 - They demand extremely low latency and may operate on cost-constrained hardware.
 - Text-only models typically have fewer than 1 billion parameters, while multimodal models generally have fewer than 10 billion parameters.
 
-Although these models are relatively small in scale, they are still based on the Transformer architecture, similar or even identical to the most advanced large language models today. Many recently released pooling models are also fine-tuned from large language models, allowing them to benefit from the continuous improvements in large models. This architecture similarity enables them to reuse much of vLLM’s infrastructure. If compatible, we would be happy to help them leverage the latest features of vLLM as well.
+Although these models are relatively small in scale, they are still based on the Transformer architecture, similar or
+even identical to the most advanced large language models today. Many recently released pooling models are also fine-tuned
+from large language models, allowing them to benefit from the continuous improvements in large models. This architecture
+similarity enables them to reuse much of vLLM’s infrastructure. If compatible, we would be happy to help them leverage
+the latest features of vLLM as well.
+
+### Cheat Sheet
+
+As illustrated in the figure below, we have summarized the relationships among the key elements of pooling models as a takeaway.
+
+![Cheat Sheet](../../assets/models/pooling_models/cheat_sheet.svg)
 
 ### Sequence-wise Task and Token-wise Task
 
-The key distinction between sequence-wise task and token-wise task lies in their output granularity: sequence-wise task produces a single result for an entire input sequence, whereas token-wise task yields a result for each individual token within the sequence.
+The key distinction between sequence-wise task and token-wise task lies in their output granularity: sequence-wise task
+produces a single result for an entire input sequence, whereas token-wise task yields a result for each individual token
+within the sequence.
 
-Of course, we also have "plugin" tasks that allow users to customize input and output processors. For more information, please refer to [IO Processor Plugins](../../design/io_processor_plugins.md).
+Many Pooling models support both (sequence) task and token task. When the default pooling task (e.g. a sequence-wise task)
+is not what you want, you need to manually specify (e.g. a token-wise task) via `PoolerConfig(task=<task>)` offline or
+`--pooler-config.task <task>` online.
+
+Of course, we also have "plugin" tasks that allow users to customize input and output processors. For more information,
+please refer to [IO Processor Plugins](../../design/io_processor_plugins.md).
 
 ### Pooling Tasks
 
@@ -39,17 +61,33 @@ Of course, we also have "plugin" tasks that allow users to customize input and o
 | `token_embed`         | Token-wise    | vector representations for each token           |
 
 !!! note
-    Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
+    Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models
+    are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
+
+### Pooling Types
+
+![Pooling Types](../../assets/models/pooling_models/pooling_types.svg)
+
+| Pooling Tasks  | Granularity   | Description                                                                                                                                                                                       |
+|----------------|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `CLS` pooling  | Sequence-wise | For BERT‑like (bidirectional self‑attention) models, CLS pooling is used by default. This means the last_hidden_states corresponding to the first token (the [CLS] token) is taken as the output. |
+| `LAST` pooling | Sequence-wise | For GPT‑like (causal self‑attention) models, LAST pooling is used by default. This means the last_hidden_states corresponding to the last token is taken as the output.                           |
+| `MEAN` pooling | Sequence-wise | Many studies have shown that averaging the last_hidden_states over all input tokens performs better on certain downstream tasks. Therefore, more and more models are using MEAN pooling.          |
+| `ALL` pooling  | Token-wise    | Outputs the last_hidden_states for all input tokens.                                                                                                                                              |
+| `STEP` pooling | Token-wise    | Filters and outputs the last_hidden_states corresponding to the token IDs returned by returned_token_ids.                                                                                         |
 
 ### Score Types
 
-The scoring models is designed to compute similarity scores between two input prompts. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
+![Score Types](../../assets/models/pooling_models/score_types.svg)
+
+The scoring models is designed to compute similarity scores between two input prompts. It supports three model types
+(aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
 
 | Pooling Tasks         | Granularity   | Outputs                                      | Score Types        | scoring function         |
 |-----------------------|---------------|----------------------------------------------|--------------------|--------------------------|
 | `classify` (see note) | Sequence-wise | reranker score for each sequence             | `cross-encoder`    | linear classifier        |
 | `embed`               | Sequence-wise | vector representations for each sequence     | `bi-encoder`       | cosine similarity        |
-| `token_classify`      | Token-wise    | probability vector of classes for each token | nan                | nan                      |
+| `token_classify`      | Token-wise    | probability vector of classes for each token | N/A                | N/A                      |
 | `token_embed`         | Token-wise    | vector representations for each token        | `late-interaction` | late interaction(MaxSim) |
 
 !!! note
@@ -57,14 +95,15 @@ The scoring models is designed to compute similarity scores between two input pr
 
 ### Pooling Usages
 
-| Pooling Usages              | Description                                                                                                                                             |
-|-----------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Classification Usages       | Predicting which predefined category, class, or label best corresponds to a given input.                                                                |
-| Embedding Usages            | Converts unstructured data (text, images, audio, etc.) into structured numerical vectors (embeddings).                                                  |
-| Token Classification Usages | Token-wise classification                                                                                                                               |
-| Token Embedding Usages      | Token-wise embedding                                                                                                                                    |
-| Scoring Usages              | Computes similarity scores between two inputs. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`. |
-| Reward Usages               | Evaluates the quality of outputs generated by a language model, acting as a proxy for human preferences.                                                |
+| Pooling Usages              | Description                                                                                                                                               |
+|-----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Classification Usages       | Predicting which predefined category, class, or label best corresponds to a given input.                                                                  |
+| Embedding Usages            | Converts unstructured data (text, images, audio, etc.) into structured numerical vectors (embeddings).                                                    |
+| Token Classification Usages | Token-wise classification                                                                                                                                 |
+| Token Embedding Usages      | Token-wise embedding                                                                                                                                      |
+| Reward Usages               | Evaluates the quality of outputs generated by a language model, acting as a proxy for human preferences.                                                  |
+| Scoring Usages              | Computes similarity scores between two inputs. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.   |
+| Plugins Usages              | Allow users to customize input and output processors. For more information, please refer to [IO Processor Plugins](../../design/io_processor_plugins.md). |
 
 We also have some special models that support multiple pooling tasks, or have specific usage scenarios, or support special inputs and outputs.
 
@@ -72,9 +111,9 @@ For more detailed information, please refer to the link below.
 
 - [Classification Usages](classify.md)
 - [Embedding Usages](embed.md)
-- [Reward Usages](reward.md)
 - [Token Classification Usages](token_classify.md)
 - [Token Embedding Usages](token_embed.md)
+- [Reward Usages](reward.md)
 - [Scoring Usages](scoring.md)
 - [Specific Model Examples](specific_models.md)
 
@@ -84,15 +123,17 @@ Each pooling model in vLLM supports one or more of these tasks according to
 [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
 enabling the corresponding APIs.
 
-### Offline APIs corresponding to pooling tasks
+### Offline APIs corresponding to pooling usages
 
-| Task             | APIs                                                                                  |
-|------------------|---------------------------------------------------------------------------------------|
-| `embed`          | `LLM.embed(...)`, `LLM.encode(..., pooling_task="embed")`, `LLM.score(...)`(see note) |
-| `classify`       | `LLM.classify(...)`, `LLM.encode(..., pooling_task="classify")`, `LLM.score(...)`     |
-| `token_classify` | `LLM.reward(...)`, `LLM.encode(..., pooling_task="token_classify")`                   |
-| `token_embed`    | `LLM.encode(..., pooling_task="token_embed")`, `LLM.score(...)`                       |
-| `plugin`         | `LLM.encode(..., pooling_task="plugin")`                                              |
+| Pooling Usages              | Dedicated API       | Pooling task for `LLM.encode` API | Score Types                | scoring function         |
+|-----------------------------|---------------------|-----------------------------------|----------------------------|--------------------------|
+| Classification Usages       | `LLM.classify(...)` | `classify`                        | `cross-encoder` (see note) | linear classifier        |
+| Embedding Usages            | `LLM.embed(...)`    | `embed`                           | `bi-encoder`               | cosine similarity        |
+| Token Classification Usages | N/A                 | `token_classify`                  | N/A                        | N/A                      |
+| Token Embedding Usages      | N/A                 | `token_embed`                     | `late-interaction`         | late interaction(MaxSim) |
+| Reward Usages               | N/A                 | `classify` & `token_classify`     | N/A                        | N/A                      |
+| Scoring Usages              | `LLM.score(...)`    | N/A                               | N/A                        | N/A                      |
+| Plugins Usages              | N/A                 | `plugin`                          | N/A                        | N/A                      |
 
 !!! note
     Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
@@ -101,7 +142,7 @@ enabling the corresponding APIs.
 
 The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
 It is primarily designed for [classification models](classify.md).
-For more information about `LLM.embed`, see [this page](classify.md#offline-inference).
+For more information about `LLM.classify`, see [this page](classify.md#offline-inference).
 
 ### `LLM.embed`
 
@@ -118,7 +159,7 @@ It is primarily designed for [score models](scoring.md).
 
 The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 
-Please use one of the more specific methods or set the task directly when using `LLM.encode`, refer to the [table above](#offline-apis-corresponding-to-pooling-tasks).
+Please use one of the more specific methods or set the task directly when using `LLM.encode`, refer to the [table above](#offline-apis-corresponding-to-pooling-usages).
 
 ### Examples
 
@@ -138,12 +179,12 @@ Our online Server provides endpoints that correspond to the offline APIs:
 
 - Corresponding to `LLM.embed`:
     - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
-    - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+    - [OpenAI-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
 - Corresponding to `LLM.classify`:
     - [Classification API](classify.md#online-serving)(`/classify`)
 - Corresponding to `LLM.score`:
-    - [Score API](scoring.md#score-api)(`/score`)
-    - [Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Score API](scoring.md#score-api) (`/score`, `/v1/score`)
+    - [Cohere Rerank API](scoring.md#cohere-rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 - Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
 
 The following introduces the Pooling API. For other APIs, please refer to the link above.
@@ -154,9 +195,12 @@ Our Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all
 
 The input format is the same as [Embeddings API](embed.md#openai-compatible-embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
-Please use one of the more specific APIs or set the task directly when using the Pooling API, refer to the [table above](#offline-apis-corresponding-to-pooling-tasks).
+Please use one of the more specific APIs or set the task directly when using the Pooling API, refer to the [table above](#offline-apis-corresponding-to-pooling-usages).
 
-Code example: [examples/pooling/pooling/pooling_online.py](../../../examples/pooling/pooling/pooling_online.py)
+Code examples:
+
+- [Online example](../../../examples/pooling/reward/token_reward_online.py)
+- [Offline example](../../../examples/pooling/reward/token_reward_offline.py)
 
 ### Examples
 
@@ -235,11 +279,66 @@ the pooler assigned to each task has the following attributes by default:
 | `embed`    | `LAST`       | ✅︎            | ❌      |
 | `classify` | `LAST`       | ❌            | ✅︎      |
 
-When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
-its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
+#### Resolution precedence
 
-You can further customize this via the `--pooler-config` option,
-which takes priority over both the model's and Sentence Transformers' defaults.
+The pooling method and `use_activation` are resolved per field. An explicitly
+set field in `--pooler-config` takes precedence over Sentence Transformers
+metadata, which in turn takes precedence over the model architecture or task
+default. Fields left unset continue through the chain independently.
+
+The current `PoolerConfig` has no `normalize` or `activation` field.
+`use_activation` controls whether the task's constructed normalization or
+classification activation is applied.
+
+| Field | Source precedence | How to override |
+| ----- | ----------------- | --------------- |
+| Pooling method (`pooling_type`) | `--pooler-config` > boolean `pooling_mode_*` fields in the Pooling module referenced by Sentence Transformers `modules.json` > architecture default (`LAST` for sequence pooling and `ALL` for token pooling unless the architecture overrides it) | Set `{"pooling_type": "CLS"}`, or set `seq_pooling_type` / `tok_pooling_type` explicitly. |
+| Embedding normalization (`use_activation`) | `--pooler-config` > Sentence Transformers modules (`true` when a Normalize module is present, otherwise `false`) > pooling-task default (`true`) when no Sentence Transformers Pooling module is found | Set `{"use_activation": false}` to return unnormalized embeddings. |
+| Classification activation function | Hugging Face `problem_type` > Sentence Transformers activation metadata > sigmoid or softmax selected from the label count | The function cannot be selected through `--pooler-config`; set `{"use_activation": false}` to return logits instead. |
+
+Sentence Transformers configurations using the newer compact `pooling_mode`
+string are not currently parsed; see [issue #45995](https://github.com/vllm-project/vllm/issues/45995).
+
+For converted models and predefined models using the standard DispatchPooler
+adapters, `embed` and `token_embed` construct an L2-normalization head, while
+`classify` and `token_classify` construct the selected classification activation.
+In both cases, `use_activation` controls whether that head is applied. Models with
+custom poolers can implement different behavior.
+
+To inspect the resolved fields without loading model weights:
+
+```python
+from vllm.config import ModelConfig, PoolerConfig
+from vllm.model_executor.layers.pooler.activations import get_act_fn
+
+
+def inspect(requested: PoolerConfig) -> None:
+    model_config = ModelConfig(
+        "intfloat/e5-small",
+        runner="pooling",
+        pooler_config=requested,
+    )
+    resolved = model_config.pooler_config
+    assert resolved is not None
+    print(
+        {
+            "seq_pooling_type": resolved.seq_pooling_type,
+            "tok_pooling_type": resolved.tok_pooling_type,
+            "use_activation": resolved.use_activation,
+            "sequence_classification_activation": type(
+                get_act_fn(model_config.hf_config)
+            ).__name__,
+        }
+    )
+
+
+inspect(PoolerConfig())
+inspect(PoolerConfig(pooling_type="CLS", use_activation=False))
+```
+
+For `intfloat/e5-small`, the first result contains `MEAN`, `ALL`, and `True`.
+The second contains `CLS`, `ALL`, and `False`. Both report the classification
+activation that the standard sequence-classification adapter would construct.
 
 ## Removed Features
 
@@ -250,11 +349,17 @@ We have split the `encode` task into two more specific token-wise tasks: `token_
 - `token_embed` is the same as `embed`, using normalization as the activation.
 - `token_classify` is the same as `classify`, by default using softmax as the activation.
 
-Pooling models now default support all pooling, you can use it without any settings.
+Pooling models now support token-wise task.
 
 - Extracting hidden states prefers using `token_embed` task.
 - Named Entity Recognition (NER) and reward models prefers using `token_classify` task.
 
 ### Score task
 
-`score` task is deprecated and will be removed in v0.20. Please use `classify` instead. Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
+`score` task has been removed in v0.21, use `classify` instead. Only when a classification model outputs num_labels
+equal to 1 can it be used as a scoring model and have its scoring API enabled.
+
+### Pooling multitask support
+
+Pooling multitask support has been removed in v0.21. When the default pooling task is not what you want,
+you need to manually specify it via `PoolerConfig(task=<task>)` offline or `--pooler-config.task <task>` online.

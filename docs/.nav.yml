@@ -11,7 +11,7 @@ nav:
       - usage/*
     - Inference and Serving:
       - serving/offline_inference.md
-      - serving/openai_compatible_server.md
+      - Online Serving: serving/online_serving
       - serving/*
       - serving/integrations
     - Deployment:
@@ -56,7 +56,9 @@ nav:
   - API Reference:
     - api/README.md
     - api/vllm
-  - CLI Reference: cli
+  - CLI Reference:
+    - cli/README.md
+    - vllm: cli
   - Community:
     - community/*
     - Governance: governance

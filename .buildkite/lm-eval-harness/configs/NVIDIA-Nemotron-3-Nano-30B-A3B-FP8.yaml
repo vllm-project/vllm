@@ -6,9 +6,7 @@ tasks:
     value: 0.7142
   - name: "exact_match,flexible-extract"
     value: 0.4579
-env_vars:
-  VLLM_USE_FLASHINFER_MOE_FP8: "1"
-  VLLM_FLASHINFER_MOE_BACKEND: "throughput"
+moe_backend: "flashinfer_cutlass"
 limit: 1319
 num_fewshot: 5
 max_model_len: 262144

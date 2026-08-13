@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import tempfile
 
 import huggingface_hub.constants
@@ -10,24 +9,8 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
-    enable_hf_transfer,
     maybe_remap_kv_scale_name,
 )
-
-
-def test_hf_transfer_auto_activation():
-    if "HF_HUB_ENABLE_HF_TRANSFER" in os.environ:
-        # in case it is already set, we can't test the auto activation
-        pytest.skip("HF_HUB_ENABLE_HF_TRANSFER is set, can't test auto activation")
-    enable_hf_transfer()
-    try:
-        # enable hf hub transfer if available
-        import hf_transfer  # type: ignore # noqa
-
-        HF_TRANSFER_ACTIVE = True
-    except ImportError:
-        HF_TRANSFER_ACTIVE = False
-    assert huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER == HF_TRANSFER_ACTIVE
 
 
 def test_download_weights_from_hf():
@@ -177,6 +160,126 @@ class TestMaybeRemapKvScaleName:
         assert result is None
 
 
+class TestKvCacheScaleMapper:
+    """The `WeightsMapper` returned by `get_cache_scale_mapper` replaces the
+    per-model `maybe_remap_kv_scale_name` calls. It must remap the same set of
+    checkpoint formats (the non-`params_dict`-dependent ones) and be idempotent
+    so it composes safely with a model's own qkv/gate_up `hf_to_vllm_mapper`."""
+
+    def _mapper(self):
+        # `get_cache_scale_mapper` does not use `self`; call it on the base
+        # class to get the default (non-config-specific) mapper.
+        from vllm.model_executor.layers.quantization.base_config import (
+            QuantizationConfig,
+        )
+
+        return QuantizationConfig.get_cache_scale_mapper()
+
+    def _map(self, name: str) -> str | None:
+        return self._mapper()._map_name(name)
+
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            # Qwen3-MoE / llm-compressor fused qkv_proj
+            (
+                "model.layers.0.self_attn.qkv_proj.k_scale",
+                "model.layers.0.self_attn.attn.k_scale",
+            ),
+            (
+                "model.layers.0.self_attn.qkv_proj.v_scale",
+                "model.layers.0.self_attn.attn.v_scale",
+            ),
+            # ModelOpt / NVFP4 k_proj/v_proj
+            (
+                "model.layers.0.self_attn.k_proj.k_scale",
+                "model.layers.0.self_attn.attn.k_scale",
+            ),
+            (
+                "model.layers.0.self_attn.v_proj.v_scale",
+                "model.layers.0.self_attn.attn.v_scale",
+            ),
+            # deprecated fused kv_scale and bare scales
+            (
+                "model.layers.0.self_attn.kv_scale",
+                "model.layers.0.self_attn.attn.k_scale",
+            ),
+            (
+                "model.layers.0.self_attn.k_scale",
+                "model.layers.0.self_attn.attn.k_scale",
+            ),
+            # NemotronH mixer
+            (
+                "model.layers.0.mixer.k_proj.k_scale",
+                "model.layers.0.mixer.attn.k_scale",
+            ),
+            # already in vLLM form -> unchanged (idempotent)
+            (
+                "model.layers.0.self_attn.attn.k_scale",
+                "model.layers.0.self_attn.attn.k_scale",
+            ),
+            # non-kv scales must not be touched
+            (
+                "model.layers.0.self_attn.k_proj.weight_scale",
+                "model.layers.0.self_attn.k_proj.weight_scale",
+            ),
+            (
+                "model.layers.0.self_attn.k_proj.input_scale",
+                "model.layers.0.self_attn.k_proj.input_scale",
+            ),
+            # regular weights untouched
+            (
+                "model.layers.0.self_attn.q_proj.weight",
+                "model.layers.0.self_attn.q_proj.weight",
+            ),
+        ],
+    )
+    def test_remap(self, name, expected):
+        assert self._map(name) == expected
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "model.layers.0.self_attn.k_scale",
+            "model.layers.0.self_attn.k_proj.k_scale",
+            "model.layers.0.self_attn.qkv_proj.v_scale",
+            "model.layers.0.mixer.k_proj.k_scale",
+        ],
+    )
+    def test_idempotent(self, name):
+        once = self._map(name)
+        assert once is not None
+        assert self._map(once) == once
+
+    def test_composes_with_qkv_mapper(self):
+        """Applied together with a model's qkv/gate_up mapper, the regex scale
+        rules run before the substr rename, so scales are normalized to `.attn.`
+        and regular projections are still fused correctly."""
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        model_mapper = WeightsMapper(
+            orig_to_new_substr={
+                ".q_proj": ".qkv_proj.q",
+                ".k_proj": ".qkv_proj.k",
+                ".v_proj": ".qkv_proj.v",
+            }
+        )
+        # AutoWeightsLoader does `mapper |= cache_scale_mapper`
+        combined = model_mapper | self._mapper()
+
+        assert (
+            combined._map_name("model.layers.0.self_attn.q_proj.weight")
+            == "model.layers.0.self_attn.qkv_proj.q.weight"
+        )
+        assert (
+            combined._map_name("model.layers.0.self_attn.k_proj.k_scale")
+            == "model.layers.0.self_attn.attn.k_scale"
+        )
+        assert (
+            combined._map_name("model.layers.0.self_attn.k_scale")
+            == "model.layers.0.self_attn.attn.k_scale"
+        )
+
+
 if __name__ == "__main__":
-    test_hf_transfer_auto_activation()
     test_download_weights_from_hf()
