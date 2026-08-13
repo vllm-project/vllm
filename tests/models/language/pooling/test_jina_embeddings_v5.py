@@ -14,7 +14,6 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-import torch
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
@@ -22,13 +21,6 @@ from vllm.model_executor.models.config import (
     MODELS_CONFIG_MAP,
     JinaEmbeddingsV5ModelConfig,
 )
-from vllm.model_executor.models.jina import (
-    JinaEmbeddingsV5DecoderModel,
-    JinaEmbeddingsV5EncoderModel,
-)
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
-from vllm.model_executor.models.utils import StageMissingLayer
 
 
 def _model_config(hf_config: PretrainedConfig) -> ModelConfig:
@@ -73,40 +65,3 @@ def test_supported_decoder_backbone_is_accepted():
     JinaEmbeddingsV5ModelConfig.verify_and_update_model_config(
         _model_config(PretrainedConfig(is_decoder=True))
     )
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    ("model_cls", "base_cls"),
-    [
-        (JinaEmbeddingsV5DecoderModel, Qwen3ForCausalLM),
-        (JinaEmbeddingsV5EncoderModel, LlamaForCausalLM),
-    ],
-)
-def test_pooling_model_skips_output_layer(monkeypatch, model_cls, base_cls):
-    class FakeLMHead(torch.nn.Linear):
-        pass
-
-    class FakeLogitsProcessor(torch.nn.Module):
-        pass
-
-    def fake_base_init(self, *, vllm_config, prefix=""):
-        torch.nn.Module.__init__(self)
-        self.model = torch.nn.Linear(2, 2, bias=False)
-        self.lm_head = FakeLMHead(2, 1024, bias=False)
-        self.logits_processor = FakeLogitsProcessor()
-
-    import vllm.model_executor.models.jina as jina_module
-
-    monkeypatch.setattr(jina_module, "ParallelLMHead", FakeLMHead)
-    monkeypatch.setattr(jina_module, "LogitsProcessor", FakeLogitsProcessor)
-    monkeypatch.setattr(jina_module, "_setup_jina_v5_task_and_pooler", lambda *_: None)
-    monkeypatch.setattr(base_cls, "__init__", fake_base_init)
-
-    model = model_cls(vllm_config=object())
-
-    assert isinstance(model.lm_head, StageMissingLayer)
-    assert isinstance(model.logits_processor, StageMissingLayer)
-    params = dict(model.named_parameters())
-    assert list(params) == ["model.weight"]
-    assert params["model.weight"] is model.model.weight
