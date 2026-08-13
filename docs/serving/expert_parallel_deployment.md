@@ -155,6 +155,7 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
+| `load_balancing_strategy` | Expert placement strategy: `"auto"`, `"hierarchical"`, or `"global"` | `"auto"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
 
 For example:
@@ -175,6 +176,23 @@ vllm serve Qwen/Qwen3-30B-A3B \
             --eplb-config.num_redundant_experts 2 \
             --eplb-config.log_balancedness true
     ```
+
+For disaggregated serving, use hierarchical load balancing on prefill
+instances to preserve expert-group locality across nodes, and global load
+balancing on decode instances to distribute experts across all ranks, as
+recommended by the [DeepSeek EPLB implementation](https://github.com/deepseek-ai/EPLB):
+
+```bash
+# Prefill instance
+--eplb-config '{"load_balancing_strategy":"hierarchical"}'
+
+# Decode instance
+--eplb-config '{"load_balancing_strategy":"global"}'
+```
+
+The default `"auto"` strategy preserves the previous topology-selection
+behavior. It uses the detected expert groups and node count, falling back to a
+single-node topology when the EP rank count is not divisible by the node count.
 
 ### Expert Distribution Formula
 

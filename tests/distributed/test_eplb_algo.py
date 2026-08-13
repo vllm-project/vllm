@@ -5,8 +5,56 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.distributed.eplb.eplb_state import compute_logical_maps
+from vllm.config import EPLBConfig
+from vllm.distributed.eplb.eplb_state import (
+    _resolve_eplb_rebalancing_topology,
+    compute_logical_maps,
+)
 from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
+
+
+@pytest.mark.parametrize("strategy", ["auto", "hierarchical", "global"])
+def test_eplb_load_balancing_strategy_config(strategy):
+    config = EPLBConfig(load_balancing_strategy=strategy)
+    assert config.load_balancing_strategy == strategy
+
+
+def test_eplb_load_balancing_strategy_config_rejects_unknown_value():
+    with pytest.raises(ValueError, match="Input should be"):
+        EPLBConfig(**{"load_balancing_strategy": "local"})
+
+
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [
+        ("auto", (8, 2)),
+        ("hierarchical", (8, 2)),
+        ("global", (1, 1)),
+    ],
+)
+def test_resolve_eplb_rebalancing_topology(strategy, expected):
+    assert _resolve_eplb_rebalancing_topology(strategy, 8, 2, 8) == expected
+
+
+def test_auto_eplb_rebalancing_preserves_legacy_single_node_fallback():
+    assert _resolve_eplb_rebalancing_topology("auto", 8, 3, 8) == (8, 1)
+
+
+def test_auto_eplb_rebalancing_preserves_legacy_policy_fallback():
+    assert _resolve_eplb_rebalancing_topology("auto", 7, 2, 8) == (7, 2)
+
+
+@pytest.mark.parametrize(
+    ("num_groups", "num_nodes", "num_gpus"),
+    [(7, 2, 8), (8, 3, 8)],
+)
+def test_hierarchical_eplb_rebalancing_rejects_incompatible_topology(
+    num_groups, num_nodes, num_gpus
+):
+    with pytest.raises(ValueError, match="Hierarchical EPLB requires"):
+        _resolve_eplb_rebalancing_topology(
+            "hierarchical", num_groups, num_nodes, num_gpus
+        )
 
 
 def test_basic_rebalance():
