@@ -7,6 +7,7 @@ import pytest
 
 from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.exceptions import VLLMValidationError
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
@@ -61,7 +62,7 @@ def test_multiple_pooling_params(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
     # Exception raised, if the size of params does not match the size of prompts
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         outputs = llm.encode(
             PROMPTS, pooling_params=pooling_params[:3], pooling_task="embed"
         )
