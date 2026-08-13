@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import os
 import random
 
@@ -9,6 +8,7 @@ import torch
 from utils import (
     _extract_step_logprobs,
     _random_prompt,
+    shutdown_llm,
     skip_if_not_cuda,
 )
 
@@ -96,5 +96,4 @@ def test_dense_nvfp4_generation_is_deterministic_across_batch_sizes_e2e(backend)
             torch.testing.assert_close(needle_logprobs, baseline_logprobs)
     finally:
         if llm is not None:
-            with contextlib.suppress(Exception):
-                llm.shutdown()
+            shutdown_llm(llm)

@@ -1507,7 +1507,12 @@ def error_on_warning(category: type[Warning] = Warning):
 
 
 def get_physical_device_indices(devices: list[int]):
-    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    # HIP_VISIBLE_DEVICES takes precedence in the HIP runtime, so torch's
+    # device order follows it; reading CUDA_VISIBLE_DEVICES alone maps a
+    # HIP-pinned run onto the wrong physical GPUs.
+    visible_devices = os.environ.get("HIP_VISIBLE_DEVICES") or os.environ.get(
+        "CUDA_VISIBLE_DEVICES"
+    )
     if visible_devices is None:
         return devices
 
