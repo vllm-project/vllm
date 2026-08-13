@@ -85,7 +85,7 @@ external draft source and never selects the method.
 | --- | --- | --- | --- |
 | `method` | `string` | `None` | Speculation method. Required in explicit speculative configurations. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, `dflash`, and `dspark`. Known formats that explicitly declare their algorithm, such as speculators-format checkpoints, populate this field automatically. |
 | `model` | `string` | `None` | External draft model, EAGLE head, auxiliary weights, or custom proposer path. Omit it for `ngram`, `ngram_gpu`, `suffix`, and `extract_hidden_states`. It is optional for `mtp` and `dspark` when their weights are embedded in the target checkpoint, and otherwise required. |
-| `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
+| `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Inferred from model metadata when it determines the value (speculators-format declarations, MTP `n_predict`, DFlash/DSpark `block_size`); otherwise required. |
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. |
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |

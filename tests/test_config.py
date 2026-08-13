@@ -2248,6 +2248,24 @@ def test_explicit_method_selects_deepseek_v4_loader(
     ) == expected
 
 
+@pytest.mark.parametrize(
+    ("method", "config_kwargs", "expected"),
+    [
+        pytest.param("dflash", {"block_size": 16}, 15, id="dflash-anchor-is-bonus"),
+        pytest.param("dspark", {"block_size": 7}, 7, id="dspark-full-block"),
+        pytest.param("dflash", {}, None, id="no-block-size-stays-required"),
+        pytest.param("draft_model", {"block_size": 16}, None, id="non-block-drafter"),
+        pytest.param("dflash", {"block_size": 1}, None, id="degenerate-block"),
+    ],
+)
+def test_block_drafters_default_tokens_from_block_size(method, config_kwargs, expected):
+    hf_config = PretrainedConfig(**config_kwargs)
+
+    assert (
+        SpeculativeConfig._tokens_from_draft_block_size(method, hf_config) == expected
+    )
+
+
 def test_draft_sample_method_probabilistic_is_accepted():
     speculative_config = SpeculativeConfig(
         method="ngram",

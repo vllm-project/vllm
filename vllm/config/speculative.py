@@ -723,6 +723,25 @@ class SpeculativeConfig:
         return hf_config
 
     @staticmethod
+    def _tokens_from_draft_block_size(
+        method: SpeculativeMethod,
+        hf_config: PretrainedConfig,
+    ) -> int | None:
+        """Structural token default for block drafters.
+
+        A block drafter only runs at its checkpoint block size: DFlash
+        proposes ``block_size - 1`` tokens (the anchor is a bonus token) and
+        DSpark proposes ``block_size`` tokens per block.
+        """
+        if method not in ("dflash", "dspark"):
+            return None
+        block_size = getattr(hf_config, "block_size", None)
+        if not isinstance(block_size, int):
+            return None
+        tokens = block_size - 1 if method == "dflash" else block_size
+        return tokens if tokens > 0 else None
+
+    @staticmethod
     def _apply_composed_hf_override(
         draft_hf_override: Callable[[PretrainedConfig], PretrainedConfig],
         target_hf_overrides: Callable[[PretrainedConfig], PretrainedConfig],
@@ -1059,6 +1078,18 @@ class SpeculativeConfig:
                         raise ValueError(
                             f"num_speculative_tokens:{self.num_speculative_tokens}"
                             f" must be divisible by {n_predict=}"
+                        )
+
+                if self.num_speculative_tokens is None:
+                    block_tokens = self._tokens_from_draft_block_size(
+                        self.method, self.draft_model_config.hf_config
+                    )
+                    if block_tokens is not None:
+                        self.num_speculative_tokens = block_tokens
+                        logger.info(
+                            "Defaulted num_speculative_tokens to %d from the "
+                            "draft checkpoint block_size.",
+                            block_tokens,
                         )
 
                 if self.num_speculative_tokens is None:
