@@ -1996,6 +1996,7 @@ def test_eagle_draft_model_config():
         "meta-llama/Meta-Llama-3-8B-Instruct", trust_remote_code=True
     )
     speculative_config = SpeculativeConfig(
+        method="eagle",
         model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
         num_speculative_tokens=1,
         target_model_config=target_model_config,
@@ -2010,179 +2011,80 @@ def test_eagle_draft_model_config():
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
 
 
-def _draft_config(model, model_type="llama", architectures=(), **hf_attrs):
-    """Stand-in for the draft ModelConfig fields method resolution reads."""
-    return SimpleNamespace(
-        hf_config=SimpleNamespace(model_type=model_type, **hf_attrs),
-        model=model,
-        architectures=list(architectures),
-    )
-
-
-def test_deprecated_mtp_method_is_normalized_before_resolution():
-    draft_model_config = _draft_config(
-        "draft", model_type="deepseek_mtp", architectures=["DeepSeekMTPModel"]
-    )
-
-    with (
-        patch(
-            "vllm.config.speculative.ModelConfig",
-            return_value=draft_model_config,
-        ),
-        patch.object(
-            SpeculativeConfig,
-            "_resolve_method_and_parallel",
-            side_effect=RuntimeError("stop after resolution"),
-        ) as resolve,
-        pytest.raises(RuntimeError, match="stop after resolution"),
-    ):
+@pytest.mark.parametrize(
+    "model", ["/train/checkpoints/6", "[ngram]", "pkg.CustomProposer"]
+)
+def test_speculative_config_requires_method(model):
+    with pytest.raises(ValueError, match="requires an explicit `method`"):
         SpeculativeConfig(
-            method="deepseek_mtp",
-            model="draft",
+            model=model,
             num_speculative_tokens=1,
-            target_model_config=MagicMock(),
         )
-
-    resolve.assert_called_once_with("mtp", draft_model_config)
-
-
-def test_constructor_auto_detects_method_from_drafter_architecture(caplog):
-    draft_model_config = _draft_config(
-        "draft", architectures=["Eagle3Qwen3ForCausalLM"]
-    )
-
-    with (
-        patch(
-            "vllm.config.speculative.ModelConfig",
-            return_value=draft_model_config,
-        ),
-        patch.object(
-            SpeculativeConfig,
-            "_maybe_override_draft_max_position_embeddings",
-            side_effect=RuntimeError("stop after detection"),
-        ),
-        caplog.at_level(logging.INFO),
-        pytest.raises(RuntimeError, match="stop after detection"),
-    ):
-        SpeculativeConfig(
-            model="draft",
-            num_speculative_tokens=1,
-            target_model_config=MagicMock(),
-        )
-
-    assert "Auto-detected speculative method 'eagle3'" in caplog.text
 
 
 @pytest.mark.parametrize(
-    "method, draft_model_config, expected",
+    ("model_type", "expected"),
     [
-        # Config parsing normalizes self-describing checkpoints to a registry
-        # drafter architecture, which resolves the method even at a path with
-        # no algorithm hint (e.g. a trainer's `checkpoints/6`).
         pytest.param(
-            None,
-            _draft_config(
-                "/train/checkpoints/6", architectures=["Eagle3Qwen3ForCausalLM"]
-            ),
-            ("eagle3", False),
-            id="arch-at-neutral-path",
-        ),
-        # peagle architectures run as the eagle3 method, drafting in parallel.
-        pytest.param(
-            None,
-            _draft_config(
-                "/train/checkpoints/6", architectures=["PeagleQwen3ForCausalLM"]
-            ),
-            ("eagle3", True),
-            id="arch-peagle-parallel-eagle3",
-        ),
-        # A declaration outranks an unrelated algorithm name in the path.
-        pytest.param(
-            None,
-            _draft_config("/bench/eagle3_vs_mtp/ckpt", model_type="deepseek_mtp"),
-            ("mtp", False),
-            id="model-type-beats-path-name",
+            "dflash",
+            {"method": "dflash", "num_speculative_tokens": 15},
+            id="dflash",
         ),
         pytest.param(
-            None,
-            _draft_config("yuhuili/EAGLE-LLaMA3-Instruct-8B"),
-            ("eagle", False),
-            id="legacy-eagle-model-id",
-        ),
-        pytest.param(
-            None,
-            _draft_config("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"),
-            ("eagle3", False),
-            id="legacy-eagle3-model-id",
-        ),
-        # Legacy EAGLE-DeepSeek is recognized before the generic DeepSeek MTP
-        # normalization can shadow its undeclared method.
-        pytest.param(
-            None,
-            _draft_config(
-                "eagle618/eagle-deepseek-v3-random",
-                model_type="deepseek_mtp",
-                architectures=["DeepSeekMTPModel"],
-            ),
-            ("eagle", False),
-            id="legacy-eagle-model-id-beats-mtp-normalization",
-        ),
-        # An algorithm name elsewhere in the path is not a declaration, and
-        # neither is draft_vocab_size: EAGLE-1 and DFlash checkpoints have one.
-        pytest.param(
-            None,
-            _draft_config(
-                "/bench/eagle3-results/checkpoints/6", draft_vocab_size=32000
-            ),
-            ("draft_model", False),
-            id="path-name-and-draft-vocab-are-not-declarations",
-        ),
-        # An explicit method is never overridden, but parallel drafting still
-        # follows the architecture when it implements that method.
-        pytest.param(
-            "draft_model",
-            _draft_config("/ckpt", architectures=["Eagle3Qwen3ForCausalLM"]),
-            ("draft_model", False),
-            id="explicit-never-overridden",
-        ),
-        pytest.param(
-            "eagle3",
-            _draft_config("/ckpt", architectures=["PeagleQwen3ForCausalLM"]),
-            ("eagle3", True),
-            id="explicit-keeps-arch-parallelism",
-        ),
-        pytest.param(
-            "dspark",
-            _draft_config("/ckpt"),
-            ("dspark", True),
-            id="explicit-dspark-keeps-parallelism",
+            "peagle",
+            {
+                "method": "eagle3",
+                "num_speculative_tokens": 7,
+                "parallel_drafting": True,
+            },
+            id="peagle",
         ),
     ],
 )
-def test_speculative_method_resolution(method, draft_model_config, expected):
-    """Method resolution reads the checkpoint's declaration, not its path.
+def test_speculators_format_declares_method_and_tokens(model_type, expected):
+    from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
 
-    Exercised below the public API: reaching it through SpeculativeConfig
-    would download a checkpoint per case.
-    """
-    assert (
-        SpeculativeConfig._resolve_method_and_parallel(method, draft_model_config)
-        == expected
-    )
+    config = {
+        "speculators_model_type": model_type,
+        "speculators_config": {
+            "proposal_methods": [
+                {"speculative_tokens": expected["num_speculative_tokens"]}
+            ]
+        },
+    }
+
+    assert SpeculatorsConfig.build_vllm_speculative_config(config) == expected
 
 
-def test_drafter_method_table_declares_valid_methods():
-    """The registry table is the authority, so its methods must be real ones.
+def test_speculators_format_preserves_explicit_method():
+    from vllm.transformers_utils.config import maybe_override_with_speculators
 
-    Key coverage is asserted at import time in the registry module itself.
-    """
-    from typing import get_args
+    config = {
+        "speculators_model_type": "dflash",
+        "transformer_layer_config": {},
+        "speculators_config": {
+            "proposal_methods": [{"speculative_tokens": 15}],
+            "verifier": {"name_or_path": "target/model"},
+        },
+    }
 
-    from vllm.config.speculative import SpeculativeMethod
-    from vllm.model_executor.models.registry import SPEC_METHOD_BY_DRAFTER_ARCH
+    with patch(
+        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+        return_value=(config, {}),
+    ):
+        model, tokenizer, speculative_config = maybe_override_with_speculators(
+            model="draft/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config={"method": "draft_model"},
+        )
 
-    valid = set(get_args(SpeculativeMethod))
-    assert {method for method, _ in SPEC_METHOD_BY_DRAFTER_ARCH.values()} <= valid
+    assert (model, tokenizer) == ("target/model", "target/model")
+    assert speculative_config == {
+        "method": "draft_model",
+        "model": "draft/model",
+        "num_speculative_tokens": 15,
+    }
 
 
 @pytest.mark.parametrize(
@@ -2211,7 +2113,12 @@ def test_deepseek_v4_dspark_normalized_before_mtp(dspark_fields, expected):
         )
     )
 
-    assert (hf_config.model_type, hf_config.architectures[0]) == expected
+    actual = (
+        hf_config.model_type,
+        hf_config.architectures[0],
+        getattr(hf_config, "n_predict", None),
+    )
+    assert actual == (*expected, dspark_fields.get("dspark_block_size"))
 
 
 def test_draft_sample_method_probabilistic_is_accepted():

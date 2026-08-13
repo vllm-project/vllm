@@ -673,9 +673,10 @@ def maybe_override_with_speculators(
     speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict
     )
-
-    # Set the draft model to the speculators model
     speculative_config["model"] = model
+    if vllm_speculative_config is not None:
+        # Explicit settings take precedence over checkpoint-declared defaults.
+        speculative_config.update(vllm_speculative_config)
 
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]

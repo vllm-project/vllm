@@ -87,32 +87,12 @@ _DEEPSEEK_V4_DSPARK_FIELDS = (
     "dspark_markov_rank",
 )
 
-_LEGACY_EAGLE_METHOD_BY_MODEL_ID: dict[str, SpeculativeMethod] = {
-    "eagle618/eagle-deepseek-v3-random": "eagle",
-    "morgendave/eagle-llama-4-scout-17b-16e-instruct": "eagle",
-}
-
 
 def _is_deepseek_v4_dspark_config(hf_config: PretrainedConfig) -> bool:
     return hf_config.model_type == "deepseek_v4" and all(
         getattr(hf_config, field, None) is not None
         for field in _DEEPSEEK_V4_DSPARK_FIELDS
     )
-
-
-def _legacy_eagle_method(model: str) -> SpeculativeMethod | None:
-    """Resolve known EAGLE checkpoints that do not declare their method."""
-    model_id = model.lower()
-    if model_id.count("/") != 1:
-        return None
-
-    owner, repo = model_id.split("/", 1)
-    if owner == "yuhuili":
-        if repo.startswith("eagle3-"):
-            return "eagle3"
-        if repo.startswith("eagle-"):
-            return "eagle"
-    return _LEGACY_EAGLE_METHOD_BY_MODEL_ID.get(model_id)
 
 
 @config
@@ -129,10 +109,9 @@ class SpeculativeConfig:
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
     method: SpeculativeMethod | None = None
-    """The name of the speculative method to use. If users provide and set the
-    `model` param, the speculative method type will be detected automatically
-    if possible, if `model` param is not provided, the method name must be
-    provided.
+    """The name of the speculative method to use. This must be provided in an
+    explicit speculative configuration. Known checkpoint formats may populate
+    it from a method declaration in their schema.
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
@@ -396,7 +375,12 @@ class SpeculativeConfig:
         # weights under mtp.*, but its required dspark_* fields distinguish it
         # from an MTP checkpoint. Normalize it before the generic V4 MTP rule.
         if _is_deepseek_v4_dspark_config(hf_config):
-            hf_config.update({"architectures": ["DSparkDraftModel"]})
+            hf_config.update(
+                {
+                    "architectures": ["DSparkDraftModel"],
+                    "n_predict": hf_config.dspark_block_size,
+                }
+            )
             return hf_config
 
         if hf_config.model_type in (
@@ -768,114 +752,24 @@ class SpeculativeConfig:
             SpeculativeConfig._apply_composed_hf_override, target_hf_overrides
         )
 
-    @staticmethod
-    def _is_custom_proposer_path(model: str | None) -> bool:
-        """True if ``model`` is a dotted import path (e.g. ``pkg.MyProposer``)."""
-        if model is None:
-            return False
-        if model.startswith(("http://", "https://", "file://")):
-            return False
-        if "/" in model:
-            return False
-        parts = model.split(".")
-        return len(parts) >= 2 and all(part.isidentifier() for part in parts)
-
-    @staticmethod
-    def _resolve_method_and_parallel(
-        method: SpeculativeMethod | None,
-        draft_model_config: ModelConfig,
-    ) -> tuple[SpeculativeMethod, bool]:
-        """Resolve the method and parallel drafting for a draft checkpoint.
-
-        The declared architecture is the authority: config parsing normalizes
-        every self-describing drafter to a registry architecture, and
-        `SPEC_METHOD_BY_DRAFTER_ARCH` declares the method each one implements
-        and whether it drafts all speculative tokens in one forward pass. An
-        explicit `method` always wins, with a warning if the checkpoint
-        declares a different one. Legacy checkpoints are recognized by their
-        scoped Hugging Face model ID ahead of the architecture, because
-        vLLM's own MTP normalization overwrites what they declare.
-        """
-        from vllm.model_executor.models.registry import SPEC_METHOD_BY_DRAFTER_ARCH
-
-        declared = next(
-            (
-                SPEC_METHOD_BY_DRAFTER_ARCH[arch]
-                for arch in draft_model_config.architectures
-                if arch in SPEC_METHOD_BY_DRAFTER_ARCH
-            ),
-            None,
-        )
-
-        if method is not None:
-            parallel_drafting = method in ("dflash", "dspark") or (
-                declared is not None and declared[0] == method and declared[1]
-            )
-            if declared is not None and declared[0] != method:
-                logger.warning(
-                    "Using requested speculative method '%s', but the draft "
-                    "checkpoint architectures %s implement '%s'.",
-                    method,
-                    draft_model_config.architectures,
-                    declared[0],
-                )
-            return method, parallel_drafting
-
-        legacy_method = _legacy_eagle_method(draft_model_config.model)
-        if legacy_method is not None:
-            logger.warning(
-                "Detected speculative method '%s' from legacy checkpoint ID "
-                "'%s'. Automatic detection for checkpoints without a method "
-                "declaration is deprecated; pass `method` in "
-                "--speculative-config instead.",
-                legacy_method,
-                draft_model_config.model,
-            )
-            return legacy_method, False
-
-        if declared is not None:
-            return declared
-
-        hf_config = draft_model_config.hf_config
-        if hf_config.model_type == "medusa":
-            return "medusa", False
-        if hf_config.model_type == "mlp_speculator":
-            return "mlp_speculator", False
-        if hf_config.model_type in get_args(MTPModelTypes):
-            return "mtp", False
-
-        return "draft_model", False
-
     def __post_init__(self):
-        # Note: "method" is a new parameter that helps to extend the
-        # configuration of non-model-based proposers, and the "model" parameter
-        # will be used to set the draft model, eagle head, or additional weight
-        # when needed. If users do not specify "method", the speculative method
-        # will be detected automatically if possible. If the speculative method
-        # can not be detected, it will be considered as the "draft_model" by
-        # default.
-
-        # infer method from user args
-        requested_method = self.method
-        if self.method is None and SpeculativeConfig._is_custom_proposer_path(
-            self.model
-        ):
-            self.method = "custom_class"
-        elif self.method is None:
-            if self.model in ("ngram", "[ngram]"):
-                self.method = "ngram"
-            else:
-                self.method = "draft_model"
+        if self.method is None:
+            raise ValueError(
+                "Speculative decoding requires an explicit `method`. Set it "
+                "in --speculative-config or pass --spec-method. For a generic "
+                "autoregressive draft "
+                "model, use method='draft_model'."
+            )
 
         if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
                 "method `%s` is deprecated and replaced with mtp.", self.method
             )
             self.method = "mtp"
-            if requested_method is not None:
-                requested_method = "mtp"
 
-        if self.model is None and self.num_speculative_tokens is not None:
+        if self.model is None and (
+            self.num_speculative_tokens is not None or self.method in ("mtp", "dspark")
+        ):
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
@@ -1047,21 +941,6 @@ class SpeculativeConfig:
                         draft_hf.vocab_size = target_vocab
                         draft_hf.truncated_vocab_size = target_vocab
 
-                detected_method, parallel_drafting = (
-                    SpeculativeConfig._resolve_method_and_parallel(
-                        requested_method, self.draft_model_config
-                    )
-                )
-                if requested_method is None:
-                    logger.info(
-                        "Auto-detected speculative method '%s' for draft model "
-                        "'%s'. Pass `method` in --speculative-config to override.",
-                        detected_method,
-                        self.draft_model_config.model,
-                    )
-                self.method = detected_method
-                self.parallel_drafting |= parallel_drafting
-
                 if self.method in ("eagle", "eagle3"):
                     # EAGLE drafts share the target's positional space; a
                     # draft checkpoint with a smaller max_position_embeddings
@@ -1140,6 +1019,8 @@ class SpeculativeConfig:
                     ):
                         hf.n_predict = hf.block_size
 
+                if self.method in ("dflash", "dspark"):
+                    self.parallel_drafting = True
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"

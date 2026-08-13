@@ -81,7 +81,9 @@ def test_grammar_bitmask_with_specdec():
     vllm_config = VllmConfig(
         model_config=ModelConfig(tokenizer=TOKENIZER),
         structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
-        speculative_config=SpeculativeConfig(model="[ngram]", num_speculative_tokens=3),
+        speculative_config=SpeculativeConfig(
+            method="ngram", model="[ngram]", num_speculative_tokens=3
+        ),
     )
     structured_output_manager = StructuredOutputManager(vllm_config)
 

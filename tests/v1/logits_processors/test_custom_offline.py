@@ -273,7 +273,11 @@ def test_rejects_custom_logitsprocs(
             "runner": "auto",
             "model": MODEL_NAME,
             "error_message": STR_SPEC_DEC_REJECTS_LOGITSPROCS,
-            "speculative_config": {"model": "ngram", "num_speculative_tokens": 1},
+            "speculative_config": {
+                "method": "ngram",
+                "model": "ngram",
+                "num_speculative_tokens": 1,
+            },
         },
     }
 

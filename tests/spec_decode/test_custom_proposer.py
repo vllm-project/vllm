@@ -85,6 +85,7 @@ if __name__ == "__main__":
     llm = LLM(
         model=MODEL_ID,
         speculative_config={
+            "method": "custom_class",
             "model": f"{__name__}.DummyDraftProposer",
             "num_speculative_tokens": NUM_SPEC_TOKENS,
         },
