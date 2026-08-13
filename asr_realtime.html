@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Qwen3-ASR 实时语音转写 (WebSocket)</title>
+    <style>
+      :root {
+        --bg: #0f0f14;
+        --surface: #1a1a24;
+        --border: #2a2a3a;
+        --text: #e4e4ec;
+        --muted: #8888a0;
+        --accent: #6c5ce7;
+        --danger: #e74c3c;
+        --success: #2ecc71;
+        --warn: #f39c12;
+        --radius: 12px;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 20px;
+      }
+      .container {
+        width: 100%;
+        max-width: 680px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 28px;
+      }
+      h1 {
+        font-size: 1.3rem;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--border);
+        transition: 0.3s;
+      }
+      .dot.off {
+        background: var(--border);
+      }
+      .dot.rec {
+        background: var(--danger);
+        animation: pulse 0.8s infinite;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.3;
+        }
+      }
+      .subtitle {
+        color: var(--muted);
+        font-size: 0.8rem;
+        margin-bottom: 16px;
+      }
+      .conf {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .conf input,
+      .conf select {
+        flex: 1;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 10px 14px;
+        color: var(--text);
+        font-size: 0.85rem;
+        outline: none;
+      }
+      .conf input:focus,
+      .conf select:focus {
+        border-color: var(--accent);
+      }
+      .btns {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      .btn {
+        flex: 1;
+        padding: 14px;
+        border: none;
+        border-radius: var(--radius);
+        font-size: 1rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: 0.2s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+      }
+      .btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .btn-go {
+        background: var(--accent);
+        color: #fff;
+      }
+      .btn-go:hover:not(:disabled) {
+        background: #5a4bd1;
+      }
+      .btn-go.on {
+        background: var(--danger);
+        animation: pulse-bg 1.5s infinite;
+      }
+      @keyframes pulse-bg {
+        0%,
+        100% {
+          background: var(--danger);
+        }
+        50% {
+          background: #c0392b;
+        }
+      }
+      .btn-clr {
+        background: var(--border);
+        color: var(--text);
+        flex: 0.4;
+      }
+      .timer {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: var(--accent);
+        text-align: center;
+        margin-bottom: 8px;
+        display: none;
+      }
+      .timer.show {
+        display: block;
+      }
+      .status {
+        font-size: 0.8rem;
+        color: var(--muted);
+        margin-bottom: 10px;
+        min-height: 20px;
+      }
+      .tag {
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 8px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        margin-right: 8px;
+      }
+      .tag.off {
+        background: #333;
+        color: #888;
+      }
+      .tag.on {
+        background: #0a3d20;
+        color: var(--success);
+      }
+      .tag.err {
+        background: #3d0a0a;
+        color: var(--danger);
+      }
+      .out {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px;
+        min-height: 100px;
+        max-height: 350px;
+        overflow-y: auto;
+        font-size: 1.05rem;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .out:empty::before {
+        content: "连接后开始说话...";
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1><span class="dot off" id="dot"></span> Qwen3-ASR 实时转写</h1>
+      <p class="subtitle">WebSocket 流式 · 边说边出字</p>
+
+      <div class="conf">
+        <input
+          id="url"
+          value="wss://huangzr12311--vllm-qwen3-asr-vllmasrserver.us-east.modal.direct/v1/realtime"
+          placeholder="wss://..."
+        />
+      </div>
+      <div class="conf">
+        <select id="micSel">
+          <option>🔍 检测麦克风...</option>
+        </select>
+        <button
+          class="btn btn-clr"
+          onclick="scanMics()"
+          style="flex: 0.3; min-width: 50px"
+        >
+          🔄
+        </button>
+      </div>
+
+      <div class="btns">
+        <button class="btn btn-go" id="btnGo" onclick="toggle()">
+          <span id="btnIcon">▶️</span> <span id="btnLabel">连接并开始</span>
+        </button>
+        <button class="btn btn-clr" onclick="clearAll()">🗑️</button>
+      </div>
+
+      <div class="timer" id="timer">00:00</div>
+      <div class="status">
+        <span class="tag off" id="tag">未连接</span> <span id="msg">就绪</span>
+      </div>
+      <div class="out" id="out"></div>
+    </div>
+
+    <script>
+      const MODEL = "Qwen/Qwen3-ASR-0.6B-hf";
+      const SAMPLE_RATE = 16000;
+
+      // ===== 状态 =====
+      let ws = null,
+        stream = null,
+        audioCtx = null,
+        proc = null;
+      let active = false,
+        timerId = null,
+        startT = 0;
+      let selectedMic = "",
+        fullText = "";
+
+      const urlEl = document.getElementById("url"),
+        micSel = document.getElementById("micSel");
+      const btnGo = document.getElementById("btnGo"),
+        btnIcon = document.getElementById("btnIcon"),
+        btnLabel = document.getElementById("btnLabel");
+      const dot = document.getElementById("dot"),
+        timerEl = document.getElementById("timer");
+      const tag = document.getElementById("tag"),
+        msg = document.getElementById("msg"),
+        out = document.getElementById("out");
+
+      // ===== 麦克风 =====
+      async function scanMics() {
+        try {
+          await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (e) {}
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        const mics = devs.filter((d) => d.kind === "audioinput");
+        micSel.innerHTML = "";
+        mics.forEach((m, i) => {
+          const o = document.createElement("option");
+          o.value = m.deviceId;
+          o.textContent = m.label || `麦克风 ${i + 1}`;
+          if (m.deviceId === selectedMic) o.selected = true;
+          micSel.appendChild(o);
+        });
+        if (!selectedMic && mics.length) selectedMic = mics[0].deviceId;
+      }
+      micSel.onchange = () => (selectedMic = micSel.value);
+      scanMics();
+
+      // ===== 连接/断开 =====
+      async function toggle() {
+        if (active) disconnect();
+        else await connect();
+      }
+
+      async function connect() {
+        const url = urlEl.value.trim();
+        if (!url) return setMsg("请填写 WebSocket URL", true);
+
+        setMsg("连接中...");
+        setTag("on", "连接中");
+        btnGo.disabled = true;
+
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              deviceId: selectedMic ? { exact: selectedMic } : undefined,
+              channelCount: 1,
+              echoCancellation: true,
+              noiseSuppression: true,
+            },
+          });
+
+          ws = new WebSocket(url);
+          ws.onopen = () => {
+            setTag("on", "已连接");
+            setMsg("会话创建中...");
+          };
+          ws.onmessage = (e) => handleMsg(e.data);
+          ws.onerror = () => {
+            setMsg("WebSocket 错误", true);
+            setTag("err", "错误");
+          };
+          ws.onclose = () => {
+            if (active) disconnect();
+          };
+
+          // 等会话创建后开始捕获音频
+          await waitForSession();
+          startCapture();
+          active = true;
+          updateUI();
+          startT = Date.now();
+          btnGo.disabled = false;
+          timerId = setInterval(updateTimer, 200);
+          setMsg("🎤 说话中...");
+        } catch (e) {
+          setMsg("连接失败: " + e.message, true);
+          setTag("err", "错误");
+          btnGo.disabled = false;
+          releaseAll();
+        }
+      }
+
+      function disconnect() {
+        active = false;
+        updateUI();
+        clearInterval(timerId);
+        timerEl.classList.remove("show");
+        stopCapture();
+        releaseAll();
+        if (ws) {
+          try {
+            if (ws.readyState === WebSocket.OPEN) ws.close(1000);
+          } catch (e) {}
+          ws = null;
+        }
+        setTag("off", "未连接");
+        setMsg("已断开");
+      }
+
+      // ===== WebSocket 协议 =====
+      function waitForSession() {
+        return new Promise((resolve, reject) => {
+          const handler = (e) => {
+            const m = JSON.parse(e.data);
+            if (m.type === "session.created") {
+              ws.removeEventListener("message", handler);
+              // 发送模型配置
+              ws.send(JSON.stringify({ type: "session.update", model: MODEL }));
+              ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+              resolve();
+            }
+          };
+          ws.addEventListener("message", handler);
+          setTimeout(() => reject(new Error("session created timeout")), 15000);
+        });
+      }
+
+      function handleMsg(data) {
+        try {
+          const m = JSON.parse(data);
+          switch (m.type) {
+            case "transcription.delta":
+              // 流式追加：不清除已有文本
+              fullText += m.delta;
+              out.textContent = fullText;
+              out.scrollTop = out.scrollHeight;
+              break;
+            case "transcription.done":
+              // 一句结束：换行，但不覆盖（保留流式效果）
+              if (m.text && m.text.trim()) {
+                fullText += "\n";
+              }
+              out.textContent = fullText;
+              out.scrollTop = out.scrollHeight;
+              break;
+            case "error":
+              setMsg("服务端错误: " + m.error, true);
+              break;
+          }
+        } catch (e) {}
+      }
+
+      // ===== 音频捕获 (带 VAD + 句间分隔) =====
+      function startCapture() {
+        audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+        const src = audioCtx.createMediaStreamSource(stream);
+        proc = audioCtx.createScriptProcessor(4096, 1, 1);
+
+        let buf = new Float32Array(0);
+        let isSpeaking = false;
+        let silentSec = 0;
+
+        proc.onaudioprocess = (e) => {
+          if (!active || !ws || ws.readyState !== WebSocket.OPEN) return;
+          const data = e.inputBuffer.getChannelData(0);
+
+          let sumSq = 0;
+          for (let i = 0; i < data.length; i++) sumSq += data[i] * data[i];
+          const rms = Math.sqrt(sumSq / data.length);
+          const frameSec = data.length / SAMPLE_RATE;
+
+          if (rms < 0.002) {
+            silentSec += frameSec;
+            // 静音 1.5 秒：结束当前句
+            if (silentSec > 1.5 && isSpeaking) {
+              ws.send(JSON.stringify({ type: "input_audio_buffer.commit", final: true }));
+              buf = new Float32Array(0);
+              isSpeaking = false;
+            }
+            return;
+          }
+          silentSec = 0;
+
+          // 新句开始
+          if (!isSpeaking) {
+            ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+            isSpeaking = true;
+          }
+
+          const tmp = new Float32Array(buf.length + data.length);
+          tmp.set(buf); tmp.set(data, buf.length); buf = tmp;
+
+          const chunkSize = Math.floor(SAMPLE_RATE * 0.1);
+          while (buf.length >= chunkSize) {
+            const chunk = buf.slice(0, chunkSize);
+            buf = buf.slice(chunkSize);
+            ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: pcmToBase64(chunk) }));
+          }
+        };
+        src.connect(proc); proc.connect(audioCtx.destination);
+      }
+
+      function stopCapture() {
+        if (proc) {
+          proc.disconnect();
+          proc = null;
+        }
+        if (audioCtx) {
+          audioCtx.close();
+          audioCtx = null;
+        }
+      }
+
+      function releaseAll() {
+        stopCapture();
+        if (stream) {
+          stream.getTracks().forEach((t) => t.stop());
+          stream = null;
+        }
+        btnGo.disabled = false;
+      }
+
+      // ===== PCM → Base64 =====
+      function pcmToBase64(float32) {
+        const i16 = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+          const s = Math.max(-1, Math.min(1, float32[i]));
+          i16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        const bytes = new Uint8Array(i16.buffer);
+        let bin = "";
+        for (let i = 0; i < bytes.byteLength; i++)
+          bin += String.fromCharCode(bytes[i]);
+        return btoa(bin);
+      }
+
+      // ===== UI =====
+      function updateUI() {
+        if (active) {
+          btnGo.classList.add("on");
+          btnIcon.textContent = "⏹️";
+          btnLabel.textContent = "停止";
+          dot.className = "dot rec";
+          timerEl.classList.add("show");
+        } else {
+          btnGo.classList.remove("on");
+          btnIcon.textContent = "▶️";
+          btnLabel.textContent = "连接并开始";
+          dot.className = "dot off";
+        }
+      }
+      function setTag(c, t) {
+        tag.className = `tag ${c}`;
+        tag.textContent = t;
+      }
+      function setMsg(t, err) {
+        msg.textContent = t;
+        msg.style.color = err ? "var(--danger)" : "var(--muted)";
+      }
+      function updateTimer() {
+        const e = Math.floor((Date.now() - startT) / 1000);
+        timerEl.textContent =
+          String(Math.floor(e / 60)).padStart(2, "0") +
+          ":" +
+          String(e % 60).padStart(2, "0");
+      }
+      function clearAll() {
+        out.textContent = "";
+        fullText = "";
+      }
+    </script>
+  </body>
+</html>
