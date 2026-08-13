@@ -22,8 +22,8 @@ from vllm.model_executor.models.qwen3_next import (
     Qwen3NextModel,
     Qwen3NextRMSNorm,
     QwenNextMixtureOfExperts,
-    _all_gather_hidden_and_residual,
 )
+from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 
@@ -131,6 +131,8 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[current_step_idx]
+        if mtp_layer.use_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
         hidden_states, residual = mtp_layer(
             positions=positions,
             hidden_states=hidden_states,
@@ -143,12 +145,9 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             )
 
         if mtp_layer.use_sequence_parallel:
-            hidden_states, residual = _all_gather_hidden_and_residual(
-                hidden_states,
-                residual,
-                positions.shape[-1],
-                self.config.hidden_size,
-            )
+            hidden_states = sp_all_gather(hidden_states + residual)
+            hidden_states = hidden_states[: positions.shape[-1]]
+            residual = None
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 

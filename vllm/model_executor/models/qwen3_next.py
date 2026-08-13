@@ -420,17 +420,21 @@ class Qwen3NextDecoderLayer(nn.Module):
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
 
-        mlp_only_layers = (
-            [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
-        )
-        is_moe_layer = (self.layer_idx not in mlp_only_layers) and (
+        mlp_only_layers = getattr(config, "mlp_only_layers", [])
+        self.is_moe_layer = (self.layer_idx not in mlp_only_layers) and (
             config.num_experts > 0
             and (self.layer_idx + 1) % config.decoder_sparse_step == 0
+        )
+        has_moe_layers = any(
+            layer_idx not in mlp_only_layers
+            and config.num_experts > 0
+            and (layer_idx + 1) % config.decoder_sparse_step == 0
+            for layer_idx in range(config.num_hidden_layers)
         )
         self.use_sequence_parallel = (
             parallel_config.use_sequence_parallel_moe
             and parallel_config.pipeline_parallel_size == 1
-            and is_moe_layer
+            and has_moe_layers
         )
 
         if self.layer_type == "linear_attention":
@@ -453,7 +457,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         else:
             raise ValueError(f"Invalid layer_type {self.layer_type}")
 
-        if is_moe_layer:
+        if self.is_moe_layer:
             self.mlp = Qwen3NextSparseMoeBlock(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.mlp",
@@ -464,6 +468,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                is_sequence_parallel=self.use_sequence_parallel,
                 prefix=f"{prefix}.mlp",
             )
 
@@ -496,14 +501,9 @@ class Qwen3NextDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         positions: torch.Tensor = None,
-        input_is_sequence_parallel: bool | None = None,
         **kwargs: object,
     ):
         full_num_tokens = positions.shape[-1]
-        if input_is_sequence_parallel is None:
-            input_is_sequence_parallel = (
-                self.use_sequence_parallel and residual is not None
-            )
 
         if residual is None:
             residual = hidden_states
@@ -511,7 +511,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if input_is_sequence_parallel:
+        if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)
             hidden_states = hidden_states[:full_num_tokens]
 
@@ -536,22 +536,11 @@ class Qwen3NextDecoderLayer(nn.Module):
                 )
 
         if self.use_sequence_parallel:
-            if (
-                not input_is_sequence_parallel
-                and envs.VLLM_MOE_SKIP_PADDING
-                and is_forward_context_available()
-            ):
-                forward_context = get_forward_context()
-                forward_context.is_padding = sp_padding_mask(
-                    forward_context.is_padding, hidden_states
-                )
             hidden_states = sp_reduce_scatter(hidden_states)
-            if not input_is_sequence_parallel:
-                residual = sp_shard(residual)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel and self.is_moe_layer:
             hidden_states = self.mlp(
                 hidden_states,
                 already_sequence_parallel=True,
@@ -574,24 +563,6 @@ class Qwen3NextDecoderLayer(nn.Module):
                 )
 
         return hidden_states, residual
-
-
-def _all_gather_hidden_and_residual(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor | None,
-    full_num_tokens: int,
-    hidden_size: int,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if residual is None:
-        hidden_states = sp_all_gather(hidden_states)
-        hidden_states = hidden_states[:full_num_tokens]
-        return hidden_states, None
-
-    combined_states = torch.cat([hidden_states, residual], dim=-1)
-    combined_states = sp_all_gather(combined_states)
-    combined_states = combined_states[:full_num_tokens]
-    hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
-    return hidden_states, residual
 
 
 @support_torch_compile
@@ -647,6 +618,9 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
+        self.use_sequence_parallel = any(
+            layer.use_sequence_parallel for layer in self.layers
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -670,34 +644,29 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         full_num_tokens = positions.shape[-1]
-        states_are_sequence_parallel = False
+        if self.use_sequence_parallel:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                forward_context = get_forward_context()
+                forward_context.is_padding = sp_padding_mask(
+                    forward_context.is_padding, hidden_states
+                )
+            hidden_states = sp_shard(hidden_states)
+            assert residual is None, "Sequence parallelism is not supported with PP"
+
         aux_hidden_states: list[torch.Tensor] = []
-        aux_states_are_sequence_parallel: list[bool] = []
         if 0 in self.aux_hidden_state_layers:
             aux_hidden_states.append(hidden_states)
-            aux_states_are_sequence_parallel.append(False)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            if states_are_sequence_parallel and not layer.use_sequence_parallel:
-                hidden_states, residual = _all_gather_hidden_and_residual(
-                    hidden_states,
-                    residual,
-                    full_num_tokens,
-                    self.config.hidden_size,
-                )
-                states_are_sequence_parallel = False
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
-                input_is_sequence_parallel=states_are_sequence_parallel,
             )
-            states_are_sequence_parallel = layer.use_sequence_parallel
             if (layer_idx + 1) in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-                aux_states_are_sequence_parallel.append(states_are_sequence_parallel)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -706,7 +675,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         hidden_states, _ = self.norm(hidden_states, residual)
         outputs = sp_restore_outputs(
             [hidden_states, *aux_hidden_states],
-            [states_are_sequence_parallel, *aux_states_are_sequence_parallel],
+            [self.use_sequence_parallel] * (1 + len(aux_hidden_states)),
             full_num_tokens,
         )
         hidden_states, *aux_hidden_states = outputs
