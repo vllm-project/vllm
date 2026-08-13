@@ -222,37 +222,16 @@ class CpuPlatform(Platform):
                 cache_config.mamba_ssm_cache_dtype in ("float16", "bfloat16")
                 and mamba_backend == "gdn"
             ):
-                source = (
-                    "explicit user request"
-                    if cache_config.user_specified_mamba_ssm_cache_dtype
-                    else "model configuration"
-                )
                 logger.info(
-                    "Using %s SSM state storage selected by %s for the CPU "
-                    "AMX GDN backend.",
+                    "Using %s SSM state storage for the CPU accelerated GDN backend.",
                     cache_config.mamba_ssm_cache_dtype,
-                    source,
-                )
-            elif not cache_config.user_specified_mamba_ssm_cache_dtype:
-                cache_config.mamba_ssm_cache_dtype = "float32"
-                logger.warning(
-                    "Reset model-selected SSM cache type to float32 for AMX "
-                    "mamba backend '%s'; the backend does not support the "
-                    "model-selected dtype.",
-                    mamba_backend,
-                )
-            elif mamba_backend != "none":
-                raise ValueError(
-                    f"AMX CPU Mamba state dtype "
-                    f"'{cache_config.mamba_ssm_cache_dtype}' is unsupported for "
-                    f"backend '{mamba_backend}'. "
-                    "Use --mamba-ssm-cache-dtype float32, or use explicit "
-                    "float16/bfloat16 only with the CPU GDN backend."
                 )
             else:
                 cache_config.mamba_ssm_cache_dtype = "float32"
                 logger.warning(
-                    "Reset SSM cache type to float32 for AMX mamba attention."
+                    "Reset SSM cache type to float32 for accelerated GDN mamba "
+                    "backend '%s'.",
+                    mamba_backend,
                 )
 
         # Lagecy setting

@@ -27,74 +27,103 @@ def _cpu_config(
             layer_types=layer_types,
         ),
     )
-    user_specified_dtype = cache_config.user_specified_mamba_ssm_cache_dtype
     config = VllmConfig(cache_config=cache_config)
     config.model_config = model_config
     cache_config.mamba_ssm_cache_dtype = resolved_dtype
-    cache_config.user_specified_mamba_ssm_cache_dtype = user_specified_dtype
     return config
 
 
 @pytest.mark.parametrize(
-    ("requested_dtype", "resolved_dtype"),
+    (
+        "model_type",
+        "requested_dtype",
+        "resolved_dtype",
+        "layer_types",
+        "expected_dtype",
+    ),
     [
-        pytest.param("float32", "float32", id="explicit-fp32"),
-        pytest.param("bfloat16", "bfloat16", id="explicit-bf16"),
-        pytest.param("auto", "bfloat16", id="explicit-auto-model-bf16"),
-        pytest.param("float16", "float16", id="explicit-fp16"),
-        pytest.param("auto", "float16", id="auto-model-fp16"),
+        pytest.param(
+            "qwen3_5",
+            "bfloat16",
+            "bfloat16",
+            ("linear_attention",),
+            "bfloat16",
+            id="gdn-explicit-bf16",
+        ),
+        pytest.param(
+            "qwen3_5",
+            "float16",
+            "float16",
+            ("linear_attention",),
+            "float16",
+            id="gdn-explicit-fp16",
+        ),
+        pytest.param(
+            "qwen3_5",
+            "auto",
+            "bfloat16",
+            ("linear_attention",),
+            "bfloat16",
+            id="gdn-model-bf16",
+        ),
+        pytest.param(
+            "qwen3_5",
+            "auto",
+            "float16",
+            ("linear_attention",),
+            "float16",
+            id="gdn-model-fp16",
+        ),
+        pytest.param(
+            "nemotron_h",
+            "auto",
+            "bfloat16",
+            ("mamba",),
+            "float32",
+            id="unsupported-model-bf16",
+        ),
+        pytest.param(
+            "nemotron_h",
+            "auto",
+            "float16",
+            ("mamba",),
+            "float32",
+            id="unsupported-model-fp16",
+        ),
+        pytest.param(
+            "nemotron_h",
+            "bfloat16",
+            "bfloat16",
+            ("mamba",),
+            "float32",
+            id="unsupported-explicit-bf16",
+        ),
+        pytest.param(
+            "nemotron_h",
+            "float16",
+            "float16",
+            ("mamba",),
+            "float32",
+            id="unsupported-explicit-fp16",
+        ),
     ],
 )
-def test_cpu_amx_gdn_preserves_resolved_state_dtype(
+def test_cpu_accelerated_gdn_dtype_policy(
     monkeypatch: pytest.MonkeyPatch,
+    model_type: str,
     requested_dtype: str,
     resolved_dtype: str,
+    layer_types: tuple[str, ...],
+    expected_dtype: str,
 ) -> None:
-    monkeypatch.setattr("torch.cpu._is_amx_tile_supported", lambda: True)
+    monkeypatch.setattr("torch.cpu._is_avx512_bf16_supported", lambda: True)
     cache_config = CacheConfig(mamba_ssm_cache_dtype=requested_dtype)
     config = _cpu_config(
         cache_config,
-        model_type="qwen3_5",
+        model_type=model_type,
         resolved_dtype=resolved_dtype,
+        layer_types=layer_types,
     )
 
     CpuPlatform.check_and_update_config(config)
-
-    assert cache_config.mamba_ssm_cache_dtype == resolved_dtype
-
-
-@pytest.mark.parametrize("resolved_dtype", ["bfloat16", "float16"])
-def test_cpu_amx_normalizes_model_selected_reduced_dtype_for_unsupported_backend(
-    monkeypatch: pytest.MonkeyPatch,
-    resolved_dtype: str,
-) -> None:
-    monkeypatch.setattr("torch.cpu._is_amx_tile_supported", lambda: True)
-    cache_config = CacheConfig(mamba_ssm_cache_dtype="auto")
-    config = _cpu_config(
-        cache_config,
-        model_type="nemotron_h",
-        resolved_dtype=resolved_dtype,
-        layer_types=("mamba",),
-    )
-
-    CpuPlatform.check_and_update_config(config)
-
-    assert cache_config.mamba_ssm_cache_dtype == "float32"
-
-
-@pytest.mark.parametrize("requested_dtype", ["bfloat16", "float16"])
-def test_cpu_amx_rejects_reduced_dtype_for_unsupported_mamba_backend(
-    monkeypatch: pytest.MonkeyPatch,
-    requested_dtype: str,
-) -> None:
-    monkeypatch.setattr("torch.cpu._is_amx_tile_supported", lambda: True)
-    cache_config = CacheConfig(mamba_ssm_cache_dtype=requested_dtype)
-    config = _cpu_config(
-        cache_config,
-        model_type="nemotron_h",
-        resolved_dtype=requested_dtype,
-        layer_types=("mamba",),
-    )
-
-    with pytest.raises(ValueError, match="unsupported for backend"):
-        CpuPlatform.check_and_update_config(config)
+    assert cache_config.mamba_ssm_cache_dtype == expected_dtype

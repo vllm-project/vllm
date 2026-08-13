@@ -512,35 +512,6 @@ def test_prefix_cache_retention_interval_from_deprecated_env(
 
 
 @pytest.mark.parametrize(
-    ("cli_value", "expected_dtype", "expected_explicit"),
-    [
-        (None, None, False),
-        ("auto", "auto", False),
-        ("float32", "float32", True),
-        ("bfloat16", "bfloat16", True),
-        ("float16", "float16", True),
-    ],
-)
-def test_mamba_ssm_cache_dtype_provenance(
-    cli_value: str | None,
-    expected_dtype: str | None,
-    expected_explicit: bool,
-) -> None:
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    cli_args = ["--model", "facebook/opt-125m"]
-    if cli_value is not None:
-        cli_args += ["--mamba-ssm-cache-dtype", cli_value]
-    args = EngineArgs.from_cli_args(parser.parse_args(cli_args))
-    vllm_config = args.create_engine_config()
-
-    assert args.mamba_ssm_cache_dtype == expected_dtype
-    assert (
-        vllm_config.cache_config.user_specified_mamba_ssm_cache_dtype
-        is expected_explicit
-    )
-
-
-@pytest.mark.parametrize(
     ("arg", "expected", "option"),
     [
         (None, None, "mm-processor-kwargs"),

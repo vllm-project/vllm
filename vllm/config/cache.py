@@ -154,8 +154,6 @@ class CacheConfig:
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
-    user_specified_mamba_ssm_cache_dtype: bool = field(default=False, init=False)
-    """Whether the SSM cache dtype was explicitly requested by the user."""
     mamba_cache_mode: MambaCacheMode = "none"
     """The cache strategy for Mamba layers:
 
@@ -247,7 +245,6 @@ class CacheConfig:
             "skip_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",
-            "user_specified_mamba_ssm_cache_dtype",
             "_block_size_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
@@ -291,8 +288,6 @@ class CacheConfig:
             self.user_specified_block_size = True
         if self.mamba_block_size is not None:
             self.user_specified_mamba_block_size = True
-        if self.mamba_ssm_cache_dtype != "auto":
-            self.user_specified_mamba_ssm_cache_dtype = True
         return self
 
     @field_validator("cache_dtype", mode="after")
