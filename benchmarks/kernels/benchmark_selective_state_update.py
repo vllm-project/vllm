@@ -34,6 +34,7 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     override_ssm_config,
     selective_state_update,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
 # bf16 shares configs with fp16 - same bit width.
@@ -93,10 +94,10 @@ def _make_inputs(
     ngroups: int,
     dtype: torch.dtype,
     state_dtype: torch.dtype | None = None,
-    device: str = "cuda",
 ):
     if state_dtype is None:
         state_dtype = dtype
+    device = current_platform.device_type
     state = torch.randn(batch, nheads, dim, dstate, dtype=state_dtype, device=device)
     x = torch.randn(batch, nheads, dim, dtype=dtype, device=device)
     dt = torch.randn(batch, nheads, dim, dtype=dtype, device=device)
@@ -127,9 +128,9 @@ def benchmark_config(
     Time one (BLOCK_SIZE_M, num_warps) config for selective_state_update.
     Returns elapsed time in microseconds, or None on error.
 
-    Uses CUDA graph capture-and-replay to isolate kernel time from Python
-    eager-mode dispatch / kwarg-resolution overhead, mirroring the timing
-    methodology in benchmarks/kernels/benchmark_moe.py.
+    Uses accelerator graph capture-and-replay to isolate kernel time from
+    Python eager-mode dispatch / kwarg-resolution overhead, mirroring the
+    timing methodology in benchmarks/kernels/benchmark_moe.py.
     """
     state, x, dt, A, B, C, D, dt_bias, out = _make_inputs(
         batch, nheads, dim, dstate, ngroups, dtype, state_dtype=state_dtype
@@ -157,10 +158,15 @@ def benchmark_config(
                 _call_kernel()
             torch.accelerator.synchronize()
 
-            # Capture graph_batch_size invocations into a CUDA graph so the
+            # Capture graph_batch_size invocations into a device graph so the
             # timed region runs without Python dispatch overhead per call.
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
+            # Capture via graph(), not the graph object: CUDA needs a side stream.
+            graph = (
+                torch.cuda.CUDAGraph()
+                if current_platform.is_cuda_alike()
+                else torch.xpu.XPUGraph()
+            )
+            with current_platform.graph(graph):
                 for _ in range(graph_batch_size):
                     _call_kernel()
             torch.accelerator.synchronize()
@@ -170,8 +176,8 @@ def benchmark_config(
                 graph.replay()
             torch.accelerator.synchronize()
 
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
+            start = torch.Event(enable_timing=True)
+            end = torch.Event(enable_timing=True)
             latencies: list[float] = []
             for _ in range(num_iters):
                 start.record()
@@ -671,8 +677,8 @@ def main():
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
     state_dtype = _SSM_CACHE_DTYPE_MAP[args.mamba_ssm_cache_dtype]
     device_name = get_ssm_device_name()
-    cap = torch.cuda.get_device_capability()
-    is_blackwell = cap[0] >= 10
+    cap = current_platform.get_device_capability()
+    is_blackwell = cap is not None and cap[0] >= 10
 
     # Mirror all output to a results file (like Unix tee).
     buf = StringIO()
@@ -690,7 +696,8 @@ def main():
     sys.stdout = _Tee()  # type: ignore[assignment]
 
     try:
-        print(f"Device : {device_name}  (sm_{cap[0]}{cap[1]})")
+        cap_str = f"sm_{cap[0]}{cap[1]}" if cap is not None else "n/a"
+        print(f"Device : {device_name}  ({cap_str})")
         print(f"Blackwell: {is_blackwell}")
         print(f"dtype  : {args.dtype}")
         print(f"ssm_cache_dtype: {args.mamba_ssm_cache_dtype}")
