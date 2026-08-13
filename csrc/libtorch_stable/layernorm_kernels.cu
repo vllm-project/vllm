@@ -112,95 +112,97 @@ __global__ void fused_add_rms_norm_kernel(
     const float epsilon, const int num_tokens, const int hidden_size,
     const int64_t residual_stride) {
   if constexpr (width > 0 && _typeConvert<scalar_t>::exists) {
-  // Sanity checks on our vector struct and type-punned pointer arithmetic
-  static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
-  static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
+    // Sanity checks on our vector struct and type-punned pointer arithmetic
+    static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
+    static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
 
-  const int vec_hidden_size = hidden_size / width;
-  const int64_t vec_input_stride = input_stride / width;
-  __shared__ float s_variance;
-  float variance = 0.0f;
-  /* These and the argument pointers are all declared `restrict` as they are
-     not aliased in practice. Argument pointers should not be dereferenced
-     in this kernel as that would be undefined behavior */
-  auto* __restrict__ input_v =
-      reinterpret_cast<_f16Vec<scalar_t, width>*>(input);
-  auto* __restrict__ residual_v =
-      reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
-  auto* __restrict__ weight_v =
-      reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
+    const int vec_hidden_size = hidden_size / width;
+    const int64_t vec_input_stride = input_stride / width;
+    __shared__ float s_variance;
+    float variance = 0.0f;
+    /* These and the argument pointers are all declared `restrict` as they are
+       not aliased in practice. Argument pointers should not be dereferenced
+       in this kernel as that would be undefined behavior */
+    auto* __restrict__ input_v =
+        reinterpret_cast<_f16Vec<scalar_t, width>*>(input);
+    auto* __restrict__ residual_v =
+        reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
+    auto* __restrict__ weight_v =
+        reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
 
-  for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int64_t id = blockIdx.x * residual_stride / width + idx;
-    int64_t strided_id = blockIdx.x * vec_input_stride + idx;
-    _f16Vec<scalar_t, width> temp = input_v[strided_id];
-    temp += residual_v[id];
-    variance += temp.sum_squares();
-    residual_v[id] = temp;
-  }
-
-  using BlockReduce = cub::BlockReduce<float, 1024>;
-  __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
-
-  if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
-  }
-  __syncthreads();
-
-  for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int64_t id = blockIdx.x * residual_stride / width + idx;
-    int64_t strided_id = blockIdx.x * vec_input_stride + idx;
-    _f16Vec<scalar_t, width> res = residual_v[id];
-    _f16Vec<scalar_t, width> out;
-    using Converter = _typeConvert<scalar_t>;
-    if constexpr (HasWeight) {
-      _f16Vec<scalar_t, width> w = weight_v[idx];
-#pragma unroll
-      for (int j = 0; j < width; ++j) {
-        float x = Converter::convert(res.data[j]);
-        float wf = Converter::convert(w.data[j]);
-        out.data[j] = Converter::convert(x * s_variance * wf);
-      }
-    } else {
-#pragma unroll
-      for (int j = 0; j < width; ++j) {
-        float x = Converter::convert(res.data[j]);
-        out.data[j] = Converter::convert(x * s_variance);
-      }
+    for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
+      int64_t id = blockIdx.x * residual_stride / width + idx;
+      int64_t strided_id = blockIdx.x * vec_input_stride + idx;
+      _f16Vec<scalar_t, width> temp = input_v[strided_id];
+      temp += residual_v[id];
+      variance += temp.sum_squares();
+      residual_v[id] = temp;
     }
-    input_v[strided_id] = out;
-  }
+
+    using BlockReduce = cub::BlockReduce<float, 1024>;
+    __shared__ typename BlockReduce::TempStorage reduceStore;
+    variance =
+        BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
+
+    if (threadIdx.x == 0) {
+      s_variance = rsqrtf(variance / hidden_size + epsilon);
+    }
+    __syncthreads();
+
+    for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
+      int64_t id = blockIdx.x * residual_stride / width + idx;
+      int64_t strided_id = blockIdx.x * vec_input_stride + idx;
+      _f16Vec<scalar_t, width> res = residual_v[id];
+      _f16Vec<scalar_t, width> out;
+      using Converter = _typeConvert<scalar_t>;
+      if constexpr (HasWeight) {
+        _f16Vec<scalar_t, width> w = weight_v[idx];
+#pragma unroll
+        for (int j = 0; j < width; ++j) {
+          float x = Converter::convert(res.data[j]);
+          float wf = Converter::convert(w.data[j]);
+          out.data[j] = Converter::convert(x * s_variance * wf);
+        }
+      } else {
+#pragma unroll
+        for (int j = 0; j < width; ++j) {
+          float x = Converter::convert(res.data[j]);
+          out.data[j] = Converter::convert(x * s_variance);
+        }
+      }
+      input_v[strided_id] = out;
+    }
   } else {
-  __shared__ float s_variance;
-  float variance = 0.0f;
+    __shared__ float s_variance;
+    float variance = 0.0f;
 
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    scalar_t z = input[blockIdx.x * input_stride + idx];
-    z += residual[blockIdx.x * residual_stride + idx];
-    float x = (float)z;
-    variance += x * x;
-    residual[blockIdx.x * residual_stride + idx] = z;
-  }
-
-  using BlockReduce = cub::BlockReduce<float, 1024>;
-  __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
-
-  if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
-  }
-  __syncthreads();
-
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * residual_stride + idx];
-    if constexpr (HasWeight) {
-      float w = (float)weight[idx];
-      input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance * w);
-    } else {
-      input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance);
+    for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+      scalar_t z = input[blockIdx.x * input_stride + idx];
+      z += residual[blockIdx.x * residual_stride + idx];
+      float x = (float)z;
+      variance += x * x;
+      residual[blockIdx.x * residual_stride + idx] = z;
     }
-  }
+
+    using BlockReduce = cub::BlockReduce<float, 1024>;
+    __shared__ typename BlockReduce::TempStorage reduceStore;
+    variance =
+        BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
+
+    if (threadIdx.x == 0) {
+      s_variance = rsqrtf(variance / hidden_size + epsilon);
+    }
+    __syncthreads();
+
+    for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+      float x = (float)residual[blockIdx.x * residual_stride + idx];
+      if constexpr (HasWeight) {
+        float w = (float)weight[idx];
+        input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance * w);
+      } else {
+        input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance);
+      }
+    }
   }
 }
 
