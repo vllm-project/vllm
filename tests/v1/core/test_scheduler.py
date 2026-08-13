@@ -2523,7 +2523,6 @@ def create_scheduler_with_priority(
     if num_speculative_tokens is not None:
         speculative_config = SpeculativeConfig(
             method="ngram",
-            model="ngram",
             num_speculative_tokens=num_speculative_tokens,
         )
 

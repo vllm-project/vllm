@@ -275,7 +275,6 @@ def test_rejects_custom_logitsprocs(
             "error_message": STR_SPEC_DEC_REJECTS_LOGITSPROCS,
             "speculative_config": {
                 "method": "ngram",
-                "model": "ngram",
                 "num_speculative_tokens": 1,
             },
         },

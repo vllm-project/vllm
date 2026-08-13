@@ -142,7 +142,6 @@ def create_scheduler(
     if num_speculative_tokens is not None:
         spec_kwargs: dict = dict(
             method="ngram",
-            model="ngram",
             num_speculative_tokens=num_speculative_tokens,
         )
         if num_speculative_tokens_per_batch_size is not None:

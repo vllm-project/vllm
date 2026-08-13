@@ -25,7 +25,6 @@ def _make_manager_and_request(backend: str, prompt_str: str = '{"a": "b"}'):
         structured_outputs_config=StructuredOutputsConfig(backend=backend),
         speculative_config=SpeculativeConfig(
             method="ngram",
-            model="[ngram]",
             num_speculative_tokens=NUM_SPEC_TOKENS,
         ),
     )

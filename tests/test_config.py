@@ -753,7 +753,7 @@ def test_draft_model_enables_async_scheduling_by_default():
 )
 def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slots):
     speculative_config = SpeculativeConfig(
-        model="ngram",
+        method="ngram",
         num_speculative_tokens=8,
     )
     speculative_config.method = method
@@ -2023,6 +2023,35 @@ def test_speculative_config_requires_method(model):
 
 
 @pytest.mark.parametrize(
+    "method", ["extract_hidden_states", "ngram", "ngram_gpu", "suffix"]
+)
+def test_model_free_methods_reject_model(method):
+    with pytest.raises(ValueError, match="does not use `model`; omit it"):
+        SpeculativeConfig(
+            method=method,
+            model="unused",
+            num_speculative_tokens=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "custom_class",
+        "dflash",
+        "draft_model",
+        "eagle",
+        "eagle3",
+        "medusa",
+        "mlp_speculator",
+    ],
+)
+def test_methods_with_external_sources_require_model(method):
+    with pytest.raises(ValueError, match="requires .*model"):
+        SpeculativeConfig(method=method, num_speculative_tokens=1)
+
+
+@pytest.mark.parametrize(
     ("model_type", "expected"),
     [
         pytest.param(
@@ -2134,6 +2163,7 @@ def test_draft_sample_method_probabilistic_is_accepted():
         num_speculative_tokens=1,
         draft_sample_method="probabilistic",
     )
+    assert speculative_config.model is None
     assert speculative_config.draft_sample_method == "probabilistic"
 
 

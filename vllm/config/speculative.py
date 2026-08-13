@@ -80,6 +80,10 @@ SpeculativeMethod = Literal[
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
+_MODEL_FREE_METHODS = frozenset(
+    ("extract_hidden_states", "ngram", "ngram_gpu", "suffix")
+)
+
 
 @config
 class SpeculativeConfig:
@@ -92,8 +96,8 @@ class SpeculativeConfig:
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
-    """The name of the draft model, eagle head, or additional weights, if
-    provided."""
+    """The external draft model, eagle head, additional weights, or custom
+    proposer path, if required by the selected method."""
     method: SpeculativeMethod | None = None
     """The name of the speculative method to use. This must be provided in an
     explicit speculative configuration. Known checkpoint formats may populate
@@ -781,9 +785,18 @@ class SpeculativeConfig:
             )
             self.method = "mtp"
 
-        if self.model is None and (
-            self.num_speculative_tokens is not None or self.method in ("mtp", "dspark")
-        ):
+        if self.method in _MODEL_FREE_METHODS:
+            if self.model is not None:
+                raise ValueError(
+                    f"method='{self.method}' does not use `model`; omit it."
+                )
+        elif self.method == "custom_class":
+            if self.model is None:
+                raise ValueError(
+                    "method='custom_class' requires 'model' to contain the "
+                    "custom proposer module path (e.g., 'my_module.MyProposer')."
+                )
+        elif self.model is None:
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
@@ -800,29 +813,11 @@ class SpeculativeConfig:
                 self.model = self.target_model_config.model
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
-            elif self.method in ("ngram", "[ngram]"):
-                self.model = "ngram"
-            elif self.method == "ngram_gpu":
-                self.model = "ngram_gpu"
-            elif self.method == "suffix":
-                self.model = "suffix"
-            elif self.method == "extract_hidden_states":
-                self.model = "extract_hidden_states"
-            elif self.method == "custom_class":
-                # method was set explicitly, but model should already contain the
-                # custom module path. If not, this is a configuration error.
-                if self.model is None:
-                    raise ValueError(
-                        "method='custom_class' requires 'model' to contain the "
-                        "custom proposer module path (e.g., 'my_module.MyProposer')."
-                    )
             else:
                 raise ValueError(
-                    "num_speculative_tokens was provided but without speculative model."
+                    f"method='{self.method}' requires `model` to identify its "
+                    "external draft source."
                 )
-
-        if self.method in ("ngram", "[ngram]"):
-            self.method = "ngram"
 
         if self.method in ("ngram", "ngram_gpu"):
             # Set default values if not provided
@@ -878,7 +873,6 @@ class SpeculativeConfig:
 
             # ExtractHiddenStatesModel is instantiated manually in load_model()
             # We just need to store the target model config for KV cache shape info
-            self.model = "extract_hidden_states"
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
 
@@ -1506,17 +1500,7 @@ class SpeculativeConfig:
         return min(num_mtp_layers, self.num_speculative_tokens) > 1
 
     def __repr__(self) -> str:
-        method = self.method
-        model = (
-            None
-            if method
-            in (
-                "ngram",
-                "suffix",
-                "extract_hidden_states",
-                "custom_class",
-            )
-            else self.draft_model_config.model
+        return (
+            f"SpeculativeConfig(method={self.method!r}, model={self.model!r}, "
+            f"num_spec_tokens={self.num_speculative_tokens!r})"
         )
-        num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
