@@ -595,9 +595,7 @@ class TestPostprocessMambaFusedKernel:
         num_scheduled_tokens = {"req_0": 5, "req_1": 3, "req_2": 8, "req_3": 6}
         num_draft_tokens = {"req_0": 2, "req_1": 0, "req_2": 3, "req_3": 0}
         num_accepted_tokens = [3, 2, 4, 2]
-        # Keep the broad Python-vs-fused golden on disjoint pages. Same-page
-        # overlap is validated independently against untouched snapshots.
-        mamba_state_idx = [1, 1, 2, 0]  # source block indices
+        mamba_state_idx = [3, 1, 2, 0]  # source block indices
 
         # Block IDs for each request (simulate block table)
         block_ids_per_req = [
@@ -2168,13 +2166,10 @@ class TestPostprocessMambaFusedKernel:
             actual_src_block_idx = src_block_idx + accept_token_bias
             actual_src_block_id = block_table[req, actual_src_block_idx]
 
-        All prior regression tests exercise only ``bias == 1``, i.e. they
-        only ever read one slot ahead of ``src_block_idx`` in the block
-        table. An off-by-one (or missing scale) in the address computation
-        on line 143 of ``mamba_utils.py`` would be invisible to every
-        existing test but would silently read the wrong physical block on
-        any speculative-decode cycle that accepts multiple tokens across a
-        block boundary, feeding a stale hidden state forward one step.
+        A ``bias == 1`` case only reads one slot ahead of ``src_block_idx``
+        in the block table. This test isolates the larger-stride case, where
+        an off-by-one would read the wrong physical block after multiple
+        tokens are accepted across a block boundary.
 
         Setup (block_size=16):
         - running   = 28 + 2 - 0 = 30
@@ -2187,8 +2182,7 @@ class TestPostprocessMambaFusedKernel:
 
         With identity block_ids = [0,1,2,3,...], an off-by-one that used
         bias=1 would copy from block_ids[2]=2 instead of block_ids[3]=3,
-        producing a clear state-value mismatch against the Python
-        reference.
+        producing a clear mismatch against the untouched snapshot.
         """
         cfg = test_config
         torch.manual_seed(7002)
@@ -2317,7 +2311,7 @@ class TestPostprocessMambaFusedKernel:
         [torch.float16, torch.float32, torch.float64],
         ids=["fp16", "fp32", "fp64"],
     )
-    def test_ds_conv_layout_matches_snapshot_and_sd(
+    def test_sd_and_ds_conv_layouts_match_snapshot(
         self,
         device,
         test_config,
@@ -2450,8 +2444,8 @@ class TestPostprocessMambaFusedKernel:
             # Reset the lru cache so other tests see the default layout again.
             model_mamba_utils.get_conv_state_layout.cache_clear()
 
-        # Validate DS independently against the snapshot before comparing
-        # layouts; otherwise a shared SD/DS bug would remain invisible.
+        # Validate DS independently against the snapshot; otherwise a shared
+        # SD/DS bug would remain invisible.
         ds_conv_sd_layout = ds_conv.permute(0, 2, 1).contiguous()
         torch.testing.assert_close(
             ds_conv_sd_layout,
