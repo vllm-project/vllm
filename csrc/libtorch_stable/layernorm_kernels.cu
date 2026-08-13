@@ -104,14 +104,14 @@ __global__ void rms_norm_kernel(
    packed and vectorized operations, which help with the
    memory latency bottleneck. */
 template <typename scalar_t, int width, bool HasWeight>
-__global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
-fused_add_rms_norm_kernel(
+__global__ void fused_add_rms_norm_kernel(
     scalar_t* __restrict__ input,  // [..., hidden_size]
     const int64_t input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size], null if !HasWeight
     const float epsilon, const int num_tokens, const int hidden_size,
     const int64_t residual_stride) {
+  if constexpr (width > 0 && _typeConvert<scalar_t>::exists) {
   // Sanity checks on our vector struct and type-punned pointer arithmetic
   static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
@@ -171,20 +171,7 @@ fused_add_rms_norm_kernel(
     }
     input_v[strided_id] = out;
   }
-}
-
-/* Generic fused_add_rms_norm_kernel
-   The width field is not used here but necessary for other specializations.
- */
-template <typename scalar_t, int width, bool HasWeight>
-__global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
-fused_add_rms_norm_kernel(
-    scalar_t* __restrict__ input,  // [..., hidden_size]
-    const int64_t input_stride,
-    scalar_t* __restrict__ residual,      // [..., hidden_size]
-    const scalar_t* __restrict__ weight,  // [hidden_size], null if !HasWeight
-    const float epsilon, const int num_tokens, const int hidden_size,
-    const int64_t residual_stride) {
+  } else {
   __shared__ float s_variance;
   float variance = 0.0f;
 
@@ -213,6 +200,7 @@ fused_add_rms_norm_kernel(
     } else {
       input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance);
     }
+  }
   }
 }
 
