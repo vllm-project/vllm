@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-import lm_eval
 import pytest
 
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_min_accuracy,
+    evaluate_gsm8k_lm_eval,
+)
 from tests.utils import large_gpu_mark
 from vllm.platforms import current_platform
 
@@ -81,8 +84,6 @@ def test_eplb_spec_decode(
     """
     method, model_name, spec_model_name, tp_size, expected_gsm8k_value = model_setup
 
-    TASK = "gsm8k"
-    FILTER = "exact_match,strict-match"
     RTOL = 0.03
 
     model_args = get_model_args(
@@ -93,18 +94,13 @@ def test_eplb_spec_decode(
         model_max_len=4096,
     )
 
-    results = lm_eval.simple_evaluate(
+    result = evaluate_gsm8k_lm_eval(
         model="vllm",
         model_args=model_args,
-        tasks=TASK,
         batch_size=64,
         num_fewshot=8,
     )
-    measured_value = results["results"][TASK][FILTER]
-    assert (
-        measured_value - RTOL < expected_gsm8k_value
-        and measured_value + RTOL > expected_gsm8k_value
-    ), f"Expected: {expected_gsm8k_value} |  Measured: {measured_value}"
+    assert_min_accuracy(result, expected_gsm8k_value, tolerance=RTOL)
 
 
 @large_gpu_mark(min_gb=80)
@@ -113,8 +109,6 @@ def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
     Ensure async EPLB works with MTP speculative decoding for Qwen3-Next.
     """
 
-    TASK = "gsm8k"
-    FILTER = "exact_match,strict-match"
     RTOL = 0.03
     expected_gsm8k_value = 0.86
 
@@ -127,15 +121,10 @@ def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
         use_async=True,
     )
 
-    results = lm_eval.simple_evaluate(
+    result = evaluate_gsm8k_lm_eval(
         model="vllm",
         model_args=model_args,
-        tasks=TASK,
         batch_size=64,
         num_fewshot=8,
     )
-    measured_value = results["results"][TASK][FILTER]
-    assert (
-        measured_value - RTOL < expected_gsm8k_value
-        and measured_value + RTOL > expected_gsm8k_value
-    ), f"Expected: {expected_gsm8k_value} |  Measured: {measured_value}"
+    assert_min_accuracy(result, expected_gsm8k_value, tolerance=RTOL)

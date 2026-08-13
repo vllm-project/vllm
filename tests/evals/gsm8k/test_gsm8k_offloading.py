@@ -38,7 +38,7 @@ import requests
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-from .gsm8k_eval import evaluate_gsm8k
+from .gsm8k_eval import assert_min_accuracy, evaluate_gsm8k
 
 if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
@@ -274,15 +274,16 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
 
             print(
                 f"GSM8K run {run_idx}/2 + {cfg.connector} ({cfg.id}): "
-                f"accuracy={results['accuracy']:.4f}, "
-                f"invalid_rate={results['invalid_rate']:.3f}, "
-                f"latency={results['latency']:.1f}s"
+                f"accuracy={results.accuracy:.4f}, "
+                f"invalid_rate={results.invalid_rate:.3f}, "
+                f"latency={results.latency:.1f}s"
             )
 
-            assert results["accuracy"] >= (cfg.accuracy_threshold - cfg.tolerance), (
-                f"GSM8K run {run_idx}/2 accuracy "
-                f"{results['accuracy']:.4f} below "
-                f"{cfg.accuracy_threshold - cfg.tolerance:.4f}"
+            assert_min_accuracy(
+                results,
+                cfg.accuracy_threshold,
+                tolerance=cfg.tolerance,
+                context=f"GSM8K run {run_idx}/2 {cfg.id}",
             )
 
             if run_idx == 1:

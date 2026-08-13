@@ -8,7 +8,11 @@ from typing import Any
 import pytest
 import torch
 
-from tests.evals.gsm8k.gsm8k_eval import _build_gsm8k_prompts, evaluate_gsm8k_offline
+from tests.evals.gsm8k.gsm8k_eval import (
+    _build_gsm8k_prompts,
+    assert_min_accuracy,
+    evaluate_gsm8k_offline,
+)
 from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.assets.image import VLM_IMAGES_DIR
@@ -115,11 +119,9 @@ def evaluate_llm_for_gsm8k(llm: LLM, expected_accuracy_threshold: float = 0.70) 
         print("Skipping GSM8K evaluation")
         return
     results = evaluate_gsm8k_offline(llm)
-    accuracy = results["accuracy"]
+    accuracy = results.accuracy
     print(f"GSM8K accuracy: {accuracy:.3f}")
-    assert accuracy >= expected_accuracy_threshold, (
-        f"Expected GSM8K accuracy >= {expected_accuracy_threshold}, got {accuracy:.3f}"
-    )
+    assert_min_accuracy(results, expected_accuracy_threshold)
 
 
 def assert_request_outputs_match(

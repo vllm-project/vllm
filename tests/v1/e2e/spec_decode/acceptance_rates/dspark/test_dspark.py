@@ -5,7 +5,10 @@ from dataclasses import dataclass
 
 import pytest
 
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_min_accuracy,
+    evaluate_gsm8k_offline,
+)
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
 
@@ -133,7 +136,7 @@ def test_dspark_correctness_and_acceptance_rate(
             use_chat_completions=config.use_chat_completions,
             chat_template_kwargs=config.chat_template_kwargs,
         )
-        accuracy = results["accuracy"]
+        accuracy = results.accuracy
         metrics = spec_llm.get_metrics()
         acceptance_rate = compute_acceptance_rate(metrics)
         acceptance_len = compute_acceptance_len(metrics)
@@ -145,8 +148,10 @@ def test_dspark_correctness_and_acceptance_rate(
         )
         print(f"{context}: {metrics_summary}")
 
-        assert accuracy >= config.reference_accuracy * REGRESSION_TOLERANCE, (
-            f"{context}: {metrics_summary}"
+        assert_min_accuracy(
+            results,
+            config.reference_accuracy * REGRESSION_TOLERANCE,
+            context=context,
         )
         assert (
             acceptance_rate >= config.reference_acceptance_rate * REGRESSION_TOLERANCE

@@ -5,7 +5,10 @@ from dataclasses import dataclass
 
 import pytest
 
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_min_accuracy,
+    evaluate_gsm8k_offline,
+)
 from tests.utils import single_gpu_only
 from vllm.config import CompilationConfig
 
@@ -141,7 +144,7 @@ def test_dflash_correctness(
             num_questions=config.num_questions,
             use_chat_completions=config.use_chat_completions,
         )
-        accuracy = results["accuracy"]
+        accuracy = results.accuracy
         acceptance_len = compute_acceptance_len(spec_llm.get_metrics())
         context = (
             f"DFlash target={config.model}, draft={config.draft_model}, MRV2={use_mrv2}"
@@ -151,10 +154,7 @@ def test_dflash_correctness(
             f"acceptance_len={acceptance_len:.2f}"
         )
 
-        assert accuracy >= config.expected_accuracy, (
-            f"{context}: GSM8K accuracy {accuracy:.3f} is below "
-            f"{config.expected_accuracy:.3f}; acceptance_len={acceptance_len:.3f}"
-        )
+        assert_min_accuracy(results, config.expected_accuracy, context=context)
         assert acceptance_len >= config.expected_acceptance_len, (
             f"{context}: acceptance_len {acceptance_len:.3f} is below "
             f"{config.expected_acceptance_len:.3f}; accuracy={accuracy:.3f}"

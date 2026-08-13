@@ -1,6 +1,17 @@
 # GSM8K Accuracy Evaluation
 
-This directory contains a replacement for the lm-eval-harness GSM8K evaluation, using an isolated GSM8K script and vLLM server for better performance and control.
+This directory owns the shared result and assertion contract for GSM8K tests.
+It supports two explicit benchmark profiles:
+
+- `isolated-v1` uses the in-repo prompt builder and last-number scorer. It can
+  run against a vLLM server or an offline `LLM` and remains the fast path for
+  most model and feature correctness tests.
+- `lm-eval-v3` delegates prompting and scoring to lm-eval's version 3 `gsm8k`
+  task. It supports offline vLLM and OpenAI-compatible server adapters.
+
+The profiles are not score-equivalent. Tests must keep their existing profile
+and baseline unless they are deliberately rebaselined with model evaluation
+results.
 
 ## Usage
 
@@ -38,3 +49,26 @@ env:                      # Environment variables (optional)
 The `server_args` field accepts any arguments that can be passed to `vllm serve`.
 
 The `env` field accepts a dictionary of environment variables to set for the server process.
+
+## Shared test API
+
+Both profiles return `GSM8KResult`. Accuracy gates should use
+`assert_min_accuracy`, which reports the profile and metric and treats accuracy
+improvements as passing:
+
+```python
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_min_accuracy,
+    evaluate_gsm8k_lm_eval,
+)
+
+result = evaluate_gsm8k_lm_eval(
+    model="vllm",
+    model_args="pretrained=Qwen/Qwen3-1.7B,max_model_len=4096",
+)
+assert_min_accuracy(result, expected=0.68, tolerance=0.03)
+```
+
+`gsm8k_platinum`, the generic multi-task `.buildkite/lm-eval-harness` jobs, and
+uses of GSM8K questions as benchmark traffic are separate contracts and
+intentionally do not use this API.

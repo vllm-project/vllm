@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import requests
 
-from ..evals.gsm8k.gsm8k_eval import evaluate_gsm8k
+from ..evals.gsm8k.gsm8k_eval import assert_min_accuracy, evaluate_gsm8k
 from ..utils import RemoteOpenAIServer, multi_gpu_test
 
 
@@ -149,15 +149,11 @@ def _run_gsm8k_eval(server: RemoteOpenAIServer, stage: str) -> float:
         host=f"http://{server.host}",
         port=server.port,
     )
-    accuracy = result["accuracy"]
+    accuracy = result.accuracy
     print(
-        f"[{stage}] GSM8K accuracy: {accuracy:.3f} "
-        f"({result['num_questions']} questions)"
+        f"[{stage}] GSM8K accuracy: {accuracy:.3f} ({result.num_questions} questions)"
     )
-    assert accuracy >= EXPECTED_ACCURACY, (
-        f"[{stage}] GSM8K accuracy {accuracy:.3f} is below "
-        f"expected threshold {EXPECTED_ACCURACY}"
-    )
+    assert_min_accuracy(result, EXPECTED_ACCURACY, context=stage)
     return accuracy
 
 

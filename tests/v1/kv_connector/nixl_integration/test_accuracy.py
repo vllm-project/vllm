@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 
-import lm_eval
 import openai
+
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_min_accuracy,
+    evaluate_gsm8k_lm_eval,
+)
 
 BASE_URL = "http://localhost:8192/v1"
 NUM_CONCURRENT = int(os.getenv("NUM_CONCURRENT", "100"))
-TASK = "gsm8k"
-FILTER = "exact_match,strict-match"
 # TODO(#43186): Widened from 0.03 to absorb chunk_scan/SSU numeric jitter
 # on granite-4.0-h-tiny under NIXL PD; tighten when the kernel divergence
 # is fixed.
@@ -30,25 +32,14 @@ EXPECTED_VALUES = {
 }
 
 SIMPLE_PROMPT = (
-    "The best part about working on vLLM is that I got to meet so many people across "
-    "various different organizations like UCB, Google, and Meta which means",
+    (
+        "The best part about working on vLLM is that I got to meet so many people "
+        "across various different organizations like UCB, Google, and Meta which means"
+    ),
 )
 
 # Get model name from environment variable
 MODEL_NAME = os.environ.get("TEST_MODEL", "Qwen/Qwen3-0.6B")
-
-
-def _meets_accuracy_threshold(measured_value: float, expected_value: float) -> bool:
-    return measured_value >= expected_value - RTOL
-
-
-def test_accuracy_threshold_is_one_sided():
-    expected_value = 0.77
-    minimum_value = expected_value - RTOL
-
-    assert _meets_accuracy_threshold(minimum_value, expected_value)
-    assert _meets_accuracy_threshold(expected_value + RTOL + 0.01, expected_value)
-    assert not _meets_accuracy_threshold(minimum_value - 0.01, expected_value)
 
 
 def run_simple_prompt():
@@ -75,10 +66,9 @@ def test_accuracy():
             "tokenizer_backend=huggingface,"
             "trust_remote_code=True"
         )
-        results = lm_eval.simple_evaluate(
+        result = evaluate_gsm8k_lm_eval(
             model="local-chat-completions",
             model_args=model_args,
-            tasks=TASK,
             num_fewshot=5,
             apply_chat_template=True,
         )
@@ -89,13 +79,12 @@ def test_accuracy():
             f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False,"
             "trust_remote_code=True"
         )
-        results = lm_eval.simple_evaluate(
+        result = evaluate_gsm8k_lm_eval(
             model="local-completions",
             model_args=model_args,
-            tasks=TASK,
         )
 
-    measured_value = results["results"][TASK][FILTER]
+    measured_value = result.accuracy
     expected_value = EXPECTED_VALUES.get(MODEL_NAME)
 
     print(f"Measured accuracy value: {measured_value}\n")
@@ -106,7 +95,4 @@ def test_accuracy():
         )
         return
 
-    minimum_value = expected_value - RTOL
-    assert _meets_accuracy_threshold(measured_value, expected_value), (
-        f"Expected at least: {minimum_value} | Measured: {measured_value}"
-    )
+    assert_min_accuracy(result, expected_value, tolerance=RTOL, context=MODEL_NAME)

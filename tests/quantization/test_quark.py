@@ -17,6 +17,10 @@ import pytest
 import torch
 from packaging import version
 
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_min_accuracy,
+    evaluate_gsm8k_lm_eval,
+)
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkConfig,
@@ -485,23 +489,21 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
     if device_count < 8:
         pytest.skip(f"This test requires >=8 gpus, got only {device_count}")
 
-    task = "gsm8k"
     rtol = 0.03
 
-    results = lm_eval.simple_evaluate(
+    result = evaluate_gsm8k_lm_eval(
         model="vllm",
         model_args=config.get_model_args(tp_size=8, model_max_len=38768),
-        tasks=task,
         batch_size=64,
         num_fewshot=8,
     )
 
-    EXPECTED_VALUE = config.excepted_value
-    measured_value = results["results"][task]["exact_match,strict-match"]
-    assert (
-        measured_value - rtol < EXPECTED_VALUE
-        and measured_value + rtol > EXPECTED_VALUE
-    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+    assert_min_accuracy(
+        result,
+        config.excepted_value,
+        tolerance=rtol,
+        context=config.model_name,
+    )
 
 
 @pytest.mark.skipif(

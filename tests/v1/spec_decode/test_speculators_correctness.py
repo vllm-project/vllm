@@ -5,7 +5,10 @@ import dataclasses
 import pytest
 import torch
 
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_min_accuracy,
+    evaluate_gsm8k_offline,
+)
 from tests.utils import large_gpu_mark
 from vllm import LLM
 from vllm.config import SpeculativeConfig
@@ -205,11 +208,13 @@ def test_speculators_correctness(monkeypatch, config):
     )
 
     results = evaluate_gsm8k_offline(spec_llm)
-    accuracy = results["accuracy"]
+    accuracy = results.accuracy
     print(f"GSM8K Accuracy: {accuracy:.4f}")
     accuracy_threshold = config.expected_gsm8k_accuracy * (1 - config.accuracy_rtol)
-    assert accuracy >= accuracy_threshold, (
-        f"Expected GSM8K accuracy >= {accuracy_threshold:.3f}, got {accuracy:.3f}"
+    assert_min_accuracy(
+        results,
+        accuracy_threshold,
+        context=config.display_name,
     )
 
     current_metrics = spec_llm.get_metrics()

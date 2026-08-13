@@ -11,7 +11,7 @@ correctly with the DeepSeek-V2-Lite model using GSM8K evaluation.
 import pytest
 import torch
 
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
+from tests.evals.gsm8k.gsm8k_eval import assert_min_accuracy, evaluate_gsm8k
 from tests.utils import RemoteOpenAIServer
 from vllm.utils.import_utils import has_deep_ep
 
@@ -102,8 +102,8 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
         )
 
         # Validate accuracy is reasonable
-        accuracy = results["accuracy"]
-        assert accuracy >= MIN_ACCURACY, (
-            f"DBO+DP+EP accuracy too low ({all2all_backend}): "
-            f"{accuracy:.3f} < {MIN_ACCURACY:.3f} "
+        assert_min_accuracy(
+            results,
+            MIN_ACCURACY,
+            context=f"DBO+DP+EP ({all2all_backend})",
         )

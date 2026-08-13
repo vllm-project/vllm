@@ -9,9 +9,12 @@ sure that the zmq frontend mp RPC message passing and
 AsyncLLMEngine are working correctly.
 """
 
-import lm_eval
 import pytest
 
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_min_accuracy,
+    evaluate_gsm8k_lm_eval,
+)
 from vllm.platforms import current_platform
 
 MODEL_NAMES = [
@@ -22,8 +25,6 @@ FP8_KV_MODEL_NAMES = [
     "Qwen/Qwen3-1.7B",
 ]
 NUM_CONCURRENT = 500
-TASK = "gsm8k"
-FILTER = "exact_match,strict-match"
 RTOL = 0.03
 EXPECTED_VALUES = {
     "Qwen/Qwen3-1.7B": 0.68,
@@ -39,22 +40,21 @@ def run_test(model_name, more_args=None):
     if more_args is not None:
         model_args = "{},{}".format(model_args, more_args)
 
-    results = lm_eval.simple_evaluate(
+    result = evaluate_gsm8k_lm_eval(
         model="vllm",
         model_args=model_args,
-        tasks="gsm8k",
         batch_size="auto",
     )
 
-    measured_value = results["results"][TASK][FILTER]
     assert model_name in EXPECTED_VALUES, (
         f"Cannot find the expected value for the model {model_name=}"
     )
-    expected_value = EXPECTED_VALUES[model_name]
-    assert (
-        measured_value - RTOL < expected_value
-        and measured_value + RTOL > expected_value
-    ), f"Expected: {expected_value} |  Measured: {measured_value}"
+    assert_min_accuracy(
+        result,
+        EXPECTED_VALUES[model_name],
+        tolerance=RTOL,
+        context=model_name,
+    )
 
 
 # TODO: [AlexM] Fix it with new CI/CD tests

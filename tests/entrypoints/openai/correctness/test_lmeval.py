@@ -9,16 +9,16 @@ sure that the zmq frontend mp RPC message passing and
 AsyncLLMEngine are working correctly.
 """
 
-import lm_eval
-
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_min_accuracy,
+    evaluate_gsm8k_lm_eval,
+)
 from vllm.platforms import current_platform
 
 from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
 NUM_CONCURRENT = 500
-TASK = "gsm8k"
-FILTER = "exact_match,strict-match"
 RTOL = 0.03
 EXPECTED_VALUE = 0.54
 DEFAULT_ARGS = ["--max-model-len", "4096"]
@@ -53,17 +53,12 @@ def run_test(more_args):
             f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
         )
 
-        results = lm_eval.simple_evaluate(
+        result = evaluate_gsm8k_lm_eval(
             model="local-completions",
             model_args=model_args,
-            tasks=TASK,
         )
 
-        measured_value = results["results"][TASK][FILTER]
-        assert (
-            measured_value - RTOL < EXPECTED_VALUE
-            and measured_value + RTOL > EXPECTED_VALUE
-        ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+        assert_min_accuracy(result, EXPECTED_VALUE, tolerance=RTOL)
 
 
 def test_lm_eval_accuracy_v1_engine():

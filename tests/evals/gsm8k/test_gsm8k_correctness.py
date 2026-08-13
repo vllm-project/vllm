@@ -18,12 +18,12 @@ import yaml
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-from .gsm8k_eval import evaluate_gsm8k
+from .gsm8k_eval import GSM8KResult, assert_min_accuracy, evaluate_gsm8k
 
 DEFAULT_STARTUP_MAX_WAIT_SECONDS = 1200
 
 
-def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
+def run_gsm8k_eval(eval_config: dict, server_url: str) -> GSM8KResult:
     """Run GSM8K evaluation using our isolated script."""
     # Extract host and port from server URL
     if "://" in server_url:
@@ -173,7 +173,7 @@ def test_gsm8k_correctness(config_filename):
 
         results = run_gsm8k_eval(eval_config, server_url)
 
-        measured_metric = results["accuracy"]
+        measured_metric = results.accuracy
         expected_metric = eval_config["accuracy_threshold"]
         tol = eval_config.get("tolerance", 0.08)
 
@@ -181,14 +181,17 @@ def test_gsm8k_correctness(config_filename):
         print(f"  Measured metric: {measured_metric:.4f}")
         print(f"  Expected metric: {expected_metric:.4f}")
         print(f"  Tolerance: {tol:.4f}")
-        print(f"  Questions: {results['num_questions']}")
-        print(f"  Invalid rate: {results['invalid_rate']:.3f}")
-        print(f"  Latency: {results['latency']:.1f}s")
-        print(f"  QPS: {results['questions_per_second']:.1f}")
+        print(f"  Profile: {results.profile}/{results.metric}")
+        print(f"  Questions: {results.num_questions}")
+        print(f"  Invalid rate: {results.invalid_rate:.3f}")
+        print(f"  Latency: {results.latency:.1f}s")
+        print(f"  QPS: {results.questions_per_second:.1f}")
 
-        assert measured_metric >= expected_metric - tol, (
-            f"GSM8K metric too low: {measured_metric:.4f} < "
-            f"{expected_metric:.4f} - {tol:.4f} = {expected_metric - tol:.4f}"
+        assert_min_accuracy(
+            results,
+            expected_metric,
+            tolerance=tol,
+            context=eval_config["model_name"],
         )
 
         # Speculative configs additionally assert that drafts are actually
