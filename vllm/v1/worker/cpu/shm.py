@@ -63,6 +63,7 @@ torch.cuda.Event = _EventPlaceholder
 torch.cuda.Stream = _StreamPlaceholder
 torch.cuda.set_stream = noop
 torch.cuda.current_stream = lambda *args, **kwargs: _StreamPlaceholder()
+torch.cuda.stream = lambda *args, **kwargs: _StreamPlaceholder()
 torch.accelerator.synchronize = noop
 torch.accelerator.empty_cache = empty_cache_noop
 torch.Tensor.pin_memory = fake_pin_memory

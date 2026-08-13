@@ -180,11 +180,12 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     bash build_rust.sh && \
     if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
-######################### BUILD IMAGE #########################
-FROM base-arch AS vllm-build
-
-ARG USE_SCCACHE
-ARG SCCACHE_ENDPOINT
+######################### SOURCE PREP IMAGE #########################
+# Shared prep (source, rust artifacts, build deps) for both vllm-build and
+# vllm-dev, so the two independent compiles (bdist_wheel vs. setup.py
+# develop) can run concurrently instead of vllm-dev waiting on a wheel
+# build it never uses.
+FROM base-arch AS vllm-src
 
 ARG GIT_REPO_CHECK=0
 # Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
@@ -221,6 +222,12 @@ COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 
 RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
+######################### BUILD IMAGE #########################
+FROM vllm-src AS vllm-build
+
+ARG USE_SCCACHE
+ARG SCCACHE_ENDPOINT
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
@@ -254,7 +261,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
-        git clone --recurse-submodules "https://github.com/triton-lang/triton-cpu.git"; \
+        git clone --recurse-submodules --shallow-submodules --filter=blob:none "https://github.com/triton-lang/triton-cpu.git"; \
         cd triton-cpu; \
         git checkout "270e696d"; \
         if [ "$USE_SCCACHE" = "1" ]; then \
@@ -286,7 +293,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/test/cpu.txt --torch-backend cpu
 
 ######################### DEV IMAGE #########################
-FROM vllm-build AS vllm-dev
+FROM vllm-src AS vllm-dev
 
 WORKDIR /vllm-workspace
 
@@ -312,6 +319,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/test/cpu.txt --torch-backend cpu && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
+# Installed after requirements/test/cpu.txt (which pins triton==3.6.0) so the
+# triton-cpu wheel isn't overwritten by that pin.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
+    if ls dist/*.whl >/dev/null 2>&1; then \
+        uv pip install dist/*.whl; \
+    fi
+
 ENTRYPOINT ["bash"]
 
 ######################### TEST IMAGE #########################
@@ -322,6 +337,12 @@ WORKDIR /vllm-workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install dist/*.whl
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
+    if ls dist/*.whl >/dev/null 2>&1; then \
+        uv pip install dist/*.whl; \
+    fi
 
 ADD ./tests/ ./tests/
 ADD ./examples/ ./examples/
@@ -343,11 +364,6 @@ ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 ######################### RELEASE IMAGE #########################
 FROM base-arch AS vllm-openai
 
-# Re-declared here because this stage is `FROM base-arch` (not `vllm-build`),
-# so the RUN below that gates the triton-cpu wheel install on $VLLM_CPU_X86
-# would otherwise see an empty value and try to install it on non-x86 targets.
-ARG VLLM_CPU_X86=0
-
 WORKDIR /vllm-workspace
 
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -356,10 +372,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install "$(realpath dist/*.whl)[audio]"
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
-    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
-        uv pip install "$(realpath dist/*.whl)"; \
+    if ls dist/*.whl >/dev/null 2>&1; then \
+        uv pip install dist/*.whl; \
     fi
 
 # Add labels to document build configuration
