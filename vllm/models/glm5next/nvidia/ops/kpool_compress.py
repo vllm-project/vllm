@@ -421,6 +421,14 @@ def _kpool_decode_update_batched_kernel(
         block = tl.maximum(tail_slot, 0).to(tl.int64) // POOL_SIZE
         block_base = block * TAIL_BLOCK_ELEMS
 
+        # The tail-ring stash must run for EVERY real token, so it is gated on
+        # the token-granular tail slot -- not on `pos_valid`, which keys off the
+        # POOL-granular `slot_mapping` and is therefore only true on the pool's
+        # last token. Gating the stash on pos_valid dropped every intra-pool
+        # token, so a decode-built pool compressed 3 stale ring entries (the
+        # prefill-seeded prompt tail, frozen forever) plus the current token.
+        stash_valid = (pos >= 0) & (tail_slot >= 0)
+
         key = tl.load(
             key_ptr + req * key_stride_b + t * key_stride_t + offs,
             mask=dim_mask,
@@ -510,7 +518,7 @@ def _kpool_decode_update_batched_kernel(
         # uses prior stashes (and the current token's own key/score via
         # is_current), then leaves this token for future pools. Order matches
         # the per-token kernel: completion read first, stash second.
-        update_mask = dim_mask & pos_valid
+        update_mask = dim_mask & stash_valid
         tl.store(
             tail_kv_ptr + block_base + phys_slot * HEAD_DIM + offs,
             key,
