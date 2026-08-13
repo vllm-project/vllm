@@ -163,9 +163,18 @@ class XgrammarGrammar(StructuredOutputGrammar):
             return False
         for token in tokens:
             if not self.matcher.accept_token(token):
-                logger.error(
-                    "Failed to advance FSM for request %s "
-                    "for tokens %s. Please file an issue.",
+                # NOTE: Rejection is an expected outcome on the speculative
+                # decoding path: the structured output manager replays draft
+                # tokens through `accept_tokens` and rolls back on rejection,
+                # so logging at ERROR here floods the logs with hundreds of
+                # lines per grammar request even though the outputs remain
+                # schema-valid. Callers own the severity for genuine desync:
+                # the scheduler already logs at ERROR (and terminates the
+                # request) when non-speculative output tokens are rejected,
+                # matching the behavior of all other structured output
+                # backends, none of which log inside `accept_tokens`.
+                logger.debug(
+                    "Failed to advance FSM for request %s for token %s.",
                     request_id,
                     token,
                 )
