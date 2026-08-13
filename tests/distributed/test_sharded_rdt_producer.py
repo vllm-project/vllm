@@ -15,7 +15,7 @@ is stubbed (`rebuild_cuda_tensor`) and the serve path is only entered as far as
 the routing guard, which fires before any CUDA work.
 
 `rdt_produce_weights_batched`'s pack/copy half needs a real GPU arena; it stays
-covered by the GPU tests in `test_weight_transfer.py`.
+covered by the GPU tests in `test_sharded_rdt_trainer.py`.
 """
 
 import contextlib
@@ -742,14 +742,14 @@ class TestConcurrentPublishAndFree:
 
 
 class TestFakeServerAgreesWithTheRealOne:
-    """`test_weight_transfer.py`'s `_FakeProducerServer` is a second, independent
-    model of this protocol that the engine-side tests assert on. Pin the two
-    against each other so the fake cannot silently drift from the semantics the
-    real server enforces."""
+    """`test_sharded_rdt_trainer.py`'s `_FakeProducerServer` is a second,
+    independent model of this protocol that the engine-side tests assert on. Pin
+    the two against each other so the fake cannot silently drift from the
+    semantics the real server enforces."""
 
     @staticmethod
     def _fake():
-        from tests.distributed.test_weight_transfer import _FakeProducerServer
+        from tests.distributed.test_sharded_rdt_trainer import _FakeProducerServer
 
         return _FakeProducerServer(auto_free=False)
 

@@ -9,7 +9,8 @@ pin the values the engine produces today (chunk boundaries, packed byte offsets,
 recorded op chains) so a refactor that changes them fails loudly instead of
 silently shipping different bytes.
 
-`tests/distributed/test_weight_transfer.py` covers the trainer (producer) side.
+`tests/distributed/test_sharded_rdt_trainer.py` covers the trainer (producer)
+side; `test_sharded_rdt_producer.py` covers its serve-actor protocol.
 """
 
 import pytest
