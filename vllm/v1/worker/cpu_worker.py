@@ -171,6 +171,9 @@ class CPUWorker(Worker):
             self.local_rank,
             current_platform.dist_backend,
         )
+        if self.use_v2_model_runner:
+            logger.info_once("Using V2 Model Runner")
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
 

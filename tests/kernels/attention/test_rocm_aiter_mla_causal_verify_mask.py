@@ -127,7 +127,14 @@ def _run_verify_block():
     # stub with the attribute is enough for metadata construction.
     layer_name = "placeholder"
     vllm_config.compilation_config.static_forward_context[layer_name] = (
-        types.SimpleNamespace(prefill_backend=torch.empty((1,)))
+        types.SimpleNamespace(
+            prefill_backend=torch.empty((1,)),
+            q_lora_rank=None,
+            kv_lora_rank=KV_LORA_RANK,
+            qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+            qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+            v_head_dim=V_HEAD_DIM,
+        )
     )
 
     init_workspace_manager(device)
