@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
 
@@ -80,6 +81,26 @@ def test_sampling_mask_tensors_from_logits():
     assert result.token_ids.tolist() == [0, 2, 1, 2]
     assert result.offsets.tolist() == [0, 2, 4]
     assert result.cu_num_generated_tokens == [0, 1, 1, 2]
+
+
+def test_sampling_mask_matches_processed_top_k_top_p_support():
+    processed_logits = apply_top_k_top_p(
+        logits=torch.tensor([[6.0, 5.0, 4.0, 4.0, 4.0, 2.0, 1.0, 0.0]], device="cuda"),
+        k=torch.tensor([3], device="cuda"),
+        p=torch.tensor([0.9], device="cuda"),
+    )
+    expected_token_ids = (
+        torch.isfinite(processed_logits[0]).nonzero().flatten().tolist()
+    )
+    assert 0 < len(expected_token_ids) < processed_logits.shape[1]
+
+    tensors = SamplingMaskTensors.from_logits(
+        processed_logits,
+        num_sampled_tokens=torch.tensor([1], device="cuda"),
+    )
+    result = tensors.tolists(np.array([1]))
+
+    assert result.to_nested_list() == [expected_token_ids]
 
 
 class TestLogprobsLists(TestCase):
