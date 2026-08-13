@@ -80,7 +80,7 @@ class BaseRenderer(ABC, Generic[_T]):
         self.api_process_rank = config.parallel_config._api_process_rank
 
         self._resources = ExitStack()
-        self._resources.callback(self._log_shutdown)
+        self._resources.callback(logger.debug, "[shutdown] BaseRenderer")
         self._finalizer = weakref.finalize(self, self._resources.close)
 
         self.tokenizer = tokenizer
@@ -89,11 +89,15 @@ class BaseRenderer(ABC, Generic[_T]):
         # multimodal processor receives a deep-copied tokenizer (see #36557)
         # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
-        self._executor = self._resources.enter_context(ThreadPoolExecutor(max_workers=pool_workers))
+        self._executor = self._resources.enter_context(
+            ThreadPoolExecutor(max_workers=pool_workers)
+        )
 
         # Separate single-worker executor so tokenization never queues behind
         # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
-        self._mm_executor = self._resources.enter_context(ThreadPoolExecutor(max_workers=1))
+        self._mm_executor = self._resources.enter_context(
+            ThreadPoolExecutor(max_workers=1)
+        )
 
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
@@ -128,7 +132,8 @@ class BaseRenderer(ABC, Generic[_T]):
                 )
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
-            self._resources.callback(self.mm_processor_cache.close)
+            if mm_processor_cache is not None:
+                self._resources.callback(self.mm_processor_cache.close)
 
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
@@ -296,10 +301,6 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def shutdown(self) -> None:
         self._resources.close()
-
-    @staticmethod
-    def _log_shutdown():
-        logger.info("[shutdown] BaseRenderer")
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
