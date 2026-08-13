@@ -116,7 +116,7 @@ def _build_layer(
         kv_cache=(conv_state, ssm_state),
         norm=_TestGatedNorm(norm_weight),
         layer_norm_epsilon=EPS,
-        gdn_decode_kernel="fused",
+        gdn_decode_kernel="cuda",
     )
     with set_current_vllm_config(vllm_config):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()

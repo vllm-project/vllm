@@ -251,24 +251,18 @@ class TestEnvWithChoices:
                 env_func()
 
 
-def test_qwen3_5_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
-    env_func = environment_variables["VLLM_QWEN3_5_GDN_DECODE_KERNEL"]
-    monkeypatch.delenv("VLLM_QWEN3_5_GDN_DECODE_KERNEL", raising=False)
-    assert env_func() == "triton"
+def test_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
+    env_func = environment_variables["VLLM_GDN_DECODE_KERNEL"]
+    monkeypatch.delenv("VLLM_GDN_DECODE_KERNEL", raising=False)
+    assert env_func() == "cuda"
 
-    for value in ("triton", "fused"):
-        monkeypatch.setenv("VLLM_QWEN3_5_GDN_DECODE_KERNEL", value)
+    for value in ("cuda", "triton"):
+        monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", value)
         assert env_func() == value
 
-    for value in (
-        "phase_a",
-        "phase_a_packed",
-        "phase_b_grouped",
-        "phase_b_cluster",
-        "invalid",
-    ):
-        monkeypatch.setenv("VLLM_QWEN3_5_GDN_DECODE_KERNEL", value)
-        with pytest.raises(ValueError, match="VLLM_QWEN3_5_GDN_DECODE_KERNEL"):
+    for value in ("fused", "invalid"):
+        monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", value)
+        with pytest.raises(ValueError, match="VLLM_GDN_DECODE_KERNEL"):
             env_func()
 
 

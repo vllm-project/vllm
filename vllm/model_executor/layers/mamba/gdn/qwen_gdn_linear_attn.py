@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
+import os
 from typing import Literal
 
 import torch
@@ -488,21 +489,29 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
-        self.gdn_decode_kernel = envs.VLLM_QWEN3_5_GDN_DECODE_KERNEL.strip().lower()
-        self.enable_fused_gdn_decode = self.gdn_decode_kernel != "triton"
-        if self.enable_fused_gdn_decode:
-            self._validate_fused_gdn_decode_kernel(vllm_config)
-        logger.info_once(
-            "Qwen3.5 GDN decode kernel: %s",
-            self.gdn_decode_kernel,
-        )
+        self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
+        if self.gdn_decode_kernel == "cuda":
+            reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
+            if reason is not None:
+                if "VLLM_GDN_DECODE_KERNEL" in os.environ:
+                    raise ValueError(
+                        f"VLLM_GDN_DECODE_KERNEL=cuda is not supported: {reason}"
+                    )
+                logger.info_once(
+                    "Falling back to the Triton GDN decode path: %s", reason
+                )
+                self.gdn_decode_kernel = "triton"
+        self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
+        logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def _validate_fused_gdn_decode_kernel(self, vllm_config: VllmConfig) -> None:
+    def _fused_gdn_decode_unsupported_reason(
+        self, vllm_config: VllmConfig
+    ) -> str | None:
         conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
         if (
             self.gqa_interleaved_layout
@@ -514,18 +523,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
             or not current_platform.has_device_capability(80)
         ):
-            raise ValueError(
-                f"{self.gdn_decode_kernel} requires a BF16 Qwen3.5 model "
-                "with K=V=128, SiLU gating, BF16 convolution cache, BF16 "
-                "or FP32 recurrent state, and a GPU with compute "
-                "capability 8.0+"
+            return (
+                "the fused CUDA kernel requires a BF16 GDN model with "
+                "K=V=128, SiLU gating, non-interleaved GQA layout, BF16 "
+                "convolution cache, BF16 or FP32 recurrent state, and a "
+                "GPU with compute capability 8.0+"
             )
-
-        op_name = "fused_gdn_decode_post_conv_mtp"
-        if not hasattr(torch.ops._C, op_name):
-            raise RuntimeError(
-                f"{self.gdn_decode_kernel} requires torch.ops._C.{op_name}"
-            )
+        if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+            return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
+        return None
 
     def create_qkvz_proj(
         self,
@@ -1798,7 +1804,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_decodes == 0
             and attn_metadata.num_spec_decodes > 0
             and self.kv_cache[1].dtype in FUSED_GDN_STATE_DTYPES
-            and self.gdn_decode_kernel == "fused"
+            and self.gdn_decode_kernel == "cuda"
             and self.num_v_heads == 8 * self.num_k_heads
             and state_indices is not None
             and state_indices.size(1) <= MAX_FUSED_GDN_MTP_TOKENS
