@@ -203,8 +203,6 @@ class TestLogprobsLists(TestCase):
         assert sliced.cu_num_generated_tokens is None
 
 
-
-
 def test_with_ec_conn_output_copies_shared_empty_output():
     """The shared empty output is copied, never written to."""
     ec_output = ECConnectorOutput(finished_sending={"mm_hash"})
