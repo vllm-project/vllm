@@ -316,7 +316,8 @@ def sanitize_message(message: str) -> str:
     message = re.sub(
         r"/(?:home|usr|opt|var|tmp|root|lib|mnt|srv)(?:/[\w.\-]+)+", "<path>", message
     )
-    message = re.sub(r"(?:/[\w\-]+)+/[\w\-]+\.\w+", "<path>", message)
+    if "." in message:
+        message = re.sub(r"(?>/[\w\-]+)+/[\w\-]+\.\w+", "<path>", message)
     return message.strip()
 
 
