@@ -1485,7 +1485,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     # [Medusa]
     "MedusaModel": _HfExamplesInfo(
-        "JackFram/llama-68m", speculative_model="abhigoyal/vllm-medusa-llama-68m-random"
+        "JackFram/llama-68m",
+        speculative_model="abhigoyal/vllm-medusa-llama-68m-random",
+        speculative_method="medusa",
     ),
     # Temporarily disabled.
     # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
@@ -1497,6 +1499,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DFlashDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3-4B",
         speculative_model="z-lab/Qwen3-4B-DFlash-b16",
+        speculative_method="dflash",
         use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
@@ -1504,6 +1507,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DFlashLagunaForCausalLM": _HfExamplesInfo(
         "poolside/Laguna-XS-2.1-NVFP4",
         speculative_model="poolside/Laguna-XS-2.1-DFlash-NVFP4",
+        speculative_method="dflash",
         use_original_num_layers=True,
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
@@ -1511,6 +1515,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DFlashQwen3NextDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3-Coder-Next",
         speculative_model="z-lab/Qwen3-Coder-Next-DFlash",
+        speculative_method="dflash",
         use_original_num_layers=True,  # DFlash requires all layers
         max_model_len=8192,  # Reduce for CI
         max_num_seqs=32,
@@ -1519,12 +1524,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "MuseGlimmerAssistantModel": _HfExamplesInfo(
         "meta-models/Muse-Glimmer-30B",
         speculative_model="meta-models/Muse-Glimmer-30B-assistant",
+        speculative_method="dflash",
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
     "DFlashMuseGlimmerAssistantModel": _HfExamplesInfo(
         "meta-models/Muse-Glimmer-30B",
         speculative_model="meta-models/Muse-Glimmer-30B-assistant",
+        speculative_method="dflash",
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
@@ -1532,12 +1539,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DSparkDraftModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Pro-DSpark",
         speculative_model="deepseek-ai/DeepSeek-V4-Pro-DSpark",  # draft in mtp.*
+        speculative_method="dspark",
         is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
     ),
     "K3DSparkModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
         speculative_model="Inferact/Kimi-K3-DSpark",
+        speculative_method="dspark",
         use_original_num_layers=True,  # DSpark has >1 draft block
         trust_remote_code=True,
         # FIXME: Investigate the NVML failure in CI.
@@ -1546,12 +1555,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Qwen3DSparkModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         speculative_model="deepseek-ai/dspark_qwen3_8b_block7",
+        speculative_method="dspark",
         is_available_online=False,
         use_original_num_layers=True,  # DSpark backbone requires all layers
     ),
     "Gemma4DSparkModel": _HfExamplesInfo(
         "google/gemma-4-12B-it",
         speculative_model="deepseek-ai/dspark_gemma4_12b_block7",
+        speculative_method="dspark",
         is_available_online=False,
         use_original_num_layers=True,
     ),
@@ -1559,6 +1570,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "EagleCohereForCausalLM": _HfExamplesInfo(
         "/host/engines/cohere-moe",
         speculative_model="/host/engines/cohere-moe/eagle",
+        speculative_method="eagle",
         tokenizer="/host/engines/cohere-moe",
         trust_remote_code=True,
         is_available_online=False,
@@ -1566,30 +1578,35 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",
         speculative_model="eagle618/eagle-deepseek-v3-random",
+        speculative_method="eagle",
         trust_remote_code=True,
     ),
     "EagleLlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Meta-Llama-3-8B-Instruct",
         trust_remote_code=True,
         speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
+        speculative_method="eagle",
         tokenizer="meta-llama/Meta-Llama-3-8B-Instruct",
     ),
     "Eagle3DeepseekV2ForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-K2.5",
         trust_remote_code=True,
         speculative_model="AQ-MedAI/Kimi-K25-eagle3",
+        speculative_method="eagle3",
         tokenizer="moonshotai/Kimi-K2.5",
     ),
     "Eagle3DeepseekV3ForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-K2.5",
         trust_remote_code=True,
         speculative_model="AQ-MedAI/Kimi-K25-eagle3",
+        speculative_method="eagle3",
         tokenizer="moonshotai/Kimi-K2.5",
     ),
     "Eagle3LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.1-8B-Instruct",
         trust_remote_code=True,
         speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+        speculative_method="eagle3",
         tokenizer="meta-llama/Llama-3.1-8B-Instruct",
         use_original_num_layers=True,
         max_model_len=10240,
@@ -1598,21 +1615,25 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "MiniMaxAI/MiniMax-M2",
         trust_remote_code=True,
         speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+        speculative_method="eagle3",
         tokenizer="MiniMaxAI/MiniMax-M2",
     ),
     "EagleMistralForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Medium-3.5-128B",
         speculative_model="mistralai/Mistral-Medium-3.5-128B-EAGLE",
+        speculative_method="eagle",
         is_available_online=False,
     ),
     "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512",
         speculative_model="mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle",
+        speculative_method="eagle",
     ),
     "LlamaForCausalLMEagle3": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         trust_remote_code=True,
         speculative_model="AngelSlim/Qwen3-8B_eagle3",
+        speculative_method="eagle3",
         tokenizer="Qwen/Qwen3-8B",
         use_original_num_layers=True,
     ),
@@ -1620,6 +1641,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
         trust_remote_code=True,
         speculative_model="morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+        speculative_method="eagle",
         tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
     "EagleMiniCPMForCausalLM": _HfExamplesInfo(
@@ -1632,10 +1654,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Eagle3Qwen2_5vlForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen2.5-VL-7B-Instruct",
         speculative_model="Rayzl/qwen2.5-vl-7b-eagle3-sgl",
+        speculative_method="eagle3",
     ),
     "Eagle3Qwen3vlForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-VL-8B-Instruct",
         speculative_model="taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
+        speculative_method="eagle3",
     ),
     "Eagle3Qwen3ForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
@@ -1644,6 +1668,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
             "inference-optimization/"
             "Qwen3-8B-from-Qwen3-8B_regen-speculators.eagle3-qwen3arch-ckpt1"
         ),
+        speculative_method="eagle3",
         tokenizer="Qwen/Qwen3-8B",
         use_original_num_layers=True,
     ),
@@ -1652,6 +1677,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "Qwen/Qwen3-8B",
         trust_remote_code=True,
         speculative_model="nm-testing/qwen3-8b-peagle-speculators",
+        speculative_method="eagle3",
         tokenizer="Qwen/Qwen3-8B",
         use_original_num_layers=True,
     ),
@@ -1659,6 +1685,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "Qwen/Qwen3-8B",
         trust_remote_code=True,
         speculative_model="nm-testing/qwen3-8b-peagle-speculators",
+        speculative_method="eagle3",
         tokenizer="Qwen/Qwen3-8B",
         use_original_num_layers=True,
     ),
@@ -1668,6 +1695,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model=(
             "inference-optimization/Qwen3-8B-speculators.peagle-qwen3arch-ckpt4"
         ),
+        speculative_method="eagle3",
         tokenizer="Qwen/Qwen3-8B",
         use_original_num_layers=True,
     ),
@@ -1675,17 +1703,20 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "BailingMoeV25MTPModel": _HfExamplesInfo(
         "inclusionAI/Ring-2.5-1T",
         speculative_model="inclusionAI/Ring-2.5-1T",
+        speculative_method="mtp",
         trust_remote_code=True,
         is_available_online=False,
     ),
     "BailingMoeV3MTPModel": _HfExamplesInfo(
         "inclusionAI/Ling-3.0-flash",
         speculative_model="inclusionAI/Ling-3.0-flash",
+        speculative_method="mtp",
         trust_remote_code=True,
     ),
     "DeepSeekMTPModel": _HfExamplesInfo(
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
+        speculative_method="mtp",
         trust_remote_code=True,
     ),
     "DeepseekV32MTPModel": _HfExamplesInfo(
@@ -1696,17 +1727,20 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DeepSeekV4MTPModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash",
         speculative_model="deepseek-ai/DeepSeek-V4-Flash",
+        speculative_method="mtp",
         trust_remote_code=True,
         is_available_online=False,
     ),
     "Dots3NoteMTPModel": _HfExamplesInfo(
         "dots-studio/dots3-note-prev",
         speculative_model="dots-studio/dots3-note-prev",
+        speculative_method="mtp",
         is_available_online=False,
     ),
     "Gemma4MTPModel": _HfExamplesInfo(
         "google/gemma-4-E4B-it",
         speculative_model="google/gemma-4-E4B-it-assistant",
+        speculative_method="mtp",
         trust_remote_code=True,
         min_transformers_version="5.8.0",
     ),
@@ -1714,16 +1748,19 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "baidu/ERNIE-4.5-21B-A3B-PT",
         trust_remote_code=True,
         speculative_model="baidu/ERNIE-4.5-21B-A3B-PT",
+        speculative_method="mtp",
     ),
     "ExaoneMoeMTP": _HfExamplesInfo(
         "LGAI-EXAONE/K-EXAONE-236B-A23B",
         speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
+        speculative_method="mtp",
         min_transformers_version="5.1.0",
         enable_prefix_caching=False,
     ),
     "Exaone4_5_MTP": _HfExamplesInfo(
         "LGAI-EXAONE/EXAONE-4.5-33B",
         speculative_model="LGAI-EXAONE/EXAONE-4.5-33B",
+        speculative_method="mtp",
         min_transformers_version="5.6.0",
     ),
     "ExtractHiddenStatesModel": _HfExamplesInfo(
@@ -1733,25 +1770,30 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Glm4MoeMTPModel": _HfExamplesInfo(
         "zai-org/GLM-4.5",
         speculative_model="zai-org/GLM-4.5",
+        speculative_method="mtp",
     ),
     "Glm4MoeLiteMTPModel": _HfExamplesInfo(
         "zai-org/GLM-4.7-Flash",
         speculative_model="zai-org/GLM-4.7-Flash",
+        speculative_method="mtp",
         min_transformers_version="5.0.0",
     ),
     "GlmOcrMTPModel": _HfExamplesInfo(
         "zai-org/GLM-OCR",
         speculative_model="zai-org/GLM-OCR",
+        speculative_method="mtp",
         is_available_online=False,
         min_transformers_version="5.1.0",
     ),
     "HYV3MTPModel": _HfExamplesInfo(
         "tencent/Hy3-preview",
         speculative_model="tencent/Hy3-preview",
+        speculative_method="mtp",
     ),
     "InklingMTPModel": _HfExamplesInfo(
         "thinkingmachines/Inkling-NVFP4",
         speculative_model="thinkingmachines/Inkling-NVFP4",
+        speculative_method="mtp",
         tokenizer_mode="inkling",
         trust_remote_code=True,
         max_model_len=4096,
@@ -1760,11 +1802,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "internlm/Intern-S2-Mobius",
         trust_remote_code=True,
         speculative_model="internlm/Intern-S2-Mobius",
+        speculative_method="mtp",
         is_available_online=False,
     ),
     "KimiK3MTPModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
         speculative_model="moonshotai/Kimi-K3",
+        speculative_method="mtp",
         trust_remote_code=True,
         is_available_online=False,
     ),
@@ -1772,22 +1816,26 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "meituan-longcat/LongCat-Flash-Chat",
         trust_remote_code=True,
         speculative_model="meituan-longcat/LongCat-Flash-Chat",
+        speculative_method="mtp",
     ),
     "MiMoMTPModel": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-7B-RL",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-7B-RL",
+        speculative_method="mtp",
     ),
     "MiMoV2MTPModel": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2.5-Pro",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-V2.5-Pro",
+        speculative_method="mtp",
         is_available_online=False,
     ),
     "MiMoV2OmniMTPModel": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2.5-Omni",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-V2.5-Omni",
+        speculative_method="mtp",
         is_available_online=False,
     ),
     "MiniMaxM3MTP": _HfExamplesInfo(
@@ -1798,6 +1846,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "NemotronHMTPModel": _HfExamplesInfo(
         "nvidia/Nemotron-Super-Placeholder",
         speculative_model="nvidia/Nemotron-Super-Placeholder",
+        speculative_method="mtp",
         is_available_online=False,
     ),
     "OpenPanguMTPModel": _HfExamplesInfo(
@@ -1811,14 +1860,17 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Qwen3_5MTP": _HfExamplesInfo(
         "Qwen/Qwen3.5-0.8B",
         speculative_model="Qwen/Qwen3.5-0.8B",
+        speculative_method="mtp",
     ),
     "Qwen3_5MoeMTP": _HfExamplesInfo(
         "Qwen/Qwen3.5-35B-A3B",
         speculative_model="Qwen/Qwen3.5-35B-A3B",
+        speculative_method="mtp",
     ),
     "Step3p5MTP": _HfExamplesInfo(
         "stepfun-ai/Step-3.5-Flash",
         speculative_model="stepfun-ai/Step-3.5-Flash",
+        speculative_method="mtp",
         use_original_num_layers=True,
         # Initialize at least one MoE layer
         hf_overrides={"num_hidden_layers": 4},
