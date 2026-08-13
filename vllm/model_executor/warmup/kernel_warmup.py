@@ -233,11 +233,18 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
 
-    Tuning is performed only on rank 0. The resulting cache is broadcast
-    to every rank so all ranks dispatch the same kernel tactic.
+    Every rank profiles the same tactics. When distributed, per-tactic
+    timings are averaged over the world CPU group so all ranks select the
+    same tactic.
     """
+    from flashinfer.autotuner import AutoTuner, set_autotune_process_group
+
     import vllm.utils.flashinfer as fi_utils
     from vllm.distributed.parallel_state import get_world_group
+
+    world = get_world_group()
+    is_leader = world.rank_in_group == 0
+    tuner = AutoTuner.get()
 
     autotune_kwargs: dict = {}
     skip_ops = _flashinfer_autotune_skip_ops(runner)
@@ -248,25 +255,6 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         )
         autotune_kwargs["skip_ops"] = skip_ops
 
-    use_persistent_cache = True
-
-    # When distributed, tune on every rank so the collectives stay synchronized.
-    if get_world_group().world_size > 1:
-        use_persistent_cache = False
-
-    if not use_persistent_cache:
-        with torch.inference_mode(), fi_utils.autotune(**autotune_kwargs):
-            runner._dummy_run(
-                num_tokens=runner.scheduler_config.max_num_batched_tokens,
-                skip_eplb=True,
-                is_profile=True,
-            )
-        get_world_group().barrier()
-        return
-
-    world = get_world_group()
-    is_leader = world.rank_in_group == 0
-
     cache_path = resolve_flashinfer_autotune_file(runner)
     if is_leader:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
@@ -275,43 +263,40 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     # When autotuning with number of tokens m, flashinfer will autotune
     # operations for all number of tokens up to m, so we only need to
     # run with the max number of tokens.
+    # Randomize inputs to avoid every token pick the same experts,
+    # which lead to some EP ranks receiving no tokens and skipping their
+    # MoE kernel entirely, and cause hang due to all-reduce collective
+    # during synchronized autotuning.
     dummy_run_kwargs = dict(
         num_tokens=runner.scheduler_config.max_num_batched_tokens,
         skip_eplb=True,
         is_profile=True,
+        randomize_inputs=True,
     )
 
-    with torch.inference_mode():
-        if is_leader:
-            with fi_utils.autotune(
-                tune_mode=True, cache=str(cache_path), **autotune_kwargs
-            ):
-                runner._dummy_run(**dummy_run_kwargs)
-        else:
-            runner._dummy_run(**dummy_run_kwargs)
-
-    # Broadcast autotune cache from rank 0 to all other ranks so every
-    # rank loads the same set of chosen tactics.
-    tune_results: bytes | None = None
+    # Read cached autotune results and broadcast to all ranks.
+    cached_results: bytes | None = None
     if is_leader and cache_path.exists():
         with open(cache_path, "rb") as f:
-            tune_results = f.read()
-
-    tune_results = world.broadcast_object(tune_results, src=0)
-
-    if tune_results is None:
-        logger.warning_once(
-            "No FlashInfer autotune cache entries found; "
-            "falling back to default tactics."
-        )
-    else:
-        write_flashinfer_autotune_cache(cache_path, tune_results)
+            cached_results = f.read()
+    cached_results = world.broadcast_object(cached_results, src=0)
+    if cached_results is not None:
+        write_flashinfer_autotune_cache(cache_path, cached_results)
         world.barrier()
-        from flashinfer.autotuner import AutoTuner
+        tuner.load_configs(str(cache_path))
 
-        AutoTuner.get().load_configs(str(cache_path))
-        logger.info_once(
-            "FlashInfer autotune cache loaded on rank %d from %s.",
-            world.rank_in_group,
-            cache_path,
-        )
+    group = world.cpu_group if world.world_size > 1 else None
+    set_autotune_process_group(group)
+    try:
+        with (
+            torch.inference_mode(),
+            fi_utils.autotune(tune_mode=True, **autotune_kwargs),
+        ):
+            runner._dummy_run(**dummy_run_kwargs)
+    finally:
+        set_autotune_process_group(None)
+
+    if world.world_size > 1:
+        world.barrier()
+    if is_leader:
+        tuner.save_configs(str(cache_path))

@@ -107,6 +107,7 @@ steps:
   - vllm/v1/worker/gpu_worker.py
   - tests/v1/spec_decode/test_max_len.py
   - tests/v1/spec_decode/test_rejection_sampler_utils.py
+  - tests/v1/spec_decode/test_synthetic_rejection_sampler_utils.py
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh

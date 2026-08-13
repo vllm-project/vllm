@@ -54,7 +54,17 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        # DCP local sequence lengths are not advanced between draft steps.
+        self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
+        # Only the non-causal DSpark draft group serves multi-token blocks via
+        # the decode path; raise its reorder threshold to the spec block length
+        # so full-cudagraph capture admits it. Causal usage stays single-token.
+        if getattr(self, "non_causal_multi_token_decode", False):
+            self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
         self._reserve_attn_logits_workspace()
+
+    def update_draft_decode_metadata(self, _metadata: MLACommonMetadata) -> None:
+        pass
 
     def _reserve_attn_logits_workspace(self) -> None:
         """Pre-size the shared workspace for the decode split-KV attn logits.

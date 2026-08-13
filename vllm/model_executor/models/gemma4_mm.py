@@ -69,6 +69,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -2039,7 +2040,20 @@ class Gemma4ForConditionalGeneration(
     ) -> torch.Tensor | None:
         logits = self.language_model.compute_logits(hidden_states)
         if logits is not None and self._suppress_token_ids:
-            logits[:, self._suppress_token_ids] = -float("inf")
+            # Cache a per-device index tensor for the (static) suppressed-token
+            # set and use `index_fill_`, so neither the Python-list indices nor
+            # the scalar fill value take a host roundtrip per call.
+            cache = getattr(self, "_suppress_token_ids_cache", None)
+            if cache is None:
+                cache = {}
+                self._suppress_token_ids_cache = cache
+            suppress_idx = cache.get(logits.device)
+            if suppress_idx is None:
+                suppress_idx = async_tensor_h2d(
+                    self._suppress_token_ids, dtype=torch.long, device=logits.device
+                )
+                cache[logits.device] = suppress_idx
+            logits.index_fill_(1, suppress_idx, -float("inf"))
         return logits
 
     # ------------------------------------------------------------------ #
@@ -2078,6 +2092,8 @@ class Gemma4ForConditionalGeneration(
                         metadata.mm_prefix_range = None
                     if hasattr(metadata, "mm_prefix_range_tensor"):
                         metadata.mm_prefix_range_tensor = None
+                    if hasattr(metadata, "mm_prefix_query_range_tensor"):
+                        metadata.mm_prefix_query_range_tensor = None
 
         if isinstance(attn_metadata, list):
             for ub_metadata in attn_metadata:

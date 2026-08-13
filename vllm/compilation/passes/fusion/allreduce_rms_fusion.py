@@ -1247,6 +1247,34 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
         return _replacement
 
 
+class AiterAllreduceFusedAddRMSNormOutputOnlyPattern(
+    AiterAllreduceFusedAddRMSNormPattern
+):
+    """Match the add-RMSNorm form when its residual output is dead."""
+
+    @property
+    def pattern(self):
+        pattern = super().pattern
+
+        def _pattern(
+            residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
+        ) -> torch.Tensor:
+            return pattern(residual, input, weight)[0]
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        replacement = super().replacement
+
+        def _replacement(
+            residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
+        ) -> torch.Tensor:
+            return replacement(residual, input, weight)[0]
+
+        return _replacement
+
+
 class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
     BasePattern, VllmPatternReplacement
 ):
@@ -1621,6 +1649,13 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             )
             self.register(
                 AiterAllreduceFusedAddRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
+            self.register(
+                AiterAllreduceFusedAddRMSNormOutputOnlyPattern(
                     epsilon,
                     self.model_dtype,
                     self.device,
