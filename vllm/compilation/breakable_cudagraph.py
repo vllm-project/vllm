@@ -28,7 +28,7 @@ import gc
 import threading
 import weakref
 from collections.abc import Callable
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar, overload
 
 import torch
 
@@ -54,6 +54,14 @@ def is_breakable_cudagraph_enabled() -> bool:
 
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+@overload
+def eager_break_during_capture(fn: F) -> F: ...
+
+
+@overload
+def eager_break_during_capture(*, always_break: bool = ...) -> Callable[[F], F]: ...
 
 
 def eager_break_during_capture(
@@ -121,8 +129,7 @@ def eager_break_during_capture(
             # slots across batch descriptors. cudagraph owns the slot, so the
             # weak_ref is safe to deref on replay.
             weak_args = tuple(
-                weak_ref_tensor(a) if isinstance(a, torch.Tensor) else a
-                for a in args
+                weak_ref_tensor(a) if isinstance(a, torch.Tensor) else a for a in args
             )
             weak_kwargs = {
                 k: weak_ref_tensor(v) if isinstance(v, torch.Tensor) else v
