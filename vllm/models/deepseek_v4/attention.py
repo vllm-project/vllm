@@ -195,6 +195,26 @@ def _resolve_skip_topk(
     return pattern[c4a_idx] == "S"
 
 
+def _validate_index_cache_ubatching(skip_topk: bool, use_ubatching: bool) -> None:
+    """Reject IndexCache under DBO, where the shared top-k buffer is unsafe.
+
+    ``topk_indices_buffer`` has no ubatch dimension. Micro-batches yield at the
+    MoE boundary, after attention, so a layer that writes and reads the buffer
+    itself stays on one side of a yield. A skipped layer instead reads a buffer
+    written a layer earlier, which the other micro-batch has since overwritten.
+
+    Raises:
+        NotImplementedError: If any layer would reuse top-k while ubatching.
+    """
+    if not skip_topk or not use_ubatching:
+        return
+    raise NotImplementedError(
+        "DeepSeek-V4 IndexCache does not support DBO/ubatching: skipped C4A "
+        "layers reuse a topk_indices_buffer that is shared across micro-batches. "
+        "Set index_topk_freq=1 (or drop index_topk_pattern), or disable DBO."
+    )
+
+
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
@@ -358,6 +378,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             config.num_hidden_layers, pp_group.rank_in_group, pp_group.world_size
         )
         self.skip_topk = _resolve_skip_topk(config, layer_id, local_start, local_end)
+        _validate_index_cache_ubatching(
+            self.skip_topk, vllm_config.parallel_config.use_ubatching
+        )
         if self.skip_topk:
             logger.info_once("IndexCache: some C4A layers reuse the previous top-k.")
         if self.compress_ratio == 4:

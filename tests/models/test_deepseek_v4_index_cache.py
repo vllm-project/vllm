@@ -11,7 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm.models.deepseek_v4.attention import _resolve_skip_topk
+from vllm.models.deepseek_v4.attention import (
+    _resolve_skip_topk,
+    _validate_index_cache_ubatching,
+)
 
 # DeepSeek-V4-Flash: 43 layers (C4A on even ids 2..42, C128A between them) plus
 # trailing SWA-only slots. V4-Flash ships one trailing entry, V4-Flash-0731
@@ -139,3 +142,17 @@ def test_each_pipeline_stage_computes_its_own_first_c4a_layer():
     assert stage1 == [28, 32, 36, 40]
     assert C4A_LAYERS[0] not in stage0
     assert stage0 == [4, 8, 12, 16, 20]
+
+
+def test_reuse_is_rejected_under_ubatching():
+    # Micro-batches share one topk_indices_buffer, so a skipped layer would read
+    # whichever micro-batch wrote last.
+    with pytest.raises(NotImplementedError, match="DBO/ubatching"):
+        _validate_index_cache_ubatching(skip_topk=True, use_ubatching=True)
+
+
+@pytest.mark.parametrize(
+    "skip_topk,use_ubatching", [(False, True), (True, False), (False, False)]
+)
+def test_ubatching_guard_allows_everything_else(skip_topk, use_ubatching):
+    _validate_index_cache_ubatching(skip_topk, use_ubatching)
