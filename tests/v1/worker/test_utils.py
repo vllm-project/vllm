@@ -61,6 +61,11 @@ def test_expand_hisparse_source_blocks_into_kernel_pages():
 def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
     worker = object.__new__(HiSparseWorker)
     worker.request_state_indices = torch.arange(4, dtype=torch.int32)
+    worker._pending_invalid_block_ids = [5]
+    invalidations = []
+    worker.invalidate_blocks = lambda blocks, states: invalidations.append(
+        (blocks.copy(), states.clone())
+    )
     original_ptr = worker.request_state_indices.data_ptr()
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
 
@@ -68,6 +73,28 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
 
     assert worker.request_state_indices.data_ptr() == original_ptr
     assert worker.request_state_indices.tolist() == [3, 1, -1, -1]
+    assert len(invalidations) == 1
+    assert invalidations[0][0] == [5]
+    torch.testing.assert_close(
+        invalidations[0][1], torch.tensor([3, 1], dtype=torch.int32)
+    )
+    assert worker._pending_invalid_block_ids == []
+
+
+def test_hisparse_runtime_invalidates_only_scheduled_request_states():
+    runtime = object.__new__(hisparse_runtime_module.HiSparseRuntime)
+    runtime._host_cache = torch.empty(1)
+    runtime.device = torch.device("cpu")
+    runtime.device_global_indices = torch.tensor(
+        [[6, 7, 8], [6, 9, 10], [6, 11, 12]], dtype=torch.int32
+    )
+
+    runtime.invalidate_slots(torch.tensor([6]), torch.tensor([1]))
+
+    torch.testing.assert_close(
+        runtime.device_global_indices,
+        torch.tensor([[6, 7, 8], [-1, 9, 10], [6, 11, 12]], dtype=torch.int32),
+    )
 
 
 def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatch):
@@ -132,19 +159,23 @@ def test_hisparse_worker_invalidates_only_index_group_leaders(monkeypatch):
     """Recycled blocks must not enter followers whose LRU state was released."""
     worker = object.__new__(HiSparseWorker)
     worker.kernel_block_size = 2
-    calls: list[tuple[str, torch.Tensor]] = []
+    calls: list[tuple[str, torch.Tensor, torch.Tensor]] = []
     leader = SimpleNamespace(
         runtime=SimpleNamespace(
             device=torch.device("cpu"),
             leader=None,
-            invalidate_slots=lambda slots: calls.append(("leader", slots.clone())),
+            invalidate_slots=lambda slots, state_indices: calls.append(
+                ("leader", slots.clone(), state_indices.clone())
+            ),
         )
     )
     follower = SimpleNamespace(
         runtime=SimpleNamespace(
             device=torch.device("cpu"),
             leader=leader.runtime,
-            invalidate_slots=lambda slots: calls.append(("follower", slots.clone())),
+            invalidate_slots=lambda slots, state_indices: calls.append(
+                ("follower", slots.clone(), state_indices.clone())
+            ),
         )
     )
     worker.cache_handles = [leader, follower]
@@ -154,16 +185,19 @@ def test_hisparse_worker_invalidates_only_index_group_leaders(monkeypatch):
     worker._block_staging_event = event
     monkeypatch.setattr(torch.accelerator, "current_stream", lambda device: object())
 
-    worker.invalidate_blocks([3])
+    state_indices = torch.tensor([4, 1])
+    worker.invalidate_blocks([3], state_indices)
 
     assert len(calls) == 1
     assert calls[0][0] == "leader"
-    torch.testing.assert_close(calls[0][1], torch.tensor([6, 7]))
+    torch.testing.assert_close(calls[0][1], torch.tensor([6, 7], dtype=torch.int32))
+    torch.testing.assert_close(calls[0][2], state_indices)
 
 
-def test_hisparse_worker_prepare_step_invalidates_and_restores(monkeypatch):
+def test_hisparse_worker_prepare_step_queues_invalidation_and_restores(monkeypatch):
     worker = object.__new__(HiSparseWorker)
     worker.kernel_block_size = 64
+    worker._pending_invalid_block_ids = []
     worker._post_forward_transfers = []
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={"request-0": 1, "request-1": 1},
@@ -176,18 +210,13 @@ def test_hisparse_worker_prepare_step_invalidates_and_restores(monkeypatch):
     cache_handle = SimpleNamespace(fully_resident=False)
     worker.cache_handles = [cache_handle]
     calls: list[tuple[Any, ...]] = []
-    worker.invalidate_blocks = lambda block_ids: calls.append(
-        ("invalidate", block_ids, worker.kernel_block_size)
-    )
     worker.restore_prefix = lambda output: calls.append(("restore", output))
     worker._enqueue_transfers = lambda transfers: calls.append(("transfer", transfers))
 
     worker.prepare_step(command, scheduler_output)
 
-    assert calls == [
-        ("invalidate", [2, 3, 4], 64),
-        ("restore", scheduler_output),
-    ]
+    assert calls == [("restore", scheduler_output)]
+    assert worker._pending_invalid_block_ids == [2, 3, 4]
     assert cache_handle.fully_resident
     assert worker._post_forward_transfers == []
 
@@ -195,6 +224,7 @@ def test_hisparse_worker_prepare_step_invalidates_and_restores(monkeypatch):
 def test_hisparse_worker_prepare_step_accepts_warmup_without_command():
     worker = object.__new__(HiSparseWorker)
     worker.kernel_block_size = 64
+    worker._pending_invalid_block_ids = []
     worker._post_forward_transfers = [object()]
     scheduler_output = SimpleNamespace(
         scheduled_new_reqs=[],
@@ -203,14 +233,14 @@ def test_hisparse_worker_prepare_step_accepts_warmup_without_command():
     cache_handle = SimpleNamespace(fully_resident=True)
     worker.cache_handles = [cache_handle]
     calls = []
-    worker.invalidate_blocks = lambda block_ids: calls.append(("invalidate", block_ids))
     worker.restore_prefix = lambda output: calls.append(("restore", output))
 
     worker.prepare_step(None, scheduler_output)
 
     assert not cache_handle.fully_resident
     assert worker._post_forward_transfers == []
-    assert calls == [("invalidate", []), ("restore", scheduler_output)]
+    assert calls == [("restore", scheduler_output)]
+    assert worker._pending_invalid_block_ids == []
 
 
 def test_hisparse_worker_enqueues_fused_page_spill(monkeypatch):

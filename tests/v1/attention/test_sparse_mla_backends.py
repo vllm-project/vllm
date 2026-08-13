@@ -2248,7 +2248,9 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     stale_row = flat_hot[stale_hot_slot].clone()
 
     flat_pool[8] += 1000
-    cache_handle.runtime.invalidate_slots(torch.tensor([8], device=device))
+    cache_handle.runtime.invalidate_slots(
+        torch.tensor([8], device=device), request_state_indices[:1]
+    )
     _, hot_indices = cache_handle.resolve_topk(
         req_id_per_token=req_ids,
         block_table=block_table,

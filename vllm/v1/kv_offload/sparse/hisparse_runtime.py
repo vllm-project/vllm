@@ -582,15 +582,20 @@ class HiSparseRuntime:
         self.device_global_indices.fill_(-1)
         self.lru_slots.copy_(self._lru_init.expand_as(self.lru_slots))
 
-    def invalidate_slots(self, slots: torch.Tensor) -> None:
-        """Drop hot copies of recycled global slots."""
+    def invalidate_slots(
+        self,
+        slots: torch.Tensor,
+        request_state_indices: torch.Tensor,
+    ) -> None:
+        """Drop scheduled requests' hot copies of recycled global slots."""
         if self._host_cache is None:
             return
         assert self.device_global_indices is not None
-        stale = torch.isin(
-            self.device_global_indices, slots.to(device=self.device, dtype=torch.int32)
-        )
-        self.device_global_indices[stale] = -1
+        slots = slots.to(device=self.device, dtype=torch.int32)
+        state_indices = request_state_indices.to(device=self.device, dtype=torch.long)
+        active_indices = self.device_global_indices.index_select(0, state_indices)
+        active_indices.masked_fill_(torch.isin(active_indices, slots), -1)
+        self.device_global_indices.index_copy_(0, state_indices, active_indices)
 
     def backup_rows(
         self,

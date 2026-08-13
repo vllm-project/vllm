@@ -94,6 +94,7 @@ class HiSparseWorker:
         self.hot_backing = hot_backing
         self._block_staging: torch.Tensor | None = None
         self._block_staging_event: torch.Event | None = None
+        self._pending_invalid_block_ids: list[int] = []
         self._post_forward_transfers: list[SparseKVPageTransfer] = []
         self._completed_transfer_ids: list[int] = []
         self._init_backup_plan(device, max_model_len, max_concurrent_batches)
@@ -108,6 +109,9 @@ class HiSparseWorker:
             return
         self.request_state_indices.fill_(-1)
         self.request_state_indices[: indices.numel()].copy_(indices)
+        if self._pending_invalid_block_ids:
+            self.invalidate_blocks(self._pending_invalid_block_ids, indices)
+            self._pending_invalid_block_ids.clear()
 
     def _init_backup_plan(
         self,
@@ -224,10 +228,12 @@ class HiSparseWorker:
             if new_block_ids is not None:
                 block_ids.extend(new_block_ids[0])
 
-        self.invalidate_blocks(block_ids)
+        self._pending_invalid_block_ids.extend(block_ids)
         self.restore_prefix(scheduler_output)
 
-    def invalidate_blocks(self, block_ids: list[int]) -> None:
+    def invalidate_blocks(
+        self, block_ids: list[int], request_state_indices: torch.Tensor
+    ) -> None:
         """Invalidate recycled host slots in this worker's leader runtimes."""
         if not block_ids:
             return
@@ -241,14 +247,14 @@ class HiSparseWorker:
             self._block_staging_event.synchronize()
         staging = self._block_staging[:num_blocks]
         staging.copy_(torch.from_numpy(np.asarray(block_ids, dtype=np.int64)))
-        blocks = staging.to(device, non_blocking=True)
+        blocks = staging.to(device, dtype=torch.int32, non_blocking=True)
         if self._block_staging_event is None:
             self._block_staging_event = torch.Event()
         self._block_staging_event.record(torch.accelerator.current_stream(device))
-        offsets = torch.arange(self.kernel_block_size, dtype=torch.long, device=device)
+        offsets = torch.arange(self.kernel_block_size, dtype=torch.int32, device=device)
         slots = (blocks[:, None] * self.kernel_block_size + offsets[None, :]).flatten()
         for runtime in self.leader_runtimes:
-            runtime.invalidate_slots(slots)
+            runtime.invalidate_slots(slots, request_state_indices)
 
     def set_fully_resident_batch(self, fully_resident: bool) -> None:
         for cache in self.cache_handles:
