@@ -156,7 +156,7 @@ class SuffixProposerGPU:
             self.drafter.propose_with_update(
                 counts, buf, sampled, max_model_len=self.max_model_len
             )
-        torch.cuda.synchronize(self.device)
+        torch.accelerator.synchronize(self.device)
         self._warmed_up = True
 
     def capture_draft_graph(self, token_ids_gpu: torch.Tensor) -> None:
@@ -227,7 +227,7 @@ class SuffixProposerGPU:
                 self._g_counts[:b],
                 max_model_len=self.max_model_len,
             )
-        torch.cuda.synchronize(self.device)
+        torch.accelerator.synchronize(self.device)
         for b in buckets:
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):

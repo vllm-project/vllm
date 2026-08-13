@@ -57,7 +57,7 @@ def _propose_repetition(
     sampled[0, 0] = 5
     counts = (sampled != -1).sum(dim=1).to(torch.int32)
     draft, nv = proposer.propose(K, num_tokens, token_ids, sampled, counts)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     return draft, nv, token_ids
 
 
@@ -156,7 +156,7 @@ def test_ingest_and_cross_request_draft():
     sampled[1, 0] = phrase[5]
     counts = (sampled != -1).sum(dim=1).to(torch.int32)
     draft, nv = proposer.propose(K, num_tokens, token_ids, sampled, counts)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     n = int(nv[1])
     assert n > 0
     expect = (phrase[6:] + phrase * 2)[:n]
