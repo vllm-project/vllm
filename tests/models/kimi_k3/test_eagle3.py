@@ -10,6 +10,7 @@ from vllm.model_executor.models.interfaces import supports_eagle3
 from vllm.models.kimi_k3.nvidia import model as kimi_model
 from vllm.models.kimi_k3.nvidia.model import (
     KimiK3ForConditionalGeneration,
+    KimiLinearForCausalLM,
     KimiLinearModel,
 )
 
@@ -24,6 +25,14 @@ def _make_kimi_linear_model() -> KimiLinearModel:
 
 def test_kimi_k3_advertises_eagle3_support():
     assert supports_eagle3(KimiK3ForConditionalGeneration)
+
+
+def test_kimi_linear_advertises_eagle3_support():
+    # The text-only architecture serves the same inner KimiLinearModel, which
+    # already carries the EagleModelMixin tap machinery - only the interface
+    # declaration was missing, so EAGLE3-family speculative decoding (dspark)
+    # was rejected at startup with "Model does not support EAGLE3 interface".
+    assert supports_eagle3(KimiLinearForCausalLM)
 
 
 def test_kimi_k3_uses_shared_eagle3_layer_configuration():
