@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.utils.torch_utils import set_random_seed
@@ -58,6 +59,50 @@ MODELS_TO_TEST = [
 ]
 
 num_tokens_list = [11, 8192]
+
+
+def test_apply_interleaved_rope():
+    mrope_section = [3, 1, 1]
+    x = torch.tensor(
+        [
+            [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]],
+            [[10, 11, 12, 13, 14], [15, 16, 17, 18, 19]],
+            [[20, 21, 22, 23, 24], [25, 26, 27, 28, 29]],
+        ]
+    )
+
+    result = apply_interleaved_rope(x, mrope_section)
+
+    expected = torch.tensor([[0, 11, 22, 3, 4], [5, 16, 27, 8, 9]])
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skipping CUDA/ROCm only test."
+)
+def test_apply_interleaved_rope_torch_compile():
+    mrope_section = [24, 20, 20]
+    num_tokens = 8192
+    rotary_dim = sum(mrope_section) * 2
+    cache = torch.randn(
+        3,
+        num_tokens,
+        rotary_dim,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    x = cache[..., : rotary_dim // 2]
+
+    expected = apply_interleaved_rope(x, mrope_section)
+    compiled_fn = torch.compile(
+        apply_interleaved_rope,
+        backend="inductor",
+        fullgraph=True,
+    )
+
+    result = compiled_fn(x, mrope_section)
+
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
