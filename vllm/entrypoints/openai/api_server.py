@@ -11,7 +11,7 @@ import socket
 import tempfile
 import warnings
 from argparse import Namespace
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
@@ -112,7 +112,7 @@ async def build_async_engine_client(
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     client_config: dict[str, Any] | None = None,
-) -> AsyncIterator[EngineClient]:
+) -> AsyncGenerator[EngineClient]:
     if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
         # The executor is expected to be mp.
         # Pre-import heavy modules in the forkserver process
@@ -143,7 +143,7 @@ async def build_async_engine_client_from_engine_args(
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     client_config: dict[str, Any] | None = None,
-) -> AsyncIterator[EngineClient]:
+) -> AsyncGenerator[EngineClient]:
     """
     Create EngineClient, either:
         - in-process using the AsyncLLMEngine Directly
