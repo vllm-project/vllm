@@ -52,6 +52,9 @@ class SharedExperts(torch.nn.Module):
         # index is always 0 and the second output list element is ignored.
         self.enable_dbo = enable_dbo
         self._output: list[torch.Tensor | None] = [None, None]
+        # Holds the cloned shared-experts input alive across the aux-stream
+        # launch. Indexed by DBO ubatch id, mirroring `_output`.
+        self._input_clone: list[torch.Tensor | None] = [None, None]
         self._layer = layer
         self._moe_config = moe_config
 
@@ -226,6 +229,9 @@ class SharedExperts(torch.nn.Module):
         assert self._output[self._output_idx] is not None
         output = self._output[self._output_idx]
         self._output[self._output_idx] = None
+        # The clone is no longer needed once the aux-stream output is consumed
+        # (the main stream is already event-ordered after the aux stream here).
+        self._input_clone[self._output_idx] = None
         return output
 
     def forward(
