@@ -32,6 +32,9 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+    NixlBaseConnectorWorker,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
@@ -330,11 +333,13 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
         w._recving_transfers = defaultdict(list)
+        w._is_hma_required = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
         w.world_size = 1
+        w.pp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._physical_blocks_per_logical_kv_block = 1
@@ -1248,3 +1253,208 @@ class TestPushPrefixCaching:
         local, remote = self._written_block_ids(w)
         assert local == [10, 11, 12]
         assert remote == [500, 501, 502]
+
+
+def _agent_metadata(
+    region_members: list[list[str]],
+    base_addresses: list[int],
+    block_lens: list[int],
+) -> NixlAgentMetadata:
+    return NixlAgentMetadata(
+        engine_id="remote-engine",
+        agent_metadata=b"agent",
+        kv_caches_base_addr=base_addresses,
+        device_id=7,
+        num_blocks=2,
+        block_lens=block_lens,
+        kv_cache_layout="HND",
+        block_size=16,
+        ssm_sizes=(0, 0),
+        attn_backend_name="FLASH_ATTN",
+        physical_blocks_per_logical_kv_block=1,
+        region_members=region_members,
+    )
+
+
+def _member_worker(
+    region_members: list[list[str]],
+    group_by_member: dict[str, int],
+    pp_size: int = 2,
+    is_hma: bool = True,
+) -> _StubWriterWorker:
+    worker = _StubWriterWorker.fresh()
+    worker.pp_size = pp_size
+    worker._has_mamba = False
+    worker._is_hma_required = is_hma
+    worker._layer_name_to_kv_group_index = group_by_member
+    worker.transfer_topo = MagicMock()
+    worker._set_region_members(region_members)
+    return worker
+
+
+def test_member_group_ids_route_descriptor_blocks():
+    worker = _StubWriterWorker.fresh()
+    worker._has_mamba = False
+    worker.num_regions = 3
+    desc_ids = worker._compute_desc_ids(
+        block_ids=[[1, 2], [5]],
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+        region_group_ids=(0, 1, 0),
+    )
+    assert desc_ids.tolist() == [1, 2, 15, 21, 22]
+
+
+def test_member_metadata_round_trip():
+    metadata = _agent_metadata([["L0", "L1"]], [0x10000], [256])
+
+    encoded = msgspec.msgpack.encode(metadata)
+    assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
+
+
+def test_member_identity_gate_preserves_the_non_hma_path():
+    assert _member_worker([["a"]], {"a": 0})._member_local_regions == (0,)
+
+    # A bare base worker (pull) never routes by member identity, and reading
+    # the derived state must not require a fully constructed worker.
+    pull = object.__new__(NixlBaseConnectorWorker)
+    pull._set_region_members([["a"]])
+    assert pull._member_local_regions == ()
+
+    # A non-HMA local layout does not require member routing.
+    assert _member_worker([["a"]], {"a": 0}, is_hma=False)._member_local_regions == ()
+
+    # PP=1 has congruent local/remote regions and keeps the region route even
+    # when its allocator is hybrid.
+    assert _member_worker([["a"]], {"a": 0}, pp_size=1)._member_local_regions == ()
+
+
+def test_member_alignment_fails_loud_when_remote_omits_members():
+    # Falling back to region-index routing here would silently transfer stale
+    # KV, so an unannounced peer must fail the handshake instead.
+    worker = _member_worker([["a"]], {"a": 0})
+    with pytest.raises(AssertionError, match="no region_members"):
+        worker._align_remote_regions_by_member(_agent_metadata([], [0xA000], [128]))
+
+
+def test_member_alignment_expands_pooled_regions():
+    worker = _member_worker([["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0})
+    assert worker._member_names == ("a", "a.swa", "b")
+    assert worker._member_local_regions == (0, 0, 1)
+    assert worker._member_group_ids == (0, 1, 0)
+
+    metadata = _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
+    worker._align_remote_regions_by_member(metadata)
+
+    assert metadata.kv_caches_base_addr == [0xA000, 0xA000, 0xB000]
+    assert metadata.block_lens == [128, 128, 128]
+    assert metadata.region_members == [["a"], ["a.swa"], ["b"]]
+
+
+def test_member_alignment_filters_and_reorders_a_pp_stage():
+    worker = _member_worker([["l2"], ["l3"]], {"l2": 0, "l3": 1})
+    metadata = _agent_metadata(
+        [["l2"], ["l0"], ["l3"], ["l1"]],
+        [0xC000, 0xA000, 0xD000, 0xB000],
+        [65536, 65536, 32768, 32768],
+    )
+
+    worker._align_remote_regions_by_member(metadata)
+
+    assert worker._member_local_regions == (0, 1)
+    assert worker._member_group_ids == (0, 1)
+    assert metadata.kv_caches_base_addr == [0xC000, 0xD000]
+    assert metadata.block_lens == [65536, 32768]
+
+
+def test_member_alignment_handles_asymmetric_pp_split():
+    """A PP split can leave each stage a different mix of attention types.
+
+    Stage 1 owns L3 (full) pooled with L4 (sliding) in region 0, and L5 (full)
+    alone in region 1. The consumer holds every layer and pools them
+    differently, so region indices cannot be paired positionally.
+    """
+    worker = _member_worker([["L3", "L4"], ["L5"]], {"L3": 0, "L4": 1, "L5": 0})
+    assert worker._member_names == ("L3", "L4", "L5")
+    assert worker._member_local_regions == (0, 0, 1)
+    assert worker._member_group_ids == (0, 1, 0)
+
+    consumer = _agent_metadata(
+        [["L0", "L1"], ["L3", "L2"], ["L5", "L4"]],
+        [0xA000, 0xB000, 0xC000],
+        [128, 128, 128],
+    )
+    worker._align_remote_regions_by_member(consumer)
+
+    # L3 -> remote region 1, L4 -> 2, L5 -> 2. Pairing by index would have sent
+    # L5 to region 1 and L4 to region 2's sibling.
+    assert consumer.kv_caches_base_addr == [0xB000, 0xC000, 0xC000]
+
+
+def test_member_alignment_is_canonical_across_remote_orderings():
+    local, groups = [["x"], ["y"]], {"x": 0, "y": 1}
+    rank0 = _agent_metadata([["x"], ["y"]], [0x1000, 0x2000], [64, 128])
+    rank1 = _agent_metadata([["y"], ["x"]], [0x2000, 0x1000], [128, 64])
+
+    _member_worker(local, groups)._align_remote_regions_by_member(rank0)
+    _member_worker(local, groups)._align_remote_regions_by_member(rank1)
+
+    assert rank0.kv_caches_base_addr == rank1.kv_caches_base_addr == [0x1000, 0x2000]
+    assert rank0.block_lens == rank1.block_lens == [64, 128]
+
+
+def test_member_alignment_is_idempotent():
+    worker = _member_worker([["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0})
+    metadata = _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
+
+    worker._align_remote_regions_by_member(metadata)
+    aligned = (list(metadata.kv_caches_base_addr), list(metadata.block_lens))
+    worker._align_remote_regions_by_member(metadata)
+
+    assert (metadata.kv_caches_base_addr, metadata.block_lens) == aligned
+
+
+def test_member_alignment_rejects_missing_local_member():
+    worker = _member_worker([["l0"], ["l1"]], {"l0": 0, "l1": 1})
+    metadata = _agent_metadata([["l0"]], [0xA000], [128])
+
+    with pytest.raises(AssertionError, match="missing locally owned layers"):
+        worker._align_remote_regions_by_member(metadata)
+
+
+def test_member_alignment_rejects_duplicate_remote_member():
+    worker = _member_worker([["a"]], {"a": 0})
+    metadata = _agent_metadata([["a"], ["a"]], [0xA000, 0xB000], [128, 128])
+
+    with pytest.raises(AssertionError, match="in multiple regions"):
+        worker._align_remote_regions_by_member(metadata)
+
+
+def test_member_alignment_rejects_inconsistent_remote_metadata():
+    worker = _member_worker([["a"]], {"a": 0})
+    metadata = _agent_metadata([["a"], ["b"]], [0xA000], [128])
+
+    with pytest.raises(AssertionError, match="lengths disagree"):
+        worker._align_remote_regions_by_member(metadata)
+
+
+def test_set_region_members_rejects_duplicate_local_member():
+    with pytest.raises(AssertionError, match="spans multiple NIXL regions"):
+        _member_worker([["a"], ["a"]], {"a": 0})
+
+
+def test_set_region_members_rejects_layer_outside_any_kv_group():
+    with pytest.raises(AssertionError, match="outside any local group"):
+        _member_worker([["a"], ["b"]], {"a": 0})
+
+
+def test_attention_member_routing_rejects_decode_tp_fanout():
+    metadata = _agent_metadata([["a"]], [0xA000], [128])
+    worker = _member_worker([["a"]], {"a": 0})
+    worker.use_mla = False
+    worker.transfer_topo.get_engine_info.return_value.remote_tp_size = 2
+    worker.transfer_topo.tp_ratio.return_value = -2
+
+    with pytest.raises(NotImplementedError, match="decode TP greater"):
+        worker._validate_remote_agent_handshake(metadata, 2)
