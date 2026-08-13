@@ -535,14 +535,12 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
         EmulationMxfp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        Rdna3MxFp4LinearKernel,
         AiterMxfp4LinearKernel,
         EmulationMxfp4LinearKernel,
     ],
     PlatformEnum.XPU: [
         XPUMxFp4LinearKernel,
-    ],
-    PlatformEnum.ROCM: [
-        Rdna3MxFp4LinearKernel,
     ],
 }
 
