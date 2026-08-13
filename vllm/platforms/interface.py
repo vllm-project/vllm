@@ -1199,6 +1199,23 @@ class Platform:
         return False
 
     @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        """
+        Check whether the platform's ModelRunner can handle multiple attention
+        layers that share the same layer index (e.g. cross attention and self
+        attention in the same decoder block of an encoder-decoder model such as
+        BART).
+
+        Platforms that have verified that their ``runner_kv_caches`` is not
+        impacted by this case should override this to a no-op. Otherwise the
+        default implementation raises ``NotImplementedError``.
+        """
+        raise NotImplementedError(
+            "Multiple attention layers with the same layer index are not "
+            "supported on the current platform."
+        )
+
+    @classmethod
     def support_deep_gemm(cls) -> bool:
         """
         Returns if DeepGEMM is supported by the current platform.

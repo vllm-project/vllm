@@ -12,10 +12,9 @@ from openai_harmony import (
     RenderConversationConfig,
     Role,
 )
-from transformers import AutoTokenizer
-from xgrammar import Grammar
-from xgrammar.testing import _is_grammar_accept_string
+from transformers import AutoTokenizer, GenerationConfig
 
+from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -25,6 +24,8 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.harmony import HarmonyParser
 from vllm.parser.parser_manager import ParserManager
 from vllm.sampling_params import StructuredOutputsParams
+from vllm.v1.structured_output.backend_types import StructuredOutputOptions
+from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
 REASONING_MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -32,6 +33,26 @@ REASONING_MODEL_NAME = "openai/gpt-oss-20b"
 @pytest.fixture(scope="module")
 def gpt_oss_tokenizer():
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
+
+
+@pytest.fixture(scope="module")
+def gpt_oss_stop_token_ids() -> set[int]:
+    eos_token_id = GenerationConfig.from_pretrained(REASONING_MODEL_NAME).eos_token_id
+    if isinstance(eos_token_id, int):
+        return {eos_token_id}
+    return set(eos_token_id)
+
+
+@pytest.fixture(scope="module")
+def xgrammar_backend(gpt_oss_tokenizer) -> XgrammarBackend:
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(backend="xgrammar")
+    )
+    return XgrammarBackend(
+        vllm_config,
+        tokenizer=gpt_oss_tokenizer,
+        vocab_size=len(gpt_oss_tokenizer),
+    )
 
 
 @pytest.fixture
@@ -1036,21 +1057,25 @@ class TestAdjustRequest:
         cls,
         adjusted_request: ChatCompletionRequest | ResponsesRequest,
         expected_admission: Sequence[str],
+        xgrammar_backend: XgrammarBackend,
+        stop_token_ids: set[int],
     ) -> None:
         structured_outputs = adjusted_request.structured_outputs
         assert structured_outputs is not None
         assert structured_outputs.structural_tag is not None
         assert structured_outputs.all_non_structural_tag_constraints_none()
 
-        grammar = Grammar.from_structural_tag(structured_outputs.structural_tag)
+        grammar = xgrammar_backend.compile_grammar(
+            StructuredOutputOptions.STRUCTURAL_TAG,
+            structured_outputs.structural_tag,
+            stop_token_ids=stop_token_ids,
+        )
         expected_admission_set = set(expected_admission)
 
         for sample_name in cls.ADMISSION_SAMPLES:
-            admitted = _is_grammar_accept_string(
-                grammar,
-                getattr(cls, sample_name),
-                require_termination=False,
-            )
+            tokens = encode_output(getattr(cls, sample_name))
+            accepted = grammar.validate_tokens(tokens)
+            admitted = accepted == tokens
             should_admit = sample_name in expected_admission_set
             assert admitted is should_admit, (
                 f"Expected structured_outputs admission for {sample_name} "
@@ -1183,6 +1208,8 @@ class TestAdjustRequest:
     def test_adjust_request(
         self,
         harmony_parser,
+        xgrammar_backend,
+        gpt_oss_stop_token_ids,
         request_kind,
         request_kwargs,
         expected_admission,
@@ -1193,4 +1220,6 @@ class TestAdjustRequest:
         self._assert_structured_outputs_admission(
             adjusted_request,
             expected_admission,
+            xgrammar_backend,
+            gpt_oss_stop_token_ids,
         )
