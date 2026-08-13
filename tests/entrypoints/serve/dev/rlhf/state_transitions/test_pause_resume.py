@@ -158,10 +158,8 @@ class TestPauseResume:
                 params={"mode": "invalid"},
                 timeout=10,
             )
-            assert response.status_code == 422
-            assert any(
-                error["loc"][-1] == "mode" for error in response.json()["detail"]
-            )
+            assert response.status_code == 400
+            assert response.json()["error"]["param"] == "query.mode"
             assert is_paused(server_url) is paused
 
             assert resume(server_url) == 200
@@ -170,7 +168,7 @@ class TestPauseResume:
         ("mode", "max_tokens", "inflight_finish_reason"),
         [
             pytest.param("abort", 256, "abort", id="abort"),
-            pytest.param("wait", 64, "length", id="wait"),
+            pytest.param("wait", 256, "length", id="wait"),
             pytest.param("keep", 256, "length", id="keep"),
         ],
     )
@@ -195,10 +193,10 @@ class TestPauseResume:
             assert is_paused(server_url)
 
             if mode in ("abort", "wait"):
-                assert inflight.done.wait(timeout=5)
+                assert inflight.done.is_set()
             else:
                 chunks_after_pause = len(inflight.chunks)
-                assert not inflight.done.wait(timeout=0.3)
+                assert not inflight.done.wait(timeout=5)
                 assert len(inflight.chunks) == chunks_after_pause, (
                     "in-flight request continued generating in keep mode"
                 )
