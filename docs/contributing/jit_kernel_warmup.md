@@ -73,7 +73,7 @@ Use independent ranges or alternatives for cartesian products, `zip_inputs(...)`
 
 `compile(compile_key)` means "make this specialization available". Depending on the backend, that may compile from source, call a compile-only API, load an already-built artifact, or compile on cache miss.
 
-`compile(...)` should not launch a real inference workload or allocate large real tensors. Each DSL should expose fake tensor/spec descriptors suitable for compilation only.
+`compile(...)` should not launch a real inference workload or allocate real tensors. Each DSL should expose fake tensor/spec descriptors suitable for compilation only.
 
 ### Register the Selected Wrapper
 
@@ -91,9 +91,9 @@ Registration records metadata only. It does not compile or launch the kernel. Re
 - Keep specialization mapping in `dispatch(...)` instead of duplicating it in warmup code.
 - Use fake tensors or backend compile-only descriptors; never perform a dummy runtime launch.
 - Keep registration metadata-only so model construction remains cheap and side-effect free.
-- Compile under `kernel_warmup()` so feature gates, logging, ordering, and exception handling remain centralized.
+- Compile registered kernels only through `kernel_warmup()`.
 - Keep runtime execution and startup compilation separate and easy to review.
-- Use the module-level wrapper singleton from both warmup and runtime paths.
+- Use one module-level wrapper instance for registration and runtime calls.
 
 ## 2. Search-Space Reference
 
