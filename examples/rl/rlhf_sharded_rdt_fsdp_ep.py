@@ -142,15 +142,6 @@ class FSDPTrainWorker:
     def sync_weights(self):
         self.engine.send_weights()
 
-    def get_sync_timing(self):
-        return self.engine.get_sync_timing()
-
-    def reset_produce_timing(self):
-        self.engine.reset_produce_timing()
-
-    def get_produce_timing(self):
-        return self.engine.get_produce_timing()
-
 
 def main():
     # Ship a minimal working_dir (this example dir) so Ray actors do NOT
@@ -269,27 +260,12 @@ def main():
         pause_generation(VLLM_ENDPOINT)
 
         for sync_iter in range(SYNC_ITERS):
-            ray.get([w.reset_produce_timing.remote() for w in fsdp_workers])
-
             print(f"[sync] iter {sync_iter} [REPLAY]: gather + serve + update...")
             _sync_t0 = time.perf_counter()
             ray.get([w.sync_weights.remote() for w in fsdp_workers])
-            _sync_seconds = time.perf_counter() - _sync_t0
-
-            ptimings = ray.get([w.get_produce_timing.remote() for w in fsdp_workers])
-            gib = sum(p["bytes"] for p in ptimings) / (1024**3)
-            slice_s_max = max(p["slice_seconds"] for p in ptimings)
-            sender_timing = ray.get(fsdp_workers[0].get_sync_timing.remote())
-            print("=" * 60)
-            print(f"[profile] iter {sync_iter} [REPLAY]")
-            print(f"[profile] total weight-sync wall time : {_sync_seconds:.3f} s")
             print(
-                "[profile] sender breakdown (s)         : "
-                + ", ".join(f"{k}={v:.3f}" for k, v in sender_timing.items())
+                f"[sync] iter {sync_iter} took {time.perf_counter() - _sync_t0:.3f} s"
             )
-            print(f"[profile] trainer slice+clone (slowest): {slice_s_max:.3f} s")
-            print(f"[profile] bytes produced (all ranks)   : {gib:.3f} GiB")
-            print("=" * 60)
 
         resume_generation(VLLM_ENDPOINT)
 

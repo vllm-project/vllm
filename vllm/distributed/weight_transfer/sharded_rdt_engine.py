@@ -180,12 +180,6 @@ class _PendingPull:
     targets: "list[torch.Tensor]"
     blob: "torch.Tensor"
     slot: int
-    # [RDT-SLOT-WAIT diagnostic] time the RPC thread spent blocked reusing the
-    # slot: generation wait (bg thread reaching the item's record) + CUDA event
-    # synchronize (the scatters actually finishing). Quantifies how much of the
-    # background thread's in-order pass-2 (quant) work leaks onto the pull path.
-    slot_wait_seconds: float = 0.0
-    slot_sync_seconds: float = 0.0
 
 
 @dataclass
@@ -196,18 +190,12 @@ class _ProcItem:
     ``chunk`` is the self-describing ``_Chunk`` (scatters + materialize/quant
     module lists). ``results`` are views aliasing the ring arena ``slot``; they
     are held as strong refs here so they outlive the RPC-thread frame until the
-    background scatter consumes them. The timing fields were measured on the RPC
-    thread during the pull and are logged (together with the process-phase
-    split) by the background thread after it finishes the item.
+    background scatter consumes them.
     """
 
     chunk: "_Chunk"
     results: "dict[FetchKey, torch.Tensor]"
     slot: int
-    t_recv: float
-    pull_seconds: float
-    nixl_delta: dict
-    pull_bytes: int
 
 
 @dataclass
@@ -514,13 +502,6 @@ class ShardedRDTWeightTransferEngine(
             )
         self._configure_ring(init_info)
         self._resolve_producers(init_info)
-
-        # Hardcoded profiling: patch Ray's NIXL transport so this worker's
-        # register/transfer/deregister calls accumulate into per-process counters
-        # we can snapshot around each pull. Fail-soft.
-        from vllm.distributed.weight_transfer._nixl_profile import install_nixl_timing
-
-        install_nixl_timing()
 
         # A pure dry run: the trainer's gather cache is empty at init, so nothing
         # can (or does) get pulled -- we only record how each slice is fetched and
@@ -888,16 +869,11 @@ class ShardedRDTWeightTransferEngine(
         """
         from ray.experimental import register_nixl_memory, set_target_for_ref
 
-        _slot_wait = _slot_sync = 0.0
         if self._slot_read_done:
-            _t = time.perf_counter()
             with self._slot_cv:
                 while self._slot_done[slot] < self._slot_queued[slot]:
                     self._slot_cv.wait(timeout=1.0)
-            _t2 = time.perf_counter()
             self._slot_read_done[slot].synchronize()
-            _slot_sync = time.perf_counter() - _t2
-            _slot_wait = _t2 - _t
 
         # [RDT-PACK] Every slice is byte-packed into ONE uint8 arena, 16B-aligned
         # in keys order -- one NIXL descriptor over the whole arena. The layout was
@@ -919,12 +895,6 @@ class ShardedRDTWeightTransferEngine(
             register_nixl_memory(arena)
             arenas[torch.uint8] = arena
         targets = self._pull_targets(chunk, slot, arena)
-        # Stamp pull-start so the NIXL patch can cleave this pull into
-        # produce_wait vs recv_wall. With chunks in flight the cleave is
-        # approximate (issues overlap completions) but the transfer sums stand.
-        from vllm.distributed.weight_transfer import _nixl_profile
-
-        _nixl_profile.mark_pull_start()
         # The owner of this chunk's gather group holds every slice of it, so ONE
         # produce RPC serves the whole packed chunk into this slot's arena. The
         # arena view stays strongly referenced through the get --
@@ -942,8 +912,6 @@ class ShardedRDTWeightTransferEngine(
             targets=targets,
             blob=blob,
             slot=slot,
-            slot_wait_seconds=_slot_wait,
-            slot_sync_seconds=_slot_sync,
         )
 
     def _pull_targets(
@@ -970,11 +938,6 @@ class ShardedRDTWeightTransferEngine(
         """Blocking half of a pull: the NIXL read lands during this ``ray.get``."""
         import ray
 
-        from vllm.distributed.weight_transfer import _nixl_profile
-
-        # [RDT-META-WAIT diagnostic] cleave produce_wait into in-get metadata
-        # wait vs issue-side work (see _nixl_profile.mark_get_entry).
-        _nixl_profile.mark_get_entry()
         ray.get(pending.ref)
         if self._pack_check:
             # [RDT-PACK-CHECK] checksum each received sub-blob; the producer logs
@@ -1012,7 +975,6 @@ class ShardedRDTWeightTransferEngine(
         lazy's Pass-2 ``copy_`` pulls its slice on demand. No recording, no
         batching; runs every sync for the call (the rare, unbaked case)."""
         device = torch.empty(0).device
-        _t = time.perf_counter()
         self.model.load_weights(
             # A producer is bound on this path: ``receive_weights`` raises before
             # calling ``_load_unbaked`` if none is. Each name pulls from the
@@ -1022,7 +984,6 @@ class ShardedRDTWeightTransferEngine(
                 names, [self._pull_sink_for(n) for n in names], device
             )
         )
-        self._log_timing("unbaked", time.perf_counter() - _t, 0.0, 0, 0.0)
 
     def _pull_sink_for(self, name: str) -> "PullSink":
         """A one-slice-at-a-time pull sink for ``name``, bound to the producer
@@ -1506,8 +1467,6 @@ class ShardedRDTWeightTransferEngine(
         """
         from collections import deque
 
-        from vllm.distributed.weight_transfer import _nixl_profile
-
         inflight: deque[tuple[_PendingPull, _Chunk]] = deque()
 
         # Gather groups with no chunk on this worker (plan.pre_free): signal
@@ -1518,26 +1477,9 @@ class ShardedRDTWeightTransferEngine(
 
         def drain_one() -> None:
             pending, chunk = inflight.popleft()
-            _t_recv = time.perf_counter()
-            _before = _nixl_profile.snapshot()
-            _t0 = time.perf_counter()
             results = self._complete_pull(pending)
-            pull_seconds = time.perf_counter() - _t0
-            delta = _nixl_profile.delta(_before, _nixl_profile.snapshot())
-            # [RDT-SLOT-WAIT diagnostic] surface the issue-side slot waits in the
-            # jsonl (per-pid sums via the driver's aggregation).
-            delta["slot_wait_seconds"] = pending.slot_wait_seconds
-            delta["slot_sync_seconds"] = pending.slot_sync_seconds
             self._dispatch_item(
-                _ProcItem(
-                    chunk=chunk,
-                    results=results,
-                    slot=pending.slot,
-                    t_recv=_t_recv,
-                    pull_seconds=pull_seconds,
-                    nixl_delta=delta,
-                    pull_bytes=sum(sc.nbytes for sc in chunk.scatters),
-                )
+                _ProcItem(chunk=chunk, results=results, slot=pending.slot)
             )
             # Each gather group whose LAST chunk this is: its read is done, so
             # this consumer is finished with the group -> signal every owner
@@ -1579,7 +1521,6 @@ class ShardedRDTWeightTransferEngine(
         process stream, record the slot's read-done event so the RPC thread can
         block on it before overwriting the slot with a later pull.
         """
-        from vllm.distributed.weight_transfer._nixl_profile import PhaseTimer
         from vllm.model_executor.model_loader.reload.layerwise import (
             LAYERWISE_INFO,
         )
@@ -1587,8 +1528,6 @@ class ShardedRDTWeightTransferEngine(
 
         results = item.results
         chunk = item.chunk
-        ph = PhaseTimer(self._proc_stream)  # stream-scoped syncs, not global
-        _t_proc = time.perf_counter()
         with (
             torch.cuda.device(self.device),
             torch.cuda.stream(self._proc_stream),
@@ -1601,25 +1540,21 @@ class ShardedRDTWeightTransferEngine(
             # scattered params. Releasing the slot right after the scatters lets
             # the NEXT chunk's RDMA overwrite the arena while quant still runs.
             try:
-                if chunk.materialize:
-                    with ph.phase("materialize_seconds"):
-                        for layer in chunk.materialize:
-                            info = LAYERWISE_INFO.get(layer)
-                            if info is None or not info.can_load():
-                                raise RuntimeError(
-                                    f"Baked replay: layer {type(layer).__name__} "
-                                    "was not set up for reload this sync "
-                                    "(start_weight_update must run before "
-                                    "update_weights)."
-                                )
-                            materialize_layer(layer, info)
-                if chunk.scatters:
-                    with ph.phase("scatter_seconds"):
-                        for sc in chunk.scatters:
-                            param = getattr(sc.layer, sc.param_name)
-                            dst = param.as_strided(sc.shape, sc.stride, sc.offset)
-                            with torch._C.DisableTorchFunctionSubclass():
-                                dst.copy_(results[sc.src])
+                for layer in chunk.materialize:
+                    info = LAYERWISE_INFO.get(layer)
+                    if info is None or not info.can_load():
+                        raise RuntimeError(
+                            f"Baked replay: layer {type(layer).__name__} "
+                            "was not set up for reload this sync "
+                            "(start_weight_update must run before "
+                            "update_weights)."
+                        )
+                    materialize_layer(layer, info)
+                for sc in chunk.scatters:
+                    param = getattr(sc.layer, sc.param_name)
+                    dst = param.as_strided(sc.shape, sc.stride, sc.offset)
+                    with torch._C.DisableTorchFunctionSubclass():
+                        dst.copy_(results[sc.src])
                 # All reads of this slot's arena are now enqueued on the process
                 # stream; record + publish so the RPC thread can reuse the slot.
                 self._slot_read_done[item.slot].record(self._proc_stream)
@@ -1642,17 +1577,6 @@ class ShardedRDTWeightTransferEngine(
                     self._run_quant(chunk.quant, ready)
                 else:
                     self._quant_queue.put((chunk.quant, ready))
-        process_seconds = time.perf_counter() - _t_proc
-        self._log_timing(
-            "replay",
-            time.perf_counter() - item.t_recv,
-            item.pull_seconds,
-            1,
-            process_seconds,
-            item.nixl_delta,
-            dict(ph.t),
-            item.pull_bytes,
-        )
 
     def _run_quant(self, layers: "list[Any]", ready: "torch.cuda.Event") -> None:
         """Quant/kernel-copy/reset the given COMPLETED leaf modules, exactly as
@@ -1661,7 +1585,6 @@ class ShardedRDTWeightTransferEngine(
         (never a receive slot), so it can overlap subsequent chunks' RDMA and
         scatters. ``info.reset()`` is what makes finalize skip the layer —
         drain_pending joins the quant queue before finalize runs."""
-        from vllm.distributed.weight_transfer._nixl_profile import PhaseTimer
         from vllm.model_executor.layers.quantization.base_config import (
             QuantizeMethodBase,
         )
@@ -1672,8 +1595,6 @@ class ShardedRDTWeightTransferEngine(
 
         stream = self._quant_stream or self._proc_stream
         assert stream is not None  # created in _ensure_proc_worker before use
-        ph = PhaseTimer(stream)
-        _t0 = time.perf_counter()
         with (
             torch.cuda.device(self.device),
             torch.cuda.stream(stream),
@@ -1687,18 +1608,12 @@ class ShardedRDTWeightTransferEngine(
                 if isinstance(quant_method, QuantizeMethodBase):
                     if hasattr(layer, "_already_called_process_weights_after_loading"):
                         delattr(layer, "_already_called_process_weights_after_loading")
-                    with ph.phase("quant_seconds"):
-                        quant_method.process_weights_after_loading(layer)
+                    quant_method.process_weights_after_loading(layer)
                 # Copy into persistent kernel storage (preserves cudagraph refs).
                 if info.kernel_tensors is not None:
-                    with ph.phase("kernel_copy_seconds"):
-                        _copy_and_restore_kernel_tensors(layer, info)
+                    _copy_and_restore_kernel_tensors(layer, info)
                 # Reset so finalize_layerwise_reload skips this (loaded) layer.
                 info.reset()
-        t = time.perf_counter() - _t0
-        # Separate jsonl record; the driver aggregation SUMS numeric fields per
-        # pid, so per-worker process/quant totals stay correct.
-        self._log_timing("replay", t, 0.0, 0, t, None, dict(ph.t), 0)
 
     def _quant_worker_loop(self) -> None:
         """Dedicated quant thread: drains (completed_modules, scatter-done event)
@@ -1717,74 +1632,6 @@ class ShardedRDTWeightTransferEngine(
                 logger.exception("RDT quant thread failed")
             finally:
                 q.task_done()
-
-    # Hardcoded profiling sink: vLLM workers run in an EngineCore subprocess
-    # whose logs are not streamed to the driver, so each receive_weights call
-    # appends one JSON line here. The driver truncates it at sync-loop start and
-    # aggregates it at the end. Single-node benchmark scaffolding only.
-    _CONSUMER_TIMING_FILE = "/tmp/rdt_profile/consumer.jsonl"
-
-    @staticmethod
-    def _log_timing(
-        mode: str,
-        total_seconds: float,
-        pull_seconds: float,
-        pull_calls: int,
-        process_seconds: float,
-        nixl_delta: dict | None = None,
-        phase_split: dict | None = None,
-        pull_bytes: int = 0,
-    ) -> None:
-        """Log a one-line timing summary for one ``receive_weights`` call.
-
-        ``mode`` is ``replay`` or ``unbaked``. ``pull_seconds`` is the full
-        ``ray.get`` round trip; ``nixl_delta`` (when present) splits that into the
-        consumer-side registration / transfer / deregistration AND the
-        produce_wait / recv_wall cleave measured by the NIXL patch.
-        ``process_seconds`` is the scatter/materialize/quantize/kernel-copy work
-        after the pull; ``phase_split`` (when present) breaks it into its
-        per-phase ``*_seconds`` (from the engine's PhaseTimer). ``pull_bytes`` is
-        the bytes THIS worker pulled this call, logged as ``bytes`` so the driver
-        can compute true per-worker bandwidth (bytes/transfer) and distinguish an
-        EP-imbalance straggler (more bytes) from a transport straggler (equal
-        bytes, lower GB/s).
-        """
-        nixl_delta = nixl_delta or {}
-        logger.info(
-            "[RDT-TIMING] receive_weights mode=%s total=%.4fs nixl_pull=%.4fs "
-            "(%d pull%s) process=%.4fs | nixl_transfer=%.4fs register=%.4fs "
-            "(%d) dereg=%.4fs",
-            mode,
-            total_seconds,
-            pull_seconds,
-            pull_calls,
-            "" if pull_calls == 1 else "s",
-            process_seconds,
-            nixl_delta.get("transfer_seconds", 0.0),
-            nixl_delta.get("register_seconds", 0.0),
-            nixl_delta.get("register_calls", 0),
-            nixl_delta.get("deregister_seconds", 0.0),
-        )
-
-        import json
-        import os
-
-        os.makedirs(
-            os.path.dirname(ShardedRDTWeightTransferEngine._CONSUMER_TIMING_FILE),
-            exist_ok=True,
-        )
-        record = {
-            "pid": os.getpid(),
-            "mode": mode,
-            "total": total_seconds,
-            "pull": pull_seconds,
-            "process": process_seconds,
-            "bytes": pull_bytes,
-            **nixl_delta,
-            **(phase_split or {}),
-        }
-        with open(ShardedRDTWeightTransferEngine._CONSUMER_TIMING_FILE, "a") as f:
-            f.write(json.dumps(record) + "\n")
 
     def shutdown(self) -> None:
         # Stop the background post-processing thread (drain, then sentinel + join)

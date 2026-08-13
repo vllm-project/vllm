@@ -278,7 +278,6 @@ def _loop_engine(server, n_groups, *, lookahead):
     e._owned_idx = list(range(n_groups))
     e._held_names = None
     e._inflight = _ResidencyDict()
-    e._sync_timing = {}
     return e
 
 

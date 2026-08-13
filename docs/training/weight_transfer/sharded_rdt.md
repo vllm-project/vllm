@@ -157,15 +157,6 @@ Two results worth not rediscovering:
 
 **Sync 0 runs serial.** Both sides still grow and register arenas on the first sync, and a producer-side registration churns its NIXL agent-metadata version; with pulls in flight the consumer's remote-agent cache can go stale for one of them (`createXferReq`: "no backend had the required registrations"). So the chunk pipeline runs one-deep during sync 0 and pipelines from sync 1, when registrations are at high-water.
 
-## Measuring
-
-The engine ships a hardcoded profiling layer (`_nixl_profile.py`) that monkeypatches Ray's NIXL transport to accumulate per-process register/transfer/deregister counters, plus `PhaseTimer` for the consumer's process phases and jsonl sinks under `/tmp/rdt_profile/`. It is benchmark scaffolding, not shipping code, and two properties are worth knowing before reading its numbers:
-
-- `PhaseTimer.phase()` calls `stream.synchronize()` on **every** scope exit and wraps materialize/scatter/quant/kernel-copy. The instrumentation therefore serializes the very pipeline those phases exist to overlap: the split sums to `process`, but slightly inflates it against the un-instrumented path.
-- `install_nixl_timing()` is installed unconditionally on both the consumer worker and the producer sidecar.
-
-Summing overlapped sub-operations cannot equal wall time. When a pull's `produce_wait` and a background scatter genuinely run at once, adding them double-counts; the per-phase numbers localize *where* time goes, and only the wall bounds *how much*.
-
 ## Known rough edges
 
 The producer server's concurrency has hazards that are currently prevented by protocol rather than by locks. They have not bitten in practice, but a change to free timing or actor concurrency could expose any of them:

@@ -315,15 +315,6 @@ class KimiTrainWorker:
     def sync_weights(self):
         self.engine.send_weights()
 
-    def get_sync_timing(self):
-        return self.engine.get_sync_timing()
-
-    def reset_produce_timing(self):
-        self.engine.reset_produce_timing()
-
-    def get_produce_timing(self):
-        return self.engine.get_produce_timing()
-
 
 def main():
     # Ship a minimal working_dir (this example dir) so Ray actors do NOT
@@ -418,28 +409,14 @@ def main():
         pause_generation(VLLM_ENDPOINT)
 
         for sync_iter in range(SYNC_ITERS):
-            ray.get([w.reset_produce_timing.remote() for w in workers])
-
             print(f"[sync] iter {sync_iter}: gather + serve + update...", flush=True)
             _sync_t0 = time.perf_counter()
             ray.get([w.sync_weights.remote() for w in workers])
-            _sync_seconds = time.perf_counter() - _sync_t0
-
-            pt = ray.get([w.get_produce_timing.remote() for w in workers])
-            gib = sum(p["bytes"] for p in pt) / (1024**3)
-            sender_timing = ray.get(workers[0].get_sync_timing.remote())
-            print("=" * 60, flush=True)
             print(
-                f"[profile] iter {sync_iter}: wall {_sync_seconds:.3f}s  "
-                f"bytes={gib:.2f}GiB  produce_calls={sum(p['calls'] for p in pt)}",
+                f"[sync] iter {sync_iter} took "
+                f"{time.perf_counter() - _sync_t0:.3f}s",
                 flush=True,
             )
-            print(
-                "[profile] sender breakdown (s): "
-                + ", ".join(f"{k}={v:.3f}" for k, v in sender_timing.items()),
-                flush=True,
-            )
-            print("=" * 60, flush=True)
 
         resume_generation(VLLM_ENDPOINT)
         print("[generate] AFTER sync (real weights):", flush=True)

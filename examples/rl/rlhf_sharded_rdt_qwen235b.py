@@ -17,7 +17,6 @@ Kimi example; all NIXL serve / gather-cache / packed-ring complexity stays
 inside the engine.
 """
 
-import contextlib
 import glob
 import json
 import os
@@ -401,19 +400,6 @@ class QwenTrainWorker:
     def sync_weights(self):
         self.engine.send_weights()
 
-    def get_sync_timing(self):
-        return self.engine.get_sync_timing()
-
-    def reset_produce_timing(self):
-        self.engine.reset_produce_timing()
-        self.engine.reset_nixl_timing()
-
-    def get_produce_timing(self):
-        return self.engine.get_produce_timing()
-
-    def get_nixl_timing(self):
-        return self.engine.get_nixl_timing()
-
 
 def main():
     # Ship a minimal working_dir (this example dir) so Ray actors do NOT
@@ -542,12 +528,6 @@ def main():
         ],
     )
     prompts = ["The capital of France is", "The future of AI is"]
-    # The consumer's timing sink is append-only and lives in the vLLM worker's
-    # EngineCore subprocess, so it accumulates across runs. Truncate it here so
-    # this run's records are the only ones in the file.
-    consumer_jsonl = "/tmp/rdt_profile/consumer.jsonl"
-    with contextlib.suppress(OSError):
-        os.remove(consumer_jsonl)
     try:
         wait_for_server(VLLM_ENDPOINT, server, timeout=3600)
 
@@ -568,66 +548,14 @@ def main():
         pause_generation(VLLM_ENDPOINT)
 
         for sync_iter in range(SYNC_ITERS):
-            ray.get([w.reset_produce_timing.remote() for w in workers])
-
             print(f"[sync] iter {sync_iter}: gather + serve + update...", flush=True)
             _sync_t0 = time.perf_counter()
             ray.get([w.sync_weights.remote() for w in workers])
-            _sync_seconds = time.perf_counter() - _sync_t0
-
-            pt = ray.get([w.get_produce_timing.remote() for w in workers])
-            gib = sum(p["bytes"] for p in pt) / (1024**3)
-            sender_timing = ray.get(workers[0].get_sync_timing.remote())
-            print("=" * 60, flush=True)
             print(
-                f"[profile] iter {sync_iter}: wall {_sync_seconds:.3f}s  "
-                f"bytes={gib:.2f}GiB  produce_calls={sum(p['calls'] for p in pt)}",
+                f"[sync] iter {sync_iter} took "
+                f"{time.perf_counter() - _sync_t0:.3f}s",
                 flush=True,
             )
-            # Routing check: every rank must serve some pulls (an idle rank means
-            # its layers were pulled from elsewhere, i.e. ownership disagreed),
-            # and the stages should carry comparable byte totals.
-            for stage in range(NUM_PP_STAGES):
-                lo, hi = stage * STAGE_SIZE, (stage + 1) * STAGE_SIZE
-                mine = pt[lo:hi]
-                print(
-                    f"[profile]   stage {stage} (ranks {lo}-{hi - 1}): "
-                    f"calls={[p['calls'] for p in mine]} "
-                    f"bytes={sum(p['bytes'] for p in mine) / (1024**3):.2f}GiB",
-                    flush=True,
-                )
-            idle = [r for r, p in enumerate(pt) if p["calls"] == 0]
-            if idle:
-                print(f"[profile]   WARNING idle producers: {idle}", flush=True)
-            print(
-                "[profile] sender breakdown (s): "
-                + ", ".join(f"{k}={v:.3f}" for k, v in sender_timing.items()),
-                flush=True,
-            )
-            # Producer serve side, summed over the 16 ranks: wait = blocked until
-            # the group was published (gather-bound), slice = replay+pack into the
-            # serve ring, method = whole RPC body. extract = Ray's post-return
-            # metadata path (cuda.synchronize + register + descs) per RPC.
-            nx = ray.get([w.get_nixl_timing.remote() for w in workers])
-            agg = {
-                k: sum(p.get(k, 0) for p in pt)
-                for k in ("wait_seconds", "slice_seconds", "method_seconds")
-            }
-            agg_nx = {
-                k: sum(x.get(k, 0) for x in nx)
-                for k in ("extract_seconds", "register_seconds", "descs_seconds")
-            }
-            calls = max(1, sum(p["calls"] for p in pt))
-            print(
-                "[profile] producer serve (sum over 16 ranks, s): "
-                + ", ".join(f"{k}={v:.2f}" for k, v in {**agg, **agg_nx}.items())
-                + "  | per-call ms: "
-                + ", ".join(
-                    f"{k}={v / calls * 1e3:.2f}" for k, v in {**agg, **agg_nx}.items()
-                ),
-                flush=True,
-            )
-            print("=" * 60, flush=True)
 
         resume_generation(VLLM_ENDPOINT)
         print("[generate] AFTER sync (real weights):", flush=True)
