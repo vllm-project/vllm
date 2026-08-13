@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -25,6 +26,8 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 def _validate_prefix_cache_retention_interval(
@@ -61,6 +64,8 @@ class KVCacheCoordinator(ABC):
     """
     Coordinate the KV cache of different KV cache groups.
     """
+
+    enable_partial_hash_hits = False
 
     def __init__(
         self,
@@ -578,14 +583,29 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     "full-attention and Mamba groups, got: "
                     f"{type(g.kv_cache_spec).__name__}."
                 )
-        # Partial hash hits are limited to full-attention + mamba ("align")
-        # without context parallelism.
-        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
+        # Fine-grained hash hits require Mamba "align", no context
+        # parallelism, and compatible cache managers in every group.
+        has_partial_mamba_group = any(
             isinstance(g.kv_cache_spec, MambaSpec)
             and g.kv_cache_spec.mamba_cache_mode == "align"
             and g.kv_cache_spec.block_size > hash_block_size
             for g in kv_cache_config.kv_cache_groups
         )
+        self.enable_partial_hash_hits = dcp_world_size == 1 and has_partial_mamba_group
+        if self.enable_partial_hash_hits:
+            unsupported_partial_hit_managers = {
+                type(manager).__name__
+                for manager in self.single_type_managers
+                if not manager.supports_fine_grained_hash_lookup
+                and manager.block_size != hash_block_size
+            }
+            if unsupported_partial_hit_managers:
+                self.enable_partial_hash_hits = False
+                logger.warning_once(
+                    "Disabling fine-grained prefix-cache hits because these KV "
+                    "cache managers require block-aligned lookups: %s.",
+                    ", ".join(sorted(unsupported_partial_hit_managers)),
+                )
         self.verify_and_split_kv_cache_groups()
 
     @property
@@ -632,6 +652,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # a tighter initial bound, reducing work for subsequent groups.
         self.attention_groups.sort(
             key=lambda g: not isinstance(g.spec, FullAttentionSpec)
+        )
+
+        # Dense reference group for per-group lookups (None when the model
+        # has no full-attention layers): full attention is downward-closed,
+        # so any group reporting a longer per-group hit implies the union of
+        # per-group hits is not consistent at a single boundary (#46453).
+        first = self.attention_groups[0]
+        self.full_attention_group_id: int | None = (
+            first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
         )
 
         # Propagate the eagle bit to each manager (default to ``use_eagle=False``).

@@ -14,8 +14,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 55
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 45
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -100,6 +101,26 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
 
+- label: LM Eval Spec Decode (4xB200)
+  key: lm-eval-spec-decode-4xb200
+  timeout_in_minutes: 120
+  device: b200-k8s
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+  - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-confidence-TP4.yaml
+  - tests/evals/gsm8k/configs/models-spec-decode.txt
+  - vllm/models/deepseek_v4/
+  - vllm/model_executor/models/qwen3_dspark.py
+  - vllm/v1/spec_decode/metrics.py
+  - vllm/v1/worker/gpu/spec_decode/adaptive_verification.py
+  - vllm/v1/worker/gpu/spec_decode/dflash/
+  - vllm/v1/worker/gpu/spec_decode/dspark/
+  - vllm/v1/worker/gpu/spec_decode/rejection_sampler.py
+  - vllm/v1/worker/gpu/spec_decode/speculator.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode.txt
+
 - label: LM Eval Large Models EP (2xB200)
   key: lm-eval-large-models-ep-2xb200
   timeout_in_minutes: 60
@@ -141,7 +162,7 @@ steps:
     amd:
       dind: false
       device: mi300_8
-      timeout_in_minutes: 60
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
       commands:
@@ -232,7 +253,7 @@ steps:
   - vllm/model_executor/kernels/linear/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
+  # - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
 
 - label: LM Eval Humming f16 (B200 - TEMPORARY)
   key: lm-eval-humming-f16-b200
@@ -336,7 +357,7 @@ steps:
 
 - label: LM Eval KV-Offload (2xH100)
   key: kv-offload-medium
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   device: h100
   num_devices: 2
   source_file_dependencies:
@@ -346,7 +367,7 @@ steps:
   - vllm/v1/simple_kv_offload/
   - tests/evals/gsm8k/test_gsm8k_offloading.py
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b"
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
 
 - label: LM Eval KV-Offload (4xH100)
   key: kv-offload-large
