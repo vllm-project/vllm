@@ -120,6 +120,9 @@ class RequestOutput:
         num_cached_tokens: The number of tokens with prefix cache hit.
         num_cache_creation_tokens: Prompt tokens currently counted as local
             prefix-cache writes for this request.
+        num_local_cached_tokens: The number of tokens with local prefix cache hits.
+        num_external_cached_tokens: The number of tokens with external prefix
+            cache hits.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
     """
@@ -138,6 +141,8 @@ class RequestOutput:
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
         num_cache_creation_tokens: int | None = None,
+        num_local_cached_tokens: int | None = None,
+        num_external_cached_tokens: int | None = None,
         *,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
@@ -161,6 +166,8 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.num_cache_creation_tokens = num_cache_creation_tokens
+        self.num_local_cached_tokens = num_local_cached_tokens
+        self.num_external_cached_tokens = num_external_cached_tokens
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
 
@@ -208,7 +215,9 @@ class RequestOutput:
             f"metrics={self.metrics}, "
             f"lora_request={self.lora_request}, "
             f"num_cached_tokens={self.num_cached_tokens}, "
-            f"num_cache_creation_tokens={self.num_cache_creation_tokens})"
+            f"num_cache_creation_tokens={self.num_cache_creation_tokens}, "
+            f"num_local_cached_tokens={self.num_local_cached_tokens}, "
+            f"num_external_cached_tokens={self.num_external_cached_tokens})"
         )
 
 
