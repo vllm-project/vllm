@@ -297,7 +297,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
 
-    @eager_break_during_capture
+    @eager_break_during_capture(always_break=True)
     def _forward(
         self,
         mixed_qkv: torch.Tensor,

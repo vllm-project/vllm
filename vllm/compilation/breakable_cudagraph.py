@@ -56,7 +56,9 @@ def is_breakable_cudagraph_enabled() -> bool:
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-def eager_break_during_capture(fn: F) -> F:
+def eager_break_during_capture(
+    fn: F | None = None, *, always_break: bool = False
+) -> F | Callable[[F], F]:
     """Decorator that turns a custom-op Python kernel into a "break point"
     for the breakable cudagraph capture.
 
@@ -86,35 +88,53 @@ def eager_break_during_capture(fn: F) -> F:
         @maybe_transfer_kv_layer
         def unified_attention_with_output(...):
             ...
+
+    Args:
+        always_break: When ``True``, break to eager even when the cudagraph
+            runtime mode is ``FULL``. Use this for ops whose kernels are not
+            cudagraph-capture-safe (e.g. the Kimi-K3 KDA recurrent kernels),
+            which fault if inlined into a FULL graph. Capture-safe ops (unified
+            attention) must leave this ``False`` so FULL mode can inline them.
     """
-    if not is_breakable_cudagraph_enabled():
-        return fn
 
-    @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        capture = BreakableCUDAGraphCapture.current()
-        if capture is None:
-            return fn(*args, **kwargs)
-        if not capture._capturing:
-            return fn(*args, **kwargs)
-        if is_forward_context_available():
-            mode = get_forward_context().cudagraph_runtime_mode
-            if mode == CUDAGraphMode.FULL:
+    def decorator(fn: F) -> F:
+        if not is_breakable_cudagraph_enabled():
+            return fn
+
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            capture = BreakableCUDAGraphCapture.current()
+            if capture is None:
                 return fn(*args, **kwargs)
+            if not capture._capturing:
+                return fn(*args, **kwargs)
+            # Capture-safe ops keep the FULL fast-path so FULL mode can inline
+            # them. Ops flagged ``always_break`` run kernels that are not
+            # cudagraph-capture-safe and must break to eager even in FULL mode;
+            # inlining them into a FULL graph faults on capture/replay.
+            if not always_break and is_forward_context_available():
+                mode = get_forward_context().cudagraph_runtime_mode
+                if mode == CUDAGraphMode.FULL:
+                    return fn(*args, **kwargs)
 
-        # Weak-ref args: strong refs in the replay lambda pin cudagraph-pool
-        # slots across batch descriptors. cudagraph owns the slot, so the
-        # weak_ref is safe to deref on replay.
-        weak_args = tuple(
-            weak_ref_tensor(a) if isinstance(a, torch.Tensor) else a for a in args
-        )
-        weak_kwargs = {
-            k: weak_ref_tensor(v) if isinstance(v, torch.Tensor) else v
-            for k, v in kwargs.items()
-        }
-        return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
+            # Weak-ref args: strong refs in the replay lambda pin cudagraph-pool
+            # slots across batch descriptors. cudagraph owns the slot, so the
+            # weak_ref is safe to deref on replay.
+            weak_args = tuple(
+                weak_ref_tensor(a) if isinstance(a, torch.Tensor) else a
+                for a in args
+            )
+            weak_kwargs = {
+                k: weak_ref_tensor(v) if isinstance(v, torch.Tensor) else v
+                for k, v in kwargs.items()
+            }
+            return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
 
-    return wrapper  # type: ignore[return-value]
+        return wrapper  # type: ignore[return-value]
+
+    if fn is not None:
+        return decorator(fn)
+    return decorator
 
 
 # ---------------------------------------------------------------------------
