@@ -43,6 +43,7 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 from .interfaces import MixtureOfExperts
 from .qwen3_moe import (
+    Qwen3MoeDecoderLayer,
     Qwen3MoeForCausalLM,
     Qwen3MoeModel,
     Qwen3MoeSparseMoeBlock,
@@ -64,6 +65,15 @@ class Qwen3VLMoeProcessingInfo(Qwen3VLProcessingInfo):
         return self.ctx.get_hf_config(Qwen3VLMoeConfig)
 
 
+class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            is_fused_checkpoint_transposed=True,
+        )
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -77,6 +87,19 @@ class Qwen3VLMoeProcessingInfo(Qwen3VLProcessingInfo):
     }
 )
 class Qwen3MoeLLMModel(Qwen3MoeModel):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        decoder_layer_type: type[torch.nn.Module] = Qwen3VLMoeDecoderLayer,
+    ):
+        super().__init__(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            decoder_layer_type=decoder_layer_type,
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -145,7 +168,7 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

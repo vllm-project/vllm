@@ -182,7 +182,7 @@ class BailingMLP(nn.Module):
         intermediate_size: int,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        reduce_results: bool | None = True,
+        reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -279,7 +279,7 @@ class BailingMoE(nn.Module):
             else:
                 intermediate_size = config.moe_intermediate_size
             intermediate_size *= config.num_shared_experts
-            self.shared_experts = BailingMLP(
+            self.shared_experts: BailingMLP | None = BailingMLP(
                 intermediate_size=intermediate_size,
                 config=config,
                 quant_config=quant_config,
@@ -509,15 +509,14 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if self.tie_word_embeddings:
-                self.lm_head = self.model.word_embeddings
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.word_embeddings)
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
