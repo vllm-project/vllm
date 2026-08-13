@@ -234,14 +234,15 @@ class Scheduler(SchedulerInterface):
         )
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
         manager_cls_obj = vllm_config.ec_manager_config.get_encoder_cache_manager_obj()
-        if manager_cls_obj is not None:
-            self.encoder_cache_manager = manager_cls_obj(cache_size=encoder_cache_size)
-        else:
-            self.encoder_cache_manager = (
-                EncoderDecoderCacheManager(cache_size=encoder_cache_size)
+        if manager_cls_obj is None:
+            manager_cls_obj = (
+                EncoderDecoderCacheManager
                 if self.is_encoder_decoder
-                else EncoderCacheManager(cache_size=encoder_cache_size)
+                else EncoderCacheManager
             )
+        self.encoder_cache_manager = manager_cls_obj.create_manager(
+            cache_size=encoder_cache_size, vllm_config=vllm_config
+        )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
@@ -307,6 +308,7 @@ class Scheduler(SchedulerInterface):
         self.mamba_partial_cache_hit = (
             self.need_mamba_block_aligned_split
             and self.hash_block_size < self.block_size
+            and self.kv_cache_manager.coordinator.enable_partial_hash_hits
         )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
@@ -324,6 +326,7 @@ class Scheduler(SchedulerInterface):
         self.enable_return_routed_experts = (
             vllm_config.model_config.enable_return_routed_experts
         )
+        self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
         if self.enable_return_routed_experts:
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
@@ -456,6 +459,9 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
+        spec = self.vllm_config.speculative_config
+        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
+        input_budget = self.scheduler_config.max_num_batched_tokens
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
@@ -483,6 +489,8 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if input_budget <= draft_slots:
+                break
 
             if (
                 request.num_output_placeholders > 0
@@ -519,7 +527,9 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-            num_new_tokens = min(num_new_tokens, token_budget)
+            num_new_tokens = min(
+                num_new_tokens, token_budget, input_budget - draft_slots
+            )
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -605,7 +615,9 @@ class Scheduler(SchedulerInterface):
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
-                            token_budget += num_scheduled_tokens.pop(preempted_req_id)
+                            restored = num_scheduled_tokens.pop(preempted_req_id)
+                            token_budget += restored
+                            input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
@@ -643,6 +655,7 @@ class Scheduler(SchedulerInterface):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
+            input_budget -= num_new_tokens + draft_slots
             req_index += 1
 
             # Speculative decode related.
@@ -693,6 +706,8 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
+                if input_budget <= draft_slots:
+                    break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
@@ -866,6 +881,7 @@ class Scheduler(SchedulerInterface):
                     # compute to a cadence-aligned step.
                     break
                 else:
+                    request_token_budget = min(token_budget, input_budget - draft_slots)
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
@@ -883,7 +899,7 @@ class Scheduler(SchedulerInterface):
                     ):
                         num_new_tokens = 1 + self.num_spec_tokens
                         if (
-                            num_new_tokens > token_budget
+                            num_new_tokens > request_token_budget
                             or num_computed_tokens + num_new_tokens > self.max_model_len
                         ):
                             # Prefer to not schedule than schedule un-padded here.
@@ -898,13 +914,13 @@ class Scheduler(SchedulerInterface):
                     # pooling requests to be chunked
                     if (
                         not self.scheduler_config.enable_chunked_prefill
-                        and num_new_tokens > token_budget
+                        and num_new_tokens > request_token_budget
                     ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
                         break
 
-                    num_new_tokens = min(num_new_tokens, token_budget)
+                    num_new_tokens = min(num_new_tokens, request_token_budget)
                     assert num_new_tokens > 0
 
                     # Apply Mamba alignment before encoder caps.
@@ -1065,6 +1081,7 @@ class Scheduler(SchedulerInterface):
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if pad_spec_decode:
@@ -1104,6 +1121,7 @@ class Scheduler(SchedulerInterface):
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 
         assert token_budget >= 0
+        assert input_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
@@ -1792,6 +1810,7 @@ class Scheduler(SchedulerInterface):
 
             stopped = False
             new_logprobs = None
+            new_sampling_mask = None
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
@@ -1921,6 +1940,13 @@ class Scheduler(SchedulerInterface):
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
+            if self.return_sampling_mask:
+                sampling_masks = model_runner_output.sampling_masks
+                if new_token_ids and sampling_masks is not None:
+                    new_sampling_mask = sampling_masks.slice_request(
+                        req_index, len(new_token_ids)
+                    )
+
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
@@ -1934,6 +1960,7 @@ class Scheduler(SchedulerInterface):
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
+                        new_sampling_mask=new_sampling_mask,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,

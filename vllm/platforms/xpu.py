@@ -330,6 +330,30 @@ class XPUPlatform(Platform):
                     )
                     setattr(pass_config, flag, False)
 
+        # UVA-offloaded weights are host USM allocations, which Inductor's
+        # static Triton launcher rejects ("Pointer argument doesn't reference
+        # XPU device memory"). Fall back to Triton's own launcher. Remove once
+        # the released torch contains pytorch/pytorch#188240, which relaxes
+        # that check to any memory type known by the driver.
+        offload_config = vllm_config.offload_config
+        uva_offloading = offload_config.offload_backend == "uva" or (
+            offload_config.offload_backend == "auto"
+            and offload_config.prefetch.offload_group_size == 0
+            and offload_config.uva.cpu_offload_gb > 0
+        )
+        if (
+            uva_offloading
+            and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
+            and compilation_config.mode != CompilationMode.NONE
+        ):
+            compilation_config.inductor_compile_config.setdefault(
+                "use_static_cuda_launcher", False
+            )
+            logger.info_once(
+                "Disabling Inductor's static Triton launcher because UVA "
+                "weight offloading is enabled."
+            )
+
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         # Only override worker_cls if it's still the default "auto"

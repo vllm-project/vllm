@@ -241,6 +241,8 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
+    return_sampling_mask: bool = False
+    """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -422,6 +424,7 @@ class ModelConfig:
             "tokenizer_revision",
             "spec_target_max_model_len",
             "enforce_eager",
+            "return_sampling_mask",
             "logprobs_mode",
             "use_fp64_gumbel",
             "disable_cascade_attn",
@@ -890,7 +893,11 @@ class ModelConfig:
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
             self.hf_config.model_type, ModelArchConfigConvertorBase
         )
-        convertor = convertor_cls(self.hf_config, self.hf_text_config)
+        convertor = convertor_cls(
+            self.hf_config,
+            self.hf_text_config,
+            revision=getattr(self, "revision", None),
+        )
         return convertor.convert(
             supports_multimodal=self._supports_multimodal_for_mm_prefix()
         )
@@ -1651,6 +1658,7 @@ class ModelConfig:
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
+                code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
@@ -1658,6 +1666,7 @@ class ModelConfig:
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
+                code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
