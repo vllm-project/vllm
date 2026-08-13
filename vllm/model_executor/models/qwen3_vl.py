@@ -112,9 +112,9 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
-from ...utils.torch_utils import async_tensor_h2d
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
@@ -709,7 +709,7 @@ class Qwen3_VisionTransformer(nn.Module):
         pinned = torch.empty(
             (num_pos, pos_ids[0].shape[1]),
             dtype=pos_ids[0].dtype,
-            pin_memory=True,
+            pin_memory=PIN_MEMORY,
         )
         pos_ids = torch.cat(pos_ids, dim=0, out=pinned).to(
             self.device, non_blocking=True
