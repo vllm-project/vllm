@@ -1135,6 +1135,7 @@ if _is_cuda() and os.getenv("VLLM_SKIP_FLASH_ATTN_BUILD") != "1":
     ):
         # FA3 requires CUDA 12.3 or later
         ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+
 if _is_cuda():
     # FA4 CuteDSL - Python-only component for FA4's cute DSL support
     # Optional since this doesn't produce a .so file, just copies Python files
