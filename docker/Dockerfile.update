@@ -71,6 +71,10 @@ ARG GITLAB_TOKEN=
 #   后装内部 editable 只换得掉 transformers 本体, 换不掉已被拉高的 hub -> 必须在这里挡。
 # torch 在 lmcache 里不带版本约束, 已装的 2.10.0 即满足, uv 不会动它 (已实测)。
 # 内部 transformers 仍排在本步骤之后, 确保 editable 最终胜出。
+#
+# 版本号: lmcache 用 setuptools-scm 取版本, 会读到上面为 vllm 设的全局
+# ENV SETUPTOOLS_SCM_PRETEND_VERSION, 装出 lmcache==0.0.0.dev0+<vllm sha>
+# (溯源时误导)。这里按命令级覆盖为 lmcache 自己 checkout 的 sha。
 ARG LMCACHE_REPO_URL
 ARG LMCACHE_BRANCH
 ARG LMCACHE_COMMIT
@@ -101,8 +105,11 @@ RUN set -e; \
     git checkout "$lm_ref"; \
     git remote set-url origin "$LMCACHE_REPO_URL"; \
     echo "lmcache checked out to ${lm_ref}"; \
+    lm_sha=$(git rev-parse --short=9 HEAD); \
+    echo "lmcache version stamp: 0.0.0.dev0+${lm_sha}"; \
     printf '%s\n' 'transformers>=4.56.0,<5' 'huggingface_hub>=0.34.0,<1.0' > /tmp/lmcache-overrides.txt; \
-    uv pip install --system --no-build-isolation -e . --overrides /tmp/lmcache-overrides.txt; \
+    SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0.dev0+${lm_sha}" \
+        uv pip install --system --no-build-isolation -e . --overrides /tmp/lmcache-overrides.txt; \
     rm -f /tmp/lmcache-overrides.txt; \
     python -c "import torch, vllm; \
 assert torch.__version__.startswith('2.10.'), 'lmcache 依赖改了 torch -> '+torch.__version__; \
@@ -115,6 +122,9 @@ print('env intact after lmcache: torch', torch.__version__, '| vllm', vllm.__fil
 #    后装的内部 editable 才能覆盖掉它。
 # REPO_URL/BRANCH 必填 (无默认值, 空则报错); COMMIT 可选 (空则停在分支 HEAD)。
 # --no-deps 确保绝不触碰 vLLM 已对齐的底层依赖环境。
+# 版本号: transformers 由自己 setup.py 静态声明 (不用 setuptools-scm), 但仍防御性
+# 隔离为 vllm 设的全局 ENV SETUPTOOLS_SCM_PRETEND_VERSION —— 若日后内部分支改用
+# setuptools-scm, 版本会取 transformers 自己的 git, 而不是静默继承 vllm 的版本串。
 ARG TRANSFORMER_REPO_URL
 ARG TRANSFORMER_BRANCH
 ARG TRANSFORMER_COMMIT=
@@ -132,7 +142,9 @@ RUN set -e; \
     git checkout "$TRANSFORMER_BRANCH"; \
     if [ -n "${TRANSFORMER_COMMIT:-}" ]; then git checkout "$TRANSFORMER_COMMIT"; fi; \
     git remote set-url origin "$TRANSFORMER_REPO_URL"; \
-    uv pip install --system --no-build-isolation --no-deps -e .; \
+    echo "transformers checked out to $(git rev-parse --short=9 HEAD)"; \
+    env -u SETUPTOOLS_SCM_PRETEND_VERSION \
+        uv pip install --system --no-build-isolation --no-deps -e .; \
     python -c "import torch, vllm, huggingface_hub as hh, transformers as tf; \
 assert torch.__version__.startswith('2.10.'), 'torch 版本被改动 -> '+torch.__version__; \
 assert '/vllm-workspace/' in vllm.__file__, 'vllm 不再是 editable -> '+vllm.__file__; \
