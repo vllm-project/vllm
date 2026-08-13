@@ -122,6 +122,33 @@ The guard must precede `set_target_for_ref`, not just the `ray.get`: the transfe
 | `gather_lookahead` | 1 | Gathered-but-unfreed groups the gather loop runs ahead by (resident memory = lookahead + 1 groups); the per-group free barrier is the back-edge. |
 | `pack_check` | off | Checksum every blob on both sides for offline diffing. |
 
+**Consumer memory budget — the arenas live OUTSIDE the engine's budget.** The
+receive arenas are `num_rdt_buffers` ring slots, each sized to the largest
+single chunk this consumer pulls, rounded up to a 256 MB multiple, allocated
+once and NIXL-registered persistently — and, like NCCL/NIXL internals, they do
+NOT count against vLLM's `gpu_memory_utilization` fraction. Size them before
+choosing that fraction, or weight-sync init OOMs after the engine comes up
+healthy. The slot size is set by the largest chunk, which for an untied-vocab
+model is the full embed/lm_head matrix on any consumer that holds it unsliced:
+at Qwen3-235B under TP8 the vocab matrices are sliced 8 ways (256 MB slots,
+0.5 GiB/GPU total); under DP8+EP8 they are whole (1.25 GiB slots, 2.5 GiB/GPU).
+The producer mirrors this per consumer it serves (`reserve_serve_arena`).
+
+**DP+EP consumers trade memory for sync speed** (measured, Qwen3-235B, 8xH100
+consumers): with `data_parallel_size=8`, `tensor_parallel_size=1` and expert
+parallel on, each consumer holds full experts for exactly one trainer EP
+coordinate, so it pulls ~2 chunks/group (1 expert + 1 replicated) instead of
+one TP slice of every coordinate — 190 pulls/consumer/sync instead of 848, at
+43 GiB/s instead of ~27, for a 3.2-3.3 s engine-level sync (vs 6.1 s TP8).
+The bill on 80 GB cards: weights are 67.8 GiB/rank (vs ~59 TP8, attention and
+embeddings unsliced), the DP+EP fused-MoE workspace scales with
+`max_num_batched_tokens × dp_size` (8 GiB at the 8192 default — cap it), the
+KV cache must still fit one `max_model_len` request in what remains, and the
+2.5 GiB of receive arenas need `enforce_eager` (or a lower utilization) to fit.
+Splitting the vocab matrices into row-range sub-chunks would shrink the arenas
+back to ~256 MB slots and re-admit CUDA graphs; until then treat DP+EP at this
+scale as an eager-mode configuration.
+
 Two results worth not rediscovering:
 
 **A spare receive slot does not help.** Receive slots are both the RDMA landing zones and the recycling unit, and there are exactly as many as in-flight pulls — so chunk *j* takes the slot of chunk *j-K*, which `drain_one()` completed on the line before. Every chunk therefore pays a wait on a scatter dispatched microseconds earlier (measured 7.2 ms/pull at 235B). Adding one spare slot does remove that wait entirely, and **measured twice, the wall got worse**: 3.39 s vs 3.10 s with the old per-name pack, then 3.44 s vs 2.70 s after the pack was made cheap. A deeper receive pipeline pulls demand forward past what the trainer can supply under `gather_lookahead=2`: the serve RPC starts arriving before the group is published (producer wait 3.6 → 9.3 ms/call) and the extra concurrency inflates the pack (8.3 → 21.4 ms/call, GIL-bound in the sidecar). The binding constraint is gather **supply**, not the slot structure. Revisit only after the gather can run further ahead — e.g. freeing a gathered group once it is *packed* rather than once its RDMA completes.
