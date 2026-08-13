@@ -233,12 +233,14 @@ __device__ __noinline__ void histogram_2048_topk(
 
   if (pair_suffix >= TopK && (pair_suffix - h0) < TopK) {
     decode_smem[SBASE + sTHR] = 2 * tx;
+    if (h0 > DBUF) decode_smem[SBASE + sBUF0] = DBUF + 1;
   }
   {
     const int right_suf = pair_suffix - h0;
     const int next_suf = pair_suffix - pair_sum;
     if (right_suf >= TopK && next_suf < TopK) {
       decode_smem[SBASE + sTHR] = 2 * tx + 1;
+      if (pair_sum - h0 > DBUF) decode_smem[SBASE + sBUF0] = DBUF + 1;
     }
   }
   __syncthreads();
@@ -250,7 +252,9 @@ __device__ __noinline__ void histogram_2048_topk(
   const int sOUT_abs = SBASE + sOUT;
   const int sBUF0_abs = SBASE + sBUF0;
 
-  {
+  // Skip a collection pass when the histogram already proves that the
+  // threshold bin cannot fit in the fixed-size buffer.
+  if (__builtin_expect(decode_smem[sBUF0_abs] <= DBUF, 1)) {
     const uint32_t uthr = static_cast<uint32_t>(threshold);
     int item = 0;
     const int n_vec_iters = (n_vec + kThreadsPerBlock - 1) / kThreadsPerBlock;
@@ -485,7 +489,11 @@ __device__ __noinline__ void histogram_256_topk(
   if (thread_id < RADIX && shared_histogram[0][thread_id] > remaining_k &&
       shared_histogram[0][thread_id + 1] <= remaining_k) {
     shared_threshold_bin = thread_id;
-    shared_buffered_count[0] = 0;
+    const int threshold_bin_count = shared_histogram[0][thread_id] -
+                                    shared_histogram[0][thread_id + 1];
+    shared_buffered_count[0] = threshold_bin_count > MAX_BUFFERED_ITEMS
+                                   ? MAX_BUFFERED_ITEMS + 1
+                                   : 0;
     shared_output_count = 0;
   }
   __syncthreads();
@@ -511,19 +519,21 @@ __device__ __noinline__ void histogram_256_topk(
   }
   __syncthreads();
 
-  for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
-    const float logit_value = logits[idx + logits_offset];
-    const int bin = convert_to_uint8(logit_value);
-    if (bin > threshold_bin) {
-      const int output_pos = atomicAdd(&shared_output_count, 1);
-      output_indices[output_pos] = idx;
-    } else if (bin == threshold_bin) {
-      const int buffer_pos = atomicAdd(&shared_buffered_count[0], 1);
-      if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
-        buffered_indices[0][buffer_pos] = idx;
-        const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
-        const int next_bin = (fp32_bits >> 24) & 0xFF;
-        atomicAdd(&shared_histogram[0][next_bin], 1);
+  if (__builtin_expect(shared_buffered_count[0] <= MAX_BUFFERED_ITEMS, 1)) {
+    for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
+      const float logit_value = logits[idx + logits_offset];
+      const int bin = convert_to_uint8(logit_value);
+      if (bin > threshold_bin) {
+        const int output_pos = atomicAdd(&shared_output_count, 1);
+        output_indices[output_pos] = idx;
+      } else if (bin == threshold_bin) {
+        const int buffer_pos = atomicAdd(&shared_buffered_count[0], 1);
+        if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
+          buffered_indices[0][buffer_pos] = idx;
+          const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
+          const int next_bin = (fp32_bits >> 24) & 0xFF;
+          atomicAdd(&shared_histogram[0][next_bin], 1);
+        }
       }
     }
   }
