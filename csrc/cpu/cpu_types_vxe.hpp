@@ -6,8 +6,10 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <torch/all.h>
+
 namespace vec_op {
 
 struct fp8_e4m3_tag {};
@@ -702,6 +704,58 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   explicit FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {}
 
+  // De-pack 16 x 4-bit nibbles from a 64-bit value and look each up in a
+  // 16-element float LUT. Used by WNA16 (AWQ/GPTQ) dequantization.
+  explicit FP32Vec16(int64_t value, const FP32Vec16& lut) {
+    uint64_t uval = static_cast<uint64_t>(value);
+    uval = (uval >> 32) | (uval << 32);
+
+    // Process 4 floats per output vector register
+    for (int v = 0; v < 4; ++v) {
+      // Extract 4 nibble indices for this output vector
+      uint8_t n0 = (uval >> ((v * 4 + 0) * 4)) & 0xF;
+      uint8_t n1 = (uval >> ((v * 4 + 1) * 4)) & 0xF;
+      uint8_t n2 = (uval >> ((v * 4 + 2) * 4)) & 0xF;
+      uint8_t n3 = (uval >> ((v * 4 + 3) * 4)) & 0xF;
+
+      // Build permute control: index % 8 * 4 gives byte offset within a
+      // 32-byte window (two 16-byte LUT vectors concatenated).
+      alignas(16) uint8_t ctrl[16] = {
+          (uint8_t)((n0 % 8) * 4 + 0), (uint8_t)((n0 % 8) * 4 + 1),
+          (uint8_t)((n0 % 8) * 4 + 2), (uint8_t)((n0 % 8) * 4 + 3),
+          (uint8_t)((n1 % 8) * 4 + 0), (uint8_t)((n1 % 8) * 4 + 1),
+          (uint8_t)((n1 % 8) * 4 + 2), (uint8_t)((n1 % 8) * 4 + 3),
+          (uint8_t)((n2 % 8) * 4 + 0), (uint8_t)((n2 % 8) * 4 + 1),
+          (uint8_t)((n2 % 8) * 4 + 2), (uint8_t)((n2 % 8) * 4 + 3),
+          (uint8_t)((n3 % 8) * 4 + 0), (uint8_t)((n3 % 8) * 4 + 1),
+          (uint8_t)((n3 % 8) * 4 + 2), (uint8_t)((n3 % 8) * 4 + 3),
+      };
+      __vector unsigned char perm =
+          (__vector unsigned char)vec_xl(0, (const signed char*)ctrl);
+
+      // Gather from both LUT halves via vec_perm (VPERM)
+      __vector unsigned char from_lo =
+          vec_perm((__vector unsigned char)lut.reg.val[0],
+                   (__vector unsigned char)lut.reg.val[1], perm);
+      __vector unsigned char from_hi =
+          vec_perm((__vector unsigned char)lut.reg.val[2],
+                   (__vector unsigned char)lut.reg.val[3], perm);
+
+      // Build selection mask: 0xFF bytes for indices >= 8, 0x00 otherwise
+      uint8_t m0 = (n0 >= 8) ? 0xFF : 0x00;
+      uint8_t m1 = (n1 >= 8) ? 0xFF : 0x00;
+      uint8_t m2 = (n2 >= 8) ? 0xFF : 0x00;
+      uint8_t m3 = (n3 >= 8) ? 0xFF : 0x00;
+      alignas(16) uint8_t sel[16] = {
+          m0, m0, m0, m0, m1, m1, m1, m1, m2, m2, m2, m2, m3, m3, m3, m3,
+      };
+      __vector __bool char mask =
+          (__vector __bool char)vec_xl(0, (const signed char*)sel);
+
+      reg.val[v] = (__vector float)vec_sel(from_lo, from_hi, mask);
+    }
+  }
+
   // FP8 stub: dead code on s390x (fp8 KV cache is x86-only), needed for
   // load_b_pair_vec template to compile on all platforms.
   explicit FP32Vec16(const BF16Vec32&, int) : reg{} {}
@@ -727,11 +781,43 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                                 vec_sub(reg.val[3], b.reg.val[3])}));
   }
 
+  FP32Vec16 operator-() const {
+    return FP32Vec16(f32x4x4_t({vec_neg(reg.val[0]), vec_neg(reg.val[1]),
+                                vec_neg(reg.val[2]), vec_neg(reg.val[3])}));
+  }
+
   FP32Vec16 operator/(const FP32Vec16& b) const {
     return FP32Vec16(f32x4x4_t({vec_div(reg.val[0], b.reg.val[0]),
                                 vec_div(reg.val[1], b.reg.val[1]),
                                 vec_div(reg.val[2], b.reg.val[2]),
                                 vec_div(reg.val[3], b.reg.val[3])}));
+  }
+
+  FP32Vec16 exp() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_exp = lo.exp();
+    auto hi_exp = hi.exp();
+    return FP32Vec16(f32x4x4_t{lo_exp.reg.val[0], lo_exp.reg.val[1],
+                               hi_exp.reg.val[0], hi_exp.reg.val[1]});
+  }
+
+  FP32Vec16 tanh() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_tanh = lo.tanh();
+    auto hi_tanh = hi.tanh();
+    return FP32Vec16(f32x4x4_t{lo_tanh.reg.val[0], lo_tanh.reg.val[1],
+                               hi_tanh.reg.val[0], hi_tanh.reg.val[1]});
+  }
+
+  FP32Vec16 er() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_er = lo.er();
+    auto hi_er = hi.er();
+    return FP32Vec16(f32x4x4_t{lo_er.reg.val[0], lo_er.reg.val[1],
+                               hi_er.reg.val[0], hi_er.reg.val[1]});
   }
 
   float reduce_sum() const {
@@ -765,6 +851,17 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                                 vec_max(reg.val[3], b.reg.val[3])}));
   }
 
+  FP32Vec16 min(const FP32Vec16& b) const {
+    return FP32Vec16(f32x4x4_t({vec_min(reg.val[0], b.reg.val[0]),
+                                vec_min(reg.val[1], b.reg.val[1]),
+                                vec_min(reg.val[2], b.reg.val[2]),
+                                vec_min(reg.val[3], b.reg.val[3])}));
+  }
+
+  FP32Vec16 clamp(const FP32Vec16& min_v, const FP32Vec16& max_v) const {
+    return this->max(min_v).min(max_v);
+  }
+
   float reduce_max() const {
     __vector float m = vec_max(vec_max(reg.val[0], reg.val[1]),
                                vec_max(reg.val[2], reg.val[3]));
@@ -775,29 +872,9 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return vec_extract(m, 0);
   }
 
-  FP32Vec16 exp() const {
-    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
-    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
-    auto lo_e = lo.exp();
-    auto hi_e = hi.exp();
-    return FP32Vec16(f32x4x4_t{lo_e.reg.val[0], lo_e.reg.val[1],
-                               hi_e.reg.val[0], hi_e.reg.val[1]});
-  }
-
   FP32Vec16 abs() const {
     return FP32Vec16(f32x4x4_t({vec_abs(reg.val[0]), vec_abs(reg.val[1]),
                                 vec_abs(reg.val[2]), vec_abs(reg.val[3])}));
-  }
-
-  FP32Vec16 min(const FP32Vec16& b) const {
-    return FP32Vec16(f32x4x4_t({vec_min(reg.val[0], b.reg.val[0]),
-                                vec_min(reg.val[1], b.reg.val[1]),
-                                vec_min(reg.val[2], b.reg.val[2]),
-                                vec_min(reg.val[3], b.reg.val[3])}));
-  }
-
-  FP32Vec16 clamp(const FP32Vec16& lo, const FP32Vec16& hi) const {
-    return this->max(lo).min(hi);
   }
 
   float reduce_min() const {
@@ -897,6 +974,25 @@ struct INT8Vec16 : public Vec<INT8Vec16> {
       ptr[i] = ar.values[i];
     }
   }
+};
+
+// Reference implementation for vector operations missing from some backends.
+struct INT8Vec64 {
+  constexpr static int VEC_ELEM_NUM = 64;
+
+  explicit INT8Vec64(const int8_t* ptr) {
+    std::memcpy(data_, ptr, sizeof(data_));
+  }
+
+  void save(int8_t* ptr) const { std::memcpy(ptr, data_, sizeof(data_)); }
+
+  void save(int8_t* ptr, const int elem_num) const {
+    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    std::memcpy(ptr, data_, elem_num);
+  }
+
+ private:
+  int8_t data_[VEC_ELEM_NUM];
 };
 
 template <typename T>
@@ -1321,6 +1417,32 @@ FORCE_INLINE void rmsnorm_fp32vec8(float* output, const float* input,
 // Prefetch data to cache for better memory access performance
 FORCE_INLINE void prefetch(const void* addr) {
   __builtin_prefetch(addr, 0, 3);  // 0=read, 3=high temporal locality
+}
+
+static void interleave_save(const BF16Vec16& vec0, const BF16Vec16& vec1,
+                            void* ptr) {
+  alignas(16) uint16_t v0[BF16Vec16::VEC_ELEM_NUM];
+  alignas(16) uint16_t v1[BF16Vec16::VEC_ELEM_NUM];
+  vec0.save(v0);
+  vec1.save(v1);
+  auto* packed = reinterpret_cast<uint32_t*>(ptr);
+  for (int i = 0; i < BF16Vec16::VEC_ELEM_NUM; ++i) {
+    packed[i] =
+        static_cast<uint32_t>(v0[i]) | (static_cast<uint32_t>(v1[i]) << 16);
+  }
+}
+
+static void interleave_save(const FP16Vec16& vec0, const FP16Vec16& vec1,
+                            void* ptr) {
+  alignas(16) uint16_t v0[FP16Vec16::VEC_ELEM_NUM];
+  alignas(16) uint16_t v1[FP16Vec16::VEC_ELEM_NUM];
+  vec0.save(v0);
+  vec1.save(v1);
+  auto* packed = reinterpret_cast<uint32_t*>(ptr);
+  for (int i = 0; i < FP16Vec16::VEC_ELEM_NUM; ++i) {
+    packed[i] =
+        static_cast<uint32_t>(v0[i]) | (static_cast<uint32_t>(v1[i]) << 16);
+  }
 }
 
 };  // namespace vec_op

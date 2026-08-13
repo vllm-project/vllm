@@ -40,6 +40,8 @@ pub struct AppState {
     pub cors: CorsConfig,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
+    /// Deployment-wide data-parallel size retained by the frontend.
+    data_parallel_size: usize,
     /// SHA-256 hashes of API keys accepted as bearer tokens for guarded routes.
     api_key_hashes: Vec<ApiKeyHash>,
     /// Number of in-flight inference requests currently owned by this frontend.
@@ -69,12 +71,14 @@ impl AppState {
             !served_model_names.is_empty(),
             "served_model_names must not be empty"
         );
+        let data_parallel_size = chat.engine_core_client().engine_count();
         Self {
             served_model_names,
             chat,
             api_server_options: ApiServerOptions::default(),
             cors: CorsConfig::default(),
             server_info: None,
+            data_parallel_size,
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
@@ -112,6 +116,17 @@ impl AppState {
     pub(crate) fn with_server_info(mut self, server_info: ServerInfoSnapshot) -> Self {
         self.server_info = Some(server_info);
         self
+    }
+
+    /// Set the deployment-wide data-parallel size reported by frontend APIs.
+    pub(crate) fn with_data_parallel_size(mut self, size: usize) -> Self {
+        self.data_parallel_size = size;
+        self
+    }
+
+    /// Return the deployment-wide data-parallel size.
+    pub(crate) fn data_parallel_size(&self) -> usize {
+        self.data_parallel_size
     }
 
     /// Build a `/server_info` response payload.
