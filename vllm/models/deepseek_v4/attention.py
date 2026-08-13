@@ -473,9 +473,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                         positions,
                         self.indexer_rotary_emb,
                     ),
-                    self._compressor_side_stream_fn(
-                        compressor, kv_score, hidden_states, positions, self.rotary_emb
-                    ),
+                    lambda: compressor(kv_score, positions, self.rotary_emb),
                 ],
                 self.ln_events[0],
                 [self.ln_events[1], self.ln_events[2]],
@@ -512,17 +510,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # MergedColumnParallelLinear returns (output, bias); bias is None.
         qr_kv, _ = self.fused_wqa_wkv(hidden_states)
         return qr_kv
-
-    @staticmethod
-    def _compressor_side_stream_fn(
-        compressor,
-        kv_score: torch.Tensor,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        rotary_emb,
-    ) -> Callable[[], None]:
-        """Return a zero-arg callable for compressor work on a side stream."""
-        return lambda: compressor(kv_score, positions, rotary_emb)
 
     def _run_parallel_input_projections(
         self, hidden_states: torch.Tensor

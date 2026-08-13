@@ -496,35 +496,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # Disable indexer-inner stream overlap, keep that serial on ROCm.
             self.indexer.aux_stream = None
 
-    @staticmethod
-    def _compressor_side_stream_fn(
-        compressor,
-        kv_score: torch.Tensor,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        rotary_emb,
-    ):
-        # On ROCm the compressor side-stream callable re-runs wkv_gate (torch.mm)
-        # on the side stream instead of consuming the pre-computed ``kv_score``
-        # from the default stream.  This removes a cross-stream data dependency:
-        # every stream becomes self-contained — default does wq_b → qnorm → rope
-        # → kv_insert, aux[0] runs the full indexer forward, and aux[1] runs
-        # wkv_gate + the MLA compressor kernels.  Eliminating the dependency is
-        # necessary because HIP Event-based stream ordering is unreliable under
-        # multi-stream overlap; Stream.wait_stream fork‑join (used in
-        # platforms/rocm.launch_multi_stream) is the only supported path and it
-        # serializes at stream granularity — fine-grained data hazards inside
-        # concurrent streams must still be avoided.
-        def _work() -> None:
-            kv_score = torch.mm(
-                hidden_states,
-                compressor.fused_wkv_wgate.weight.T,
-                out_dtype=torch.float32,
-            )
-            compressor(kv_score, positions, rotary_emb)
-
-        return _work
-
     def _run_parallel_input_projections(
         self, hidden_states: torch.Tensor
     ) -> tuple[
