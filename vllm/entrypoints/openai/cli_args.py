@@ -190,10 +190,8 @@ class BaseFrontendArgs:
     """Enable launcher-managed EngineCore snapshots for Sleep Mode level 3."""
     engine_snapshot_provider: Literal["fake", "criu_cuda"] = "criu_cuda"
     """Engine snapshot provider. The fake provider is for lifecycle testing."""
-    engine_snapshot_resource_policy: Literal[
-        "full", "discard_kv", "l1_prepared", "l2_prepared"
-    ] = "full"
-    """Internal Engine snapshot resource policy."""
+    engine_snapshot_resource_policy: Literal["full", "minimized"] = "full"
+    """Engine snapshot state captured in the process image."""
     engine_snapshot_persistence: Literal["durable", "page_cache"] = "durable"
     """Durability mode for Engine snapshot artifacts."""
     engine_snapshot_integrity: Literal["optimistic", "strict"] = "optimistic"

@@ -313,19 +313,15 @@ def test_engine_snapshot_resource_policy(serve_parser):
     assert args.engine_snapshot_resource_policy == "full"
 
     args = serve_parser.parse_args(
-        args=["--engine-snapshot-resource-policy", "discard_kv"]
+        args=["--engine-snapshot-resource-policy", "minimized"]
     )
-    assert args.engine_snapshot_resource_policy == "discard_kv"
+    assert args.engine_snapshot_resource_policy == "minimized"
 
-    args = serve_parser.parse_args(
-        args=["--engine-snapshot-resource-policy", "l2_prepared"]
-    )
-    assert args.engine_snapshot_resource_policy == "l2_prepared"
-
-    args = serve_parser.parse_args(
-        args=["--engine-snapshot-resource-policy", "l1_prepared"]
-    )
-    assert args.engine_snapshot_resource_policy == "l1_prepared"
+    for unsupported in ("discard_kv", "host_backup", "reload_weights"):
+        with pytest.raises(SystemExit):
+            serve_parser.parse_args(
+                args=["--engine-snapshot-resource-policy", unsupported]
+            )
 
     with pytest.raises(SystemExit):
         serve_parser.parse_args(

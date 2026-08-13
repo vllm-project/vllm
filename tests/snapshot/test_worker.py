@@ -15,7 +15,7 @@ def _checkpoint_worker(worker_class, backend="uni"):
     return worker
 
 
-def test_l2_prepared_worker_lifecycle_order(monkeypatch):
+def test_reload_weights_worker_lifecycle_order(monkeypatch):
     import vllm.v1.worker.gpu_worker as gpu_worker
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -139,7 +139,7 @@ def test_checkpoint_prepare_rejects_unknown_executor_before_side_effects(monkeyp
     assert worker._checkpoint_prepare_state is None
 
 
-def test_l2_prepared_worker_rolls_back_failed_discard(monkeypatch):
+def test_reload_weights_worker_rolls_back_failed_discard(monkeypatch):
     import vllm.v1.worker.gpu_worker as gpu_worker
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -194,7 +194,7 @@ def test_l2_prepared_worker_rolls_back_failed_discard(monkeypatch):
     assert worker._checkpoint_prepare_state is not None
 
 
-def test_l2_prepared_worker_checks_discard_capability_before_side_effects(
+def test_reload_weights_worker_checks_discard_capability_before_side_effects(
     monkeypatch,
 ):
     import vllm.v1.worker.gpu_worker as gpu_worker
@@ -226,7 +226,7 @@ def test_l2_prepared_worker_checks_discard_capability_before_side_effects(
     assert worker._checkpoint_prepare_state is None
 
 
-def test_l2_prepared_worker_rejects_active_lora():
+def test_reload_weights_worker_rejects_active_lora():
     from vllm.v1.worker.gpu_worker import Worker
 
     worker = object.__new__(Worker)
@@ -238,7 +238,7 @@ def test_l2_prepared_worker_rejects_active_lora():
         Worker._validate_checkpoint_weight_reload(worker)
 
 
-def test_l2_prepared_worker_rejects_online_weight_updates():
+def test_reload_weights_worker_rejects_online_weight_updates():
     from vllm.v1.worker.gpu_worker import Worker
 
     worker = object.__new__(Worker)
@@ -250,7 +250,7 @@ def test_l2_prepared_worker_rejects_online_weight_updates():
         Worker._validate_checkpoint_weight_reload(worker)
 
 
-def test_l1_prepared_worker_lifecycle_order(monkeypatch):
+def test_host_backup_worker_lifecycle_order(monkeypatch):
     import vllm.v1.worker.gpu_worker as gpu_worker
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -308,7 +308,7 @@ def test_l1_prepared_worker_lifecycle_order(monkeypatch):
     assert worker._checkpoint_prepare_state is None
 
 
-def test_l1_prepared_worker_rolls_back_failed_backup(monkeypatch):
+def test_host_backup_worker_rolls_back_failed_backup(monkeypatch):
     import vllm.v1.worker.gpu_worker as gpu_worker
     from vllm.v1.worker.gpu_worker import Worker
 

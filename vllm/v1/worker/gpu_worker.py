@@ -298,20 +298,20 @@ class Worker(WorkerBase):
 
         if self.get_draft_model() is not None:
             raise NotImplementedError(
-                "l2_prepared does not support speculative draft models"
+                "reload_weights does not support speculative draft models"
             )
         if self.vllm_config.lora_config is not None and self.list_loras():
             raise NotImplementedError(
-                "l2_prepared does not support active LoRA adapters"
+                "reload_weights does not support active LoRA adapters"
             )
         if self.weight_transfer_engine is not None:
             raise NotImplementedError(
-                "l2_prepared does not support online weight updates"
+                "reload_weights does not support online weight updates"
             )
         model_loader = get_model_loader(self.model_runner.load_config)
         if not hasattr(model_loader, "get_all_weights"):
             raise NotImplementedError(
-                "l2_prepared requires a model loader with get_all_weights"
+                "reload_weights requires a model loader with get_all_weights"
             )
 
     @staticmethod

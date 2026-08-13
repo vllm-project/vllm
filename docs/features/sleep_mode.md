@@ -123,10 +123,16 @@ VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
   --enable-engine-snapshot \
   --enable-sleep-mode \
   --engine-snapshot-provider=criu_cuda \
-  --engine-snapshot-resource-policy=l2_prepared \
+  --engine-snapshot-resource-policy=minimized \
   --engine-snapshot-dir=/snapshots \
   --port 8000
 ```
+
+Engine snapshots expose two resource policies. The default `full` policy keeps
+weights, KV cache, and runtime state in the CUDA process image. The `minimized`
+policy removes weights and KV cache before capture, then reloads the weights
+from the configured model files and recreates the KV cache after restore.
+Intermediate resource combinations are not user-configurable.
 
 Use `POST /sleep?level=3&mode=wait` to capture the EngineCore and
 `POST /wake_up` to restore it. `GET /snapshot/status` reports the checkpoint
