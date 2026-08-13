@@ -61,6 +61,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.common.ops.fused_qk_rmsnorm import fused_q_kv_rmsnorm
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
@@ -419,6 +420,19 @@ class KimiMLAAttention(nn.Module):
             )
 
         # TODO: Remove this mypy workaround once the K3 PR is fully merged.
+        # Fuse the q-a and kv-a RMSNorms into one Triton launch when a q-LoRA
+        # rank is present (both norms exist and run on the same tokens). Both
+        # use config.rms_norm_eps. Only wired on the q-LoRA path; the uncompressed
+        # path has no q norm, so the wrapper keeps its single kv-a norm there.
+        q_kv_norm = None
+        if self.q_lora_rank is not None:
+            q_norm_weight = self.q_a_layernorm.weight
+            kv_norm_weight = self.kv_a_layernorm.weight
+            eps = config.rms_norm_eps
+
+            def q_kv_norm(q_c: torch.Tensor, kv_c: torch.Tensor):
+                return fused_q_kv_rmsnorm(q_c, kv_c, q_norm_weight, kv_norm_weight, eps)
+
         mla_modules = MLAModules(  # type: ignore[call-arg]
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
@@ -437,6 +451,7 @@ class KimiMLAAttention(nn.Module):
             is_sparse=False,
             topk_indices_buffer=None,
             g_proj=getattr(self, "g_proj", None),
+            q_kv_norm=q_kv_norm,
         )
         self.mla_attn = MultiHeadLatentAttentionWrapper(
             self.hidden_size,
