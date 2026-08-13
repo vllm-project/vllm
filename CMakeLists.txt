@@ -414,9 +414,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/custom_all_reduce.cu"
     "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
 
+  # cooperative_topk uses the CUDA 13 cluster PTX API signatures. CUDA 12.x's
+  # libcudacxx exposes different barrier and bulk-copy overloads, so retain the
+  # regular top-k fallback there instead of failing the extension build.
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
      DEFINED CMAKE_CUDA_COMPILER_VERSION AND
-     CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
+     CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
 
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
       cuda_archs_loose_intersection(COOPERATIVE_TOPK_ARCHS
