@@ -188,7 +188,9 @@ class CoreEngineProcManager:
                     current_platform.is_cuda_alike() or current_platform.is_xpu()
                 )
                 if is_dp and (
-                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
+                    needs_device_env_isolation
+                    or vllm_config.parallel_config.use_ray
+                    or vllm_config.parallel_config.data_parallel_pp_first
                 ):
                     set_assigned_physical_gpu_ids_for_dp_rank(
                         vllm_config, local_dp_rank, user_assigned_gpu_ids
@@ -290,14 +292,18 @@ def set_assigned_physical_gpu_ids_for_dp_rank(
     explicitly rather than read from the config because callers may reuse
     one config object across DP ranks, overwriting the field each time.
     """
-    world_size = vllm_config.parallel_config.world_size
-    local_world_size = vllm_config.parallel_config.local_world_size
+    parallel_config = vllm_config.parallel_config
+    world_size = parallel_config.world_size
+    local_world_size = parallel_config.local_world_size
+    device_stride = (
+        local_world_size if parallel_config.data_parallel_pp_first else world_size
+    )
     evar = current_platform.device_control_env_var
 
     physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
         evar,
         local_dp_rank,
-        world_size,
+        device_stride,
         local_world_size,
         user_assigned_gpu_ids=user_assigned_gpu_ids,
     )
