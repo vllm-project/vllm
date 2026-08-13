@@ -926,7 +926,7 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if (
             speculative_config is None
-            or not speculative_config.uses_dynamic_speculative_decoding()
+            or not speculative_config.uses_variable_speculative_decoding()
             or not self.compilation_config.cudagraph_mode.has_full_cudagraphs()
             or self.use_v2_model_runner
         ):
@@ -941,11 +941,20 @@ class VllmConfig:
         )
         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+    def _normalize_constant_speculative_schedule(self) -> None:
+        speculative_config = self.speculative_config
+        if speculative_config is None:
+            return
+
+        constant_k = speculative_config.constant_num_speculative_tokens()
+        if constant_k is not None:
+            speculative_config.num_speculative_tokens = constant_k
+
     def _maybe_disable_dynamic_sd_for_data_parallel(self) -> None:
         speculative_config = self.speculative_config
         if (
             speculative_config is None
-            or not speculative_config.uses_dynamic_speculative_decoding()
+            or not speculative_config.uses_variable_speculative_decoding()
             or self.parallel_config.data_parallel_size <= 1
         ):
             return
@@ -1391,6 +1400,7 @@ class VllmConfig:
                 "optimization level defaults."
             )
 
+        self._normalize_constant_speculative_schedule()
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 

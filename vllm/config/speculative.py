@@ -1493,6 +1493,31 @@ class SpeculativeConfig:
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
 
+    def constant_num_speculative_tokens(self) -> int | None:
+        """Return a positive K when every schedule entry resolves to it."""
+        schedule = self.num_speculative_tokens_per_batch_size
+        if not schedule or any(
+            not isinstance(entry, list | tuple) or len(entry) != 3 for entry in schedule
+        ):
+            return None
+
+        max_k = self.num_speculative_tokens
+        try:
+            scheduled_k = {min(int(entry[2]), max_k) for entry in schedule}
+        except (TypeError, ValueError):
+            return None
+        if len(scheduled_k) != 1:
+            return None
+
+        constant_k = next(iter(scheduled_k))
+        return constant_k if constant_k > 0 else None
+
+    def uses_variable_speculative_decoding(self) -> bool:
+        """Whether the schedule can change the target verification width."""
+        return self.uses_dynamic_speculative_decoding() and (
+            self.constant_num_speculative_tokens() is None
+        )
+
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
 

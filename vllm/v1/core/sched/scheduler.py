@@ -245,9 +245,17 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
+        self.num_uniform_spec_tokens = self.num_spec_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
+        self.variable_speculative_tokens = False
         if speculative_config is not None:
+            self.variable_speculative_tokens = (
+                speculative_config.uses_variable_speculative_decoding()
+            )
+            constant_k = speculative_config.constant_num_speculative_tokens()
+            if constant_k is not None:
+                self.num_uniform_spec_tokens = constant_k
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
                     speculative_config.num_speculative_tokens_per_batch_size,
@@ -890,12 +898,15 @@ class Scheduler(SchedulerInterface):
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
                     if (
-                        (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        (
+                            self.num_uniform_spec_tokens > 0
+                            and not self.variable_speculative_tokens
+                        )
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
-                        num_new_tokens = 1 + self.num_spec_tokens
+                        num_new_tokens = 1 + self.num_uniform_spec_tokens
                         if (
                             num_new_tokens > request_token_budget
                             or num_computed_tokens + num_new_tokens > self.max_model_len
@@ -1085,7 +1096,7 @@ class Scheduler(SchedulerInterface):
                 if pad_spec_decode:
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
-                    ] * self.num_spec_tokens
+                    ] * self.num_uniform_spec_tokens
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
