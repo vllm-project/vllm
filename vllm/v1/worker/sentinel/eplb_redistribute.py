@@ -50,16 +50,9 @@ def mark_dead_expert_slots_inplace(
     rank owns num_local_experts consecutive physical slots starting at
     rank * num_local_experts. Shape stays constant (no topology change).
     """
-    num_physical = physical_to_logical_map.shape[1]
-    ep_world_size = num_physical // num_local_experts
     for ep_rank in dead_ep_ranks:
-        if ep_rank < 0 or ep_rank >= ep_world_size:
-            raise ValueError(
-                f"ep_rank={ep_rank} out of bounds for ep_world_size={ep_world_size}"
-            )
         start = ep_rank * num_local_experts
-        end = start + num_local_experts
-        physical_to_logical_map[:, start:end] = -1
+        physical_to_logical_map[:, start : start + num_local_experts] = -1
 
 
 def check_redundancy_sufficient(
@@ -92,12 +85,6 @@ def redistribute_expert_placement(
     Raises:
         RuntimeError: If not enough slots to cover missing experts.
     """
-    if physical_to_logical_map.ndim != 2:
-        raise ValueError(
-            f"physical_to_logical_map must be 2D; got shape "
-            f"{tuple(physical_to_logical_map.shape)}"
-        )
-
     num_layers = physical_to_logical_map.shape[0]
     all_logical = set(range(num_logical))
     reassignments: set[tuple[int, int]] = set()

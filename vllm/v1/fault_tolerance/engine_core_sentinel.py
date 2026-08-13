@@ -236,7 +236,7 @@ class EngineCoreSentinel:
 
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         # Workers replay masks for the cumulative dead set.
-        ft_request.params.setdefault("dead_dp_ranks", sorted(self._dead_dp_ranks))
+        ft_request.params["dead_dp_ranks"] = sorted(self._dead_dp_ranks)
         return self._reinit_dp_and_dispatch_command(ft_request)
 
     def scale_down(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
@@ -338,9 +338,6 @@ class EngineCoreSentinel:
                     master_ip, dense_rank, len(alive), recovery_round
                 )
             )
-        params["dp_master_ip"] = master_ip
-        params["dp_group_rank"] = dense_rank
-        params["dp_group_size"] = len(alive)
         # Commit the master IP only after the group reinit succeeded, so a
         # failed recovery leaves a consistent state that can be retried.
         parallel_config.data_parallel_master_ip = master_ip
@@ -362,13 +359,14 @@ class EngineCoreSentinel:
         """Reinit the engine DP group and coordinate fresh ports for the
         worker DP/EP/EPLB groups. Returns worker params."""
         engine = self.engine
-        if not hasattr(engine, "dp_group") or not hasattr(engine, "dp_store"):
-            return {}
-
         parallel_config = engine.vllm_config.parallel_config
         self._dp_reinit_epoch += 1
 
-        worker_params: dict[str, Any] = {}
+        worker_params: dict[str, Any] = {
+            "dp_master_ip": master_ip,
+            "dp_group_rank": dense_rank,
+            "dp_group_size": dense_size,
+        }
 
         worker_params["new_stateless_dp_group_ports"] = self._coordinate_ports(
             "ft_worker_dp_ports",
