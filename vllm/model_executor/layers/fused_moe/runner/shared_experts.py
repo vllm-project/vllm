@@ -75,14 +75,22 @@ class SharedExperts(torch.nn.Module):
                 logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
 
         if self._stream is not None:
-            # One pair per DBO ubatch id.
+            # One triple per DBO ubatch id. `_input_ready_event` forks the aux
+            # stream (aux waits for the main-stream input), `_input_consumed_event`
+            # lets the main stream wait until the aux stream has snapshotted the
+            # aliased input (before the routed experts overwrite it), and
+            # `_output_ready_event` joins the aux stream back. All ordering is via
+            # CUDA events (record()/wait()), which are capture-safe;
+            # record_stream()/wait_stream() are illegal under HIP/CUDA graph
+            # capture and are deliberately avoided.
             self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
+            self._input_consumed_event = [torch.cuda.Event(), torch.cuda.Event()]
             self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
 
             # Persistent, module-owned copy targets for the shared-experts input
             # (one per DBO ubatch id). Sized to the largest cudagraph decode
-            # batch so the copy in `maybe_forward_async` is allocation-free and
-            # keeps a stable address under graph capture.
+            # batch so the snapshot in `maybe_forward_async` is allocation-free
+            # and keeps a stable address under graph capture.
             self._input_buffer: list[torch.Tensor | None] = [None, None]
             self._max_input_rows = self._moe_config.max_capture_size
 
@@ -145,8 +153,10 @@ class SharedExperts(torch.nn.Module):
     def maybe_forward_async(self, shared_experts_input: torch.Tensor) -> bool:
         """Enqueue shared experts on the aux stream without waiting for them.
 
-        Returns true if the shared experts were enqueued, false otherwise. Call
-        `wait` to wait for the shared experts to finish if this returns true.
+        Returns true if the shared experts were enqueued, false otherwise. When
+        it returns true the caller must, in order: call `wait_input_consumed`
+        just before the routed experts overwrite ``shared_experts_input`` in
+        place, and `wait` before consuming the shared-expert output.
         """
         if (
             self._determine_shared_experts_order(shared_experts_input)
@@ -158,46 +168,51 @@ class SharedExperts(torch.nn.Module):
         assert self._output[idx] is None
 
         # Some models (e.g. Qwen3.5) pass the same tensor as both hidden_states
-        # and the shared-experts input, then mutate it in place inside the routed
-        # experts. Copy the input into a private, module-owned buffer so the aux
-        # stream reads a stable copy while the main stream is free to overwrite
-        # the original. The copy runs on the main stream *before* the routed
-        # experts are launched, so program order guarantees it captures the
-        # pre-mutation values; the input_ready event (recorded after the copy)
-        # then holds the aux stream until the copy is done.
+        # and the shared-experts input, then overwrite it in place inside the
+        # routed experts. To keep the shared read correct without serializing the
+        # streams, the aux stream takes its own private snapshot of the input as
+        # its first op, and the main stream is held (via `wait_input_consumed`)
+        # only until that snapshot is done -- not until the whole shared MLP is.
         #
-        # A persistent buffer (rather than a fresh clone) needs no
-        # record_stream() to stay alive for the aux stream, so ordering is done
-        # entirely with CUDA events. This is what keeps the path cudagraph-safe:
-        # record_stream()/wait_stream() are illegal under HIP/CUDA graph capture,
-        # whereas event record()/wait() are captured correctly.
-        shared_experts_input = self._copy_input_to_buffer(shared_experts_input)
-
+        # The snapshot copy runs on the aux stream, so it stays off the main
+        # critical path: a device-to-device copy issued on the main stream here
+        # would serialize behind it on ROCm and collapse the overlap. Because the
+        # copy is issued as soon as the input is ready (before gate/dispatch), the
+        # main stream's `wait_input_consumed` resolves with essentially no stall,
+        # while the expensive shared MLP still overlaps the routed path.
+        #
+        # The snapshot target is a persistent, module-owned buffer, so it needs
+        # no record_stream() to stay alive for the aux stream; ordering is done
+        # entirely with CUDA events, which (unlike record_stream/wait_stream) are
+        # legal under HIP/CUDA graph capture.
         self._input_ready_event[idx].record(current_stream())
         with torch.cuda.stream(self._stream):
             self._input_ready_event[idx].wait(self._stream)
-            self._output[idx] = self._layer(shared_experts_input)
+            buffered_input = self._snapshot_input(shared_experts_input)
+            self._input_consumed_event[idx].record(self._stream)
+            self._output[idx] = self._layer(buffered_input)
             self._output_ready_event[idx].record(self._stream)
         return True
 
-    def _copy_input_to_buffer(self, x: torch.Tensor) -> torch.Tensor:
+    def _snapshot_input(self, x: torch.Tensor) -> torch.Tensor:
         """Copy the aliased shared-experts input into a persistent buffer.
 
         Returns a view of a module-owned buffer holding a private copy of ``x``,
-        so the aux stream never reads the storage the routed experts mutate in
-        place. The buffer is sized to the largest cudagraph decode batch and
-        reused across steps, so the copy is allocation-free on the hot path and
-        has a stable address under graph capture. Growth only happens eagerly
-        (during warmup or eager execution), never mid-capture: cudagraph decode
-        batches are captured largest-first and each size is warmed up eagerly
-        before capture, so replayed sizes never exceed the pre-allocated buffer.
+        so the aux stream never reads the storage the routed experts overwrite in
+        place. Must be called on the aux stream. The buffer is sized to the
+        largest cudagraph decode batch and reused across steps, so the copy is
+        allocation-free on the hot path and has a stable address under graph
+        capture. Growth only happens eagerly (during warmup or eager execution),
+        never mid-capture: cudagraph decode batches are captured largest-first
+        and each size is warmed up eagerly before capture, so replayed sizes
+        never exceed the pre-allocated buffer.
 
         Args:
             x: The shared-experts input, aliased with hidden_states.
 
         Returns:
             A ``[x.shape[0], ...]`` view of the persistent buffer, filled with a
-            copy of ``x`` on the current (main) stream.
+            copy of ``x`` on the aux stream.
         """
         idx = self._output_idx
         buf = self._input_buffer[idx]
@@ -214,6 +229,17 @@ class SharedExperts(torch.nn.Module):
         out = buf[:num_rows]
         out.copy_(x)
         return out
+
+    def wait_input_consumed(self) -> None:
+        """Block the main stream until the aux stream has snapshotted the input.
+
+        Ordered before the routed experts overwrite ``shared_experts_input`` in
+        place, so the aux stream's private copy of the aliased buffer is
+        guaranteed complete first. This closes the read/write race without
+        waiting on the expensive shared-expert MLP, preserving stream overlap.
+        """
+        assert self._stream is not None
+        self._input_consumed_event[self._output_idx].wait(current_stream())
 
     def wait(self) -> None:
         """Block the main stream until `maybe_forward_async` output is ready."""

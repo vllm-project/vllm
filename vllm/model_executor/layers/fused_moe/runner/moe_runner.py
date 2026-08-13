@@ -589,6 +589,16 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
+        # When shared experts run on the aux stream, they alias
+        # `shared_experts_input` with `hidden_states`, which the routed kernel
+        # below overwrites in place. Wait until the aux stream has taken its own
+        # snapshot of that buffer before launching the routed kernel. The
+        # snapshot is issued early (before the gate/dispatch above), so this
+        # resolves with essentially no stall while the shared MLP still overlaps.
+        if shared_experts_overlapping:
+            assert self._shared_experts is not None
+            self._shared_experts.wait_input_consumed()
+
         if self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
             fused_out = self.routed_experts.forward_monolithic(
