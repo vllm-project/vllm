@@ -19,6 +19,7 @@ from vllm.multimodal.utils import (
     set_mm_embedding_modality,
 )
 from vllm.renderers.paged_shm.tensor_ipc import PagedShmTensorIPC
+from vllm.utils.time_utils import debug_spend_time
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
@@ -125,7 +126,7 @@ class EncoderRunner:
         with stream:
             self._pshm_tensor_ipc.read(mm_kwargs, device=self.device)
         stream.synchronize()
-        print("execute_mm_encoder", time.perf_counter())
+        debug_spend_time("after execute_mm_encoder")
 
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=True

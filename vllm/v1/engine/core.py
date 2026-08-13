@@ -44,6 +44,7 @@ from vllm.utils.gc_utils import (
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.utils.time_utils import debug_spend_time, set_arrival_time
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -1710,9 +1711,8 @@ class EngineCoreProc(EngineCore):
                     if request_type == EngineCoreRequestType.ADD:
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
 
-                        print(
-                            f"after add_request_decoder {(time.perf_counter() - req.arrival_time) * 1000} ms",
-                        )
+                        set_arrival_time(req.arrival_time)
+                        debug_spend_time("after add_request_decoder")
 
                         try:
                             request = self.preprocess_add_request(req)

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import time
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
@@ -31,6 +30,7 @@ from vllm.renderers.inputs.preprocess import (
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.counter import Counter
 from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.time_utils import debug_spend_time
 from vllm.utils.tqdm_utils import maybe_tqdm
 from vllm.v1.engine.llm_engine import LLMEngine
 
@@ -111,7 +111,6 @@ class OfflineInferenceMixin:
         prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-        arrival_time: float | None = None,
     ) -> Sequence[EngineInput]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
@@ -141,7 +140,6 @@ class OfflineInferenceMixin:
             parsed_prompts,
             tok_params,
             prompt_extras=prompt_extras,
-            arrival_time=arrival_time,
         )
 
     def _preprocess_cmpl_one(
@@ -149,13 +147,11 @@ class OfflineInferenceMixin:
         prompt: PromptType,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-        arrival_time: float | None = None,
     ) -> EngineInput:
         (engine_input,) = self._preprocess_cmpl(
             [prompt],
             tokenization_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
-            arrival_time=arrival_time,
         )
         return engine_input
 
@@ -303,7 +299,6 @@ class OfflineInferenceMixin:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-        arrival_time: float | None = None,
     ) -> list[str]:
         seq_prompts = prompt_to_seq(prompts)
         seq_params = self._params_to_seq(params, len(seq_prompts))
@@ -316,7 +311,6 @@ class OfflineInferenceMixin:
                     prompt,
                     tokenization_kwargs,
                     mm_processor_kwargs=mm_processor_kwargs,
-                    arrival_time=arrival_time,
                 )
                 for prompt in maybe_tqdm(
                     seq_prompts,
@@ -327,7 +321,6 @@ class OfflineInferenceMixin:
             params=seq_params,
             lora_requests=seq_lora_requests,
             priorities=seq_priority,
-            arrival_time=arrival_time,
         )
 
     def _run_completion(
@@ -343,7 +336,6 @@ class OfflineInferenceMixin:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-        arrival_time: float | None = None,
     ):
         self._add_completion_requests(
             prompts=prompts,
@@ -353,11 +345,8 @@ class OfflineInferenceMixin:
             priority=priority,
             tokenization_kwargs=tokenization_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
-            arrival_time=arrival_time,
         )
-        print(
-            f"after _add_completion_requests {(time.perf_counter() - arrival_time) * 1000} ms",
-        )
+        debug_spend_time("after _add_completion_requests")
         return self._run_engine(use_tqdm=use_tqdm, output_type=output_type)
 
     def _run_chat(
@@ -539,7 +528,6 @@ class OfflineInferenceMixin:
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
         priorities: Sequence[int] | None = None,
-        arrival_time: float | None = None,
     ) -> list[str]:
         added_request_ids: list[str] = []
 
@@ -553,7 +541,6 @@ class OfflineInferenceMixin:
                         None if lora_requests is None else lora_requests[i],
                     ),
                     priority=0 if priorities is None else priorities[i],
-                    arrival_time=arrival_time,
                 )
                 added_request_ids.append(request_id)
         except Exception as e:
@@ -569,7 +556,6 @@ class OfflineInferenceMixin:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
-        arrival_time: float | None = None,
     ) -> str:
         if isinstance(params, SamplingParams):
             # We only care about the final output
@@ -583,7 +569,6 @@ class OfflineInferenceMixin:
             params,
             lora_request=lora_request,
             priority=priority,
-            arrival_time=arrival_time,
         )
 
     def _run_engine(
