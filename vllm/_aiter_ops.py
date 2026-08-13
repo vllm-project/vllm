@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import functools
+import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -8,6 +10,7 @@ import torch
 from torch._ops import OpOverload
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -15,6 +18,8 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
+
+logger = init_logger(__name__)
 
 try:
     import pandas as pd
@@ -48,6 +53,83 @@ def is_aiter_found() -> bool:
 # been checked in forward passes that are torch compiled.
 # we keep this global outside to not cause torch compile breaks.
 IS_AITER_FOUND = is_aiter_found()
+
+
+class _DlInfo(ctypes.Structure):
+    _fields_ = [
+        ("dli_fname", ctypes.c_char_p),
+        ("dli_fbase", ctypes.c_void_p),
+        ("dli_sname", ctypes.c_char_p),
+        ("dli_saddr", ctypes.c_void_p),
+    ]
+
+
+_HIP_RUNTIME_HANDLE: ctypes.CDLL | None = None
+
+
+def _find_torch_hip_runtime_path() -> str | None:
+    """Find the HIP runtime already selected by PyTorch's extension graph."""
+    try:
+        torch_extension = ctypes.CDLL(torch._C.__file__)
+        hip_symbol = torch_extension.hipGetDeviceCount
+        dladdr = ctypes.CDLL(None).dladdr
+        dladdr.argtypes = [ctypes.c_void_p, ctypes.POINTER(_DlInfo)]
+        dladdr.restype = ctypes.c_int
+        info = _DlInfo()
+        if not dladdr(ctypes.cast(hip_symbol, ctypes.c_void_p), ctypes.byref(info)):
+            return None
+    except (AttributeError, OSError, TypeError, ctypes.ArgumentError):
+        return None
+    if info.dli_fname is None:
+        return None
+
+    runtime_path = os.fsdecode(info.dli_fname)
+    if "libamdhip64.so" not in os.path.basename(runtime_path):
+        return None
+    return runtime_path
+
+
+def _promote_torch_hip_runtime() -> None:
+    """Make PyTorch's HIP runtime symbols visible to AITER JIT extensions.
+
+    PyTorch loads its native extension with ``RTLD_LOCAL``. Some AITER JIT
+    extensions rely on HIP registration and launch symbols being available in
+    the process-global lookup scope. Reopening the exact runtime that provides
+    PyTorch's ``hipGetDeviceCount`` symbol promotes the existing DSO instead of
+    selecting or initializing a second HIP runtime.
+    """
+    global _HIP_RUNTIME_HANDLE
+    if _HIP_RUNTIME_HANDLE is not None:
+        return
+
+    runtime_path = _find_torch_hip_runtime_path()
+    if runtime_path is None:
+        logger.warning_once(
+            "Could not locate PyTorch's HIP runtime; AITER JIT extensions may "
+            "fail to resolve HIP symbols."
+        )
+        return
+
+    try:
+        # Retain the handle for the process lifetime. Besides preventing a
+        # future dlclose, this documents that the RTLD_GLOBAL promotion is
+        # intentional and must outlive every lazily imported AITER extension.
+        _HIP_RUNTIME_HANDLE = ctypes.CDLL(runtime_path, mode=ctypes.RTLD_GLOBAL)
+    except OSError as err:
+        logger.warning_once(
+            "Could not promote PyTorch's HIP runtime at %s; AITER JIT "
+            "extensions may fail to resolve HIP symbols: %s",
+            runtime_path,
+            err,
+        )
+
+
+def _maybe_promote_torch_hip_runtime() -> None:
+    if current_platform.is_rocm() and IS_AITER_FOUND:
+        _promote_torch_hip_runtime()
+
+
+_maybe_promote_torch_hip_runtime()
 
 
 def is_aiter_found_and_supported() -> bool:
@@ -2012,14 +2094,29 @@ class rocm_aiter_ops:
     @staticmethod
     def register_ops_once() -> None:
         gfx1100_enabled = rocm_aiter_ops.is_gfx1100_aiter_enabled()
+        global _OPS_REGISTERED
+
         if not (
             is_aiter_found_and_supported()
             or is_aiter_found_and_supported_on_rdna4()
             or gfx1100_enabled
         ):
+            if not current_platform.is_rocm():
+                return
+
+            from vllm.platforms.rocm import on_gfx11
+
+            if on_gfx11() and not _OPS_REGISTERED:
+                direct_register_custom_op(
+                    op_name="rocm_aiter_sparse_attn_indexer",
+                    op_func=rocm_aiter_sparse_attn_indexer,
+                    mutates_args=["topk_indices_buffer"],
+                    fake_impl=rocm_aiter_sparse_attn_indexer_fake,
+                    dispatch_key=current_platform.dispatch_key,
+                )
+                _OPS_REGISTERED = True
             return
 
-        global _OPS_REGISTERED
         if not _OPS_REGISTERED:
             if gfx1100_enabled:
                 direct_register_custom_op(

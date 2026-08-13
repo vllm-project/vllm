@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -108,6 +109,9 @@ if TYPE_CHECKING:
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
+    VLLM_MAX_STOP_STRINGS: int = 4
+    VLLM_MAX_NUM_BAD_WORDS: int = 128
+    VLLM_MAX_BAD_WORDS_TOTAL_TOKENS: int = 1024
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
@@ -1064,6 +1068,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
     ),
+    # KV context length each adaptive-verification profiling request pretends to
+    # carry, so the profiled step reads a realistic amount of cache.
+    # Raise it for long-context deployments, where step cost is dominated by
+    # attention over a much larger KV cache than the default assumes.
+    # Clamped to max_model_len - query_len. Default: 8192 tokens
+    "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN": lambda: int(
+        os.getenv("VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", "8192")
+    ),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH": lambda: bool(
@@ -1113,6 +1125,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # requests from a single API call. Default: 1024.
     "VLLM_MAX_COMPLETION_PROMPTS": lambda: int(
         os.environ.get("VLLM_MAX_COMPLETION_PROMPTS", "1024")
+    ),
+    # Maximum number of stop strings allowed in a single request.
+    "VLLM_MAX_STOP_STRINGS": lambda: int(os.environ.get("VLLM_MAX_STOP_STRINGS", "4")),
+    # Maximum number of bad-word token sequences generated per request.
+    "VLLM_MAX_NUM_BAD_WORDS": lambda: int(
+        os.environ.get("VLLM_MAX_NUM_BAD_WORDS", "128")
+    ),
+    # Maximum total number of bad-word tokens (summed across all bad words)
+    # allowed per request. Bounds the per-request GPU buffer width.
+    "VLLM_MAX_BAD_WORDS_TOTAL_TOKENS": lambda: int(
+        os.environ.get("VLLM_MAX_BAD_WORDS_TOTAL_TOKENS", "1024")
     ),
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
