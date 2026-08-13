@@ -716,6 +716,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     w13_input_scale: torch.Tensor | None = None,
     w2_input_scale: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
+    gate_up_interleaved: bool = True,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -724,7 +725,13 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     torch.Tensor | None,
     torch.Tensor | None,
 ]:
-    """Convert loaded weights into backend-specific kernel format."""
+    """Convert loaded weights into backend-specific kernel format.
+
+    ``gate_up_interleaved`` describes the loaded ``w13`` layout: GPT-OSS fuses
+    gate/up row-interleaved ([g0, u0, g1, u1, ...]), while checkpoints with
+    separate gate_proj/up_proj tensors are already contiguous after ``_load_w13``.
+    Backends that only ever see GPT-OSS weights ignore it.
+    """
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
@@ -784,22 +791,17 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend == Mxfp4MoeBackend.RDNA3_MXFP4:
-        # Only GPT-OSS stores gate/up interleaved in a fused tensor; separate
-        # gate_proj/up_proj checkpoints are already contiguous after _load_w13.
-        from vllm.config import get_current_vllm_config
         from vllm.model_executor.layers.fused_moe.experts.rdna3_mxfp4_moe import (
             repack_experts_rdna3,
         )
 
-        model_type = get_current_vllm_config().model_config.hf_config.model_type
-        deint = model_type == "gpt_oss"
         b_q13, b_s13 = repack_experts_rdna3(
-            w13_weight.data, w13_weight_scale.data, deinterleave=deint
+            w13_weight.data, w13_weight_scale.data, deinterleave=gate_up_interleaved
         )
         b_q2, b_s2 = repack_experts_rdna3(
             w2_weight.data, w2_weight_scale.data, deinterleave=False
         )
-        if deint and w13_bias is not None:
+        if gate_up_interleaved and w13_bias is not None:
             w13_bias = torch.cat(
                 [w13_bias.data[:, ::2], w13_bias.data[:, 1::2]], dim=1
             ).contiguous()
