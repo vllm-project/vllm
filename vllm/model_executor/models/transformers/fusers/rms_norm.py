@@ -15,7 +15,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.distributed.utils import split_tensor_along_last_dim
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
@@ -24,6 +23,10 @@ from vllm.model_executor.models.transformers.fx_utils import (
     output_value,
     peel,
     trace,
+)
+from vllm.model_executor.models.transformers.layers import (
+    GemmaRMSNorm,
+    RMSNorm,
 )
 
 if TYPE_CHECKING:
