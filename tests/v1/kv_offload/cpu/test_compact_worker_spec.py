@@ -317,6 +317,13 @@ def _make_offloading_config(
             pcp_size=1,
             dcp_size=1,
             data_parallel_index=0,
+            # Upstream #51879 added these two as REQUIRED (no defaults) and
+            # updated its own five construction sites. This is a sixth, in a
+            # test file that exists only in this fork, so upstream could not see
+            # it and the merge produced no conflict -- _make_offloading_config()
+            # simply started raising TypeError at setup.
+            data_parallel_size=1,
+            data_parallel_rank_local=None,
             is_parallelism_agnostic=True,
         ),
         compact_slice_accounting=compact_slice_accounting,

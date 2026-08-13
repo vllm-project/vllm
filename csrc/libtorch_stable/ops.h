@@ -300,6 +300,16 @@ void fused_kimi_k3_mla_key_concat_ds_mla_insert(
     std::optional<torch::stable::Tensor> position_ids,
     std::optional<torch::stable::Tensor> cos_sin_cache);
 
+void fused_kimi_k3_mla_kv_concat(torch::stable::Tensor const& k_nope,
+                                 torch::stable::Tensor const& k_pe,
+                                 torch::stable::Tensor& k_out);
+
+void fused_kimi_k3_mla_kv_concat_quant_fp8(torch::stable::Tensor const& k_nope,
+                                           torch::stable::Tensor const& k_pe,
+                                           torch::stable::Tensor const& v,
+                                           torch::stable::Tensor& k_fp8,
+                                           torch::stable::Tensor& v_fp8);
+
 void fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert(
     torch::stable::Tensor const& q, torch::stable::Tensor const& k_nope,
     torch::stable::Tensor const& k_pe, torch::stable::Tensor const& kv_c_normed,

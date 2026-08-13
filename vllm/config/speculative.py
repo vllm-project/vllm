@@ -1547,19 +1547,44 @@ class SpeculativeConfig:
 
     @property
     def max_num_new_slots_for_drafting(self) -> int:
+        """Return the maximum additional drafting slots per request.
+
+        The scheduler budget already includes one query slot per decoding request.
+        Let K be ``num_speculative_tokens``. Standard configurations require:
+
+        ==================== ============= ======== ================
+        Algorithm            Method        Parallel Additional slots
+        ==================== ============= ======== ================
+        EAGLE3               eagle3        No       0
+        P-EAGLE              eagle3        Yes      K - 1
+        DFlash               dflash        Yes      K
+        DSpark               dspark        Yes      K - 1
+        MTP                  mtp           No       0
+        N-gram               ngram         No       0
+        Draft model          draft_model   No       1
+        PARD                 draft_model   Yes      K
+        ==================== ============= ======== ================
         """
-        Calculate the maximum number of new slots that might be added to the batch
-        when drafting.
-        """
-        slots_per_req = 0  # for serial non-draft-model methods, no change needed
+        num_draft_tokens = self.num_speculative_tokens
+
+        if self.use_dflash():
+            # DFlash uses one bonus query followed by K mask queries.
+            return num_draft_tokens
+
         if self.parallel_drafting:
-            # For parallel drafting, we need one new slot per 'masked' token
-            slots_per_req = self.num_speculative_tokens - 1
+            if self.uses_draft_model():
+                # PARD does not shift the existing input, so all K query
+                # positions require additional slots.
+                return num_draft_tokens
+
+            # The existing query is reused; only masked queries need new slots.
+            return num_draft_tokens - 1
+
         if self.uses_draft_model():
-            # For draft model-based speculation, we need one new slot per request
-            # Since we do not slice the draft tokens
-            slots_per_req += 1
-        return slots_per_req
+            # The autoregressive draft-model input retains one unsliced token.
+            return 1
+
+        return 0
 
     def use_gemma4_mtp(self) -> bool:
         return (

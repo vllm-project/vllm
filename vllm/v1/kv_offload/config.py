@@ -92,6 +92,10 @@ class OffloadingParallelConfig:
     dcp_size: int
     # Data parallel replica index of this engine.
     data_parallel_index: int
+    # Number of data parallel replicas.
+    data_parallel_size: int
+    # Local rank of the data parallel group, set only in SPMD mode.
+    data_parallel_rank_local: int | None
     # True when the bytes that will be persisted for a block are portable
     # across parallelism configurations: for the direct layout, concatenating
     # the block's data across all workers in rank order yields the same bytes
