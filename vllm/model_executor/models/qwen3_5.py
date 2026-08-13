@@ -133,20 +133,19 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
-        is_moe_layer = config.model_type == "qwen3_5_moe_text"
-        self.use_attn_reduce_scatter_for_moe = (
+        self.is_moe_layer = config.model_type == "qwen3_5_moe_text"
+        self.use_sequence_parallel = (
             parallel_config.use_sequence_parallel_moe
             and parallel_config.pipeline_parallel_size == 1
-            and is_moe_layer
+            and self.is_moe_layer
         )
-
         if self.layer_type == "linear_attention":
             self.linear_attn = QwenGatedDeltaNetAttention(
                 config=config,
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
-                reduce_results=not self.use_attn_reduce_scatter_for_moe,
+                reduce_results=not self.use_sequence_parallel,
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
@@ -155,7 +154,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
-                reduce_results=not self.use_attn_reduce_scatter_for_moe,
+                reduce_results=not self.use_sequence_parallel,
             )
         else:
             raise ValueError(f"Invalid layer_type {self.layer_type}")
@@ -173,6 +172,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                is_sequence_parallel=self.use_sequence_parallel,
                 prefix=f"{prefix}.mlp",
             )
         else:
