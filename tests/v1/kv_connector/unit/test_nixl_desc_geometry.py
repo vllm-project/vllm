@@ -98,7 +98,12 @@ class _RecordingNixl:
         pass
 
 
-def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):
+def _make_mla_hybrid_worker(
+    local_block_size,
+    kernel_block_size,
+    num_logical_blocks,
+    enable_prefix_caching=False,
+):
     """Build a real pull worker with a hybrid MLA + 2xKDA HMA layout."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
@@ -146,7 +151,7 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
     )
 
     vllm_config = create_vllm_config(block_size=local_block_size)
-    vllm_config.cache_config.enable_prefix_caching = False
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     # kv_buffer_device defaults to the *real* platform's device type, which on
     # a CPU-only test host would make this a host-buffer worker: host xfer
     # buffers are per-layer, so the HMA shared-tensor regions this test builds
@@ -363,7 +368,13 @@ def _resolve(
 
 
 def _run_hetero_case(
-    local_block, kernel, remote_block, num_tokens, tp_size=2, remote_kernel=None
+    local_block,
+    kernel,
+    remote_block,
+    num_tokens,
+    tp_size=2,
+    remote_kernel=None,
+    hit_tokens=0,
 ):
     """Full pull-path run for one geometry; returns pairing records.
 
@@ -378,13 +389,15 @@ def _run_hetero_case(
     block_size_ratio = kernel // remote_kernel
     remote_ppl = remote_block // remote_kernel
     matched = num_tokens - 1  # mamba N-1 rule
-    n_local = -(-num_tokens // local_block)
+    assert hit_tokens % local_block == 0
+    n_local = -(-num_tokens // local_block) - hit_tokens // local_block
     n_remote = -(-matched // remote_block)
 
     worker = _make_mla_hybrid_worker(
         local_block_size=local_block,
         kernel_block_size=kernel,
         num_logical_blocks=max(2 * n_local + 4, 8),
+        enable_prefix_caching=hit_tokens > 0,
     )
     # Local KDA state pages are (48, 64) bytes; the remote holds 1/tp_size
     # shards of each.
@@ -416,6 +429,8 @@ def _run_hetero_case(
             "remote_port": 1234,
             "tp_size": tp_size,
         },
+        num_local_computed_tokens=hit_tokens,
+        num_total_tokens=matched,
     )
     meta = metadata.reqs_to_recv["req-b"]
     meta.local_physical_block_ids = worker._logical_to_kernel_block_ids(
@@ -476,17 +491,25 @@ def _run_hetero_case(
                 f"tokens {ltok} vs {rtok}"
             )
             if lkind == "attn":
-                assert ltok == rtok, (
+                assert hit_tokens + ltok == rtok, (
                     f"TOKEN MISALIGNMENT: local sub-block holds tokens "
-                    f"[{ltok}..) but receives remote tokens [{rtok}..) "
+                    f"[{hit_tokens + ltok}..) but receives remote tokens "
+                    f"[{rtok}..) "
                     f"(geometry local_block={local_block}, "
                     f"remote_block={remote_block}, N={num_tokens})"
                 )
-                covered_tokens.add(ltok)
+                covered_tokens.add(rtok)
 
     # Invariant 3: full coverage of the matched tokens, at the finest
     # transfer granularity (the remote kernel block).
-    needed = {t for t in range(0, matched - matched % remote_kernel, remote_kernel)}
+    needed = {
+        t
+        for t in range(
+            hit_tokens,
+            matched - matched % remote_kernel,
+            remote_kernel,
+        )
+    }
     missing = needed - covered_tokens
     assert not missing, (
         f"tokens never transferred: {sorted(missing)[:8]} "
@@ -511,7 +534,7 @@ def _run_hetero_case(
                     break
     done_sending, done_recving = worker.get_finished()
     assert "req-b" in done_recving
-    n_excluded = -(-matched // local_block)
+    n_excluded = -(-matched // local_block) - hit_tokens // local_block
     stale = []
     for b in local_attn[:n_excluded]:
         for region, t in enumerate(worker._test_tensors):
@@ -524,6 +547,28 @@ def _run_hetero_case(
         f"blocks (region, block, bytes): {stale} "
         f"(geometry local_block={local_block}, remote_block={remote_block}, "
         f"N={num_tokens}, matched={matched})"
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "local_block,remote_block,num_tokens,hit_tokens",
+    [
+        (24, 40, 65, 24),
+        (40, 24, 97, 40),
+    ],
+)
+def test_hetero_ppl_partial_prefix_hit_end_to_end(
+    local_block, remote_block, num_tokens, hit_tokens
+):
+    """A block-aligned local hit selects the matching remote suffix, writes
+    only within the newly allocated local blocks, and zeroes their padding."""
+    _run_hetero_case(
+        local_block=local_block,
+        kernel=4,
+        remote_block=remote_block,
+        num_tokens=num_tokens,
+        hit_tokens=hit_tokens,
     )
 
 

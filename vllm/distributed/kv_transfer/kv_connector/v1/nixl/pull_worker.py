@@ -31,6 +31,8 @@ _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
 
+    _supports_hetero_ppl_prefix_caching = True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -211,6 +213,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
+                num_local_computed_tokens=meta.num_local_computed_tokens,
+                num_total_tokens=meta.num_total_tokens,
             )
 
         if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
@@ -230,6 +234,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
+        num_local_computed_tokens: int = 0,
+        num_total_tokens: int = 0,
     ):
         """
         Post a READ point-to-point xfer request from a single local worker to
@@ -294,6 +300,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             prefill_block_ids=remote_block_ids,
             decode_physical_per_logical=self._physical_blocks_per_logical_kv_block,
             prefill_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
+            num_local_computed_tokens=num_local_computed_tokens,
+            num_total_tokens=num_total_tokens,
+            block_size_ratio=block_size_ratio,
         )
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
