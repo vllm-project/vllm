@@ -6,13 +6,17 @@ from typing import cast
 
 import torch
 
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
-    DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
-    DeepseekV4FlashMLAMetadataBuilder,
+    DeepseekV4SparseMLABackend,
+    DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -310,7 +314,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
     decode_swa_ragged_indptr: torch.Tensor | None = None
 
 
-class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4FlashMLAMetadataBuilder):
+class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.c128a_decode_topk_ragged_indices_buffer: torch.Tensor | None = None
@@ -368,6 +372,10 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4FlashMLAMetadataBuil
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    # Keep fused multi-step decode disabled until update_draft_decode_metadata()
+    # also refreshes the ROCm-specific ragged SWA indices and indptrs.
+    supports_draft_decode_metadata_update = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
@@ -427,7 +435,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         )
 
 
-class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4FlashMLABackend):
+class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV4"
@@ -442,9 +450,72 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Block scale for the preshuffled weight; None = not preshuffled.
+        self._wqa_wkv_scale: torch.Tensor | None = None
+        self._wo_b_scale: torch.Tensor | None = None
+
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
+
+    def prepare_attn_preshuffle(self) -> None:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if not rocm_aiter_ops.is_enabled():
+            return
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            _upcast_e8m0_to_fp32,
+        )
+        from vllm.model_executor.utils import replace_parameter
+
+        def _prep(linear) -> torch.Tensor | None:
+            w = getattr(linear, "weight", None)
+            if w is None or w.dim() != 2:
+                return None
+            # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
+            if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
+                return None
+            ws = getattr(linear, "weight_scale_inv", None)  # per-block scale
+            if ws is None:
+                return None
+            if ws.dtype == torch.float8_e8m0fnu:
+                ws = _upcast_e8m0_to_fp32(ws).contiguous()
+            # Shuffle the weight in place (single weight, no unshuffled copy).
+            replace_parameter(
+                linear,
+                "weight",
+                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            )
+            return ws
+
+        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
+        self._wo_b_scale = _prep(self.wo_b)
+
+    def _bpre_attn_gemm(
+        self,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        x: torch.Tensor,
+        reduce_tp: bool,
+    ) -> torch.Tensor:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
+        out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            x_fp8, weight, x_scale, scale, output_dtype=x.dtype
+        )
+        if reduce_tp and get_tensor_model_parallel_world_size() > 1:
+            out = tensor_model_parallel_all_reduce(out)
+        return out
+
+    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self._wqa_wkv_scale is not None and hidden_states.dim() == 2:
+            return self._bpre_attn_gemm(
+                self.fused_wqa_wkv.weight, self._wqa_wkv_scale, hidden_states, False
+            )
+        return super()._fused_wqa_wkv_gemm(hidden_states)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
@@ -457,7 +528,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.o_lora_rank,
             self.wo_a,
         )
-        return self.wo_b(z.flatten(1))
+        zf = z.flatten(1)
+        if self._wo_b_scale is not None and zf.dim() == 2:
+            return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
+        return self.wo_b(zf)
 
     def forward_mqa(
         self,

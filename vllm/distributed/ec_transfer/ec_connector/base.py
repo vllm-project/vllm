@@ -275,3 +275,15 @@ class ECConnectorBase(ABC):
             get_finished().
         """
         return False, None
+
+    def has_pending_push_work(self) -> bool:
+        """Return True if the connector has push-mode work that requires
+        the engine main loop to keep stepping (e.g. for EPD,
+        Producer has push work when Xfer is in progress - Consumer
+        is reading it).
+        This mirrors exactly the KV Connector's has_pending_push_work().
+
+        Connectors that don't implement push-based EC transfer should
+        leave this as False.
+        """
+        return False

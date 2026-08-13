@@ -54,6 +54,8 @@ def main():
         logger.info("Delegating entrypoint handling to vllm-omni")
         omni_main()
     else:
+        vllm.entrypoints.cli.benchmark.main.maybe_exec_rust_bench()
+
         # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default
         if len(sys.argv) > 1 and sys.argv[1] == "bench":
             logger.debug(

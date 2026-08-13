@@ -92,11 +92,6 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
     def shutdown(self) -> None:
         MockWeightTransferEngine.shutdown_called = True
 
-    @staticmethod
-    def trainer_send_weights(*args, **kwargs):
-        """Mock method to simulate trainer sending weights."""
-        pass
-
 
 def mock_create_engine(config, vllm_config, device, model):
     """Mock factory function that returns our mock engine."""
@@ -234,6 +229,7 @@ def test_update_weights_calls_engine():
             assert shapes == test_shapes
 
         llm.finish_weight_update()
+        assert llm.get_weight_version() == "default"
 
 
 @create_new_process_for_each_test()
@@ -259,6 +255,8 @@ def test_full_weight_transfer_flow():
             weight_transfer_config=WeightTransferConfig(backend="nccl"),
         )
 
+        assert llm.get_weight_version() == "default"
+
         # Step 1: Initialize weight transfer engine
         llm.init_weight_transfer_engine(
             WeightTransferInitRequest(init_info={"test_param": "flow_test"})
@@ -278,8 +276,15 @@ def test_full_weight_transfer_flow():
             )
         )
 
+        assert llm.get_weight_version() == "default"
+
         # Step 4: Finish weight update
-        llm.finish_weight_update()
+        llm.finish_weight_update("step-42")
+
+        assert llm.get_weight_version() == "step-42"
+
+        llm.update_weight_version("manual-version")
+        assert llm.get_weight_version() == "manual-version"
 
         # Verify the full flow completed
         def check_flow(self):
@@ -319,4 +324,5 @@ def test_weight_transfer_config_backend():
     )
 
     config = llm.llm_engine.vllm_config.weight_transfer_config
+    assert config is not None
     assert config.backend == "nccl"
