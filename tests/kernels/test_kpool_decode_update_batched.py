@@ -13,6 +13,14 @@ plain decode, plus a randomized fuzz pass.
 The kernel iterates each request's ``next_n`` tokens in position order inside
 one program (grid = num_requests) to preserve the pool-completion
 read-after-stash dependency; the reference mirrors that ordering.
+
+``test_decode_writer_matches_prefill_writer`` is deliberately NOT
+reference-based: it checks the decode writer against the *prefill* writer
+(``kpool_compress_and_write_cache``), the invariant that actually matters in
+production. A hand-written reference can drift to match a buggy kernel -- that
+is exactly how the stash-gating bug (intra-pool tokens never entering the tail
+ring, because the stash was gated on the pool-granular ``slot_mapping``) stayed
+green here.
 """
 
 import math
@@ -21,6 +29,7 @@ import pytest
 import torch
 
 from vllm.models.glm5next.nvidia.ops.kpool_compress import (
+    kpool_compress_and_write_cache,
     kpool_decode_update_and_maybe_write_cache_batched,
 )
 
@@ -180,8 +189,11 @@ def _torch_reference(
                 kv_flat[k_off : k_off + HEAD_DIM] = quantized.view(torch.uint8)
                 kv_flat[s_off : s_off + 4] = scale.detach().reshape(1).view(torch.uint8)
 
-            # stash
-            if pos_valid:
+            # stash -- gated on the TOKEN-granular tail slot, not on pos_valid.
+            # pos_valid keys off the pool-granular cache_loc, which is -1 for
+            # every token that is not the pool's last, so gating the stash on it
+            # would drop all intra-pool tokens.
+            if p >= 0 and tail_slot_cpu[b][t] >= 0:
                 tail_cpu[block, 0, phys_slot] = cur_key
                 tail_cpu[block, 1, phys_slot] = cur_score
 
@@ -219,6 +231,79 @@ def _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos):
         round_scale=ROUND_SCALE,
     )
     return kv, tail
+
+
+@pytest.mark.parametrize("pool_size", [4, 16])
+def test_decode_writer_matches_prefill_writer(pool_size):
+    """A pool built token-by-token by decode must equal one built by prefill.
+
+    The indexer K cache has two writers: ``kpool_compress_and_write_cache``
+    compresses the prompt during prefill, and this kernel compresses the
+    generated tokens during decode. They must produce byte-identical entries,
+    because the fraction of the cache written by the decode path grows with the
+    generation length -- so an asymmetry between them silently degrades sparse
+    top-k selection more and more the longer the model generates, and is
+    invisible below ``index_topk`` (where every pool is selected anyway).
+
+    Unlike the reference-based tests above, this one uses the *other production
+    kernel* as the oracle, so it cannot be defeated by the reference drifting
+    to match a buggy implementation. `pool_size=4` is the shipping
+    ``index_kpool`` for GLM5-Next; 16 covers the wider layout.
+    """
+    n_pools, page, nblk = 8, 64, 4
+    n_tok = n_pools * pool_size
+    dev = "cuda"
+    torch.manual_seed(0)
+    k = torch.randn(n_tok, HEAD_DIM, dtype=torch.bfloat16, device=dev)
+    score = torch.randn(n_tok, HEAD_DIM, dtype=torch.bfloat16, device=dev)
+    ape = torch.randn(pool_size, HEAD_DIM, dtype=torch.float32, device=dev)
+
+    kv_prefill = torch.zeros(nblk, page, HEAD_DIM + 4, dtype=torch.uint8, device=dev)
+    kpool_compress_and_write_cache(
+        kv_prefill,
+        k.view(n_pools, pool_size, HEAD_DIM),
+        score.view(n_pools, pool_size, HEAD_DIM),
+        ape,
+        torch.arange(n_pools, dtype=torch.int64, device=dev),
+        pool_size=pool_size,
+        head_dim=HEAD_DIM,
+        round_scale=ROUND_SCALE,
+    )
+
+    # One request owning tail block 0, fed one token per decode step.
+    kv_decode = torch.zeros_like(kv_prefill)
+    tail = torch.zeros(nblk, 2, pool_size, HEAD_DIM, dtype=torch.bfloat16, device=dev)
+    for t in range(n_tok):
+        completes = t % pool_size == pool_size - 1
+        kpool_decode_update_and_maybe_write_cache_batched(
+            kv_decode,
+            tail,
+            # token-granular: every token has a valid tail slot
+            torch.tensor([[t % pool_size]], dtype=torch.int32, device=dev),
+            k[t].view(1, 1, HEAD_DIM),
+            score[t].view(1, 1, HEAD_DIM),
+            ape,
+            # pool-granular: only the pool's last token carries a cache slot
+            torch.tensor(
+                [[t // pool_size if completes else -1]], dtype=torch.int32, device=dev
+            ),
+            torch.tensor([[t]], dtype=torch.int32, device=dev),
+            pool_size,
+            HEAD_DIM,
+            round_scale=ROUND_SCALE,
+        )
+
+    differing = [
+        p
+        for p in range(n_pools)
+        if not torch.equal(
+            kv_prefill[p // page, p % page], kv_decode[p // page, p % page]
+        )
+    ]
+    assert not differing, (
+        f"decode-written pools differ from prefill-written pools: "
+        f"{len(differing)}/{n_pools} (pool_size={pool_size}, first={differing[:5]})"
+    )
 
 
 def test_leading_invalid_tail_slot():
