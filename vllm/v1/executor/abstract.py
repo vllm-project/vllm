@@ -157,6 +157,23 @@ class Executor(ABC):
         kwargs: dict | None = None,
         non_block: Literal[False] = False,
     ) -> list[_R]:
+        pass
+
+    @overload
+    def collective_rpc(
+        self,
+        method: str | Callable[[WorkerBase], _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: Literal[True] = True,
+    ) -> Future[list[_R]]:
+        pass
+
+    @abstractmethod
+    def collective_rpc(
+        self, method, timeout=None, args=(), kwargs=None, non_block: bool = False
+    ):
         """Execute an RPC call on all workers.
 
         Args:
@@ -181,23 +198,6 @@ class Executor(ABC):
             and set up data-plane communication to pass data.
 
         """
-        pass
-
-    @overload
-    def collective_rpc(
-        self,
-        method: str | Callable[[WorkerBase], _R],
-        timeout: float | None = None,
-        args: tuple = (),
-        kwargs: dict | None = None,
-        non_block: Literal[True] = True,
-    ) -> Future[list[_R]]:
-        pass
-
-    @abstractmethod
-    def collective_rpc(
-        self, method, timeout=None, args=(), kwargs=None, non_block: bool = False
-    ):
         raise NotImplementedError
 
     def get_kv_connector_handshake_metadata(

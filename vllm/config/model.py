@@ -1903,7 +1903,7 @@ class ModelConfig:
 
     @property
     def head_dtype(self) -> torch.dtype:
-        """ "head" refers to the last Linear layer(s) of an LLM,
+        """The "head" refers to the last Linear layer(s) of an LLM,
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 

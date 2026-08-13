@@ -268,7 +268,7 @@ def ref_masked_attention(
     q_seq_lens: list | None = None,
     kv_seq_lens: list | None = None,
 ) -> torch.Tensor:
-    """ "Golden" masked attention reference. Supports two types of masking:
+    """Reference ("golden") masked attention. Supports two types of masking:
 
     * Basic attention mask, utilizing {q,kv}_seq_lens args to mask out
       padding elements

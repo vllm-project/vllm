@@ -1036,9 +1036,9 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        """Same as apply(), except uses router_logits as opposed
-        to the topk_ids and topk_weights. This is useful for kernels
-        with fused router and fused_experts (e.g. FLASHINFER_TRTLLM).
+        """Same as `apply`, except it takes router_logits rather than
+        topk_ids and topk_weights. This is useful for kernels with a fused
+        router and fused_experts (e.g. FLASHINFER_TRTLLM).
         """
         raise NotImplementedError
 
