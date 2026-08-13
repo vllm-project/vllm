@@ -134,6 +134,8 @@ async def serve_http(
         )
 
         await loop.run_in_executor(
+            # Now engine_client.shutdown will be executed twice;
+            # this is the first time.
             None, partial(engine_client.shutdown, timeout=timeout)
         )
         logger.info_once("[shutdown] API server: engine client stopped")

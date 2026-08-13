@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
@@ -77,17 +79,21 @@ class BaseRenderer(ABC, Generic[_T]):
         self.model_config = config.model_config
         self.api_process_rank = config.parallel_config._api_process_rank
 
+        self._resources = ExitStack()
+        self._resources.callback(self._log_shutdown)
+        self._finalizer = weakref.finalize(self, self._resources.close)
+
         self.tokenizer = tokenizer
 
         # Thread pool executor for blocking tokenizer operations.  The
         # multimodal processor receives a deep-copied tokenizer (see #36557)
         # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
-        self._executor = ThreadPoolExecutor(max_workers=pool_workers)
+        self._executor = self._resources.enter_context(ThreadPoolExecutor(max_workers=pool_workers))
 
         # Separate single-worker executor so tokenization never queues behind
         # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
-        self._mm_executor: Executor = ThreadPoolExecutor(max_workers=1)
+        self._mm_executor = self._resources.enter_context(ThreadPoolExecutor(max_workers=1))
 
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
@@ -122,6 +128,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 )
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
+            self._resources.callback(self.mm_processor_cache.close)
 
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
@@ -288,17 +295,11 @@ class BaseRenderer(ABC, Generic[_T]):
         await self._clear_mm_cache_async()
 
     def shutdown(self) -> None:
-        mm_processor_cache = self.mm_processor_cache
-        if mm_processor_cache is not None:
-            mm_processor_cache.close()
+        self._resources.close()
 
-        if executor := getattr(self, "_executor", None):
-            executor.shutdown(wait=False)
-
-        if (
-            mm_executor := getattr(self, "_mm_executor", None)
-        ) is not None and mm_executor is not executor:
-            mm_executor.shutdown(wait=False)
+    @staticmethod
+    def _log_shutdown():
+        logger.info("[shutdown] BaseRenderer")
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:

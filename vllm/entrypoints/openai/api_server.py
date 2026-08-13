@@ -183,6 +183,8 @@ async def build_async_engine_client_from_engine_args(
         yield async_llm
     finally:
         if async_llm:
+            # Now engine_client.shutdown will be executed twice;
+            # this is the second time.
             async_llm.shutdown(timeout=vllm_config.shutdown_timeout)
 
 
