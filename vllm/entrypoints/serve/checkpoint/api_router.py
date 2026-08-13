@@ -28,6 +28,14 @@ async def suspend(raw_request: Request):
             content={
                 "error": f"Invalid suspend mode '{mode}'. "
                 "Must be one of 'abort', 'wait', 'keep'."
+@router.post("/suspend")
+async def suspend(raw_request: Request):
+    mode = raw_request.query_params.get("mode", "abort")
+    if mode not in ("abort", "wait", "keep"):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": f"Invalid suspend mode '{mode}'. Must be one of 'abort', 'wait', 'keep'."
             },
         )
     logger.info("Suspending engine with mode: %s", mode)
