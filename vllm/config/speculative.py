@@ -950,6 +950,10 @@ class SpeculativeConfig:
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
+                    or (
+                        "DSparkDraftModel" in self.draft_model_config.architectures
+                        and self.draft_model_config.hf_config.model_type == "qwen3"
+                    )
                 ):
                     self.method = "dspark"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
@@ -1007,7 +1011,16 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
 
-                if self.method == "dspark" and (
+                if (
+                    self.method == "dspark"
+                    and "DSparkDraftModel" in self.draft_model_config.architectures
+                    and self.draft_model_config.hf_config.model_type == "qwen3"
+                ):
+                    self.draft_model_config.hf_config.architectures = [
+                        "Qwen3DSparkModel"
+                    ]
+                    self.update_arch_()
+                elif self.method == "dspark" and (
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
