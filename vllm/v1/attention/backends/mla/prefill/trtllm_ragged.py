@@ -147,16 +147,18 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
-        out = torch.empty(
-            q.shape[0],
-            q.shape[1],
-            v.shape[2],
-            device=q.device,
-            dtype=self._prefill_metadata.output_dtype,
-        )
+        if out is None:
+            out = torch.empty(
+                q.shape[0],
+                q.shape[1],
+                v.shape[2],
+                device=q.device,
+                dtype=self._prefill_metadata.output_dtype,
+            )
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,

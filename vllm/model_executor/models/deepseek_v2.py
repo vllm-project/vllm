@@ -635,7 +635,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
 
     def forward(self): ...
 
-    def get_attn_backend(self) -> AttentionBackend:
+    def get_attn_backend(self) -> type[AttentionBackend]:
         return DeepseekV32IndexerBackend
 
 
@@ -690,6 +690,7 @@ class Indexer(nn.Module):
         # NOTE: (zyongye) we use fp8 naive cache,
         #       where we store value in fp8 and scale in fp32
         #       per self.quant_block_size element
+        assert cache_config is not None
         self.k_cache = DeepseekV32IndexerCache(
             head_dim=self.head_dim + self.head_dim // self.quant_block_size * 4,
             dtype=torch.uint8,
@@ -1116,6 +1117,10 @@ class DeepseekV2MLAAttention(nn.Module):
             )
 
         if self.is_v32 and (not _skip_topk or is_mtp_layer):
+            assert q_lora_rank is not None
+            assert cache_config is not None
+            self.indexer_rope_emb: nn.Module | None
+            self.indexer: Indexer | None
             self.indexer_rope_emb = get_rope(
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
@@ -1227,6 +1232,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         self.use_mha = use_mha
 
+        attn_cls: typing.Any
         if use_mha:
             attn_cls = DeepseekAttention
         elif model_config.use_mla:
@@ -1520,7 +1526,7 @@ class DeepseekV2Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, int | str]] = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -1689,7 +1695,7 @@ class DeepseekV2Model(nn.Module):
                     # param and delegate to its expert-aware weight_loader
                     # with expert_id.
                     for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
+                        param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in chunk_name:
                             continue
 
@@ -1715,7 +1721,7 @@ class DeepseekV2Model(nn.Module):
                             param,
                             weight_to_load,
                             name_mapped,
-                            shard_id=shard_id,
+                            shard_id=expert_shard_id,
                             expert_id=expert_id,
                             return_success=True,
                         )
@@ -1737,9 +1743,10 @@ class DeepseekV2Model(nn.Module):
                             continue
 
                         # Remapping the name of FP8 kv-scale.
-                        name = maybe_remap_kv_scale_name(name, params_dict)
-                        if name is None:
+                        remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                        if remapped_name is None:
                             continue
+                        name = remapped_name
 
                         if is_pp_missing_parameter(name, self):
                             continue
