@@ -5,7 +5,6 @@ from argparse import ArgumentError
 
 import pytest
 
-from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -64,29 +63,39 @@ def test_prefix_caching_xxhash_from_cli():
     assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash_cbor"
 
 
-def test_defaults_with_usage_context():
-    engine_args = EngineArgs(model="facebook/opt-125m")
-    vllm_config: VllmConfig = engine_args.create_engine_config(UsageContext.LLM_CLASS)
+def test_mm_prefix_lm_raises_batched_tokens_floor():
+    """Verify that prefix-LM multimodal models auto-raise
+    max_num_batched_tokens to fit at least one multimodal item.
 
-    from vllm.platforms import current_platform
-    from vllm.utils.mem_constants import GiB_bytes
+    Regression test for https://github.com/vllm-project/vllm/issues/42687
+    """
+    from unittest.mock import patch
 
-    device_memory = current_platform.get_device_total_memory()
-    device_name = current_platform.get_device_name().lower()
-    if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
-        # For GPUs like H100, H200, and MI300x with >= 70GB memory
-        default_llm_tokens = 16384
-        default_server_tokens = 8192
-        default_max_num_seqs = 1024
-    else:
-        default_llm_tokens = 8192
-        default_server_tokens = 2048
-        default_max_num_seqs = 256
+    # Simulate a prefix-LM multimodal model whose largest modality
+    # (video) requires 2496 tokens — more than the 2048 default.
+    fake_mm_min = (2496, "video")
 
-    assert vllm_config.scheduler_config.max_num_seqs == default_max_num_seqs
-    assert vllm_config.scheduler_config.max_num_batched_tokens == default_llm_tokens  # noqa: E501
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        max_model_len=2048,
+        enforce_eager=True,
+    )
 
-    engine_args = EngineArgs(model="facebook/opt-125m")
-    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
-    assert vllm_config.scheduler_config.max_num_seqs == default_max_num_seqs
-    assert vllm_config.scheduler_config.max_num_batched_tokens == default_server_tokens  # noqa: E501
+    with (
+        patch.object(
+            type(engine_args),
+            "_get_min_mm_batched_tokens",
+            staticmethod(lambda _mc: fake_mm_min),
+        ),
+        patch(
+            "vllm.config.ModelConfig.is_multimodal_model",
+            new_callable=lambda: property(lambda self: True),
+        ),
+        patch(
+            "vllm.config.ModelConfig.is_mm_prefix_lm",
+            new_callable=lambda: property(lambda self: True),
+        ),
+    ):
+        vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+    assert vllm_config.scheduler_config.max_num_batched_tokens >= 2496

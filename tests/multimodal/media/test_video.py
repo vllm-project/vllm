@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import io
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import numpy.typing as npt
@@ -10,9 +12,19 @@ import pytest
 from PIL import Image
 
 from vllm.assets.base import get_vllm_public_assets
-from vllm.assets.video import video_to_ndarrays, video_to_pil_images_list
+from vllm.assets.video import (
+    video_get_metadata,
+    video_to_ndarrays,
+    video_to_pil_images_list,
+)
 from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
-from vllm.multimodal.video import VIDEO_LOADER_REGISTRY, VideoLoader
+from vllm.multimodal.video import (
+    PYNVVIDEOCODEC_VIDEO_BACKEND,
+    VIDEO_LOADER_REGISTRY,
+    PyNvVideoCodecVideoBackend,
+    VideoLoader,
+    _pynvvc_frames_to_nhwc,
+)
 
 from ..utils import cosine_similarity, create_video_from_image, normalize_image
 
@@ -110,6 +122,20 @@ def test_opencv_video_io_colorspace(tmp_path, is_color: bool, fourcc: str, ext: 
         )
         assert np.sum(np.isnan(sim)) / sim.size < 0.001
         assert np.nanmean(sim) > 0.99
+
+
+def test_opencv_video_metadata_matches_sampled_frame_timeline(tmp_path):
+    image_path = f"{tmp_path}/test_metadata_image.png"
+    Image.new("RGB", (8, 8), color=(255, 0, 0)).save(image_path)
+    video_path = f"{tmp_path}/test_metadata_video.mp4"
+    create_video_from_image(image_path, video_path, num_frames=10, fps=5.0)
+
+    metadata = video_get_metadata(video_path, num_frames=4)
+
+    assert metadata["fps"] == pytest.approx(5.0)
+    assert metadata["duration"] == pytest.approx(2.0)
+    assert metadata["frames_indices"] == [0, 3, 6, 9]
+    assert metadata["total_num_frames"] == 4
 
 
 NUM_FRAMES = 10
@@ -239,6 +265,17 @@ def test_video_media_io_backend_env_var_fallback(monkeypatch: pytest.MonkeyPatch
         assert metadata_missing["video_backend"] == "test_video_backend_override_2"
 
 
+def _make_jpeg_b64_frames(n: int, width: int = 8, height: int = 8) -> list[str]:
+    """Return *n* tiny base64-encoded JPEG frames."""
+    frames: list[str] = []
+    for i in range(n):
+        img = Image.new("RGB", (width, height), color=(i % 256, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        frames.append(pybase64.b64encode(buf.getvalue()).decode("ascii"))
+    return frames
+
+
 def test_load_base64_jpeg_returns_metadata():
     """Regression test: load_base64 with video/jpeg must return metadata.
 
@@ -248,16 +285,8 @@ def test_load_base64_jpeg_returns_metadata():
     """
 
     num_test_frames = 3
-    frame_width, frame_height = 8, 8
 
-    # Build a few tiny JPEG frames and base64-encode them
-    b64_frames = []
-    for i in range(num_test_frames):
-        img = Image.new("RGB", (frame_width, frame_height), color=(i * 80, 0, 0))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG")
-        b64_frames.append(pybase64.b64encode(buf.getvalue()).decode("ascii"))
-
+    b64_frames = _make_jpeg_b64_frames(num_test_frames)
     data = ",".join(b64_frames)
 
     imageio = ImageMediaIO()
@@ -287,3 +316,233 @@ def test_load_base64_jpeg_returns_metadata():
     # Default fps=1 → duration == num_frames
     assert metadata["fps"] == 1.0
     assert metadata["duration"] == float(num_test_frames)
+
+
+def test_load_base64_jpeg_enforces_num_frames_limit():
+    """Frames beyond num_frames must be truncated in the video/jpeg path.
+
+    Without the limit an attacker can send thousands of base64 JPEG frames
+    in a single request and exhaust server memory (OOM).
+    """
+    num_frames_limit = 4
+    sent_frames = 20
+
+    b64_frames = _make_jpeg_b64_frames(sent_frames)
+    data = ",".join(b64_frames)
+
+    imageio = ImageMediaIO()
+    videoio = VideoMediaIO(imageio, num_frames=num_frames_limit)
+    frames, metadata = videoio.load_base64("video/jpeg", data)
+
+    assert frames.shape[0] == num_frames_limit
+    assert metadata["total_num_frames"] == num_frames_limit
+    assert metadata["frames_indices"] == list(range(num_frames_limit))
+
+
+def test_load_base64_jpeg_no_limit_when_num_frames_negative():
+    """When num_frames is -1, all frames should be loaded without truncation."""
+    sent_frames = 10
+
+    b64_frames = _make_jpeg_b64_frames(sent_frames)
+    data = ",".join(b64_frames)
+
+    imageio = ImageMediaIO()
+    videoio = VideoMediaIO(imageio, num_frames=-1)
+    frames, metadata = videoio.load_base64("video/jpeg", data)
+
+    assert frames.shape[0] == sent_frames
+    assert metadata["total_num_frames"] == sent_frames
+    assert metadata["frames_indices"] == list(range(sent_frames))
+
+
+def test_load_base64_jpeg_raises_on_zero_num_frames():
+    """num_frames=0 is invalid and should raise ValueError."""
+    b64_frames = _make_jpeg_b64_frames(3)
+    data = ",".join(b64_frames)
+
+    imageio = ImageMediaIO()
+    videoio = VideoMediaIO(imageio, num_frames=0)
+
+    with pytest.raises(ValueError, match="num_frames must be greater than 0 or -1"):
+        videoio.load_base64("video/jpeg", data)
+
+
+def test_pynvvideocodec_unrelated_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakePyNvVCException(Exception):
+        pass
+
+    fake_nvc = SimpleNamespace(PyNvVCException=FakePyNvVCException)
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", fake_nvc)
+    original_error = RuntimeError("GPU decoder unavailable")
+
+    def raise_unrelated_error(cls, file_path, nvc):
+        raise original_error
+
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackend,
+        "_read_source_metadata",
+        classmethod(raise_unrelated_error),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        PyNvVideoCodecVideoBackend.decode_frames_pynvvideocodec(b"video", None)
+
+    assert exc_info.value is original_error
+
+
+# ---------------------------------------------------------------------------
+# GPU video backend policy tests
+# ---------------------------------------------------------------------------
+
+
+class TestMergeKwargsGpuBackendPolicy:
+    """Verify that merge_kwargs blocks request-level GPU backend selection
+    when the static (engine-level) config did not configure that backend."""
+
+    def test_pynvvideocodec_requires_gpu(self):
+        assert VIDEO_LOADER_REGISTRY.backend_requires_gpu(PYNVVIDEOCODEC_VIDEO_BACKEND)
+
+    def test_strips_video_backend_pynv_when_not_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs=None,
+            runtime_kwargs={"video_backend": "pynvvideocodec"},
+        )
+        assert "video_backend" not in result
+
+    def test_strips_backend_pynv_when_not_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"num_frames": 16},
+            runtime_kwargs={"backend": "pynvvideocodec"},
+        )
+        assert result.get("backend") != "pynvvideocodec"
+
+    def test_preserves_video_backend_pynv_when_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"video_backend": "pynvvideocodec"},
+            runtime_kwargs={"video_backend": "pynvvideocodec", "num_frames": 8},
+        )
+        assert result["video_backend"] == "pynvvideocodec"
+        assert result["num_frames"] == 8
+
+    def test_preserves_backend_pynv_when_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"backend": "pynvvideocodec"},
+            runtime_kwargs={"backend": "pynvvideocodec"},
+        )
+        assert result["backend"] == "pynvvideocodec"
+
+    def test_strips_request_level_hw_decoders_when_not_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"video_backend": "pynvvideocodec"},
+            runtime_kwargs={"hw_decoders": 4},
+        )
+        assert "hw_decoders" not in result
+
+    def test_prevents_request_level_hw_decoders_override(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={
+                "video_backend": "pynvvideocodec",
+                "hw_decoders": 2,
+            },
+            runtime_kwargs={"hw_decoders": 4},
+        )
+        assert result["hw_decoders"] == 2
+
+    @pytest.mark.parametrize("backend", ["opencv", "pyav", "torchcodec"])
+    def test_software_video_backend_passes_through(self, backend: str):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs=None,
+            runtime_kwargs={"video_backend": backend},
+        )
+        assert result["video_backend"] == backend
+
+    @pytest.mark.parametrize("backend", ["opencv", "pyav"])
+    def test_software_codec_backend_passes_through(self, backend: str):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs=None,
+            runtime_kwargs={"backend": backend},
+        )
+        assert result["backend"] == backend
+
+    def test_strips_both_keys_independently(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs=None,
+            runtime_kwargs={
+                "video_backend": "pynvvideocodec",
+                "backend": "pynvvideocodec",
+                "num_frames": 4,
+            },
+        )
+        assert "video_backend" not in result
+        assert result.get("backend") != "pynvvideocodec"
+        assert result["num_frames"] == 4
+
+    def test_other_kwargs_preserved_when_gpu_backend_stripped(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"fps": 2},
+            runtime_kwargs={
+                "video_backend": "pynvvideocodec",
+                "num_frames": 16,
+            },
+        )
+        assert "video_backend" not in result
+        assert result["num_frames"] == 16
+
+    def test_static_pynv_with_different_runtime_gpu_backend(self):
+        """If static sets pynv via video_backend but runtime tries to set it
+        via the codec-level 'backend' key (without a static match), strip it."""
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"video_backend": "pynvvideocodec"},
+            runtime_kwargs={"backend": "pynvvideocodec"},
+        )
+        assert result.get("backend") != "pynvvideocodec"
+        assert result["video_backend"] == "pynvvideocodec"
+
+    def test_deepstream_requires_gpu(self):
+        assert VIDEO_LOADER_REGISTRY.backend_requires_gpu("deepstream")
+
+    def test_strips_backend_deepstream_when_not_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs=None,
+            runtime_kwargs={"backend": "deepstream"},
+        )
+        assert result.get("backend") != "deepstream"
+
+    def test_preserves_backend_deepstream_when_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"backend": "deepstream"},
+            runtime_kwargs={"backend": "deepstream", "num_frames": 8},
+        )
+        assert result["backend"] == "deepstream"
+        assert result["num_frames"] == 8
+
+    def test_strips_pool_size_from_runtime(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"backend": "deepstream"},
+            runtime_kwargs={"backend": "deepstream", "pool_size": 4},
+        )
+        assert "pool_size" not in result
+
+    def test_unknown_backend_not_treated_as_gpu(self):
+        assert not VIDEO_LOADER_REGISTRY.backend_requires_gpu("totally_unknown")
+
+
+@pytest.mark.parametrize("layout", ["nhwc", "nchw"])
+def test_pynvvc_frames_normalized_to_nhwc(layout: str):
+    """PyNvVideoCodec frame batches are normalized to NHWC regardless of the
+    per-frame layout the decoder emits (it has varied across versions), so the
+    HF video processors (which materialize a PIL image per frame) receive the
+    same NHWC shape as every other video backend."""
+    torch = pytest.importorskip("torch")
+
+    n, h, w, c = 4, 5, 6, 3
+    nhwc = torch.arange(n * h * w * c, dtype=torch.uint8).reshape(n, h, w, c)
+    frames = nhwc if layout == "nhwc" else nhwc.permute(0, 3, 1, 2).contiguous()
+
+    out = _pynvvc_frames_to_nhwc(frames)
+
+    assert out.shape == (n, h, w, c)
+    assert out.is_contiguous()
+    assert torch.equal(out, nhwc)  # content preserved / correctly transposed

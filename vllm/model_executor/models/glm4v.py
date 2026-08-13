@@ -18,6 +18,7 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -32,7 +33,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -61,6 +61,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
+from .utils import WeightsMapper
 
 
 class GLMVImagePixelInputs(TensorSchema):
@@ -376,6 +377,15 @@ class EVA2CLIPModel(nn.Module):
 
 
 class GLM4VModel(ChatGLMModel):
+    hf_to_vllm_mapper = ChatGLMModel.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            # Vision GLU projections
+            "linear_proj.gate_proj": ("linear_proj.merged_proj", 0),
+            "linear_proj.dense_h_to_4h": ("linear_proj.merged_proj", 1),
+        }
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -507,6 +517,9 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
 class GLM4VForCausalLM(
     ChatGLMBaseModel, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
+    # NOTE: we must bring this to the surface because GLM4VModel.hf_to_vllm_mapper
+    # contains non-stacking related mappings which LoRA/BnB needs to know about
+    hf_to_vllm_mapper = GLM4VModel.hf_to_vllm_mapper
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],

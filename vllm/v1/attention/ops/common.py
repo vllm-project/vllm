@@ -6,6 +6,34 @@ from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.triton_utils import tl, triton
 
 
+def mask_dcp_empty_shards_(
+    lse: torch.Tensor,
+    seq_lens: torch.Tensor | None,
+    query_start_loc: torch.Tensor | None,
+) -> None:
+    if seq_lens is None and query_start_loc is None:
+        return
+    if seq_lens is None or query_start_loc is None:
+        raise ValueError("seq_lens and query_start_loc must be provided together")
+    if (
+        seq_lens.ndim != 1
+        or query_start_loc.ndim != 1
+        or query_start_loc.shape[0] != seq_lens.shape[0] + 1
+    ):
+        raise ValueError("query_start_loc must contain one boundary per sequence")
+
+    row_indices = torch.arange(
+        lse.shape[0], device=lse.device, dtype=query_start_loc.dtype
+    )
+    sequence_indices = torch.searchsorted(
+        query_start_loc[1:], row_indices, right=True
+    ).clamp_max(seq_lens.shape[0] - 1)
+    empty_rows = (row_indices >= query_start_loc[-1]) | (
+        seq_lens[sequence_indices] == 0
+    )
+    lse.masked_fill_(empty_rows[:, None], float("-inf"))
+
+
 @triton.jit
 def _correct_attn_cp_out_kernel(
     outputs_ptr,
@@ -51,7 +79,7 @@ def _correct_attn_cp_out_kernel(
     )
 
     # calc final lse
-    lse = tl.load(lses_ptr + lse_offsets)
+    lse = tl.load(lses_ptr + lse_offsets).to(tl.float32)
     lse = tl.where((lse != lse) | (lse == float("inf")), -float("inf"), lse)
     lse_max = tl.max(lse, axis=0)
     lse_max = tl.where(lse_max == -float("inf"), 0, lse_max)
@@ -80,7 +108,7 @@ def _correct_attn_cp_out_kernel(
     lse_offset = (
         lse_idx * lses_stride_N + batch_idx * lses_stride_B + head_idx * lses_stride_H
     )
-    lse_tmp = tl.load(lses_ptr + lse_offset)
+    lse_tmp = tl.load(lses_ptr + lse_offset).to(tl.float32)
     lse_finally = lse_tmp - lse
     lse_finally = tl.where(
         (lse_finally != lse_finally) | (lse_finally == float("inf")),
@@ -90,6 +118,7 @@ def _correct_attn_cp_out_kernel(
     factor = tl.exp(lse_finally) if IS_BASE_E else tl.exp2(lse_finally)
     output = tl.load(outputs_ptr + output_offsets)
     output = output * factor
+    output = tl.where(factor == 0.0, 0.0, output)
 
     tl.store(new_output_ptr + output_offsets, output)
 
@@ -184,6 +213,8 @@ def _cp_lse_common(
     cp_group: GroupCoordinator,
     ctx: CPTritonContext | None = None,
     is_lse_base_on_e=True,
+    seq_lens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
 ):
     """
     cp_attn_out: [ B, H, D ]
@@ -196,6 +227,7 @@ def _cp_lse_common(
         ctx = CPTritonContext()
 
     cp_attn_lse = cp_attn_lse.contiguous()
+    mask_dcp_empty_shards_(cp_attn_lse, seq_lens, query_start_loc)
     lses = cp_group.all_gather(cp_attn_lse, dim=0).reshape(
         (cp_group.world_size,) + cp_attn_lse.shape
     )
@@ -216,13 +248,21 @@ def cp_lse_ag_out_rs(
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
     is_lse_base_on_e=True,
+    seq_lens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
 ):
     """
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     out, lse = _cp_lse_common(
-        cp_attn_out, cp_attn_lse, cp_group, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e
+        cp_attn_out,
+        cp_attn_lse,
+        cp_group,
+        ctx=ctx,
+        is_lse_base_on_e=is_lse_base_on_e,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
     )
     out = cp_group.reduce_scatter(out, dim=1)
 
@@ -241,13 +281,21 @@ def cp_lse_ag_out_ar(
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
     is_lse_base_on_e=True,
+    seq_lens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
 ):
     """
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     out, lse = _cp_lse_common(
-        cp_attn_out, cp_attn_lse, cp_group, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e
+        cp_attn_out,
+        cp_attn_lse,
+        cp_group,
+        ctx=ctx,
+        is_lse_base_on_e=is_lse_base_on_e,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
     )
     out = cp_group.all_reduce(out)
 
@@ -265,6 +313,7 @@ def _pack_seq_kernel(
     D: tl.constexpr,
     Lmax: tl.constexpr,
     PAD_VALUE: tl.constexpr,
+    PAD_IS_UINT8: tl.constexpr,
     BLOCK_T: tl.constexpr,  # timesteps per program
     BLOCK_D: tl.constexpr,  # features per program
 ):
@@ -294,9 +343,15 @@ def _pack_seq_kernel(
     # out_ptr: row-major [B, Lmax, D]
     out_row_ptr = out_ptr + (pid_b * Lmax + off_t)[:, None] * D + off_d[None, :]
 
-    # Initialize with PAD (cast will occur as needed based on out_ptr dtype)
+    # Initialize with PAD. PAD_IS_UINT8 selects the pad tensor's dtype so
+    # integer-typed outputs (e.g. MXFP4 packed nibbles, ue8m0 scale bytes)
+    # get an exact-byte pad rather than going through an fp32→uint8 cast
+    # that's implementation-defined outside of value 0.
     d_mask = off_d[None, :] < D
-    pad_vals = tl.full([BLOCK_T, BLOCK_D], PAD_VALUE, tl.float32)
+    if PAD_IS_UINT8:
+        pad_vals = tl.full([BLOCK_T, BLOCK_D], PAD_VALUE, tl.uint8)
+    else:
+        pad_vals = tl.full([BLOCK_T, BLOCK_D], PAD_VALUE, tl.float32)
     tl.store(out_row_ptr, pad_vals, mask=t_mask[:, None] & d_mask)
 
     # Load & write only where within seq_len
@@ -307,23 +362,36 @@ def _pack_seq_kernel(
 def pack_seq_triton(
     x: torch.Tensor,
     lengths: torch.Tensor,
-    pad_value: float = -float("inf"),
+    pad_value: float | int = -float("inf"),
     block_t: int = 64,
     block_d: int = 64,
 ) -> torch.Tensor:
-    """
-    Pack sequences of different lengths into a batched tensor.
+    """Pack sequences of different lengths into a batched tensor.
+
+    Supports float dtypes (any, via fp32 pad) and ``torch.uint8`` (exact-byte
+    pad — e.g. MXFP4 packed nibbles or ue8m0 scale bytes). For uint8 inputs
+    ``pad_value`` must be an integer in ``[0, 255]``.
 
     Args:
-        x: [N, ...] - input tensor where N is total number of tokens
-        lengths: [B] - sequence lengths for each batch
-        pad_value: value to use for padding
-        block_t: block size for time dimension
-        block_d: block size for feature dimension
+        x: [N, ...] — input tensor where N is total number of tokens.
+        lengths: [B] — sequence lengths for each batch.
+        pad_value: value to use for padding. Defaults to ``-inf`` which is
+            only sensible for float dtypes; pass ``0`` (or any byte) for
+            uint8 inputs.
+        block_t: block size for time dimension.
+        block_d: block size for feature dimension.
 
     Returns:
-        packed: [B, Lmax, ...] - packed tensor
+        packed: [B, Lmax, ...] — packed tensor.
     """
+    is_uint8 = x.dtype == torch.uint8
+    if is_uint8:
+        assert isinstance(pad_value, int) and 0 <= pad_value <= 255, (
+            f"uint8 pack requires an integer pad in [0, 255], got {pad_value!r}"
+        )
+        pad_constexpr: int | float = int(pad_value)
+    else:
+        pad_constexpr = float(pad_value)
 
     # Handle multi-dimensional input by reshaping to (N, -1)
     original_shape = x.shape
@@ -338,8 +406,6 @@ def pack_seq_triton(
     B = lengths.numel()
     Lmax = int(lengths.max().item())
 
-    # Starts are computed inside the kernel from lengths
-
     out = torch.empty((B, Lmax, D), device=x.device, dtype=x.dtype)
 
     grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
@@ -350,17 +416,16 @@ def pack_seq_triton(
         N,
         D,
         Lmax,
-        PAD_VALUE=float(pad_value),
+        PAD_VALUE=pad_constexpr,
+        PAD_IS_UINT8=is_uint8,
         BLOCK_T=block_t,
         BLOCK_D=block_d,
         num_warps=4,
         num_stages=2,
     )
 
-    # Reshape output back to original dimensions (except first dimension)
     if len(original_shape) > 2:
-        output_shape = (B, Lmax) + original_shape[1:]
-        out = out.reshape(output_shape)
+        out = out.reshape((B, Lmax) + original_shape[1:])
 
     return out
 

@@ -8,7 +8,9 @@ import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -37,6 +39,7 @@ class DeepseekV2Model(nn.Module):
         start_layer_id: int = 0,
     ) -> None:
         super().__init__()
+        assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         quant_config = vllm_config.quant_config
         self.vocab_size = self.config.vocab_size
@@ -105,7 +108,7 @@ class DeepseekV2Model(nn.Module):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -153,7 +156,7 @@ class DeepseekV2Model(nn.Module):
                 break
             else:
                 for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
+                    param_name, weight_name, expert_id, expert_shard_id = mapping
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
@@ -164,7 +167,7 @@ class DeepseekV2Model(nn.Module):
                         param,
                         loaded_weight,
                         name,
-                        shard_id=shard_id,
+                        shard_id=expert_shard_id,
                         expert_id=expert_id,
                     )
                     break
@@ -174,9 +177,10 @@ class DeepseekV2Model(nn.Module):
                         continue
 
                     # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
 
                     param = params_dict[name]
                     weight_loader = getattr(
@@ -190,13 +194,16 @@ class DeepseekV2Model(nn.Module):
 class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
+        assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         quant_config = vllm_config.quant_config
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
         self.model = DeepseekV2Model(
-            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            start_layer_id=target_layer_num,
         )
 
         self.lm_head = ParallelLMHead(
@@ -218,7 +225,7 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,

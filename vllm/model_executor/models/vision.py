@@ -8,9 +8,10 @@ from collections.abc import Callable
 from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
+import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import MultiModalConfig, VllmConfig, get_current_vllm_config
+from vllm.config import ModelConfig, MultiModalConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -18,6 +19,8 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.transformers_utils.processor import get_processor, get_processor_config
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
@@ -102,45 +105,60 @@ def get_vit_attn_backend(
     """
     Get the attention backend for Vision Transformer.
     """
-    try:
-        vllm_config: VllmConfig = get_current_vllm_config()
-        model_config = vllm_config.model_config
-        multimodal_config: MultiModalConfig | None = (
-            model_config.multimodal_config if model_config is not None else None
-        )
-    except (AssertionError, AttributeError):
-        multimodal_config = None
-
+    mm_cfg = get_multimodal_config()
     attn_backend_override = (
-        multimodal_config.mm_encoder_attn_backend
-        if multimodal_config is not None
-        else None
+        mm_cfg.mm_encoder_attn_backend if mm_cfg is not None else None
     )
-    attn_backend = _get_vit_attn_backend(
+    return _get_vit_attn_backend(
         head_size,
         dtype,
         attn_backend_override=attn_backend_override,
     )
-    return attn_backend
 
 
-def is_vit_use_data_parallel():
+def get_multimodal_config() -> MultiModalConfig | None:
+    """Return the current ``MultiModalConfig``, or ``None`` when no engine
+    config context is active (e.g., during unit tests) or when the current
+    ``model_config`` does not carry a ``multimodal_config`` (e.g., minimal
+    stubs used in tests)."""
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None or vllm_config.model_config is None:
+        return None
+    return getattr(vllm_config.model_config, "multimodal_config", None)
+
+
+def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
+    """Return the padded hidden size for FP8 ViT encoder attention, or
+    ``None`` when FP8 is not enabled.
+
+    cuDNN FP8 prefill attention requires ``head_dim`` to be a multiple of
+    16. For non-aligned ``head_dim`` (e.g. 72), Q/K/V are padded to the
+    nearest multiple of 16.
+    """
+    mm_cfg = get_multimodal_config()
+    if mm_cfg is None or mm_cfg.mm_encoder_attn_dtype != "fp8":
+        return None
+    return num_heads * round_up(head_dim, 16)
+
+
+def is_vit_use_data_parallel(num_heads: int | None = None) -> bool:
     """
     Get the tensor parallel type for Vision Transformer.
     """
-    try:
-        vllm_config: VllmConfig = get_current_vllm_config()
-        model_config = vllm_config.model_config
-        multimodal_config: MultiModalConfig | None = (
-            model_config.multimodal_config if model_config is not None else None
-        )
-    except (AssertionError, AttributeError):
-        multimodal_config = None
-
-    mm_encoder_tp_mode = (
-        multimodal_config.mm_encoder_tp_mode if multimodal_config is not None else None
+    mm_cfg = get_multimodal_config()
+    can_split = (
+        num_heads % get_tensor_model_parallel_world_size() == 0
+        if num_heads is not None
+        else None
     )
-    return mm_encoder_tp_mode == "data"
+    if num_heads is not None and not can_split:
+        logger.warning_once(
+            "The number of vision attention heads is not divisible by "
+            "the tensor parallel size. Falling back to data parallelism "
+            "for the vision encoder."
+        )
+        return True
+    return mm_cfg is not None and mm_cfg.mm_encoder_tp_mode == "data"
 
 
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]
@@ -566,38 +584,150 @@ def run_dp_sharded_mrope_vision_model(
     return out_embeddings
 
 
-def get_llm_pos_ids_for_vision(
-    start_idx: int,
-    vision_idx: int,
-    spatial_merge_size: int,
-    t_index: list[int],
-    grid_hs: torch.Tensor,
-    grid_ws: torch.Tensor,
-) -> torch.Tensor:
-    llm_pos_ids_list = []
-    llm_grid_h = grid_hs[vision_idx] // spatial_merge_size
-    llm_grid_w = grid_ws[vision_idx] // spatial_merge_size
-    h_index = (
-        torch.arange(llm_grid_h)
-        .view(1, -1, 1)
-        .expand(len(t_index), -1, llm_grid_w)
-        .flatten()
-    )
-    w_index = (
-        torch.arange(llm_grid_w)
-        .view(1, 1, -1)
-        .expand(len(t_index), llm_grid_h, -1)
-        .flatten()
-    )
-    t_index_tensor = (
-        torch.Tensor(t_index)
-        .to(llm_grid_h.device)
-        .view(-1, 1)
-        .expand(-1, llm_grid_h * llm_grid_w)
-        .long()
-        .flatten()
-    )
-    _llm_pos_ids = torch.stack([t_index_tensor, h_index, w_index])
-    llm_pos_ids_list.append(_llm_pos_ids + start_idx)
-    llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
-    return llm_pos_ids
+class FusedInputNorm(nn.Module):
+    """
+    Module that applies rescaling and normalization to input images.
+    Equivalent to: output = (input * rescale_factor - mean) / std
+    """
+
+    def __init__(
+        self,
+        image_mean: list[float],
+        image_std: list[float],
+        rescale_factor: float,
+        channel: int = 3,
+        dtype: torch.dtype = torch.float32,
+    ):
+        super().__init__()
+
+        self.channel = channel
+
+        # Model construction can set the accelerator as PyTorch's default
+        # device. Determine whether the normalization is an identity on CPU
+        # so torch.allclose does not introduce a device synchronization while
+        # the model is being initialized. The actual buffers below still use
+        # the caller's default device.
+        image_mean_cpu = torch.tensor(image_mean, dtype=dtype, device="cpu") * (
+            1.0 / rescale_factor
+        )
+        image_std_cpu = torch.tensor(image_std, dtype=dtype, device="cpu") * (
+            1.0 / rescale_factor
+        )
+        weight_cpu = 1.0 / image_std_cpu
+        bias_cpu = -image_mean_cpu / image_std_cpu
+        self.is_identity = bool(
+            torch.allclose(weight_cpu, torch.ones_like(weight_cpu))
+            and torch.allclose(bias_cpu, torch.zeros_like(bias_cpu))
+        )
+
+        if not self.is_identity:
+            image_mean_tensor = torch.tensor(image_mean, dtype=dtype) * (
+                1.0 / rescale_factor
+            )
+            image_std_tensor = torch.tensor(image_std, dtype=dtype) * (
+                1.0 / rescale_factor
+            )
+            weight = 1.0 / image_std_tensor
+            bias = -image_mean_tensor / image_std_tensor
+            self.register_buffer("weight", weight)
+            self.register_buffer("bias", bias)
+        else:
+            self.register_buffer("weight", None)
+            self.register_buffer("bias", None)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.weight.dtype
+
+    @classmethod
+    def identity(
+        cls, channel: int = 3, dtype: torch.dtype = torch.float32
+    ) -> "FusedInputNorm":
+        return cls(
+            image_mean=[0.0, 0.0, 0.0],
+            image_std=[1.0, 1.0, 1.0],
+            rescale_factor=1.0,
+            channel=channel,
+            dtype=dtype,
+        )
+
+    @classmethod
+    def from_model_config(cls, model_config: "ModelConfig") -> nn.Module:
+        if not model_config.multimodal_config.mm_device_do_normalize:
+            return cls.identity()
+
+        model = model_config.model
+        revision = model_config.revision
+
+        # Try to read parameters from the processor config
+        config = get_processor_config(model, revision=revision)
+        do_rescale = config.get("do_rescale", None)
+        do_normalize = config.get("do_normalize", None)
+        image_mean = config.get("image_mean", None)
+        image_std = config.get("image_std", None)
+        rescale_factor = config.get("rescale_factor", None)
+
+        # Fallback to the image_processor object if any parameter is missing
+        if None in [do_rescale, do_normalize, image_mean, image_std, rescale_factor]:
+            image_processor = get_processor(model, revision=revision).image_processor
+
+            if do_rescale is None:
+                do_rescale = getattr(image_processor, "do_rescale", None)
+            if do_normalize is None:
+                do_normalize = getattr(image_processor, "do_normalize", None)
+            if image_mean is None:
+                image_mean = getattr(image_processor, "image_mean", None)
+            if image_std is None:
+                image_std = getattr(image_processor, "image_std", None)
+            if rescale_factor is None:
+                rescale_factor = getattr(image_processor, "rescale_factor", None)
+
+        # Apply defaults based on flags
+        if not do_rescale:
+            rescale_factor = 1.0
+        if not do_normalize:
+            image_mean = [0.0, 0.0, 0.0]
+            image_std = [1.0, 1.0, 1.0]
+
+        # Ensure all required parameters are resolved
+        assert None not in [
+            do_rescale,
+            do_normalize,
+            image_mean,
+            image_std,
+            rescale_factor,
+        ], "Some normalization parameters are still None after resolution."
+
+        # If no processing is needed, return an identity module
+        if not do_rescale and not do_normalize:
+            return cls.identity()
+
+        return cls(
+            image_mean=image_mean, image_std=image_std, rescale_factor=rescale_factor
+        )
+
+    def forward(
+        self,
+        grid_thw: torch.Tensor,
+        visual_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if self.is_identity:
+            return grid_thw.to(visual_dtype)
+
+        assert grid_thw.ndim == 2
+        patches, size = grid_thw.shape
+        patch_size = size // self.channel
+
+        # Apply the per-channel affine transform directly instead of via
+        # F.batch_norm. batch_norm dispatches to cuDNN, whose batch-norm
+        # kernels cap the batch dimension near the CUDA grid limit (~65535);
+        # here that dimension is the number of patches, which grows unbounded
+        # with image resolution and batch size and overflows the cap on large
+        # image-heavy requests (CUDNN_STATUS_INTERNAL_ERROR). The plain
+        # broadcasted multiply-add is numerically identical and has no such
+        # limit.
+        x = grid_thw.to(self.dtype).view(patches, self.channel, patch_size)
+        x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
+            1, self.channel, 1
+        )
+        return x.view(patches, size).to(visual_dtype)

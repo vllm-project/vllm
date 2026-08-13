@@ -15,7 +15,7 @@ from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum, auto
-from functools import cached_property, partial
+from functools import partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Lock as LockType
@@ -44,20 +44,30 @@ from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
+from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
+    aiter_requires_tcp_store,
     get_distributed_init_method,
+    get_file_store_init_method,
     get_ip,
     get_loopback_ip,
     get_open_port,
 )
+from vllm.utils.ompmultiprocessing import OMPProcessManager
 from vllm.utils.system_utils import (
     _maybe_force_spawn,
     decorate_logs,
     get_mp_context,
     set_process_title,
 )
+from vllm.utils.torch_utils import (
+    OMP_NUM_THREADS_SET_BY_VLLM,
+    set_torch_threads_for_runtime,
+    startup_omp_num_threads,
+)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
+from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
@@ -67,25 +77,29 @@ logger = init_logger(__name__)
 class FutureWrapper(Future):
     def __init__(
         self,
-        futures_queue: deque[tuple["FutureWrapper", Callable]],
+        futures_queue: deque["FutureWrapper"],
+        get_response: Callable[[], Any],
         aggregate: Callable = lambda x: x,
     ):
         self.futures_queue = futures_queue
+        self.get_response = get_response
         self.aggregate = aggregate
         super().__init__()
+        self.futures_queue.appendleft(self)
 
     def result(self, timeout=None):
         if timeout is not None:
             raise RuntimeError("timeout not implemented")
+
         # Drain any futures ahead of us in the queue.
         while not self.done():
-            future, get_response = self.futures_queue.pop()
-            future.wait_for_response(get_response)
+            future = self.futures_queue.pop()
+            future._wait_for_response()
         return super().result()
 
-    def wait_for_response(self, get_response: Callable):
+    def _wait_for_response(self):
         try:
-            response = self.aggregate(get_response())
+            response = self.aggregate(self.get_response())
             with suppress(InvalidStateError):
                 self.set_result(response)
         except Exception as e:
@@ -115,13 +129,14 @@ class MultiprocExecutor(Executor):
             f"_parallel_size ({pcp_size}). "
         )
 
-        # Set multiprocessing envs
-        set_multiprocessing_worker_envs()
+        set_multiprocessing_worker_envs(self.local_world_size)
 
-        # use the loopback address get_loopback_ip() for communication.
-        distributed_init_method = get_distributed_init_method(
-            get_loopback_ip(), get_open_port()
-        )
+        if aiter_requires_tcp_store():
+            distributed_init_method = get_distributed_init_method(
+                get_loopback_ip(), get_open_port()
+            )
+        else:
+            distributed_init_method = get_file_store_init_method()
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
@@ -165,19 +180,24 @@ class MultiprocExecutor(Executor):
                 [] if context.get_start_method() == "fork" else None
             )
 
+            # For CPU backend only, to setup OpenMP threads affinity
+            cpu_omp_manager = OMPProcessManager(self.vllm_config)
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 is_driver_worker = self._is_driver_worker(global_rank)
-                unready_worker_handle = WorkerProc.make_worker_process(
-                    vllm_config=self.vllm_config,
-                    local_rank=local_rank,
-                    rank=global_rank,
-                    distributed_init_method=distributed_init_method,
-                    input_shm_handle=scheduler_output_handle,
-                    shared_worker_lock=shared_worker_lock,
-                    is_driver_worker=is_driver_worker,
-                    inherited_fds=inherited_fds,
-                )
+                with cpu_omp_manager.configure_omp_envs(
+                    rank=global_rank, local_rank=local_rank
+                ):
+                    unready_worker_handle = WorkerProc.make_worker_process(
+                        vllm_config=self.vllm_config,
+                        local_rank=local_rank,
+                        rank=global_rank,
+                        distributed_init_method=distributed_init_method,
+                        input_shm_handle=scheduler_output_handle,
+                        shared_worker_lock=shared_worker_lock,
+                        is_driver_worker=is_driver_worker,
+                        inherited_fds=inherited_fds,
+                    )
                 unready_workers.append(unready_worker_handle)
                 if inherited_fds is not None:
                     inherited_fds.append(unready_worker_handle.death_writer.fileno())
@@ -188,6 +208,12 @@ class MultiprocExecutor(Executor):
 
             # Wait for all local workers to be ready.
             self.workers = WorkerProc.wait_for_ready(unready_workers)
+
+            # The workers have inherited their thread count (see
+            # set_multiprocessing_worker_envs); this process only schedules, so
+            # it gets no benefit from torch intra-op parallelism, just CPU
+            # contention with them.
+            set_torch_threads_for_runtime()
 
             # Start background thread to monitor worker health if not in headless mode.
             if self.monitor_workers:
@@ -218,7 +244,7 @@ class MultiprocExecutor(Executor):
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
 
-            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+            self.futures_queue = deque[FutureWrapper]()
 
             self._post_init_executor()
 
@@ -234,6 +260,17 @@ class MultiprocExecutor(Executor):
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
         self.output_rank = self._get_output_rank()
+
+    def get_response_mqs(self, unique_reply_rank: int = -1) -> list[MessageQueue]:
+        assert unique_reply_rank >= -1 and unique_reply_rank < self.world_size, (
+            f"unique_reply_rank must be -1 or < world_size,"
+            f"unique_reply_rank = {unique_reply_rank}, "
+            f"world_size={self.world_size}"
+        )
+        ranks = (
+            [unique_reply_rank] if unique_reply_rank != -1 else range(self.world_size)
+        )
+        return [self.workers[rank].worker_response_mq for rank in ranks]
 
     def _get_parallel_sizes(self) -> tuple[int, int, int]:
         self.world_size = self.parallel_config.world_size
@@ -269,9 +306,12 @@ class MultiprocExecutor(Executor):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
-            proc_name = next(h.proc.name for h in workers if h.proc.sentinel == died[0])
+            proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
             logger.error(
-                "Worker proc %s died unexpectedly, shutting down executor.", proc_name
+                "Worker proc %s died unexpectedly (exit code: %s), "
+                "shutting down executor.",
+                proc.name,
+                proc.exitcode,
             )
             _self.shutdown()
             callback = _self.failure_callback
@@ -370,7 +410,7 @@ class MultiprocExecutor(Executor):
             responses = []
             for mq in response_mqs:
                 dequeue_timeout = (
-                    None if deadline is None else (deadline - time.monotonic())
+                    None if deadline is None else max(0.0, deadline - time.monotonic())
                 )
                 try:
                     status, result = mq.dequeue(timeout=dequeue_timeout)
@@ -384,17 +424,11 @@ class MultiprocExecutor(Executor):
                 responses.append(result)
             return responses[0] if output_rank is not None else responses
 
-        if non_block:
-            future = FutureWrapper(self.futures_queue, aggregate=aggregate)
-            self.futures_queue.appendleft((future, get_response))
-            return future
+        future = FutureWrapper(
+            self.futures_queue, get_response=get_response, aggregate=aggregate
+        )
 
-        # First drain any pending futures in the queue.
-        while self.futures_queue:
-            future, get_fut_response = self.futures_queue.pop()
-            future.wait_for_response(get_fut_response)
-
-        return aggregate(get_response())
+        return future if non_block else future.result()
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):
@@ -415,27 +449,47 @@ class MultiprocExecutor(Executor):
             return False
 
         active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
+        initial_count = len(active_procs())
+
         # Give processes time to clean themselves up properly first
-        logger.debug("Worker Termination: allow workers to gracefully shutdown")
-        if wait_for_termination(active_procs(), 4):
+        logger.info(
+            "[shutdown] Executor: waiting for worker exit count=%d",
+            initial_count,
+        )
+        if wait_for_termination(
+            active_procs(), timeout=envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+        ):
+            logger.info_once("[shutdown] Executor: all workers exited gracefully")
             return
 
         # Send SIGTERM if still running
-        logger.debug("Worker Termination: workers still running sending SIGTERM")
-        for p in active_procs():
+        remaining = active_procs()
+        logger.warning(
+            "[shutdown] Executor: workers still running after grace period; "
+            "sending SIGTERM count=%d",
+            len(remaining),
+        )
+        for p in remaining:
             p.terminate()
         if not wait_for_termination(active_procs(), 4):
             # Send SIGKILL if still running
-            logger.debug(
-                "Worker Termination: resorting to SIGKILL to take down workers"
+            remaining = active_procs()
+            logger.warning(
+                "[shutdown] Executor: workers still running after SIGTERM; "
+                "sending SIGKILL count=%d",
+                len(remaining),
             )
-            for p in active_procs():
+            for p in remaining:
                 p.kill()
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
         if not getattr(self, "shutting_down", False):
-            logger.debug("Triggering shutdown of workers")
+            worker_count = len(getattr(self, "workers", None) or [])
+            logger.debug(
+                "[shutdown] Executor: start worker_count=%d",
+                worker_count,
+            )
             self.shutting_down = True
 
             # Make sure all the worker processes are terminated first.
@@ -461,15 +515,11 @@ class MultiprocExecutor(Executor):
                 mq.shutdown()
             self.response_mqs = []
 
+        logger.debug_once("[shutdown] Executor: complete")
+
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
         return
-
-    @cached_property
-    def max_concurrent_batches(self) -> int:
-        # PP requires PP-size concurrent batches to fill the pipeline.
-        pp_size = self.parallel_config.pipeline_parallel_size
-        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def _get_output_rank(self) -> int:
         # Only returns ModelRunnerOutput from TP rank=0 and PP rank=-1
@@ -674,7 +724,12 @@ class WorkerProc:
             daemon=True,
         )
 
-        proc.start()
+        # Apply NUMA binding if configured
+        with numa_utils.configure_subprocess(
+            vllm_config, local_rank, process_kind="worker"
+        ):
+            proc.start()
+
         # Close child ends of pipes here in the parent
         ready_writer.close()
         death_reader.close()
@@ -800,6 +855,19 @@ class WorkerProc:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        # Publish the logical-to-physical mapping early so topology helpers
+        # work before init_device (needed by set_worker_net_device below).
+        assigned_physical_gpu_ids = kwargs[
+            "vllm_config"
+        ].parallel_config.assigned_physical_gpu_ids
+        if assigned_physical_gpu_ids is not None:
+            from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+            set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+
+        # Set net device env vars for the worker if VLLM_GPU_NIC_PCIE_MAPPING is set
+        set_worker_net_device(kwargs.get("local_rank", 0), kwargs["vllm_config"])
+
         worker = None
         ready_writer = kwargs.pop("ready_pipe")
         death_pipe = kwargs.pop("death_pipe", None)
@@ -825,6 +893,8 @@ class WorkerProc:
 
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
+            if kwargs["vllm_config"].parallel_config.numa_bind:
+                numa_utils.log_current_affinity_state(f"Worker_{worker.rank}")
 
             worker.monitor_death_pipe(death_pipe, shutdown_requested)
 
@@ -856,7 +926,9 @@ class WorkerProc:
             if ready_writer is not None:
                 logger.exception("WorkerProc failed to start.")
             elif shutdown_requested.is_set():
-                logger.info("WorkerProc shutting down.")
+                logger.debug_once(
+                    "[shutdown] WorkerProc: exiting after shutdown request"
+                )
             else:
                 logger.exception("WorkerProc failed.")
 
@@ -868,7 +940,12 @@ class WorkerProc:
         except SystemExit as e:
             # SystemExit is raised on SIGTERM or SIGKILL, which usually indicates that
             # the graceful shutdown process did not succeed
-            logger.warning("WorkerProc was terminated")
+            if shutdown_requested.is_set():
+                logger.debug_once(
+                    "[shutdown] WorkerProc: terminated by shutdown signal"
+                )
+            else:
+                logger.warning("WorkerProc was terminated")
             # SystemExit must never be ignored
             raise e
 
@@ -891,7 +968,11 @@ class WorkerProc:
         converted to a FAILURE response.
         """
         if isinstance(output, AsyncModelRunnerOutput):
-            output = output.get_output()
+            try:
+                output = output.get_output()
+            except Exception as e:
+                logger.exception("Error getting async model runner output")
+                output = e
 
         if isinstance(output, Exception):
             result = (WorkerProc.ResponseStatus.FAILURE, str(output))
@@ -942,6 +1023,9 @@ class WorkerProc:
                     func = partial(cloudpickle.loads(method), self.worker)
 
                 output = func(*args, **kwargs)
+
+                if output_rank is None or self.rank == output_rank:
+                    self.handle_output(output)
             except Exception as e:
                 # Notes have been introduced in python 3.11
                 if hasattr(e, "add_note"):
@@ -951,10 +1035,6 @@ class WorkerProc:
                 # string, only for logging purpose.
                 if output_rank is None or self.rank == output_rank:
                     self.handle_output(e)
-                continue
-
-            if output_rank is None or self.rank == output_rank:
-                self.handle_output(output)
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
@@ -993,31 +1073,33 @@ class WorkerProc:
         decorate_logs(process_name)
 
 
-def set_multiprocessing_worker_envs():
+def set_multiprocessing_worker_envs(local_world_size: int = 1):
     """Set up environment variables that should be used when there are workers
     in a multiprocessing environment. This should be called by the parent
     process before worker processes are created"""
 
     _maybe_force_spawn()
 
-    # Configure thread parallelism if OMP_NUM_THREADS isn't set
-    #
-    # Helps to avoid CPU contention. The default of spawning a thread per
-    # core combined with multiprocessing for each GPU can have a negative
-    # impact on performance. The contention is amplified when running in a
-    # container where CPU limits can cause throttling.
-    default_omp_num_threads = 1
-    if (
-        "OMP_NUM_THREADS" not in os.environ
-        and (current_parallelism := torch.get_num_threads()) > default_omp_num_threads
-    ):
-        logger.warning_once(
-            "Reducing Torch parallelism from %d threads to %d to avoid "
-            "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
-            "external environment to tune this value as needed.",
-            current_parallelism,
-            default_omp_num_threads,
-            scope="local",
-        )
-        os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
-        torch.set_num_threads(default_omp_num_threads)
+    if current_platform.is_cpu() or "OMP_NUM_THREADS" in os.environ:
+        return
+
+    # Choose the workers' thread count here, before they start, since a worker
+    # must not set its own: `torch.set_num_threads()` spawns the thread pool
+    # eagerly, and doing that part way through a worker's startup either races
+    # the dlopen of shared objects or, in a forked worker, deadlocks (libgomp
+    # is not fork-safe).
+    num_threads = startup_omp_num_threads(local_world_size)
+    os.environ["OMP_NUM_THREADS"] = str(num_threads)
+    os.environ[OMP_NUM_THREADS_SET_BY_VLLM] = "1"
+
+    # A spawned worker picks the count up from the environment when it imports
+    # torch. A forked worker instead inherits it from this process, so set it
+    # here too. This is safe as long as we don't *use* the pool before forking:
+    # a forked child whose parent had run a parallel region deadlocks, whereas
+    # one whose parent merely sized the pool does not.
+    torch.set_num_threads(num_threads)
+    logger.debug(
+        "Set OMP_NUM_THREADS=%d for %d worker process(es).",
+        num_threads,
+        local_world_size,
+    )

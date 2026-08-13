@@ -11,6 +11,7 @@ from typing import Any
 
 import torch._functorch.config
 import torch.fx as fx
+from torch._dynamo.utils import dynamo_timed
 from torch._inductor.runtime.triton_heuristics import CachingAutotuner
 from torch._logging._internal import trace_structured
 
@@ -270,10 +271,12 @@ class PiecewiseBackend:
                 compile_range=range_entry.compile_range,
                 graph_index=self.piecewise_compile_index,
                 num_graphs=self.total_piecewise_compiles,
+                is_encoder=self.vllm_backend.is_encoder,
             )
 
             range_entry.compiled = True
 
+    @dynamo_timed("vllm_log_compile_start_torch_trace_only")
     def _log_compile_start(self, compile_range: Range):
         """Log compilation event for TORCH_TRACE/tlparse."""
         is_cudagraph_size = (
@@ -353,12 +356,22 @@ class PiecewiseBackend:
         return None
 
     def __call__(self, *args: Any) -> Any:
-        runtime_shape = args[self.sym_shape_indices[0]]
-        range_entry = self._find_range_for_shape(runtime_shape)
+        if self.sym_shape_indices:
+            runtime_shape = args[self.sym_shape_indices[0]]
+            range_entry = self._find_range_for_shape(runtime_shape)
+            assert range_entry is not None, (
+                f"Shape: {runtime_shape} out of considered ranges: "
+                f"{self.compile_ranges}"
+            )
+        else:
+            # All inputs have static shapes; use the only compiled range_entry
+            compiled_entries = [re for re in self.range_entries.values() if re.compiled]
+            assert len(compiled_entries) == 1, (
+                f"Expected exactly one compiled range_entry for static shape "
+                f"compilation, but found {len(compiled_entries)}"
+            )
+            range_entry = compiled_entries[0]
 
-        assert range_entry is not None, (
-            f"Shape: {runtime_shape} out of considered ranges: {self.compile_ranges}"
-        )
         assert range_entry.compiled, (
             "All ranges should be compiled or loaded up front in "
             "PiecewiseBackend.__init__. "

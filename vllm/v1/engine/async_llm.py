@@ -21,12 +21,12 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
-from vllm.inputs import ProcessorInputs, PromptType
+from vllm.exceptions import VLLMClientError, VLLMValidationError
+from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
-from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
@@ -45,6 +45,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
     StatLoggerManager,
@@ -78,12 +79,11 @@ class AsyncLLM(EngineClient):
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
         stat_loggers: list[StatLoggerFactory] | None = None,
         aggregate_engine_logging: bool = False,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ) -> None:
@@ -96,7 +96,6 @@ class AsyncLLM(EngineClient):
             log_stats: Whether to log stats.
             usage_context: Usage context of the LLM.
             mm_registry: Multi-modal registry.
-            use_cached_outputs: Whether to use cached outputs.
             log_requests: Whether to log requests.
             start_engine_loop: Whether to start the engine loop.
             stat_loggers: customized stat loggers for the engine.
@@ -111,6 +110,7 @@ class AsyncLLM(EngineClient):
         maybe_register_config_serialize_by_value()
 
         self.vllm_config = vllm_config
+        self._elastic_ep_lock = asyncio.Lock()
         self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
 
@@ -133,13 +133,8 @@ class AsyncLLM(EngineClient):
             )
 
         self.renderer = renderer = renderer_from_config(self.vllm_config)
-        self.io_processor = get_io_processor(
-            self.vllm_config,
-            self.renderer,
-            self.model_config.io_processor_plugin,
-        )
 
-        # Convert TokPrompt --> EngineCoreRequest.
+        # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
         # Converts EngineCoreOutputs --> RequestOutput.
@@ -217,7 +212,7 @@ class AsyncLLM(EngineClient):
         enable_log_requests: bool = False,
         aggregate_engine_logging: bool = False,
         disable_log_stats: bool = False,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ) -> "AsyncLLM":
@@ -290,7 +285,7 @@ class AsyncLLM(EngineClient):
         request_id: str,
         prompt: EngineCoreRequest
         | PromptType
-        | ProcessorInputs
+        | EngineInput
         | AsyncGenerator[StreamingInput, None],
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
@@ -299,8 +294,10 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        session_id: str | None = None,
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -314,14 +311,14 @@ class AsyncLLM(EngineClient):
             and not is_pooling
             and params.prompt_logprobs
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "--kv-sharing-fast-prefill produces incorrect logprobs for "
                 "prompt tokens, please disable it when the requests need "
                 "prompt logprobs"
             )
 
         if isinstance(prompt, AsyncGenerator):
-            if reasoning_ended is not None:
+            if reasoning_ended is not None or reasoning_parser_kwargs is not None:
                 raise NotImplementedError
 
             # Streaming input case.
@@ -335,6 +332,7 @@ class AsyncLLM(EngineClient):
                 trace_headers,
                 priority,
                 data_parallel_rank,
+                session_id,
             )
 
         # Convert Input --> Request.
@@ -353,22 +351,43 @@ class AsyncLLM(EngineClient):
                     "latter will be used, and the former will be ignored."
                 )
         else:
-            request = self.input_processor.process_inputs(
-                request_id,
-                prompt,
-                params,
-                supported_tasks=await self.get_supported_tasks(),
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-                trace_headers=trace_headers,
-                priority=priority,
-                data_parallel_rank=data_parallel_rank,
-            )
+            if isinstance(prompt, dict) and "type" in prompt:
+                # Rendered EngineInput; no blocking preprocessing needed.
+                request = self.input_processor.process_inputs(
+                    request_id,
+                    prompt,
+                    params,
+                    supported_tasks=await self.get_supported_tasks(),
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                    data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
+                )
+            else:
+                # Raw prompts require tokenization and possibly multimodal
+                # processing, which must not block the event loop.
+                request = await self.input_processor.process_inputs_async(
+                    request_id,
+                    prompt,
+                    params,
+                    supported_tasks=await self.get_supported_tasks(),
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                    data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
+                )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
         if reasoning_ended is not None:
             request.reasoning_ended = reasoning_ended
+        if reasoning_parser_kwargs is not None:
+            request.reasoning_parser_kwargs = reasoning_parser_kwargs
 
         self.input_processor.assign_request_id(request)
 
@@ -430,6 +449,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        session_id: str | None = None,
     ) -> RequestOutputCollector:
         self._validate_streaming_input_sampling_params(sampling_params)
 
@@ -441,6 +461,7 @@ class AsyncLLM(EngineClient):
             trace_headers=trace_headers,
             priority=priority,
             data_parallel_rank=data_parallel_rank,
+            session_id=session_id,
         )
 
         if not sampling_params.skip_clone:
@@ -479,7 +500,7 @@ class AsyncLLM(EngineClient):
                     )
                     req.external_req_id = request_id
                     if req.prompt_embeds is not None:
-                        raise ValueError(
+                        raise VLLMValidationError(
                             "prompt_embeds not supported for streaming inputs"
                         )
                     prompt_text, _, _ = extract_prompt_components(
@@ -515,7 +536,7 @@ class AsyncLLM(EngineClient):
             or params.output_kind == RequestOutputKind.FINAL_ONLY
             or params.stop
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "Input streaming not currently supported "
                 "for pooling models, n > 1, request_kind = FINAL_ONLY "
                 "or with stop strings."
@@ -530,7 +551,7 @@ class AsyncLLM(EngineClient):
         self,
         prompt: EngineCoreRequest
         | PromptType
-        | ProcessorInputs
+        | EngineInput
         | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
@@ -541,7 +562,9 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        session_id: str | None = None,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -569,8 +592,10 @@ class AsyncLLM(EngineClient):
                 trace_headers=trace_headers,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
+                session_id=session_id,
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
+                reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
 
             # The output_handler task pushes items into the queue.
@@ -605,7 +630,7 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error.
-        except ValueError as e:
+        except VLLMClientError as e:
             if self.log_requests:
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
@@ -654,6 +679,8 @@ class AsyncLLM(EngineClient):
         self._logger_ref = [self.logger_manager]
         logger_ref = self._logger_ref
         renderer = self.renderer
+        # P0 multi-modal sender ("shadow") cache; None for text-only models.
+        mm_processor_cache = renderer.mm_processor_cache
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
         async def output_handler():
@@ -680,6 +707,16 @@ class AsyncLLM(EngineClient):
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
+
+                        # 2b) Recover from P0/P1 cache drift: the engine flags hashes
+                        # it couldn't find (mm_cache_miss_hashes); drop them from the
+                        # P0 shadow so the client's retry resends the data and
+                        # repopulates P1. Hot-path no-op (field is None otherwise).
+                        if mm_processor_cache is not None:
+                            for eco in outputs_slice:
+                                if eco.mm_cache_miss_hashes:
+                                    for mm_hash in eco.mm_cache_miss_hashes:
+                                        mm_processor_cache.invalidate(mm_hash)
 
                         # Allow other asyncio tasks to run between chunks
                         if end < num_outputs:
@@ -723,6 +760,33 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
 
+    async def notify_kv_transfer_request_rejected(
+        self,
+        request_id: str,
+        kv_transfer_params: dict[str, Any],
+        *,
+        data_parallel_rank: int | None = None,
+    ) -> None:
+        """Submit a pre-aborted request so the connector's request_finished
+        hook runs to free any pre-admission KV-transfer resources (e.g. NIXL
+        prefill blocks pinned on the P node)."""
+        request = EngineCoreRequest(
+            request_id=request_id,
+            prompt_token_ids=[0],
+            mm_features=None,
+            sampling_params=SamplingParams(
+                max_tokens=1,
+                extra_args={"kv_transfer_params": dict(kv_transfer_params)},
+            ),
+            pooling_params=None,
+            arrival_time=time.time(),
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=data_parallel_rank,
+            abort_immediately=True,
+        )
+        await self.engine_core.add_request_async(request)
+
     async def pause_generation(
         self,
         *,
@@ -757,6 +821,8 @@ class AsyncLLM(EngineClient):
                 stacklevel=2,
             )
             mode = "wait"
+        if clear_cache:
+            await self.renderer.clear_mm_cache_async()
         await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
         # Small sleep to help ensure that final outputs from any in-flight requests are
         # returned prior to this method returning. These outputs come out of the engine
@@ -776,7 +842,7 @@ class AsyncLLM(EngineClient):
 
     async def encode(
         self,
-        prompt: PromptType | ProcessorInputs,
+        prompt: PromptType | EngineInput,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
@@ -841,7 +907,7 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error.
-        except ValueError:
+        except VLLMClientError:
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
             raise
@@ -889,7 +955,7 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.renderer.clear_mm_cache()
+        await self.renderer.clear_mm_cache_async()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(
@@ -903,6 +969,8 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_encoder_cache_async()
 
     async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        if level >= 1:
+            await self.renderer.clear_mm_cache_async()
         await self.engine_core.sleep_async(level, mode)
 
         if self.logger_manager is not None:
@@ -913,6 +981,12 @@ class AsyncLLM(EngineClient):
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)
+
+    async def checkpoint_prepare(self) -> None:
+        await self.collective_rpc("checkpoint_prepare")
+
+    async def checkpoint_restore(self) -> None:
+        await self.collective_rpc("checkpoint_restore")
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
@@ -963,17 +1037,27 @@ class AsyncLLM(EngineClient):
             "waiting for requests to drain."
         )
 
+    async def _drain_requests_for_elastic_ep(self, drain_timeout: int) -> None:
+        try:
+            logger.info(
+                "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
+                "waiting for requests to drain before scaling"
+            )
+            await self.wait_for_requests_to_drain(drain_timeout)
+        except BaseException:
+            set_scaling_elastic_ep(False)
+            raise
+
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ):
-        """
-        Scale up or down the data parallel size by adding or removing
-        engine cores.
-        Args:
-            new_data_parallel_size: The new number of data parallel workers
-            drain_timeout:
-                Maximum time to wait for requests to drain (seconds)
-        """
+        """Scale the elastic EP data parallel size."""
+        async with self._elastic_ep_lock:
+            await self._scale_elastic_ep(new_data_parallel_size, drain_timeout)
+
+    async def _scale_elastic_ep(
+        self, new_data_parallel_size: int, drain_timeout: int
+    ) -> None:
         old_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
         if old_data_parallel_size == new_data_parallel_size:
             logger.info(
@@ -982,12 +1066,7 @@ class AsyncLLM(EngineClient):
             )
             return
 
-        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
-            logger.info(
-                "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
-                "waiting for requests to drain before scaling"
-            )
-            await self.wait_for_requests_to_drain(drain_timeout)
+        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
 
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
@@ -1007,11 +1086,21 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log_engine_initialized()
 
         set_scaling_elastic_ep(True)
-        try:
-            await self.engine_core.scale_elastic_ep(new_data_parallel_size)
-            self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        finally:
-            set_scaling_elastic_ep(False)
+        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
+            await self._drain_requests_for_elastic_ep(drain_timeout)
+
+        await self.engine_core.commit_elastic_ep()
+        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+        set_scaling_elastic_ep(False)
+
+    async def handle_fault(
+        self, fault_tolerance_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        """send fault tolerance instruction to the engine"""
+        return await self.engine_core.handle_fault(fault_tolerance_request)
+
+    async def get_status(self):
+        return await self.engine_core.get_status()
 
     @property
     def is_running(self) -> bool:
@@ -1039,18 +1128,17 @@ class AsyncLLM(EngineClient):
         Args:
             request: Weight transfer initialization request with backend-specific info
         """
-        from vllm.distributed.weight_transfer.base import (
-            WeightTransferInitRequest,
-        )
-
-        if isinstance(request, WeightTransferInitRequest):
-            init_info_dict = request.init_info
-        else:
-            raise TypeError(f"Expected WeightTransferInitRequest, got {type(request)}")
-
         await self.collective_rpc(
-            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+            "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
         )
+
+    async def start_weight_update(self) -> None:
+        """Start a new weight update."""
+        await self.collective_rpc("start_weight_update")
+
+    async def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
+        await self.collective_rpc("start_draft_weight_update")
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
@@ -1059,14 +1147,20 @@ class AsyncLLM(EngineClient):
         Args:
             request: Weight update request with backend-specific update info
         """
-
-        if isinstance(request, WeightTransferUpdateRequest):
-            update_info_dict = request.update_info
-        else:
-            raise TypeError(
-                f"Expected WeightTransferUpdateRequest, got {type(request)}"
-            )
-
         await self.collective_rpc(
-            "update_weights", kwargs={"update_info": update_info_dict}
+            "update_weights", kwargs={"update_info": request.update_info}
         )
+
+    async def finish_weight_update(self, weight_version: str | None = None) -> None:
+        """Finish the weight update and set its version if provided."""
+        await self.collective_rpc("finish_weight_update")
+        if weight_version is not None:
+            await self.update_weight_version(weight_version)
+
+    async def update_weight_version(self, new_version: str) -> None:
+        """Set the weight version without updating weights."""
+        await self.engine_core.set_weight_version_async(new_version)
+
+    async def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
+        return await self.engine_core.get_weight_version_async()

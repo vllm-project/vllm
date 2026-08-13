@@ -12,6 +12,23 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 logger = logging.getLogger(__name__)
 
 
+def has_io_processor(
+    vllm_config: VllmConfig,
+    plugin_from_init: str | None = None,
+):
+    if plugin_from_init:
+        model_plugin = plugin_from_init
+    else:
+        # A plugin can be specified via the model config
+        # Retrieve the model specific plugin if available
+        # This is using a custom field in the hf_config for the model
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        config_plugin = hf_config.get("io_processor_plugin")
+        model_plugin = config_plugin
+
+    return model_plugin is not None
+
+
 def get_io_processor(
     vllm_config: VllmConfig,
     renderer: BaseRenderer,

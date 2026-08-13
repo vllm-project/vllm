@@ -15,7 +15,7 @@ from regex import escape as regex_escape
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -23,6 +23,7 @@ from vllm.v1.structured_output.backend_types import (
 )
 from vllm.v1.structured_output.utils import (
     OutlinesVocabulary,
+    compile_regex_with_timeout,
     get_outlines_cache,
     get_outlines_vocabulary,
 )
@@ -61,13 +62,19 @@ class OutlinesBackend(StructuredOutputBackend):
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        index = oc.Index(regex_string, vocabulary.inner)
+        index = compile_regex_with_timeout(
+            lambda pat: oc.Index(pat, vocabulary.inner),
+            regex_string,
+        )
         self.cache[cache_key] = index
 
         return index
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
             regex = json_schema.build_regex_from_schema(grammar_spec)
@@ -97,7 +104,7 @@ class OutlinesBackend(StructuredOutputBackend):
             (max_num_seqs, (self.vocab_size + 31) // 32),
             -1,
             dtype=torch.int32,
-            pin_memory=is_pin_memory_available(),
+            pin_memory=PIN_MEMORY,
         )
 
     def destroy(self):

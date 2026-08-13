@@ -1,25 +1,81 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from typing import Any
 
 import torch
+from typing_extensions import override
 
-from vllm.config import VllmConfig
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
+from vllm.utils.math_utils import round_up
+from vllm.v1.kv_offload.base import (
+    CanonicalKVCaches,
+    OffloadingCounterMetadata,
+    OffloadingGaugeMetadata,
+    OffloadingHistogramMetadata,
+    OffloadingManager,
+    OffloadingMetricMetadata,
+    OffloadingSpec,
+    OffloadingWorker,
+)
+from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
-from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
-from vllm.v1.kv_offload.spec import OffloadingSpec
-from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
-from vllm.v1.kv_offload.worker.worker import OffloadingHandler
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 
 class CPUOffloadingSpec(OffloadingSpec):
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        super().__init__(vllm_config, kv_cache_config)
+    BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+
+    @classmethod
+    def build_metric_definitions(
+        cls, extra_config: dict[str, Any]
+    ) -> dict[str, OffloadingMetricMetadata]:
+        definitions: dict[str, OffloadingMetricMetadata] = {
+            CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC: OffloadingGaugeMetadata(
+                documentation=(
+                    "Fraction of CPU KV-cache space currently pinned by active "
+                    "transfers (0.0 = idle, 1.0 = saturated). Sustained high "
+                    "values indicate transfers (stores or promotions) may be "
+                    "dropped due to insufficient capacity."
+                ),
+            ),
+            CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC: OffloadingGaugeMetadata(
+                documentation=(
+                    "Fraction of CPU KV-cache space currently pinned by "
+                    "in-flight stores that have not yet "
+                    "completed (0.0 = idle, 1.0 = saturated)."
+                ),
+            ),
+            CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC: OffloadingGaugeMetadata(
+                documentation=(
+                    "Fraction of CPU KV-cache space currently pinned by "
+                    "in-flight loads that have not yet "
+                    "completed (0.0 = idle, 1.0 = saturated)."
+                ),
+            ),
+            CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of the number of CPU blocks requested by each "
+                    "KV offload prepare_store call."
+                ),
+                buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
+            ),
+        }
+        store_threshold = int(extra_config.get("store_threshold", 0))
+        if store_threshold >= 2:
+            definitions[CPUOffloadingMetrics.STORES_SKIPPED] = (
+                OffloadingCounterMetadata(
+                    documentation=(
+                        "Number of KV offload stores skipped because the reuse "
+                        "threshold was not reached."
+                    ),
+                )
+            )
+        return definitions
+
+    def __init__(self, config: OffloadingConfig):
+        super().__init__(config)
 
         cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
         if not cpu_bytes_to_use:
@@ -27,90 +83,109 @@ class CPUOffloadingSpec(OffloadingSpec):
                 "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
 
-        # calculate kv_bytes_per_offloaded_block
-        assert kv_cache_config is not None
-        page_sizes = {
-            kv_cache_group.kv_cache_spec.page_size_bytes
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-        }
-        assert len(page_sizes) == 1
-        page_size_bytes = page_sizes.pop()
-        kv_bytes_per_block = (
-            page_size_bytes
-            * len(kv_cache_config.kv_cache_tensors)
-            * vllm_config.parallel_config.world_size
-        )
+        world_size = config.parallel.world_size
+        self.num_blocks = 0
+        self.kv_bytes_per_chunk = 0
+        self.cpu_page_size_per_worker = 0
+        self.replicated_layout = config.replicated_layout and self._uses_shared_region()
+        if config.worker_kv_bytes_per_block > 0 and world_size > 0:
+            num_copies = 1 if self.replicated_layout else world_size
+            kv_bytes_per_block = config.worker_kv_bytes_per_block * num_copies
+            kv_bytes_per_chunk = kv_bytes_per_block * self.blocks_per_chunk
 
-        kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
-        self.num_blocks = (
-            int(cpu_bytes_to_use) // kv_bytes_per_offloaded_block
-            if kv_bytes_per_offloaded_block > 0
-            else 0
-        )
+            # calculate cpu_page_size_per_worker
+            self.cpu_page_size_per_worker = kv_bytes_per_chunk // num_copies
+
+            # calculate num_blocks
+            aligned_kv_bytes_per_chunk = round_up(
+                kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
+            )
+            self.num_blocks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
+
+            # Expose aligned_kv_bytes_per_chunk as
+            # kv_bytes_per_chunk. Note that this might contain
+            # some padding. i.e. each offloaded block is of the form,
+            # |--- W0-B0---|---- W1-B0---| ... |---- Wn-B0---| *** maybe-pad *** |
+            # or |--- B0 (single copy) ---| *** maybe-pad *** |
+            self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
 
         # worker-side
-        self._handlers: CpuGpuOffloadingHandlers | None = None
+        self._worker: CPUOffloadingWorker | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+        self.cache_policy_module_path: str | None = self.extra_config.get(
+            "cache_policy_module_path"
+        )
 
+    @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
-            kv_events_config = self.vllm_config.kv_events_config
-            enable_events = (
-                kv_events_config is not None and kv_events_config.enable_kv_cache_events
-            )
-
-            assert len(self.gpu_block_size) == 1
-            gpu_block_size = self.gpu_block_size[0]
-            offloaded_block_size = gpu_block_size * self.block_size_factor
-
-            self._manager = CPUOffloadingManager(
-                block_size=offloaded_block_size,
-                num_blocks=self.num_blocks,
-                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
-                enable_events=enable_events,
-            )
-
             # store_threshold: how many times a block must appear in lookup()
             # before it is eligible for CPU offloading.  Values < 2 disable
             # filtering (a threshold of 1 equals no filter; 0 is the default).
             store_threshold = int(self.extra_config.get("store_threshold", 0))
-            if store_threshold >= 2:
-                max_tracker_size = int(
-                    self.extra_config.get("max_tracker_size", 64_000)
-                )
-                self._manager = FilterReusedOffloadingManager(
-                    backing=self._manager,
-                    store_threshold=store_threshold,
-                    max_tracker_size=max_tracker_size,
-                )
+
+            # Maximum entries in the internal tracker's LRU table.
+            max_tracker_size = int(self.extra_config.get("max_tracker_size", 64_000))
+
+            self._manager = CPUOffloadingManager(
+                num_blocks=self.num_blocks,
+                cache_policy=self.eviction_policy,
+                cache_policy_module_path=self.cache_policy_module_path,
+                enable_events=self.kv_events_config.enable_kv_cache_events,
+                store_threshold=store_threshold,
+                max_tracker_size=max_tracker_size,
+            )
         return self._manager
 
-    def get_handlers(
-        self,
-        kv_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
-        if not self._handlers:
-            if not current_platform.is_cuda_alike():
-                raise Exception(
-                    "CPU Offloading is currently only supported on CUDA-alike GPUs"
-                )
+    def _uses_shared_region(self) -> bool:
+        """Whether the worker CPU buffer is the shared mmap region (vs a private
+        per-rank tensor); replicated-layout dedup is gated on this being True."""
+        return current_platform.is_cuda_alike()
 
-            assert len(self.gpu_block_size) == 1
-            gpu_block_size = self.gpu_block_size[0]
-
-            self._handlers = CpuGpuOffloadingHandlers(
-                attn_backends=attn_backends,
-                gpu_block_size=gpu_block_size,
-                cpu_block_size=gpu_block_size * self.block_size_factor,
-                num_cpu_blocks=self.num_blocks,
-                gpu_caches=kv_caches,
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+        mmap_region: SharedOffloadRegion | None = None
+        # num_blocks == 0 would size the region to zero bytes, which cannot be
+        # mmap'd; fall back to the tensor path (empty tensors) as before.
+        if self._uses_shared_region() and self.num_blocks > 0:
+            # Replicated layout puts all ranks on slot 0 (single MLA copy);
+            # otherwise each rank takes its own slot by physical device index.
+            if self.replicated_layout:
+                rank = 0
+            else:
+                world_size = self.config.parallel.world_size
+                rank = torch.accelerator.current_device_index() % world_size
+            mmap_region = SharedOffloadRegion(
+                engine_id=self.config.engine_id,
+                num_blocks=self.num_blocks,
+                rank=rank,
+                kv_bytes_per_block=self.kv_bytes_per_chunk,
+                cpu_page_size=self.cpu_page_size_per_worker,
             )
+        try:
+            return CPUOffloadingWorker(
+                kv_caches=kv_caches,
+                blocks_per_chunk=self.blocks_per_chunk,
+                num_cpu_blocks=self.num_blocks,
+                mmap_region=mmap_region,
+            )
+        except Exception:
+            if mmap_region is not None:
+                mmap_region.cleanup()
+            raise
 
-        assert self._handlers is not None
-        yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler
-        yield CPULoadStoreSpec, GPULoadStoreSpec, self._handlers.cpu_to_gpu_handler
+    @override
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        if not self._worker:
+            if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+                raise Exception(
+                    "CPU Offloading is currently only supported on CUDA-alike "
+                    "and XPU GPUs"
+                )
+            self._worker = self.create_worker(kv_caches)
+
+        assert self._worker is not None
+        return self._worker

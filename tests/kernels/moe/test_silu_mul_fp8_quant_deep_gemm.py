@@ -7,21 +7,28 @@ import random
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT, has_deep_gemm
+from vllm.utils.deep_gemm import (
+    DeepGemmQuantScaleFMT,
+    has_deep_gemm,
+    transform_sf_into_required_layout,
+)
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import set_random_seed
 
-if current_platform.is_fp8_fnuz():
-    pytest.skip(
-        "Tests in this file require float8_e4m3fn and platform does not support",
-        allow_module_level=True,
-    )
+fp8_dtype = current_platform.fp8_dtype()
+DEVICE = current_platform.device_type
 
-fp8_dtype = torch.float8_e4m3fn
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="persistent_masked_m_silu_mul_quant requires a CUDA-alike or XPU device.",
+)
 
 CASES = [
     (1, 1, 128, fp8_dtype),
@@ -58,22 +65,21 @@ def as_uint8(x) -> torch.Tensor:
 
 
 def silu(x: torch.Tensor) -> torch.Tensor:
-    one_f32 = torch.tensor([1.0], device=x.device, dtype=torch.float32)
     x_f32 = x.to(torch.float32)
-    act_f32 = x_f32 / (one_f32 + torch.exp(-x_f32))
-    assert act_f32.dtype == torch.float32
-    return act_f32.to(torch.bfloat16)
+    act_f32 = x_f32 / (1.0 + torch.exp(-x_f32))
+    if current_platform.is_cuda():
+        # C++ kernel returns bf16
+        return act_f32.to(torch.bfloat16)
+    # Triton fallback stays in f32
+    return act_f32
 
 
 def do_quant(x: torch.Tensor, group_size: int, ceil_ue8m0: bool):
+    fp8_min_val, fp8_max_val = get_fp8_min_max()
     eps_bf16 = torch.tensor([1e-10], device=x.device, dtype=torch.bfloat16)
     one_bf16 = torch.tensor([1.0], device=x.device, dtype=torch.bfloat16)
-    fp8_max_bf16 = torch.tensor(
-        [torch.finfo(fp8_dtype).max], device=x.device, dtype=torch.bfloat16
-    )
-    fp8_min_bf16 = torch.tensor(
-        [torch.finfo(fp8_dtype).min], device=x.device, dtype=torch.bfloat16
-    )
+    fp8_max_bf16 = torch.tensor([fp8_max_val], device=x.device, dtype=torch.bfloat16)
+    fp8_min_bf16 = torch.tensor([fp8_min_val], device=x.device, dtype=torch.bfloat16)
     fp8_max_inv = one_bf16 / fp8_max_bf16
     assert fp8_max_inv.dtype == torch.bfloat16
 
@@ -81,22 +87,36 @@ def do_quant(x: torch.Tensor, group_size: int, ceil_ue8m0: bool):
     num_groups = x.numel() // group_size
     x_og_shape = x.shape
 
-    x = x.to(torch.bfloat16)
-    x = x.view((-1, group_size))
-    amax = x.abs().amax(dim=1).clamp(min=eps_bf16)
-    assert amax.dtype == torch.bfloat16
-    s = amax * fp8_max_inv
+    if current_platform.is_cuda():
+        # C++ kernel computes entirely in bf16
+        x = x.to(torch.bfloat16)
+        x = x.view((-1, group_size))
+        amax = x.abs().amax(dim=1).clamp(min=eps_bf16)
+        assert amax.dtype == torch.bfloat16
+        s = amax * fp8_max_inv
 
-    if ceil_ue8m0:
-        s = torch.exp2(
-            torch.ceil(torch.log2(s).to(torch.bfloat16)).to(torch.bfloat16)
-        ).to(torch.bfloat16)
+        if ceil_ue8m0:
+            s = torch.exp2(
+                torch.ceil(torch.log2(s).to(torch.bfloat16)).to(torch.bfloat16)
+            ).to(torch.bfloat16)
 
-    inv_s = one_bf16 / s
-    inv_s = inv_s.view((num_groups, 1))
-    xq = torch.clamp(x * inv_s, min=fp8_min_bf16.item(), max=fp8_max_bf16.item()).to(
-        fp8_dtype
-    )
+        inv_s = one_bf16 / s
+        inv_s = inv_s.view((num_groups, 1))
+        xq = torch.clamp(
+            x * inv_s, min=fp8_min_bf16.item(), max=fp8_max_bf16.item()
+        ).to(fp8_dtype)
+    else:
+        # Triton fallback computes in f32. Use multiply-by-reciprocal
+        # to match Triton's constexpr evaluation of 1.0/fp8_max.
+        fp8_min_f, fp8_max_f = get_fp8_min_max()
+
+        x = x.to(torch.float32).view((-1, group_size))
+        amax = x.abs().amax(dim=1).clamp(min=1e-10)
+        s = amax * (1.0 / fp8_max_f)
+        if ceil_ue8m0:
+            s = torch.exp2(torch.ceil(torch.log2(s)))
+        inv_s = (1.0 / s).view((num_groups, 1))
+        xq = torch.clamp(x * inv_s, min=fp8_min_f, max=fp8_max_f).to(fp8_dtype)
 
     xq = xq.view(x_og_shape)
     xs = s.view((-1, xq.size(-1) // group_size))
@@ -112,12 +132,10 @@ def silu_mul_quant(
     assert gate.dtype == torch.bfloat16
     assert up.dtype == torch.bfloat16
 
-    act_bf16 = silu(gate)
-    assert act_bf16.dtype == torch.bfloat16
+    act = silu(gate)
 
     # act & mul
-    a_m = act_bf16 * up
-    assert a_m.dtype == torch.bfloat16
+    a_m = act * up
 
     q, s = do_quant(a_m, group_size, ceil_ue8m0)
     return q, s
@@ -132,7 +150,7 @@ def pack_scales(x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tenso
 
     # Add i32_padding here so we can view it as a i32 tensor later on.
     i32_padding = round_up(G, 4) - G
-    ref_s_i8 = torch.empty((E, T, G + i32_padding), dtype=torch.uint8, device="cuda")
+    ref_s_i8 = torch.empty((E, T, G + i32_padding), dtype=torch.uint8, device=DEVICE)
     for e in range(E):
         nt = tokens_per_expert[e].item()
         ref_s_i8[e, :nt, :G] = x[e, :nt].view(torch.int32) >> 23
@@ -165,9 +183,9 @@ def ref_with_scale_fmt(
         DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
     ]
 
-    ref_q = torch.empty((E, T, H), dtype=fp8_dtype, device="cuda")
+    ref_q = torch.empty((E, T, H), dtype=fp8_dtype, device=DEVICE)
     ref_s_f32 = torch.empty(
-        (E, T, cdiv(H, group_size)), dtype=torch.float32, device="cuda"
+        (E, T, cdiv(H, group_size)), dtype=torch.float32, device=DEVICE
     )
 
     for e in range(E):
@@ -190,7 +208,7 @@ def token_random(E, T, H2, tokens_per_expert):
     Initialize each token in a random range so we test a range of
     scale values.
     """
-    y = torch.empty((E, T, H2), dtype=torch.bfloat16, device="cuda")
+    y = torch.empty((E, T, H2), dtype=torch.bfloat16, device=DEVICE)
     for e in range(E):
         for t in range(tokens_per_expert[e].item()):
             exp = random.choice(range(1, 20))
@@ -209,7 +227,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
         high=T,
         size=(E,),
         dtype=torch.int32,
-        device="cuda",
+        device=DEVICE,
     )
 
     # Input tensor of shape (E, T, 2*H)
@@ -221,8 +239,12 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
     scale_fmts = [
         DeepGemmQuantScaleFMT.FLOAT32,
         DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
-        DeepGemmQuantScaleFMT.UE8M0,
     ]
+    # UE8M0 (int32 packed) scales require the C++ kernel which is
+    # not available on ROCm (#ifndef USE_ROCM).
+    # https://github.com/ROCm/aiter/issues/2420
+    if current_platform.is_cuda():
+        scale_fmts.append(DeepGemmQuantScaleFMT.UE8M0)
 
     # Run the SiLU V2 kernel
     for scale_fmt in scale_fmts:
@@ -244,8 +266,6 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
             and current_platform.has_device_capability(100)
             and scale_fmt == DeepGemmQuantScaleFMT.UE8M0
         ):
-            from deep_gemm import transform_sf_into_required_layout
-
             _q, _s = ref_with_scale_fmt(
                 E,
                 T,
@@ -274,10 +294,22 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
         for e in range(E):
             nt = tokens_per_expert[e].item()
 
-            torch.testing.assert_close(
-                y_q[e, :nt].to(torch.float32),
-                ref_y_q[e, :nt].to(torch.float32),
-            )
+            if current_platform.is_rocm() or current_platform.is_xpu():
+                # ROCm and XPU both run the Triton fallback kernel, whose f32
+                # math intrinsics (tl.exp) may differ from PyTorch's torch.exp
+                # by 1 ULP.  At FP8 quantization boundaries this can flip one
+                # representable value.  Allow 1 FP8 quantum of tolerance.
+                torch.testing.assert_close(
+                    y_q[e, :nt].to(torch.float32),
+                    ref_y_q[e, :nt].to(torch.float32),
+                    atol=32.0,
+                    rtol=0.2,
+                )
+            else:
+                torch.testing.assert_close(
+                    y_q[e, :nt].to(torch.float32),
+                    ref_y_q[e, :nt].to(torch.float32),
+                )
 
             if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
                 G = H // group_size

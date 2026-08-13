@@ -56,16 +56,7 @@ def build_late_interaction_doc_params(
     )
 
 
-def compute_maxsim_score(
-    q_emb: torch.Tensor,
-    d_emb: torch.Tensor,
-) -> torch.Tensor:
-    # compute in float32 for numerical stability
-    token_scores = torch.matmul(q_emb.float(), d_emb.float().T)
-    return token_scores.amax(dim=-1).sum()
-
-
-def compute_maxsim_scores(
+def compute_maxsim_score_batched(
     q_embs: Sequence[torch.Tensor],
     d_embs: Sequence[torch.Tensor],
     max_batch_size: int = 64,

@@ -1,424 +1,55 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterable, Iterator
+
+import numpy as np
 import torch
 
+from vllm.config import SpeculativeConfig
+from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+from vllm.v1.worker.gpu.input_batch import (
+    InputBatch,
+    get_num_sampled_and_rejected,
+)
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample, tl_rand64
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
+from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    rejection_sample,
+)
+
+# Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
+# TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
+# per vocab block on load and apply ops like temperature and gumbel, so folding
+# sampling-param application into those kernels would remove this buffer and
+# its traffic entirely.
+MAX_CHUNK_BYTES = 2**30  # 1GB
+_FP32_BYTES = 4
 
 
-@triton.jit
-def _strict_rejection_sample_kernel(
-    sampled_ptr,  # [num_reqs, num_speculative_steps + 1]
-    sampled_stride,
-    num_sampled_ptr,  # [num_reqs]
-    target_sampled_ptr,  # [num_draft_tokens + num_reqs]
-    input_ids_ptr,  # [num_draft_tokens + num_reqs]
-    cu_num_logits_ptr,  # [num_reqs + 1]
-):
-    req_idx = tl.program_id(0)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
-    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
-    num_tokens = end_idx - start_idx
-
-    num_sampled = 0
-    rejected = False
-    for i in range(num_tokens - 1):
-        if not rejected:
-            target_sampled = tl.load(target_sampled_ptr + start_idx + i)
-            draft_sampled = tl.load(input_ids_ptr + start_idx + i + 1)
-            tl.store(sampled_ptr + req_idx * sampled_stride + i, target_sampled)
-            num_sampled += 1
-            if target_sampled != draft_sampled:
-                rejected = True
-    if not rejected:
-        target_sampled = tl.load(target_sampled_ptr + start_idx + num_tokens - 1)
-        tl.store(
-            sampled_ptr + req_idx * sampled_stride + num_tokens - 1, target_sampled
-        )
-        num_sampled += 1
-    tl.store(num_sampled_ptr + req_idx, num_sampled)
+def get_max_chunk_logits(vocab_size: int) -> int:
+    """Largest number of logits rows one verification chunk may hold."""
+    return max(1, MAX_CHUNK_BYTES // (vocab_size * _FP32_BYTES))
 
 
-def strict_rejection_sample(
-    # [num_draft_tokens + num_reqs]
-    target_sampled: torch.Tensor,
-    # [num_draft_tokens + num_reqs]
-    draft_sampled: torch.Tensor,
-    # [num_reqs + 1]
-    cu_num_logits: torch.Tensor,
-    num_speculative_steps,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    num_reqs = cu_num_logits.shape[0] - 1
-    sampled = target_sampled.new_empty(num_reqs, num_speculative_steps + 1)
-    num_sampled = target_sampled.new_empty(num_reqs, dtype=torch.int32)
-    _strict_rejection_sample_kernel[(num_reqs,)](
-        sampled,
-        sampled.stride(0),
-        num_sampled,
-        target_sampled,
-        draft_sampled,
-        cu_num_logits,
-        num_warps=1,
-    )
-    return sampled, num_sampled
-
-
-@triton.jit
-def _gather_draft_logits_and_target_argmax_kernel(
-    local_target_argmax_ptr,
-    local_target_argmax_stride,
-    local_target_max_ptr,
-    local_target_max_stride,
-    # [num_logits, V]
-    out_draft_logits_ptr,
-    out_draft_logits_stride,
-    # [num_logits, V]
-    target_logits_ptr,
-    target_logits_stride,
-    # [max_num_reqs, num_speculative_steps, V]
-    draft_logits_ptr,
-    draft_logits_stride_0,
-    draft_logits_stride_1,
-    # [num_logits]
-    expanded_idx_mapping_ptr,
-    # [num_logits]
-    expanded_local_pos_ptr,
-    # [max_num_reqs]
-    temp_ptr,
-    vocab_size,
-    num_speculative_steps,
-    BLOCK_SIZE: tl.constexpr,
-):
-    logit_idx = tl.program_id(0)
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx)
-    draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
-
-    block_idx = tl.program_id(1)
-    block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block_offsets < vocab_size
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-
-    if temp == 0.0:
-        # Greedy sampling. Get the target logits argmax.
-        target_logits = tl.load(
-            target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
-        value, idx = tl.max(target_logits, axis=0, return_indices=True)
-        token_id = block_idx * BLOCK_SIZE + idx
-        tl.store(
-            local_target_argmax_ptr
-            + logit_idx * local_target_argmax_stride
-            + block_idx,
-            token_id,
-        )
-        tl.store(
-            local_target_max_ptr + logit_idx * local_target_max_stride + block_idx,
-            value,
-        )
-    elif draft_step_idx < num_speculative_steps:
-        draft_logits = tl.load(
-            draft_logits_ptr
-            + req_state_idx * draft_logits_stride_0
-            + draft_step_idx * draft_logits_stride_1
-            + block_offsets,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
-        tl.store(
-            out_draft_logits_ptr + logit_idx * out_draft_logits_stride + block_offsets,
-            draft_logits,
-            mask=mask,
-        )
-
-
-@triton.jit
-def _probabilistic_rejection_kernel(
-    # [num_reqs, num_speculative_steps + 1]
-    sampled_ptr,
-    sampled_stride,
-    # [num_reqs]
-    rejected_steps_ptr,
-    # [num_reqs]
-    rejected_pos_ptr,
-    # [num_logits]
-    draft_sampled_ptr,
-    # [num_logits, V]
-    target_probs_ptr,
-    target_probs_stride,
-    # [num_logits, V]
-    draft_probs_ptr,
-    draft_probs_stride,
-    # [num_logits, num_blocks]
-    local_target_argmax_ptr,
-    local_target_argmax_stride,
-    # [num_logits, num_blocks]
-    local_target_max_ptr,
-    local_target_max_stride,
-    # [num_reqs + 1]
-    cu_num_logits_ptr,
-    # [num_logits]
-    pos_ptr,
-    # [num_reqs]
-    idx_mapping_ptr,
-    # [max_num_reqs]
-    temp_ptr,
-    # [max_num_reqs]
-    seeds_ptr,
-    NUM_BLOCKS: tl.constexpr,
-    PADDED_NUM_BLOCKS: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
-    num_tokens = tl.load(cu_num_logits_ptr + req_idx + 1) - start_idx
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    seed = tl.load(seeds_ptr + req_state_idx)
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-
-    rejected_step = 0
-    accepted = True
-    for i in range(num_tokens - 1):
-        if accepted:
-            logit_idx = start_idx + i
-            draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1)
-            if temp == 0.0:
-                # Greedy sampling. Only accept the sampled draft token if
-                # it exactly matches the target argmax.
-                block_offsets = tl.arange(0, PADDED_NUM_BLOCKS)
-                block_mask = block_offsets < NUM_BLOCKS
-                local_max = tl.load(
-                    local_target_max_ptr
-                    + logit_idx * local_target_max_stride
-                    + block_offsets,
-                    mask=block_mask,
-                    other=float("-inf"),
-                )
-                max_block = tl.argmax(local_max, axis=0)
-                target_argmax = tl.load(
-                    local_target_argmax_ptr
-                    + logit_idx * local_target_argmax_stride
-                    + max_block
-                )
-                accepted &= target_argmax == draft_sampled
-            else:
-                target_prob = tl.load(
-                    target_probs_ptr + logit_idx * target_probs_stride + draft_sampled
-                ).to(tl.float64)
-                draft_prob = tl.load(
-                    draft_probs_ptr + logit_idx * draft_probs_stride + draft_sampled
-                ).to(tl.float64)
-                pos = tl.load(pos_ptr + logit_idx)
-                u = tl_rand64(seed, pos, includes_zero=False)
-                accepted &= target_prob > u * draft_prob
-            tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
-            rejected_step += accepted
-    tl.store(rejected_steps_ptr + req_idx, rejected_step)
-    pos_val = tl.load(pos_ptr + start_idx + rejected_step)
-    tl.store(rejected_pos_ptr + req_idx, pos_val)
-
-
-@triton.jit
-def _compute_residual_logits_kernel(
-    # [num_reqs, V]
-    residual_logits_ptr,
-    residual_logits_stride,
-    # [num_logits, V]
-    target_probs_ptr,
-    target_probs_stride,
-    # [num_logits, V]
-    draft_probs_ptr,
-    draft_probs_stride,
-    # [num_logits, V]
-    target_logits_ptr,
-    target_logits_stride,
-    # [num_reqs]
-    rejected_step_ptr,
-    # [num_reqs + 1]
-    cu_num_logits_ptr,
-    # [num_reqs]
-    idx_mapping_ptr,
-    # [max_num_reqs]
-    temp_ptr,
-    vocab_size,
-    BLOCK_SIZE: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
-    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
-    rejected_logit_idx = start_idx + tl.load(rejected_step_ptr + req_idx)
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block_offsets < vocab_size
-
-    if temp == 0.0 or (rejected_logit_idx == end_idx - 1):
-        # Greedy sampling / bonus token. In either case, use the
-        # target logits directly to reduce numerical error.
-        residual_logits = tl.load(
-            target_logits_ptr
-            + rejected_logit_idx * target_logits_stride
-            + block_offsets,
-            mask=mask,
-            other=float("-inf"),
-        )
-    else:
-        target_probs = tl.load(
-            target_probs_ptr + rejected_logit_idx * target_probs_stride + block_offsets,
-            mask=mask,
-            other=0.0,
-        )
-        draft_probs = tl.load(
-            draft_probs_ptr + rejected_logit_idx * draft_probs_stride + block_offsets,
-            mask=mask,
-            other=0.0,
-        )
-        residual_probs = tl.maximum(target_probs - draft_probs, 0.0)
-        residual_logits = tl.log(residual_probs)
-
-    tl.store(
-        residual_logits_ptr + req_idx * residual_logits_stride + block_offsets,
-        residual_logits,
-        mask=mask,
-    )
-
-
-def probabilistic_rejection_sample(
-    # [num_logits, V]
-    target_logits: torch.Tensor,
-    # [max_num_reqs, num_speculative_steps, V]
-    draft_logits: torch.Tensor,
-    # [num_logits]
-    draft_sampled: torch.Tensor,
-    # [num_reqs + 1]
-    cu_num_logits: torch.Tensor,
-    # [num_logits]
-    pos: torch.Tensor,
-    # [num_reqs]
-    idx_mapping: torch.Tensor,
-    # [num_logits]
-    expanded_idx_mapping: torch.Tensor,
-    # [num_logits]
-    expanded_local_pos: torch.Tensor,
-    # [max_num_reqs]
-    temperature: torch.Tensor,
-    # [max_num_reqs]
-    seed: torch.Tensor,
-    num_speculative_steps: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    num_reqs = cu_num_logits.shape[0] - 1
-    num_logits, vocab_size = target_logits.shape
-
-    BLOCK_SIZE = 1024
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-
-    # Gather draft logits and target argmax for greedy sampling.
-    gathered_draft_logits = target_logits.new_empty(target_logits.shape)
-    local_target_argmax = target_logits.new_empty(
-        num_logits, num_blocks, dtype=torch.int64
-    )
-    local_target_max = target_logits.new_empty(
-        num_logits, num_blocks, dtype=torch.float32
-    )
-    _gather_draft_logits_and_target_argmax_kernel[(num_logits, num_blocks)](
-        local_target_argmax,
-        local_target_argmax.stride(0),
-        local_target_max,
-        local_target_max.stride(0),
-        gathered_draft_logits,
-        gathered_draft_logits.stride(0),
-        target_logits,
-        target_logits.stride(0),
-        draft_logits,
-        draft_logits.stride(0),
-        draft_logits.stride(1),
-        expanded_idx_mapping,
-        expanded_local_pos,
-        temperature,
-        vocab_size,
-        num_speculative_steps,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
-
-    # Compute target and draft probs.
-    target_probs = torch.softmax(target_logits, dim=-1)
-    draft_probs = torch.softmax(gathered_draft_logits, dim=-1)
-
-    # Rejection sample.
-    # [num_reqs, num_speculative_steps + 1]
-    sampled = draft_sampled.new_empty(
-        num_reqs, num_speculative_steps + 1, dtype=torch.int64
-    )
-    # [num_reqs]
-    rejected_steps = sampled.new_empty(num_reqs)
-    # [num_reqs]
-    rejected_pos = pos.new_empty(num_reqs)
-    _probabilistic_rejection_kernel[(num_reqs,)](
-        sampled,
-        sampled.stride(0),
-        rejected_steps,
-        rejected_pos,
-        draft_sampled,
-        target_probs,
-        target_probs.stride(0),
-        draft_probs,
-        draft_probs.stride(0),
-        local_target_argmax,
-        local_target_argmax.stride(0),
-        local_target_max,
-        local_target_max.stride(0),
-        cu_num_logits,
-        pos,
-        idx_mapping,
-        temperature,
-        seed,
-        num_warps=1,
-        NUM_BLOCKS=num_blocks,
-        PADDED_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
-    )
-
-    # Compute the logits and positions to resample the rejected/bonus
-    # tokens from.
-    # [num_reqs, vocab_size]
-    residual_logits = target_logits.new_empty(num_reqs, vocab_size)
-    _compute_residual_logits_kernel[(num_reqs, num_blocks)](
-        residual_logits,
-        residual_logits.stride(0),
-        target_probs,
-        target_probs.stride(0),
-        draft_probs,
-        draft_probs.stride(0),
-        target_logits,
-        target_logits.stride(0),
-        rejected_steps,
-        cu_num_logits,
-        idx_mapping,
-        temperature,
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
-
-    # Gumbel sample tokens from the residual distribution.
-    resampled = gumbel_sample(
-        residual_logits,
-        idx_mapping,
-        temperature,
-        seed,
-        rejected_pos,
-        apply_temperature=False,
-    )
-    sampled.scatter_(1, rejected_steps.unsqueeze(1), resampled.unsqueeze(1))
-
-    return sampled, rejected_steps + 1
+def _iter_request_chunks(
+    cu_num_logits: np.ndarray, max_chunk_logits: int
+) -> Iterator[tuple[int, int]]:
+    """Yield maximally packed request ranges without splitting requests."""
+    assert max_chunk_logits > 0
+    num_reqs = cu_num_logits.size - 1
+    start = 0
+    while start < num_reqs:
+        max_logit = int(cu_num_logits[start]) + max_chunk_logits
+        end = int(np.searchsorted(cu_num_logits, max_logit, side="right") - 1)
+        end = min(num_reqs, max(start + 1, end))
+        yield start, end
+        start = end
 
 
 @triton.jit
@@ -445,27 +76,39 @@ class RejectionSampler:
     def __init__(
         self,
         sampler: Sampler,
-        num_speculative_steps,
-        use_strict_rejection_sampling: bool = True,
+        spec_config: SpeculativeConfig,
+        device: torch.device,
     ):
         self.sampler = sampler
-        self.num_speculative_steps = num_speculative_steps
-        self.use_strict_rejection_sampling = use_strict_rejection_sampling
+        self.num_speculative_steps = spec_config.num_speculative_tokens
+        rejection_sample_method = spec_config.rejection_sample_method
+        self.use_block_verification: bool = False
+        self.synthetic_conditional_rates: torch.Tensor | None = None
+        if rejection_sample_method == "synthetic":
+            assert spec_config.synthetic_acceptance_rates is not None
+            self.synthetic_conditional_rates = torch.tensor(
+                unconditional_to_conditional_rates(
+                    spec_config.synthetic_acceptance_rates
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
+        elif rejection_sample_method == "block":
+            self.use_block_verification = True
 
     def _get_logprobs_tensors(
         self,
-        input_batch: InputBatch,
         sampled: torch.Tensor,
         num_sampled: torch.Tensor,
         logits: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        cu_num_logits_np: np.ndarray,
+        max_num_logprobs: int,
     ) -> LogprobsTensors | None:
-        max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
-            input_batch.idx_mapping_np
-        )
         if max_num_logprobs == NO_LOGPROBS:
             return None
 
-        num_reqs = input_batch.cu_num_logits.shape[0] - 1
+        num_reqs = cu_num_logits.shape[0] - 1
         num_logits = logits.shape[0]
         flat_sampled = torch.zeros(
             num_logits, dtype=sampled.dtype, device=sampled.device
@@ -475,16 +118,133 @@ class RejectionSampler:
             sampled,
             sampled.stride(0),
             num_sampled,
-            input_batch.cu_num_logits,
+            cu_num_logits,
             num_warps=1,
         )
-        expanded_logits = num_logits != input_batch.idx_mapping.shape[0]
-        return compute_topk_logprobs(
+        expanded_logits = num_logits != num_reqs
+        return compute_topk_scores(
             logits,
             max_num_logprobs,
             flat_sampled,
-            input_batch.cu_num_logits_np.tolist() if expanded_logits else None,
+            cu_num_logits_np.tolist() if expanded_logits else None,
+            logits_mode=self.sampler.logprobs_mode
+            in ("raw_logits", "processed_logits"),
         )
+
+    def _verify(
+        self,
+        logits: torch.Tensor,
+        draft_logits: torch.Tensor | None,
+        draft_sampled: torch.Tensor,
+        pos: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        expanded_idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        processed_logits = self.sampler.apply_sampling_params(
+            logits,
+            expanded_idx_mapping,
+            idx_mapping,
+            idx_mapping_np,
+            pos,
+            draft_sampled,
+            expanded_local_pos,
+        )
+        sampled, num_sampled = rejection_sample(
+            processed_logits,
+            draft_logits,
+            draft_sampled,
+            cu_num_logits,
+            pos,
+            idx_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            self.sampler.sampling_states.temperature.gpu,
+            self.sampler.sampling_states.seeds.gpu,
+            self.num_speculative_steps,
+            self.synthetic_conditional_rates,
+            use_fp64=self.sampler.use_fp64_gumbel,
+            use_block_verification=self.use_block_verification,
+        )
+        return processed_logits, sampled, num_sampled
+
+    def _verify_in_chunks(
+        self,
+        logits: torch.Tensor,
+        input_batch: InputBatch,
+        draft_logits: torch.Tensor | None,
+        draft_sampled: torch.Tensor,
+        pos: torch.Tensor,
+        max_chunk_logits: int,
+        max_num_logprobs: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, LogprobsTensors | None]:
+        cu_num_logits_np = input_batch.cu_num_logits_np
+        use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
+        num_reqs = input_batch.num_reqs
+
+        if logits.shape[0] <= max_chunk_logits:
+            # One chunk covers the batch. Adaptive verification compacts the logits
+            # without updating cu_num_logits_np (it keeps the pre-compacted layout),
+            # so the stale sums must not pick chunk boundaries; its budget cap
+            # guarantees the compacted batch always lands here.
+            request_chunks: Iterable[tuple[int, int]] = ((0, num_reqs),)
+        else:
+            request_chunks = _iter_request_chunks(cu_num_logits_np, max_chunk_logits)
+
+        sampled_chunks: list[torch.Tensor] = []
+        num_sampled_chunks: list[torch.Tensor] = []
+        logprobs_chunks: list[LogprobsTensors] = []
+
+        for start, end in request_chunks:
+            lo = int(cu_num_logits_np[start])
+            hi = int(cu_num_logits_np[end])
+            chunk_cu_num_logits_np = cu_num_logits_np[start : end + 1] - lo
+            chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1] - lo
+            # draft_logits uses persistent request-state indices and stays global.
+            processed_logits, sampled, num_sampled = self._verify(
+                logits[lo:hi],
+                draft_logits,
+                draft_sampled[lo:hi],
+                pos[lo:hi],
+                chunk_cu_num_logits,
+                input_batch.idx_mapping[start:end],
+                input_batch.idx_mapping_np[start:end],
+                input_batch.expanded_idx_mapping[lo:hi],
+                input_batch.expanded_local_pos[lo:hi],
+            )
+            chunk_logprobs = self._get_logprobs_tensors(
+                sampled,
+                num_sampled,
+                processed_logits if use_processed_logits else logits[lo:hi],
+                chunk_cu_num_logits,
+                chunk_cu_num_logits_np,
+                max_num_logprobs,
+            )
+            if chunk_logprobs is not None:
+                logprobs_chunks.append(chunk_logprobs)
+            del processed_logits
+            sampled_chunks.append(sampled)
+            num_sampled_chunks.append(num_sampled)
+
+        if len(sampled_chunks) == 1:
+            logprobs_tensors = logprobs_chunks[0] if logprobs_chunks else None
+            return sampled_chunks[0], num_sampled_chunks[0], logprobs_tensors
+
+        logprobs_tensors = None
+        if logprobs_chunks:
+            expanded_logits = logits.shape[0] != input_batch.num_reqs
+            logprobs_tensors = LogprobsTensors.cat(
+                logprobs_chunks,
+                cu_num_generated_tokens=(
+                    cu_num_logits_np.tolist() if expanded_logits else None
+                ),
+            )
+
+        sampled = torch.cat(sampled_chunks)
+        num_sampled = torch.cat(num_sampled_chunks)
+        return sampled, num_sampled, logprobs_tensors
 
     def __call__(
         self,
@@ -492,56 +252,39 @@ class RejectionSampler:
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
-        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
-        if self.use_strict_rejection_sampling:
-            sampler_output = self.sampler(logits, input_batch)
-            logprobs_tensors = sampler_output.logprobs_tensors
-            sampled, num_sampled = strict_rejection_sample(
-                sampler_output.sampled_token_ids.view(-1),
-                draft_sampled,
-                input_batch.cu_num_logits,
-                self.num_speculative_steps,
-            )
-        else:
-            assert draft_logits is not None
-            pos = input_batch.positions[input_batch.logits_indices]
-            processed_logits = self.sampler.apply_sampling_params(
-                logits,
-                input_batch.expanded_idx_mapping,
-                input_batch.idx_mapping_np,
-                pos,
-                draft_sampled,
-                input_batch.expanded_local_pos,
-            )
-            sampled, num_sampled = probabilistic_rejection_sample(
-                processed_logits,
-                draft_logits,
-                draft_sampled,
-                input_batch.cu_num_logits,
-                pos,
-                input_batch.idx_mapping,
-                input_batch.expanded_idx_mapping,
-                input_batch.expanded_local_pos,
-                self.sampler.sampling_states.temperature.gpu,
-                self.sampler.sampling_states.seeds.gpu,
-                self.num_speculative_steps,
-            )
-            logprobs_tensors = self._get_logprobs_tensors(
-                input_batch,
-                sampled,
-                num_sampled,
-                processed_logits
-                if self.sampler.logprobs_mode == "processed_logprobs"
-                else logits,
-            )
+        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        pos = input_batch.positions[input_batch.logits_indices]
+
+        max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
+            input_batch.idx_mapping_np
+        )
+        chunk_logit_limit = get_max_chunk_logits(logits.shape[1])
+        sampled, num_sampled, logprobs_tensors = self._verify_in_chunks(
+            logits,
+            input_batch,
+            draft_logits,
+            draft_sampled,
+            pos,
+            chunk_logit_limit,
+            max_num_logprobs,
+        )
+
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.sampler.req_states.prefill_len.gpu,
+        )
 
         return SamplerOutput(
             sampled_token_ids=sampled,
             logprobs_tensors=logprobs_tensors,
             num_nans=num_nans,
             num_sampled=num_sampled,
+            num_rejected=num_rejected,
         )

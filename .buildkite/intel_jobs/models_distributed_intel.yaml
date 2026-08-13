@@ -1,0 +1,27 @@
+group: Models - Distributed
+depends_on: 
+  - image-build-xpu
+steps:
+- label: Distributed Model Tests (2 GPUs)
+  key: distributed-model-tests-2-gpus
+  timeout_in_minutes: 65
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/sharded_state_loader.py
+  - vllm/model_executor/models/
+  - tests/model_executor/model_loader/test_sharded_state_loader.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m "not slow_test"'

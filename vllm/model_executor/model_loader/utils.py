@@ -5,7 +5,7 @@
 import inspect
 import warnings
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 from torch import nn
@@ -14,7 +14,8 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.attention import is_deferred_attention_layer
+from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -25,6 +26,7 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.tracing import instrument
+from vllm.utils.mem_utils import release_device_memory_under_pressure
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -71,7 +73,7 @@ def initialize_model(
         model_class,
     )
     # try to be compatible with old-style model class
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if "prefix" in all_params:
         kwargs["prefix"] = prefix
     if "config" in all_params:
@@ -104,17 +106,39 @@ def process_weights_after_loading(
             # parameters onto device for processing and back off after.
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
+            # process_weights_after_loading may swap in freshly-created
+            # Parameters (e.g. FP8 requantization), which are stamped with the
+            # global rank in BasevLLMParameter.__init__. Re-reconcile their TP
+            # state to the layer so a later weight reload / RL weight-refit
+            # narrows replicated (disable_tp) weights at the correct offset.
+            if hasattr(module, "update_param_tp_status"):
+                module.update_param_tp_status()
+            # Repacking transients above can leave large amounts of memory in
+            # the caching allocator, which starves the OS on UMA devices.
+            release_device_memory_under_pressure(target_device)
 
-    # Initialize post-load attention weights for both Attention and MLA.
-    # NOTE: Happens after other modules so we can easily decompress weights.
+    # Initialize post-load attention weights for any attention layer and MM
+    # encoder. NOTE: Happens after other modules so we can easily decompress
+    # weights.
     for _, module in model.named_modules():
-        if isinstance(module, (Attention, MLAAttention)) and hasattr(
-            module, "process_weights_after_loading"
-        ):
+        if is_deferred_attention_layer(module):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
                 module.process_weights_after_loading(model_config.dtype)
+
+    # Process HPC modules (HpcRopeNorm, etc.) that rely on
+    # process_weights_after_loading being called from the model's
+    # load_weights(). When using DummyModelLoader (e.g. profiling or
+    # sleep/wake_up reload), the model's load_weights() is not called, so we
+    # must handle HPC modules here generically.
+    for _, module in model.named_modules():
+        if isinstance(module, HpcModule):
+            module.process_weights_after_loading(model)
+
+    # Model-level post-load hook, after the per-layer quant finalize.
+    if hasattr(model, "process_weights_after_loading"):
+        model.process_weights_after_loading()
 
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
@@ -174,7 +198,7 @@ _MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
 def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
     from vllm.model_executor.models.adapters import as_embedding_model, as_seq_cls_model
 
-    architectures = getattr(model_config.hf_config, "architectures", [])
+    architectures = getattr(model_config.hf_config, "architectures", None) or []
 
     model_cls, arch = model_config.registry.resolve_model_cls(
         architectures,
@@ -214,15 +238,15 @@ def get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], 
             model_config.runner_type,
             model_config.trust_remote_code,
             model_config.model_impl,
-            tuple(getattr(model_config.hf_config, "architectures", [])),
+            tuple(getattr(model_config.hf_config, "architectures", None) or []),
         )
     )
     if key in _MODEL_ARCH_BY_HASH:
         return _MODEL_ARCH_BY_HASH[key]
 
-    model_arch = _get_model_architecture(model_config)
-    _MODEL_ARCH_BY_HASH[key] = model_arch
-    return model_arch
+    model_cls_and_arch = _get_model_architecture(model_config)
+    _MODEL_ARCH_BY_HASH[key] = model_cls_and_arch
+    return model_cls_and_arch
 
 
 def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:
@@ -231,35 +255,6 @@ def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:
     return get_model_architecture(model_config)[1]
-
-
-@dataclass
-class ParamMapping:
-    """
-    A class to handle parameter mapping for model weight loading.
-    It creates a bidirectional mapping between packed parameters and their
-    constituent parts.
-    """
-
-    packed_mapping: dict[str, list[str]]
-    inverse_packed_mapping: dict[str, tuple[str, int]] = field(default_factory=dict)
-
-    def __post_init__(self):
-        for packed_name, sub_params in self.packed_mapping.items():
-            # Skip self-contained cases (e.g., {"W_pack": ["W_pack"]})
-            if len(sub_params) == 1 and sub_params[0] == packed_name:
-                continue
-            for index, param_name in enumerate(sub_params):
-                self.inverse_packed_mapping[param_name] = (
-                    packed_name,
-                    index,
-                )
-
-    def get_sub_modules(self, module_name: str) -> tuple[str, list[str]] | None:
-        for key, value in self.packed_mapping.items():
-            if module_name.endswith(key):
-                return key, value
-        return None
 
 
 def configure_quant_config(
@@ -281,6 +276,6 @@ def configure_quant_config(
 
         # pass mappings by reference to quant_config
         if hf_to_vllm_mapper is not None:
-            quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+            quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_unstacked_mapper())
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping

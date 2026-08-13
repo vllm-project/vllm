@@ -8,11 +8,12 @@
 import numpy as np
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 
-@triton.jit()
+@triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
 def _causal_conv1d_fwd_kernel(  # continuous batching
     # Pointers to matrices
     x_ptr,  # (dim, cu_seqlen) holding `batch` of actual sequences + padded sequences
@@ -33,11 +34,10 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
     # Matrix dimensions
     dim: tl.constexpr,
-    seqlen: tl.int32,  # cu_seqlen
-    num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
+    num_cache_lines,  # added to support vLLM larger cache lines
     # Strides
     stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
-    stride_x_token: tl.constexpr,  # stride to get to next token (same feature-index, same sequence-index)
+    stride_x_token: tl.int64,  # stride to get to next token (same feature-index, same sequence-index)
     stride_w_dim: tl.constexpr,  # stride to get to next dim-axis value
     stride_w_width: tl.constexpr,  # stride to get to next width-axis value
     stride_istate_seq: tl.constexpr,
@@ -45,19 +45,21 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     stride_istate_token: tl.constexpr,
     stride_cache_indices: tl.constexpr,
     stride_o_dim: tl.constexpr,
-    stride_o_token: tl.constexpr,
+    stride_o_token: tl.int64,
     stride_block_m: tl.constexpr,  # Stride block to align divided by BLOCK_M
     # others
     pad_slot_id: tl.constexpr,
+    null_block_id: tl.constexpr,
     # Meta-parameters
     HAS_BIAS: tl.constexpr,
     KERNEL_WIDTH: tl.constexpr,
     SILU_ACTIVATION: tl.constexpr,
     IS_APC_ENABLED: tl.constexpr,
-    USE_PAD_SLOT: tl.constexpr,
+    HAS_NULL_BLOCK: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     conv_states_ptr = initial_states_ptr
     conv_state_indices_ptr = cache_indices_ptr
@@ -67,6 +69,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     state_len = (
         KERNEL_WIDTH - 1
     )  # can be passed via argument if it's not the same as this value
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
 
     # one program handles one chunk in a single sequence
     # rather than mixing sequences - to make updating initial_states across sequences efficiently
@@ -79,6 +84,8 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
 
     if idx_seq == pad_slot_id:
+        if launch_pdl:
+            tl.extra.cuda.gdc_launch_dependents()
         return
 
     sequence_start_index = tl.load(query_start_loc_ptr + idx_seq)
@@ -133,9 +140,11 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         conv_state_indices_ptr + idx_seq * stride_cache_indices + conv_state_init_index
     ).to(tl.int64)
 
-    if USE_PAD_SLOT:  # noqa
-        if conv_states_input_coord == pad_slot_id:
-            # not processing as this is not the actual sequence
+    if HAS_NULL_BLOCK:  # noqa
+        if conv_states_input_coord == null_block_id:
+            # not processing as this is a null block (padding)
+            if launch_pdl:
+                tl.extra.cuda.gdc_launch_dependents()
             return
     conv_states_base = (
         conv_states_ptr
@@ -408,6 +417,10 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         w_ptrs = w_base + (3 * stride_w_width)  # [BLOCK_N] tensor
         w_col3 = tl.load(w_ptrs, mask_w, other=0.0)
     mask_x_1d = idx_feats < dim
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
+
     for idx_token in range(segment_len):
         acc = acc_preload
 
@@ -475,6 +488,7 @@ def causal_conv1d_fn(
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
+    null_block_id: int = NULL_BLOCK_ID,
     block_idx_first_scheduled_token: torch.Tensor | None = None,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
@@ -590,7 +604,6 @@ def causal_conv1d_fn(
         stride_istate_seq = conv_states.stride(0)
         stride_istate_dim = conv_states.stride(1)
         stride_istate_token = conv_states.stride(2)
-        assert stride_istate_dim == 1
     if out.dim() == 2:
         stride_o_dim = out.stride(0)
         stride_o_token = out.stride(1)
@@ -714,7 +727,6 @@ def causal_conv1d_fn(
         out,
         # Matrix dimensions
         dim,
-        cu_seqlen,
         num_cache_lines,
         # stride
         stride_x_dim,
@@ -730,22 +742,24 @@ def causal_conv1d_fn(
         block_size_to_align // BLOCK_M,
         # others
         pad_slot_id,
+        null_block_id,
         # META
         HAS_BIAS=bias is not None,
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
         IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
-        USE_PAD_SLOT=pad_slot_id is not None,
+        HAS_NULL_BLOCK=null_block_id is not None,
         NP2_STATELEN=np2_statelen,
         # launch_cooperative_grid=True
         BLOCK_M=BLOCK_M,
         BLOCK_N=256,
         num_stages=2,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out.to(original_x_dtype)
 
 
-@triton.jit()
+@triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
 def _causal_conv1d_update_kernel(
     # Pointers to matrices
     x_ptr,  # (batch, dim, seqlen)
@@ -763,11 +777,11 @@ def _causal_conv1d_update_kernel(
     dim: tl.constexpr,
     seqlen: tl.constexpr,
     state_len: tl.constexpr,
-    num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
+    num_cache_lines,  # added to support vLLM larger cache lines
     # Strides
     stride_x_seq: tl.constexpr,
     stride_x_dim: tl.constexpr,
-    stride_x_token: tl.constexpr,
+    stride_x_token: tl.int64,
     stride_w_dim: tl.constexpr,
     stride_w_width: tl.constexpr,
     stride_conv_state_seq: tl.constexpr,
@@ -776,9 +790,9 @@ def _causal_conv1d_update_kernel(
     stride_state_indices: tl.constexpr,
     stride_o_seq: tl.constexpr,
     stride_o_dim: tl.constexpr,
-    stride_o_token: tl.constexpr,
+    stride_o_token: tl.int64,
     # others
-    pad_slot_id: tl.constexpr,
+    null_block_id: tl.constexpr,
     # Meta-parameters
     HAS_BIAS: tl.constexpr,
     KERNEL_WIDTH: tl.constexpr,
@@ -787,12 +801,18 @@ def _causal_conv1d_update_kernel(
     IS_APC_ENABLED: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
-    USE_PAD_SLOT: tl.constexpr,
+    HAS_NULL_BLOCK: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+
     # ruff: noqa: E501
     idx_seq = tl.program_id(0)
     if idx_seq >= batch:
+        if launch_pdl:
+            tl.extra.cuda.gdc_launch_dependents()
         return
 
     # [BLOCK_N,] elements along the feature-dimension (channel)
@@ -811,9 +831,11 @@ def _causal_conv1d_update_kernel(
         conv_state_indices_ptr + idx_seq * stride_state_indices + conv_state_init
     ).to(tl.int64)
 
-    if USE_PAD_SLOT:  # noqa
-        if conv_states_input_coord == pad_slot_id:
+    if HAS_NULL_BLOCK:  # noqa
+        if conv_states_input_coord == null_block_id:
             # not processing as this is not the actual sequence
+            if launch_pdl:
+                tl.extra.cuda.gdc_launch_dependents()
             return
 
     if IS_VARLEN:
@@ -831,6 +853,8 @@ def _causal_conv1d_update_kernel(
         o_offset = idx_seq * stride_o_seq
 
     if query_start_index == query_end_index:
+        if launch_pdl:
+            tl.extra.cuda.gdc_launch_dependents()
         return
 
     if IS_SPEC_DECODING:
@@ -969,6 +993,9 @@ def _causal_conv1d_update_kernel(
     mask_x_1d = idx_feats < dim
 
     # STEP 5: compute each token
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
+
     for idx_token in tl.range(seqlen):
         acc = acc_preload
 
@@ -1076,10 +1103,11 @@ def causal_conv1d_update(
     num_accepted_tokens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
     max_query_len: int = -1,
-    pad_slot_id: int = PAD_SLOT_ID,
+    null_block_id: int = NULL_BLOCK_ID,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
     validate_data=False,
+    out: torch.Tensor | None = None,
 ):
     """
     x: Input tensor which can take the following shapes:
@@ -1111,16 +1139,17 @@ def causal_conv1d_update(
     max_query_len: int
         If query_start_loc is not None, this indicates the maximum query
         length in the batch.
-    pad_slot_id: int
-            if conv_state_indices is passed, lets the kernel identify padded
-            entries that will not be processed,
-            for example: conv_state_indices = [pad_slot_id, 1 ,20 ,pad_slot_id]
+    null_block_id: int
+            Block ID used to identify padded entries in
+            conv_state_indices. Block 0 is the null block.
+            for example: conv_state_indices = [null_block_id, 1, 20, null_block_id]
             in this case, the kernel will not process entries at
             indices 0 and 3
-    out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
+    out: optional output tensor with the same shape as `x`. When omitted,
+        the input is overwritten.
     """
     if validate_data:
-        assert pad_slot_id is not None
+        assert null_block_id is not None
         assert x.stride(1) == 1
     if isinstance(activation, bool):
         activation = "silu" if activation is True else None
@@ -1129,10 +1158,22 @@ def causal_conv1d_update(
 
     original_x_dtype = x.dtype
     x = x.to(conv_state.dtype)
+    if out is None:
+        out = x
+    else:
+        if out.shape != x.shape:
+            raise ValueError(
+                f"`out` shape {tuple(out.shape)} must match `x` shape {tuple(x.shape)}."
+            )
+        if out.dtype != original_x_dtype or out.device != x.device:
+            raise ValueError(
+                "`out` must have the same dtype and device as the input `x`."
+            )
     unsqueeze = query_start_loc is None and x.dim() == 2
     if unsqueeze:
         # make it (batch, dim, seqlen) with seqlen == 1
         x = x.unsqueeze(-1)
+        out = out.unsqueeze(-1)
     if query_start_loc is None:
         batch, dim, seqlen = x.shape
     else:
@@ -1146,9 +1187,6 @@ def causal_conv1d_update(
 
     if validate_data:
         assert dim == weight.size(0)
-        assert conv_state.stride(-2) == 1, (
-            f"ERROR: expect contiguous along feat-dim of conv_state (currently stride={conv_state.stride()})"
-        )
         assert state_len >= width - 1
         # when above happens, we don't shift-left to keep any records in conv_state
         assert dim == conv_state.size(1)
@@ -1162,8 +1200,6 @@ def causal_conv1d_update(
         assert num_cache_lines >= batch
         assert weight.stride(1) == 1  # Need this
 
-    # adopt the strategy in vLLM that overwrite on 'x' directly, rather than creating a new tensor 'o'
-    out = x
     stride_w_dim, stride_w_width = weight.stride()
 
     if query_start_loc is None:
@@ -1225,7 +1261,7 @@ def causal_conv1d_update(
         stride_o_dim,
         stride_o_token,
         # others
-        pad_slot_id,
+        null_block_id,
         # META
         HAS_BIAS=bias is not None,
         KERNEL_WIDTH=width,
@@ -1234,9 +1270,20 @@ def causal_conv1d_update(
         IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
         IS_SPEC_DECODING=num_accepted_tokens is not None,
         NP2_STATELEN=np2_statelen,
-        USE_PAD_SLOT=pad_slot_id is not None,
+        HAS_NULL_BLOCK=null_block_id is not None,
         BLOCK_N=256,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     if unsqueeze:
         out = out.squeeze(-1)
     return out.to(original_x_dtype)
+
+
+if current_platform.is_cpu():
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+        causal_conv1d_fn_cpu,
+        causal_conv1d_update_cpu,
+    )
+
+    causal_conv1d_fn = causal_conv1d_fn_cpu  # type: ignore
+    causal_conv1d_update = causal_conv1d_update_cpu  # type: ignore

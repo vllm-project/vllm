@@ -1,0 +1,4 @@
+# Dependencies for building Rust artifacts through setuptools-rust.
+setuptools>=77.0.3,<81.0.0
+setuptools-rust>=1.9.0
+wheel

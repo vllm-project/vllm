@@ -50,14 +50,6 @@ input_tokens = [
     2,
 ]
 
-if current_platform.is_rocm():
-    # Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_math_sdp(True)
-
 # On ROCm, floating-point reductions in attention and GEMM kernels are
 # non-associative and sensitive to batch geometry. Force LLM instances
 # into an identical, deterministic execution mode:
@@ -288,7 +280,7 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
         assert "error" in response.object
         assert (
             "truncate_prompt_tokens value is greater than max_model_len. "
-            "Please, select a smaller truncation size." in response.message
+            "Please request a smaller truncation size." in response.message
         )
 
 
@@ -369,7 +361,7 @@ async def test_chat_request(
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 34
+    assert output.usage.prompt_tokens == 33
 
     # test continue_final_message
     response = requests.post(
@@ -401,7 +393,7 @@ async def test_chat_request(
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 36
+    assert output.usage.prompt_tokens == 35
 
     # test continue_final_message with add_generation_prompt
     response = requests.post(
@@ -507,11 +499,17 @@ async def test_base64_embedding(hf_model, client: openai.AsyncOpenAI, model_name
         "The best thing about vLLM is that it supports many different models",
     ]
 
+    def check_outputs(outputs: list[list[float]]) -> None:
+        # The embeddings endpoint executes list elements as separate scheduler
+        # requests, so use the same per-request geometry for the HF reference.
+        for input_text, output in zip(input_texts, outputs, strict=True):
+            run_embedding_correctness_test(hf_model, [input_text], [output])
+
     responses_float = await client.embeddings.create(
         input=input_texts, model=model_name, encoding_format="float"
     )
     float_data = [d.embedding for d in responses_float.data]
-    run_embedding_correctness_test(hf_model, input_texts, float_data)
+    check_outputs(float_data)
 
     responses_base64 = await client.embeddings.create(
         input=input_texts, model=model_name, encoding_format="base64"
@@ -522,14 +520,14 @@ async def test_base64_embedding(hf_model, client: openai.AsyncOpenAI, model_name
             np.frombuffer(base64.b64decode(data.embedding), dtype="float32").tolist()
         )
 
-    run_embedding_correctness_test(hf_model, input_texts, base64_data)
+    check_outputs(base64_data)
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(
         input=input_texts, model=model_name
     )
     default_data = [d.embedding for d in responses_default.data]
-    run_embedding_correctness_test(hf_model, input_texts, default_data)
+    check_outputs(default_data)
 
 
 @pytest.mark.asyncio
@@ -732,28 +730,9 @@ async def test_pooling_embed(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_pooling_token_embed(server: RemoteOpenAIServer, model_name: str):
-    task = "token_embed"
-    response = requests.post(
-        server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "input": input_text,
-            "encoding_format": "float",
-            "task": task,
-        },
-    )
-
-    poolings = PoolingResponse.model_validate(response.json())
-
-    assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == len(input_tokens)
-    assert len(poolings.data[0].data[0]) == 384
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("task", ["classify", "token_classify", "plugin"])
+@pytest.mark.parametrize(
+    "task", ["classify", "token_classify", "token_embed", "plugin"]
+)
 async def test_pooling_not_supported(
     server: RemoteOpenAIServer, model_name: str, task: str
 ):
@@ -767,4 +746,10 @@ async def test_pooling_not_supported(
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(f"Unsupported task: {task!r}")
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "token_embed":
+        err_msg = "Try switching the model's pooling_task via"
+    else:
+        err_msg = f"Unsupported task: {task!r}"
+    assert response.json()["error"]["message"].startswith(err_msg)

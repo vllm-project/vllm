@@ -9,12 +9,14 @@ import pytest
 import torch
 import torch.distributed
 
+import vllm.envs as envs
 from tests.utils import ensure_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
+    get_tp_group,
     get_world_group,
     graph_capture,
     init_distributed_environment,
@@ -82,11 +84,18 @@ def test_pynccl():
 @worker_fn_wrapper
 def multiple_allreduce_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
-    groups = [
-        torch.distributed.new_group(ranks=[0, 1], backend="gloo"),
-        torch.distributed.new_group(ranks=[2, 3], backend="gloo"),
-    ]
-    group = groups[0] if torch.distributed.get_rank() in [0, 1] else groups[1]
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        # Eager-init path: parent PG has bound_device_id + a CPU backend,
+        # so split_group is supported.
+        group = torch.distributed.split_group(
+            split_ranks=[[0, 1], [2, 3]], backend="cpu:gloo,cuda:nccl"
+        )
+    else:
+        groups = [
+            torch.distributed.new_group(ranks=[0, 1], backend="gloo"),
+            torch.distributed.new_group(ranks=[2, 3], backend="gloo"),
+        ]
+        group = groups[0] if torch.distributed.get_rank() in [0, 1] else groups[1]
     pynccl_comm = PyNcclCommunicator(group=group, device=device)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
     # two groups can communicate independently
@@ -189,6 +198,52 @@ def all_gather_worker_fn():
 )
 def test_pynccl_all_gather():
     distributed_run(all_gather_worker_fn, 2)
+
+
+@worker_fn_wrapper
+def cuda_communicator_all_gather_dim_worker_fn():
+    with ensure_current_vllm_config():
+        ensure_model_parallel_initialized(2, 1)
+
+    tp_group = get_tp_group()
+    comm = tp_group.device_communicator
+    assert comm is not None
+
+    rank = tp_group.rank_in_group
+    world_size = tp_group.world_size
+    device = tp_group.device
+
+    shape = (2, 3, 4)
+    num_elems = 1
+    for size in shape:
+        num_elems *= size
+
+    for dim in (1, -1):
+        tensor = (
+            torch.arange(num_elems, dtype=torch.float32, device=device).reshape(shape)
+            + rank * num_elems
+        )
+        expected = torch.cat(
+            [
+                torch.arange(num_elems, dtype=torch.float32, device=device).reshape(
+                    shape
+                )
+                + r * num_elems
+                for r in range(world_size)
+            ],
+            dim=dim,
+        )
+
+        result = comm.all_gather(tensor, dim=dim)
+        torch.accelerator.synchronize()
+        torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+)
+def test_cuda_communicator_all_gather_dim_not_zero():
+    distributed_run(cuda_communicator_all_gather_dim_worker_fn, 2)
 
 
 @worker_fn_wrapper
@@ -339,11 +394,16 @@ def test_pynccl_send_recv():
 @worker_fn_wrapper
 def multiple_send_recv_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
-    groups = [
-        torch.distributed.new_group(ranks=[0, 2], backend="gloo"),
-        torch.distributed.new_group(ranks=[1, 3], backend="gloo"),
-    ]
-    group = groups[0] if torch.distributed.get_rank() in [0, 2] else groups[1]
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        group = torch.distributed.split_group(
+            split_ranks=[[0, 2], [1, 3]], backend="cpu:gloo,cuda:nccl"
+        )
+    else:
+        groups = [
+            torch.distributed.new_group(ranks=[0, 2], backend="gloo"),
+            torch.distributed.new_group(ranks=[1, 3], backend="gloo"),
+        ]
+        group = groups[0] if torch.distributed.get_rank() in [0, 2] else groups[1]
     pynccl_comm = PyNcclCommunicator(group=group, device=device)
     if torch.distributed.get_rank() == 0:
         tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)

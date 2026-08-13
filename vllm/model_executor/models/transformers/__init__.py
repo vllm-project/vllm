@@ -16,13 +16,16 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 
-from vllm.compilation.decorators import support_torch_compile
+from typing import TYPE_CHECKING
+
+import torch.nn.functional as F
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.moe import MoEMixin
 from vllm.model_executor.models.transformers.multimodal import (
-    DYNAMIC_ARG_DIMS,
     MultiModalDummyInputsBuilder,
     MultiModalMixin,
     MultiModalProcessingInfo,
@@ -32,16 +35,87 @@ from vllm.model_executor.models.transformers.pooling import (
     EmbeddingMixin,
     SequenceClassificationMixin,
 )
-from vllm.model_executor.models.transformers.utils import can_enable_torch_compile
 from vllm.multimodal import MULTIMODAL_REGISTRY
+
+if TYPE_CHECKING:
+    import torch
+
+    from vllm.model_executor.layers.attention import Attention, MLAAttention
+
+
+def vllm_attention_forward(
+    # Transformers args
+    module: "torch.nn.Module",
+    query: "torch.Tensor",
+    key: "torch.Tensor",
+    value: "torch.Tensor",
+    attention_mask: "torch.Tensor",
+    # Transformers kwargs
+    scaling: float | None = None,
+    # vLLM kwargs
+    attention_instances: "dict[int, Attention] | None" = None,
+    **kwargs,
+):
+    self_attn = attention_instances[module.layer_idx]
+    if scaling is not None:
+        self_attn.impl.scale = float(scaling)
+    hidden = query.shape[-2]
+    head_dim_qk = query.shape[-1]
+    head_dim_v = value.shape[-1]
+    query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+    query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
+    # Pad `value` up to the query/key head size when it is smaller (expanded
+    # MLA). A larger last dim just means `value` isn't split per head, e.g.
+    # packed grouped/multi-query projections, and needs no padding.
+    pad_value = head_dim_v < head_dim_qk
+    if pad_value:
+        value = F.pad(value.view(-1, head_dim_v), (0, head_dim_qk - head_dim_v))
+        value = value.reshape(hidden, -1)
+    attn_output = self_attn.forward(query, key, value)
+    if pad_value:
+        attn_output = attn_output.view(-1, head_dim_qk)[..., :head_dim_v]
+        attn_output = attn_output.reshape(hidden, -1)
+    return attn_output, None
+
+
+def vllm_mla_attention_forward(
+    # Transformers args
+    module: "torch.nn.Module",
+    query: "torch.Tensor",
+    kv_c_normed: "torch.Tensor",
+    k_pe: "torch.Tensor",
+    attention_mask: "torch.Tensor",
+    # Transformers kwargs
+    scaling: float | None = None,
+    # vLLM kwargs
+    attention_instances: "dict[int, MLAAttention] | None" = None,
+    **kwargs,
+):
+    self_attn = attention_instances[module.layer_idx]
+    # [batch=1, heads, num_tokens, qk_head_dim] -> [num_tokens, heads, qk_head_dim]
+    query = query.transpose(1, 2).flatten(0, 1)
+    num_tokens, num_heads = query.shape[:2]
+    # [batch=1, num_tokens, kv_lora_rank] -> [num_tokens, kv_lora_rank]
+    kv_c_normed = kv_c_normed.reshape(-1, kv_c_normed.shape[-1])
+    # [batch=1, heads=1, num_tokens, qk_rope] -> [num_tokens, 1, qk_rope]
+    k_pe = k_pe.reshape(-1, 1, k_pe.shape[-1])
+    attn_output = self_attn.forward(
+        query,
+        kv_c_normed,
+        k_pe,
+        output_shape=(num_tokens, num_heads * self_attn.v_head_dim),
+    )
+    return attn_output, None
+
+
+ALL_ATTENTION_FUNCTIONS.register("vllm", vllm_attention_forward)
+ALL_ATTENTION_FUNCTIONS.register("vllm_mla", vllm_mla_attention_forward)
 
 
 # Text only models
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersForCausalLM(CausalMixin, Base): ...
 
 
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersMoEForCausalLM(MoEMixin, CausalMixin, Base): ...
 
 
@@ -51,9 +125,6 @@ class TransformersMoEForCausalLM(MoEMixin, CausalMixin, Base): ...
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
-)
 class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin, Base): ...
 
 
@@ -62,20 +133,15 @@ class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin, Base): ...
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
-)
 class TransformersMultiModalMoEForCausalLM(
     MoEMixin, MultiModalMixin, CausalMixin, Base
 ): ...
 
 
 # Embedding models
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersEmbeddingModel(EmbeddingMixin, LegacyMixin, Base): ...
 
 
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersMoEEmbeddingModel(EmbeddingMixin, MoEMixin, Base): ...
 
 
@@ -84,20 +150,15 @@ class TransformersMoEEmbeddingModel(EmbeddingMixin, MoEMixin, Base): ...
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
-)
 class TransformersMultiModalEmbeddingModel(EmbeddingMixin, MultiModalMixin, Base): ...
 
 
 # Sequence classification models
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersForSequenceClassification(
     SequenceClassificationMixin, LegacyMixin, Base
 ): ...
 
 
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersMoEForSequenceClassification(
     SequenceClassificationMixin, MoEMixin, Base
 ): ...
@@ -107,9 +168,6 @@ class TransformersMoEForSequenceClassification(
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
-)
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
 )
 class TransformersMultiModalForSequenceClassification(
     SequenceClassificationMixin, MultiModalMixin, Base

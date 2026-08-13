@@ -2,15 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Sequence
+
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    kFp8StaticTensorSym,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    CUTLASS_BLOCK_FP8_SUPPORTED,
     convert_to_channelwise,
 )
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
+from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -143,6 +154,12 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
 
 
 class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    def __init__(
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        self.logical_output_size: int | None = None
+        super().__init__(c, layer_param_names)
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -155,6 +172,74 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
+    def input_quant_key(self) -> QuantKey | None:
+        """Only static per-tensor activation quantization is supported for external
+        quantization."""
+        if self.config.activation_quant_key == kFp8StaticTensorSym:
+            return kFp8StaticTensorSym
+        return None
+
+    @staticmethod
+    def _pad_to_alignment(
+        x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
+    ) -> torch.Tensor:
+        """Pad tensor ``x`` along ``dim`` to the next multiple of
+        ``alignment``."""
+        remainder = x.shape[dim] % alignment
+        if remainder == 0:
+            return x
+        pad_size = alignment - remainder
+        pad_spec = [0] * (2 * x.dim())
+        pad_spec[-(2 * dim + 1)] = pad_size
+        return torch.nn.functional.pad(x, pad_spec, value=value)
+
+    @staticmethod
+    def padded_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        if loaded_weight.shape != param.shape:
+            slices = tuple(slice(0, s) for s in loaded_weight.shape)
+            param.data[slices].copy_(loaded_weight)
+        else:
+            param.data.copy_(loaded_weight.view(param.shape))
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        weight_name, weight_scale_name, _, _ = self.layer_param_names
+        weight = getattr(layer, weight_name)
+
+        # keep the logical output width so runtime can slice away static padding.
+        self.logical_output_size = weight.shape[1]
+
+        pad_k = (16 - weight.shape[0] % 16) % 16
+        pad_n = (16 - weight.shape[1] % 16) % 16
+        if pad_k == 0 and pad_n == 0:
+            return
+
+        # B is column-major [K, N]
+        padded_weight = torch.nn.functional.pad(
+            weight.t().contiguous(),
+            (0, pad_k, 0, pad_n),
+        ).t()
+        replace_parameter(layer, weight_name, padded_weight.data)
+        set_weight_attrs(
+            getattr(layer, weight_name),
+            {
+                "weight_loader": self.padded_weight_loader,
+            },
+        )
+
+        weight_scale = getattr(layer, weight_scale_name, None)
+        if weight_scale is not None and pad_n > 0 and weight_scale.numel() > 1:
+            flat_scale = weight_scale.reshape(-1)
+            padded_scale = self._pad_to_alignment(
+                flat_scale, dim=0, alignment=16, value=1.0
+            ).view(-1, *weight_scale.shape[1:])
+            replace_parameter(layer, weight_scale_name, padded_scale.data)
+            set_weight_attrs(
+                getattr(layer, weight_name),
+                {
+                    "weight_loader": self.padded_weight_loader,
+                },
+            )
+
     def apply_scaled_mm(
         self,
         *,
@@ -166,8 +251,93 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        # Fused GEMM_DQ
+        padded_k, padded_n = B.shape
+        output_size = self.logical_output_size
+        assert output_size is not None
+        pad_k = padded_k - A.shape[1]
+        pad_n = padded_n - output_size
+
+        if pad_k > 0:
+            A = self._pad_to_alignment(A, dim=1, alignment=16)
+        if pad_n > 0 and bias is not None:
+            bias = self._pad_to_alignment(bias, dim=0, alignment=16)
+
         output = ops.cutlass_scaled_mm(
             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
         )
-        return output.view(*output_shape)
+
+        if pad_n > 0:
+            output = output[..., :output_size].contiguous()
+
+        return output.view(*output_shape[:-1], output_size)
+
+
+class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+        super().__init__(config)
+        act_scale_descriptor = config.activation_quant_key.scale
+        self.quant_fp8 = QuantFP8(
+            static=act_scale_descriptor.static,
+            group_shape=act_scale_descriptor.group_shape,
+            num_token_padding=self.get_output_padding(),
+            use_ue8m0=False,
+            column_major_scales=True,
+        )
+
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        if not CUTLASS_BLOCK_FP8_SUPPORTED:
+            return (
+                False,
+                "The device compute capability of"
+                f"{compute_capability} is not supported.",
+            )
+        return True, None
+
+    @classmethod
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        act_quant_desc = config.activation_quant_key.scale
+        if act_quant_desc.group_shape != GroupShape(1, 128):
+            return (
+                False,
+                "Supports only dynamic per token group activation "
+                "quantization with group_shape=(1,128).",
+            )
+        return True, None
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        out_dtype = self.config.out_dtype
+        return ops.cutlass_scaled_mm(
+            A,
+            B.T,
+            out_dtype=out_dtype,
+            scale_a=As,
+            scale_b=Bs.T,
+        )
+
+
+def cutlass_scaled_mm(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    return ops.cutlass_scaled_mm(
+        A,
+        B.T,
+        out_dtype=output_dtype,
+        scale_a=As,
+        scale_b=Bs.T,
+    )

@@ -8,6 +8,7 @@ import os
 import signal
 import time
 import uuid
+from collections import Counter
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
@@ -27,12 +28,17 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import (
+    EngineCoreOutputs,
+    EngineCoreReadyResponse,
+    EngineCoreRequest,
+)
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (
     AsyncMPClient,
     DPLBAsyncMPClient,
     EngineCoreClient,
+    MPClient,
     SyncMPClient,
 )
 from vllm.v1.engine.utils import CoreEngineProcManager
@@ -114,7 +120,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
             return 1
 
         def recv_multipart(self):
-            return (b"\x00\x00", b"ready")
+            return (b"\x00\x00", b"")
 
     class DummySocket:
         def send_multipart(self, _msg, *, copy: bool = False, track: bool = False):
@@ -197,13 +203,19 @@ def _make_pooling_request(
     )
 
 
-def test_dplb_late_interaction_sticky_routing():
+def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncMPClient:
     client = object.__new__(DPLBAsyncMPClient)
-    client.client_count = 1
+    client.client_count = client_count
     client.reqs_in_flight = {}
-    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
-    client.lb_engines = [[0, 0], [0, 0], [0, 0]]
+    client.engine_inflight = Counter()
+    client.core_engines = [bytes([i, 0]) for i in range(num_engines)]
+    client.lb_engines = [[0, 0, 0.0] for _ in range(num_engines)]
     client.eng_start_index = 0
+    return client
+
+
+def test_dplb_late_interaction_sticky_routing():
+    client = _make_dplb_client()
 
     query_key = "rerank-abc-query-0"
     query_request = _make_pooling_request(
@@ -222,18 +234,111 @@ def test_dplb_late_interaction_sticky_routing():
 
 
 def test_dplb_non_late_interaction_still_uses_lb():
-    client = object.__new__(DPLBAsyncMPClient)
-    client.client_count = 1
-    client.reqs_in_flight = {}
-    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
-    client.lb_engines = [[2, 1], [0, 0], [1, 0]]
-    client.eng_start_index = 0
+    client = _make_dplb_client()
+    client.lb_engines = [[2, 1, 0.0], [0, 0, 0.0], [1, 0, 0.0]]
 
     request = make_request(SamplingParams(max_tokens=1))
     chosen_engine = client.get_core_engine_for_request(request)
 
     assert chosen_engine == client.core_engines[1]
     assert client.lb_engines[1][0] == 1
+
+
+def test_dplb_burst_round_robins_despite_snapshot_rebinds():
+    """A stats snapshot rebind wipes the optimistic lb_engines increments;
+    the exact in-flight floor must keep a burst spreading round-robin."""
+    client = _make_dplb_client(num_engines=4)
+
+    for _ in range(4):
+        client.get_core_engine_for_request(make_request(SamplingParams(max_tokens=1)))
+    # Coordinator snapshot arrives, not yet reflecting the 4 routed requests.
+    client.lb_engines = [[0, 0, 0.0] for _ in range(4)]
+    for _ in range(4):
+        client.get_core_engine_for_request(make_request(SamplingParams(max_tokens=1)))
+
+    assert sorted(client.engine_inflight.values()) == [2, 2, 2, 2]
+
+
+def test_dplb_snapshot_backpressure_overrides_inflight():
+    """An engine reported heavily loaded by the coordinator is avoided even
+    when this client has routed nothing to it."""
+    client = _make_dplb_client(num_engines=2)
+    client.lb_engines = [[5, 10, 0.0], [0, 0, 0.0]]
+
+    chosen = client.get_core_engine_for_request(
+        make_request(SamplingParams(max_tokens=1))
+    )
+
+    assert chosen == client.core_engines[1]
+
+
+def test_dplb_kv_pressure_amplifies_waiting_penalty():
+    """A waiting queue on a KV-bound engine (slow drain) is penalized, while
+    the same queue with low KV usage is not (e.g. transient burst)."""
+    client = _make_dplb_client(num_engines=2)
+    # Engine 0 has a smaller total but is KV-bound with a queue.
+    client.lb_engines = [[5, 10, 1.0], [0, 20, 0.2]]
+
+    chosen = client.get_core_engine_for_request(
+        make_request(SamplingParams(max_tokens=1))
+    )
+    assert chosen == client.core_engines[1]
+
+    # Same counts without KV pressure: the smaller total wins.
+    client = _make_dplb_client(num_engines=2)
+    client.lb_engines = [[5, 10, 0.2], [0, 20, 0.2]]
+
+    chosen = client.get_core_engine_for_request(
+        make_request(SamplingParams(max_tokens=1))
+    )
+    assert chosen == client.core_engines[0]
+
+
+def test_dplb_finished_requests_release_inflight():
+    client = _make_dplb_client(num_engines=2)
+
+    req = make_request(SamplingParams(max_tokens=1))
+    engine = client.get_core_engine_for_request(req)
+    assert client.engine_inflight[engine] == 1
+
+    outputs = EngineCoreOutputs(finished_requests={req.request_id})
+    asyncio.run(DPLBAsyncMPClient.process_engine_outputs(client, outputs))
+
+    assert client.engine_inflight[engine] == 0
+    assert req.request_id not in client.reqs_in_flight
+
+
+def test_apply_ready_response_syncs_block_size():
+    import msgspec
+
+    client = object.__new__(MPClient)
+    client.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
+        model_config=SimpleNamespace(max_model_len=8192),
+    )
+    client.stats_update_address = None
+
+    payload = msgspec.msgpack.encode(
+        EngineCoreReadyResponse(
+            max_model_len=8192,
+            num_gpu_blocks=100,
+            block_size=1056,
+            dp_stats_address=None,
+            dtype="bfloat16",
+            vllm_version="test",
+            world_size=1,
+            data_parallel_size=1,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+            data_parallel_rank=0,
+            max_num_seqs=256,
+            max_num_batched_tokens=8192,
+            instance_id="test-instance",
+        )
+    )
+    client._apply_ready_response(payload)
+    assert client.vllm_config.cache_config.block_size == 1056
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
@@ -937,6 +1042,13 @@ async def test_engine_core_client_future_utility_async(
 
 
 @pytest.mark.parametrize(
+    "model_name,num_groups",
+    [
+        ("meta-llama/Llama-3.2-1B-Instruct", 1),
+        ("google/gemma-3-1b-it", 7),
+    ],
+)
+@pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
     [(True, "tcp"), (False, "inproc")],
     indirect=["publisher_config"],
@@ -944,12 +1056,14 @@ async def test_engine_core_client_future_utility_async(
 def test_kv_cache_events(
     multiprocessing_mode: bool,
     publisher_config,
+    model_name: str,
+    num_groups: int,
 ):
     block_size = 16
     num_blocks = 2
 
     engine_args = EngineArgs(
-        model=MODEL_NAME,
+        model=model_name,
         enforce_eager=True,
         enable_prefix_caching=True,
         block_size=block_size,
@@ -985,26 +1099,29 @@ def test_kv_cache_events(
         assert result is not None, "No message received"
 
         seq, received = result
-
         assert seq == 0, "Sequence number mismatch"
-        assert len(received.events) == 1, "We should have exactly one BlockStored event"
-        event = received.events[0]
-        assert isinstance(event, BlockStored), "We should have a BlockStored event"
-        assert len(event.block_hashes) == num_blocks, (
-            "We should have a BlockStored event with 2 block_hashes"
+        assert len(received.events) == num_groups, (
+            f"Expected {num_groups} BlockStored event(s), got {len(received.events)}"
         )
-        assert event.block_size == block_size, (
-            "Block size should be the same as the block size"
-        )
-        assert event.parent_block_hash is None, "Parent block hash should be None"
-        assert event.lora_id is None, "Lora id should be None"
-        assert event.lora_name is None, "Lora name should be None"
-        assert len(event.token_ids) == num_blocks * block_size, (
-            "Token ids should be the same as the custom tokens"
-        )
-        assert event.token_ids == custom_tokens, (
-            "Token ids should be the same as the custom tokens"
-        )
+
+        for index, event in enumerate(received.events):
+            assert isinstance(event, BlockStored), "We should have a BlockStored event"
+            assert len(event.block_hashes) == num_blocks, (
+                "We should have a BlockStored event with 2 block_hashes"
+            )
+            assert event.block_size == block_size, (
+                "Block size should be the same as the block size"
+            )
+            assert event.parent_block_hash is None, "Parent block hash should be None"
+            assert event.lora_id is None, "Lora id should be None"
+            assert event.lora_name is None, "Lora name should be None"
+            assert len(event.token_ids) == num_blocks * block_size, (
+                "Token ids should be the same as the custom tokens"
+            )
+            assert event.token_ids == custom_tokens, (
+                "Token ids should be the same as the custom tokens"
+            )
+            assert event.group_idx == index
     finally:
         client.shutdown()
         subscriber.close()
@@ -1175,7 +1292,6 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]
         mock_executor.determine_available_memory.return_value = [1024 * 1024 * 1024]
         mock_executor.initialize_from_config.return_value = None
-        mock_executor.max_concurrent_batches = 1
 
         return mock_executor
 

@@ -14,12 +14,12 @@ from transformers import (
 )
 
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -454,6 +454,7 @@ class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
         num_images = mm_counts.get("image", 0)
 
         image_overrides = mm_options.get("image")
+        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
 
         return {
             "image": self._get_dummy_images(
@@ -561,7 +562,7 @@ class Blip2ForConditionalGeneration(
                 config.qformer_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.qformer",
+                prefix=maybe_prefix(prefix, "qformer"),
             )
             self.language_projection = nn.Linear(
                 config.qformer_config.hidden_size,
@@ -620,8 +621,8 @@ class Blip2ForConditionalGeneration(
         return self._image_pixels_to_features(self.vision_model, pixel_values)
 
     def _process_image_input(self, image_input: Blip2ImageInputs) -> torch.Tensor:
-        if image_input["type"] == "image_embeds":
-            return image_input["data"]
+        if image_input.type == "image_embeds":
+            return image_input.data
 
         image_features = self._process_image_pixels(image_input)
 

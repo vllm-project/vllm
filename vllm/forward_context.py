@@ -69,27 +69,8 @@ def _compute_sp_num_tokens(
     return sp_tokens.tolist()
 
 
-def _compute_chunked_local_num_tokens(
-    num_tokens_across_dp_cpu: torch.Tensor,
-    sequence_parallel_size: int,
-    max_num_tokens: int,
-    chunk_idx: int,
-) -> list[int]:
-    sp_tokens = _compute_sp_num_tokens(num_tokens_across_dp_cpu, sequence_parallel_size)
-    sp_size = len(sp_tokens)
-
-    local_size = [-1] * sp_size
-    for i in range(sp_size):
-        # Take into account sharding if MoE activation is sequence parallel.
-        local_size[i] = min(max_num_tokens, sp_tokens[i] - (max_num_tokens * chunk_idx))
-        if local_size[i] <= 0:
-            local_size[i] = 1  # ensure lockstep even if done
-    return local_size
-
-
 @dataclass
 class DPMetadata:
-    max_tokens_across_dp_cpu: torch.Tensor
     num_tokens_across_dp_cpu: torch.Tensor
 
     # NOTE: local_sizes should only be set by the chunked_sizes context manager
@@ -102,7 +83,10 @@ class DPMetadata:
         num_tokens_across_dp_cpu: torch.Tensor,
     ) -> "DPMetadata":
         assert num_tokens_across_dp_cpu is not None
-        assert parallel_config.data_parallel_size > 1
+        assert (
+            parallel_config.data_parallel_size > 1
+            or parallel_config.use_sequence_parallel_moe
+        )
         assert parallel_config.is_moe_model is not False
         dp_rank = parallel_config.data_parallel_rank
         batchsize = num_tokens
@@ -112,47 +96,7 @@ class DPMetadata:
         assert num_tokens_across_dp_cpu[dp_rank] == batchsize, (
             f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
         )
-        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp_cpu)
-        return DPMetadata(max_tokens_across_dp_cpu, num_tokens_across_dp_cpu)
-
-    @contextmanager
-    def chunked_sizes(
-        self, sequence_parallel_size: int, max_chunk_size_per_rank: int, chunk_idx: int
-    ):
-        """
-        Context manager to compute and temporarily set the per-rank local token
-        sizes for a specific chunk during chunked forward execution.
-
-        This is necessary to ensure each DP (data parallel) rank processes its
-        designated portion of tokens in lockstep with others, even when the
-        token counts are uneven or some ranks have completed their input early.
-
-        For chunked execution, we break up the total tokens on each rank into
-        multiple chunks (of at most `max_chunk_size_per_rank`), and for a given
-        `chunk_idx`, this context manager sets `self.local_sizes` to the number
-        of tokens to process in that chunk on each rank.
-
-        `self.local_sizes` is only valid inside the context.
-
-        Args:
-            sequence_parallel_size: When Attn is TP and MoE layers are EP,
-                                    we use SP between the layers to avoid
-                                    redundant ops. We need this value to
-                                    compute the chunked sizes.
-            max_chunk_size_per_rank: The max number of tokens each rank is
-                                     allowed to process in this chunk.
-            chunk_idx: The index of the chunk to compute sizes for.
-        """
-        self.local_sizes = _compute_chunked_local_num_tokens(
-            self.num_tokens_across_dp_cpu,
-            sequence_parallel_size,
-            max_chunk_size_per_rank,
-            chunk_idx,
-        )
-        try:
-            yield self.local_sizes
-        finally:
-            self.local_sizes = None
+        return DPMetadata(num_tokens_across_dp_cpu)
 
     @contextmanager
     def sp_local_sizes(self, sequence_parallel_size: int):
@@ -205,6 +149,11 @@ class ForwardContext:
     batch_descriptor: BatchDescriptor | None = None
 
     ubatch_slices: UBatchSlices | None = None
+
+    # Boolean mask over the token axis: True for padding rows that are not real
+    # tokens. Consumers can use it to skip work for padded tokens. None when
+    # the producer does not set it.
+    is_padding: torch.Tensor | None = None
 
     # If True, bypass the compiled model call, e.g. by using .forward() directly
     skip_compiled: bool = False
@@ -270,6 +219,7 @@ def create_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
+    is_padding: torch.Tensor | None = None,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -287,6 +237,7 @@ def create_forward_context(
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
+        is_padding=is_padding,
     )
 
 
@@ -316,6 +267,7 @@ def set_forward_context(
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
+    is_padding: torch.Tensor | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -328,14 +280,20 @@ def set_forward_context(
 
     dp_metadata: DPMetadata | None = None
     if (
-        vllm_config.parallel_config.data_parallel_size > 1
+        (
+            vllm_config.parallel_config.data_parallel_size > 1
+            or vllm_config.parallel_config.use_sequence_parallel_moe
+        )
         and vllm_config.parallel_config.is_moe_model is not False
         and (attn_metadata is not None or num_tokens is not None)
     ):
         # If num_tokens_across_dp hasn't already been initialized, then
         # initialize it here. Both DP padding and Microbatching will be
         # disabled.
-        if num_tokens_across_dp is None:
+        if (
+            num_tokens_across_dp is None
+            and vllm_config.parallel_config.data_parallel_size > 1
+        ):
             assert ubatch_slices is None
             assert num_tokens is not None
             _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
@@ -344,6 +302,9 @@ def set_forward_context(
                 allow_microbatching=False,
             )
             assert num_tokens_across_dp is not None
+        elif num_tokens_across_dp is None:
+            assert num_tokens is not None
+            num_tokens_across_dp = torch.tensor([num_tokens], dtype=torch.int32)
         dp_metadata = DPMetadata.make(
             vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
         )
@@ -375,6 +336,7 @@ def set_forward_context(
         slot_mapping,
         additional_kwargs,
         skip_compiled,
+        is_padding=is_padding,
     )
 
     try:

@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -27,13 +28,12 @@ logger = init_logger(__name__)
 
 
 class Ernie45ToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         """
         Ernie thinking model format:
         abc\n</think>\n\n\n<tool_call>\ndef\n</tool_call>\n
         """
-        super().__init__(tokenizer)
-        self.current_tool_name_sent = False
+        super().__init__(tokenizer, tools)
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id = -1
         self.streamed_args_for_tool: list[str] = []

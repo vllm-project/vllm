@@ -18,7 +18,7 @@ from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule
 
 from vllm.config import VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor
@@ -170,7 +170,7 @@ def load_image(
         list of meta info for each image in *file_paths*
     """
 
-    imgs = []
+    imgs: list[np.ndarray] = []
     metas = []
     temporal_coords = []
     location_coords = []
@@ -209,11 +209,11 @@ def load_image(
         except Exception:
             logger.exception("Could not extract timestamp for %s", file)
 
-    imgs = np.stack(imgs, axis=0)  # num_frames, H, W, C
-    imgs = np.moveaxis(imgs, -1, 0).astype("float32")  # C, num_frames, H, W
-    imgs = np.expand_dims(imgs, axis=0)  # add batch di
+    stacked = np.stack(imgs, axis=0)  # num_frames, H, W, C
+    stacked = np.moveaxis(stacked, -1, 0).astype("float32")  # C, num_frames, H, W
+    stacked = np.expand_dims(stacked, axis=0)  # add batch di
 
-    return imgs, temporal_coords, location_coords, metas
+    return stacked, temporal_coords, location_coords, metas
 
 
 class PrithviMultimodalDataProcessor(IOProcessor[ImagePrompt, ImageRequestOutput]):
@@ -327,7 +327,7 @@ class PrithviMultimodalDataProcessor(IOProcessor[ImagePrompt, ImageRequestOutput
                 }
             )
 
-        return prompts
+        return prompts  # type: ignore[return-value]
 
     def post_process(
         self,

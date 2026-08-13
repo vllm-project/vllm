@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vllm.config import VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.plugins.io_processors.interface import IOProcessor
