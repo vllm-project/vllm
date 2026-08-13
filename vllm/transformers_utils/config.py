@@ -699,6 +699,30 @@ def get_config(
         **kwargs,
     )
 
+    # For transformers 5.x heterogeneous per-layer configs (e.g. gemma4),
+    # allow global attribute access so vLLM can read head_dim etc. uniformly.
+    if hasattr(config, "allow_global_per_layer_attribute_access"):
+        config.allow_global_per_layer_attribute_access = True
+    # Also apply to text_config if present
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None and hasattr(
+        text_config, "allow_global_per_layer_attribute_access"
+    ):
+        text_config.allow_global_per_layer_attribute_access = True
+        # For gemma4-style heterogeneous configs, synthesize global_head_dim
+        # from per-layer configs so vLLM model code can find it.
+        per_layer = getattr(text_config, "per_layer_config", None)
+        if per_layer and not hasattr(text_config, "global_head_dim"):
+            layer_types = getattr(text_config, "layer_types", [])
+            for i, lt in enumerate(layer_types):
+                if lt == "full_attention" and i < len(per_layer):
+                    full_head_dim = getattr(per_layer[i], "head_dim", None)
+                    if full_head_dim and full_head_dim != getattr(
+                        text_config, "head_dim", None
+                    ):
+                        text_config.global_head_dim = full_head_dim
+                    break
+
     # Patching defaults for GGUF models
     if _is_gguf:
         # Some models have different default values between GGUF and HF.

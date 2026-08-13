@@ -453,8 +453,22 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         # Gemma4 uses dual head dimensions: head_dim (sliding attention)
         # and global_head_dim (full attention).  Return the largest so
         # that attention backends allocate buffers large enough for both.
-        head_dim = getattr(self.hf_text_config, "head_dim", 0)
-        global_head_dim = getattr(self.hf_text_config, "global_head_dim", 0)
+        try:
+            head_dim = getattr(self.hf_text_config, "head_dim", 0)
+        except Exception:
+            head_dim = 0
+        try:
+            global_head_dim = getattr(self.hf_text_config, "global_head_dim", 0)
+        except Exception:
+            global_head_dim = 0
+        # If per-layer config, try accessing from layer configs directly
+        if head_dim == 0 and hasattr(self.hf_text_config, "per_layer_config"):
+            per_layer = self.hf_text_config.per_layer_config
+            if per_layer:
+                head_dim = getattr(per_layer[0], "head_dim", 0)
+                global_head_dim = max(
+                    getattr(lc, "head_dim", 0) for lc in per_layer
+                )
         return max(head_dim, global_head_dim) or super().get_head_size()
 
 
