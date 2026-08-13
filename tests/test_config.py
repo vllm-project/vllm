@@ -2091,38 +2091,41 @@ def test_speculators_format_preserves_explicit_shorthand_method():
     }
 
 
-@pytest.mark.parametrize(
-    "dspark_fields, expected",
-    [
-        pytest.param({}, ("deepseek_mtp", "DeepSeekV4MTPModel"), id="mtp"),
-        pytest.param(
-            {
-                "dspark_block_size": 5,
-                "dspark_noise_token_id": 128799,
-                "dspark_target_layer_ids": [58, 59, 60],
-                "dspark_markov_rank": 512,
-            },
-            ("deepseek_v4", "DSparkDraftModel"),
-            id="dspark",
-        ),
-    ],
-)
-def test_deepseek_v4_dspark_normalized_before_mtp(dspark_fields, expected):
-    """DSpark ships inside the V4 target, so only its fields separate it."""
-    hf_config = SpeculativeConfig.hf_config_override(
-        PretrainedConfig(
-            architectures=["DeepseekV4ForCausalLM"],
-            model_type="deepseek_v4",
-            **dspark_fields,
-        )
+@pytest.fixture
+def deepseek_v4_dspark_config():
+    return PretrainedConfig(
+        architectures=["DeepseekV4ForCausalLM"],
+        model_type="deepseek_v4",
+        num_nextn_predict_layers=1,
+        dspark_block_size=5,
+        dspark_noise_token_id=128799,
+        dspark_target_layer_ids=[58, 59, 60],
+        dspark_markov_rank=512,
     )
 
-    actual = (
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        ("draft_model", ("deepseek_v4", "DeepseekV4ForCausalLM", None)),
+        ("mtp", ("deepseek_mtp", "DeepSeekV4MTPModel", 1)),
+        ("dspark", ("deepseek_v4", "DSparkDraftModel", 5)),
+    ],
+)
+def test_explicit_method_selects_deepseek_v4_loader(
+    deepseek_v4_dspark_config,
+    method,
+    expected,
+):
+    hf_config = SpeculativeConfig.compose_draft_hf_overrides(None, method)(
+        deepseek_v4_dspark_config
+    )
+
+    assert (
         hf_config.model_type,
         hf_config.architectures[0],
         getattr(hf_config, "n_predict", None),
-    )
-    assert actual == (*expected, dspark_fields.get("dspark_block_size"))
+    ) == expected
 
 
 def test_draft_sample_method_probabilistic_is_accepted():

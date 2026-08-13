@@ -80,20 +80,6 @@ SpeculativeMethod = Literal[
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
-_DEEPSEEK_V4_DSPARK_FIELDS = (
-    "dspark_block_size",
-    "dspark_noise_token_id",
-    "dspark_target_layer_ids",
-    "dspark_markov_rank",
-)
-
-
-def _is_deepseek_v4_dspark_config(hf_config: PretrainedConfig) -> bool:
-    return hf_config.model_type == "deepseek_v4" and all(
-        getattr(hf_config, field, None) is not None
-        for field in _DEEPSEEK_V4_DSPARK_FIELDS
-    )
-
 
 @config
 class SpeculativeConfig:
@@ -353,6 +339,7 @@ class SpeculativeConfig:
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+        """Normalize a checkpoint config for an MTP-backed draft loader."""
         initial_architecture = hf_config.architectures[0]
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
@@ -370,19 +357,6 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Dots3NoteMTPModel"]}
             )
-
-        # DeepSeek-V4 DSpark reuses the target architecture and stores its
-        # weights under mtp.*, but its required dspark_* fields distinguish it
-        # from an MTP checkpoint. Normalize it before the generic V4 MTP rule.
-        if _is_deepseek_v4_dspark_config(hf_config):
-            hf_config.update(
-                {
-                    "architectures": ["DSparkDraftModel"],
-                    "n_predict": hf_config.dspark_block_size,
-                }
-            )
-            return hf_config
-
         if hf_config.model_type in (
             "deepseek_v3",
             "deepseek_v32",
@@ -646,9 +620,6 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
 
-        if initial_architecture == "MistralLarge3ForCausalLM":
-            hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
-
         if hf_config.model_type == "hy_v3":
             hf_config.model_type = "hy_v3_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -719,18 +690,52 @@ class SpeculativeConfig:
         return hf_config
 
     @staticmethod
+    def eagle_hf_config_override(
+        hf_config: PretrainedConfig,
+    ) -> PretrainedConfig:
+        initial_architecture = hf_config.architectures[0]
+        hf_config = SpeculativeConfig.hf_config_override(hf_config)
+        if initial_architecture == "MistralLarge3ForCausalLM":
+            hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
+        return hf_config
+
+    @staticmethod
+    def identity_hf_config_override(
+        hf_config: PretrainedConfig,
+    ) -> PretrainedConfig:
+        return hf_config
+
+    @staticmethod
+    def dspark_hf_config_override(
+        hf_config: PretrainedConfig,
+    ) -> PretrainedConfig:
+        if hf_config.model_type == "deepseek_v4":
+            updates: dict[str, Any] = {"architectures": ["DSparkDraftModel"]}
+            if (
+                block_size := getattr(hf_config, "dspark_block_size", None)
+            ) is not None:
+                updates["n_predict"] = block_size
+            hf_config.update(updates)
+        return hf_config
+
+    @staticmethod
     def _apply_composed_hf_override(
+        draft_hf_override: Callable[[PretrainedConfig], PretrainedConfig],
         target_hf_overrides: Callable[[PretrainedConfig], PretrainedConfig],
         hf_config: PretrainedConfig,
     ) -> PretrainedConfig:
-        hf_config = SpeculativeConfig.hf_config_override(hf_config)
+        hf_config = draft_hf_override(hf_config)
         return target_hf_overrides(hf_config)
 
     @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
+        method: SpeculativeMethod,
     ) -> Callable[[PretrainedConfig], PretrainedConfig]:
-        """Build the ``hf_overrides`` for the draft ``ModelConfig``.
+        """Build method-selected ``hf_overrides`` for the draft ``ModelConfig``.
+
+        The explicit method selects any structural loader normalization. A
+        callable target override is then composed after that normalization.
 
         Callable overrides on the target are config-to-config transforms
         (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
@@ -745,11 +750,20 @@ class SpeculativeConfig:
         target via ``functools.partial`` over a module-referenceable static
         method instead.
         """
+        draft_hf_override = {
+            "mtp": SpeculativeConfig.hf_config_override,
+            "dspark": SpeculativeConfig.dspark_hf_config_override,
+            "eagle": SpeculativeConfig.eagle_hf_config_override,
+            "eagle3": SpeculativeConfig.hf_config_override,
+            "dflash": SpeculativeConfig.hf_config_override,
+        }.get(method, SpeculativeConfig.identity_hf_config_override)
         if not callable(target_hf_overrides):
-            return SpeculativeConfig.hf_config_override
+            return draft_hf_override
 
         return functools.partial(
-            SpeculativeConfig._apply_composed_hf_override, target_hf_overrides
+            SpeculativeConfig._apply_composed_hf_override,
+            draft_hf_override,
+            target_hf_overrides,
         )
 
     def __post_init__(self):
@@ -898,11 +912,12 @@ class SpeculativeConfig:
                 if self.method == "medusa":
                     draft_hf_overrides = {"model_type": "medusa"}
                 else:
-                    # Compose any callable hf_overrides set on the target so the
-                    # draft config receives the same transform (e.g. the test
-                    # shrink). Dict overrides stay target-only.
+                    # Select loader normalization from the explicit method, then
+                    # compose any callable target override. Dict overrides stay
+                    # target-only.
                     draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
-                        self.target_model_config.hf_overrides
+                        self.target_model_config.hf_overrides,
+                        self.method,
                     )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
@@ -989,14 +1004,20 @@ class SpeculativeConfig:
                         "Qwen3DSparkModel",
                     )
                 ):
-                    # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
-                    # and its weights ship in the target checkpoint. Reached
-                    # only when `method` was requested explicitly, since
-                    # hf_config_override already normalizes declared configs.
-                    self.draft_model_config.hf_config.model_type = "deepseek_v4"
-                    self.draft_model_config.hf_config.architectures = [
-                        "DSparkDraftModel"
-                    ]
+                    # An explicit DSpark method selects the embedded
+                    # DeepSeek-V4 loader even when the checkpoint does not
+                    # declare a dedicated draft architecture.
+                    hf_config = self.draft_model_config.hf_config
+                    hf_config.model_type = "deepseek_v4"
+                    hf_config.architectures = ["DSparkDraftModel"]
+                    if (
+                        getattr(hf_config, "n_predict", None) is None
+                        and (
+                            block_size := getattr(hf_config, "dspark_block_size", None)
+                        )
+                        is not None
+                    ):
+                        hf_config.n_predict = block_size
                     self.draft_model_config.quantization = (
                         self.target_model_config.quantization
                     )
