@@ -163,3 +163,48 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
     # K cache is always updated before the scoring decision.
     torch.testing.assert_close(observed["k"], k[: slot_mapping.numel()])
     assert observed["slots"] is slot_mapping
+
+
+def test_skipped_k_cache_insert_accepts_no_k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    indexer_metadata = make_indexer_metadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        slot_mapping=torch.empty(0, dtype=torch.long),
+    )
+    monkeypatch.setattr(
+        sparse_indexer,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            attn_metadata={INDEXER_LAYER: indexer_metadata},
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+        ),
+    )
+    monkeypatch.setattr(
+        sparse_indexer.current_platform, "fp8_dtype", lambda: torch.float16
+    )
+
+    topk_indices = torch.full((1, 2048), 17, dtype=torch.int32)
+    result = sparse_indexer.sparse_attn_indexer(
+        torch.empty(1, 1),
+        INDEXER_LAYER,
+        torch.empty(1),
+        torch.empty(1, 1),
+        None,
+        None,
+        torch.empty(1, 1),
+        128,
+        "ue8m0",
+        2048,
+        4,
+        4096,
+        4096,
+        topk_indices,
+        True,
+        False,
+        "",
+    )
+
+    assert result is topk_indices
+    assert torch.all(topk_indices == -1)

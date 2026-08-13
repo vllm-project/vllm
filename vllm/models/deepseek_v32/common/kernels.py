@@ -381,13 +381,8 @@ def _fused_norm_rope_kernel(
                 mask=index_k_mask,
             )
 
-        if indexer_cache_ptr is None:
-            # PCP gathers the materialized index K before inserting it into cache.
-            return
-        else:
-            # 3. FP8 quantize + cache write from registers.
-            #    No need to write back to index_k_ptr — the only consumer
-            #    (sparse_attn_indexer) reads from the cache, not index_k.
+        # PCP inserts index K after gathering; other paths write it directly.
+        if indexer_cache_ptr is not None:
             _fp8_quant_and_cache_write(
                 result,
                 index_k_mask,
@@ -730,7 +725,7 @@ def _fused_q_kernel(
                         + 1,
                         (r2 / scale).to(tl.float8e4nv),
                     )
-                else:
+                if q_pe_out_ptr is not None:
                     # bf16 query: write the RoPE'd q_pe unquantized.
                     out_ty = q_pe_out_ptr.dtype.element_ty
                     q_pe_dst = (
@@ -824,6 +819,7 @@ def fused_q(
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
     quantize_mqa: bool = True,
+    q_pe_out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fuse the MQA-query and indexer-query RoPE/quantization.
 
@@ -840,6 +836,11 @@ def fused_q(
     assert ql_nope.ndim == 3
     assert ql_nope.shape[:2] == q_pe.shape[:2]
     assert q_scale.dtype == torch.float32 and q_scale.numel() == 1
+    assert q_pe_out is None or (
+        q_pe_out.shape == q_pe.shape
+        and q_pe_out.dtype == q_pe.dtype
+        and q_pe_out.device == q_pe.device
+    )
 
     num_tokens = positions.shape[0]
     num_q_heads = q_pe.shape[1]
@@ -884,17 +885,18 @@ def fused_q(
             dtype=torch.float8_e4m3fn,
             device=q_pe.device,
         )
-        # Placeholder; pid 0 packs q_pe into mqa_q_fp8 instead.
-        q_pe_out = mqa_q_fp8
         mqa_q = mqa_q_fp8
     else:
         # bf16 path: only the RoPE'd q_pe is produced; ql_nope used directly.
+        assert q_pe_out is None
         q_pe_out = torch.empty_like(q_pe)
         mqa_q_fp8 = q_pe_out  # unused placeholder for the fp8 pack pointer
         mqa_q = q_pe_out
 
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
+    if q_pe_out is not None and quantize_mqa:
+        cutedsl_kernel = None
     if cutedsl_kernel is not None:
         cutedsl_kernel(
             positions,
@@ -946,8 +948,8 @@ def fused_q(
         ql_nope.shape[2],
         triton.next_power_of_2(ql_nope.shape[2]),
         q_pe_out,
-        q_pe_out.stride(0),
-        q_pe_out.stride(1),
+        q_pe_out.stride(0) if q_pe_out is not None else 0,
+        q_pe_out.stride(1) if q_pe_out is not None else 0,
         index_weights,
         index_weights.stride(0),
         index_weights_softmax_scale,

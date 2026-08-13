@@ -440,19 +440,29 @@ def test_fused_norm_rope_ds_mla(num_tokens: int):
 # ── fused_q ──────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("num_tokens", [1, 4, 17, 512, 4096])
+@pytest.mark.parametrize(
+    ("num_tokens", "num_q_heads"),
+    [
+        (1, NUM_HEADS),
+        (4, NUM_HEADS),
+        (17, NUM_HEADS),
+        (512, NUM_HEADS),
+        (4096, NUM_HEADS),
+        (17, 64),
+    ],
+)
 @pytest.mark.parametrize("index_interleave", [True, False])
-def test_fused_q(num_tokens: int, index_interleave: bool):
+def test_fused_q(num_tokens: int, num_q_heads: int, index_interleave: bool):
     torch.manual_seed(2)
     dev = "cuda"
     max_pos = 8192
     pos = torch.arange(num_tokens, device=dev, dtype=torch.int64) % max_pos
 
     q_pe = torch.randn(
-        num_tokens, NUM_HEADS, ROPE_DIM, device=dev, dtype=torch.bfloat16
+        num_tokens, num_q_heads, ROPE_DIM, device=dev, dtype=torch.bfloat16
     )
     ql_nope = torch.randn(
-        num_tokens, NUM_HEADS, KV_LORA, device=dev, dtype=torch.bfloat16
+        num_tokens, num_q_heads, KV_LORA, device=dev, dtype=torch.bfloat16
     )
     index_q = torch.randn(
         num_tokens, INDEX_HEADS, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16
@@ -484,7 +494,7 @@ def test_fused_q(num_tokens: int, index_interleave: bool):
     mqa_nope_ref = (ql_nope.float() / s).to(FP8)
     qpe_ref = rope(
         q_pe.float(),
-        pos.unsqueeze(-1).expand(num_tokens, NUM_HEADS),
+        pos.unsqueeze(-1).expand(num_tokens, num_q_heads),
         q_cos_sin,
         interleave=True,
     )
@@ -505,8 +515,10 @@ def test_fused_q(num_tokens: int, index_interleave: bool):
     torch.testing.assert_close(iw_out, iw_ref, rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("num_tokens", [1, 17, 512])
-def test_fused_q_no_indexer(num_tokens: int):
+@pytest.mark.parametrize(
+    ("num_tokens", "materialize_q_pe"), [(1, False), (17, True), (512, False)]
+)
+def test_fused_q_no_indexer(num_tokens: int, materialize_q_pe: bool):
     torch.manual_seed(3)
     dev = "cuda"
     max_pos = 8192
@@ -519,6 +531,7 @@ def test_fused_q_no_indexer(num_tokens: int):
     )
     q_scale = torch.tensor([0.5], device=dev, dtype=torch.float32)
     q_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+    q_pe_out = torch.empty_like(q_pe) if materialize_q_pe else None
 
     _, _, mqa = K.fused_q(
         pos,
@@ -533,6 +546,7 @@ def test_fused_q_no_indexer(num_tokens: int):
         0.0,
         has_indexer=False,
         index_rope_interleave=False,
+        q_pe_out=q_pe_out,
     )
     s = q_scale.item()
     assert_fp8(mqa[:, :, :KV_LORA], (ql_nope.float() / s).to(FP8), "mqa ql_nope")
@@ -543,49 +557,8 @@ def test_fused_q_no_indexer(num_tokens: int):
         interleave=True,
     )
     assert_fp8(mqa[:, :, KV_LORA:], (qpe_ref / s).to(FP8), "mqa q_pe")
-
-
-@pytest.mark.parametrize("num_tokens", [17, 512])
-def test_fused_q_pcp8_shape(num_tokens: int):
-    """Exercise GLM-5.2 PCP8's 64 local query heads on the SM100 path."""
-    torch.manual_seed(7)
-    dev = "cuda"
-    num_q_heads = 64
-    max_pos = 65536
-    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64) % max_pos
-    q_pe = torch.randn(
-        num_tokens, num_q_heads, ROPE_DIM, device=dev, dtype=torch.bfloat16
-    )
-    ql_nope = torch.randn(
-        num_tokens, num_q_heads, KV_LORA, device=dev, dtype=torch.bfloat16
-    )
-    index_q = torch.randn(
-        num_tokens, INDEX_HEADS, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16
-    )
-    index_w = torch.randn(num_tokens, INDEX_HEADS, device=dev, dtype=torch.float32)
-    q_scale = torch.tensor([0.37], device=dev, dtype=torch.float32)
-    q_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
-    idx_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
-
-    iq_fp8, iw_out, mqa = K.fused_q(
-        pos,
-        q_pe,
-        q_cos_sin,
-        index_q,
-        idx_cos_sin,
-        ql_nope,
-        q_scale,
-        index_w,
-        INDEX_HEAD_DIM**-0.5,
-        INDEX_HEADS**-0.5,
-        has_indexer=True,
-        index_rope_interleave=True,
-    )
-    torch.accelerator.synchronize()
-
-    assert mqa.shape == (num_tokens, num_q_heads, KV_LORA + ROPE_DIM)
-    assert iq_fp8.shape == index_q.shape
-    assert iw_out.shape == index_w.shape
+    if q_pe_out is not None:
+        assert_bf16(q_pe_out, qpe_ref, "materialized q_pe RoPE")
 
 
 @pytest.mark.parametrize("num_tokens", [1, 17, 512])
