@@ -298,6 +298,12 @@ def test_mtp_propose_random_sampling_records_draft_probs():
     proposer.draft_attn_groups = [mock_attn_group]
 
     result = proposer.propose(
+        # Read from the proposer rather than restated: these three tests are
+        # ours, and they broke when an upstream merge made this a required
+        # positional argument on SpecDecodeBaseProposer.propose(). Taking it from
+        # the object that was configured keeps them correct if the fixture's
+        # value changes, which restating a literal would not.
+        num_speculative_tokens=proposer.num_speculative_tokens,
         target_token_ids=torch.randint(0, vocab_size, (total_tokens,), device=device),
         target_positions=torch.arange(total_tokens, device=device),
         target_hidden_states=torch.randn(total_tokens, hidden_size, device=device),
@@ -371,6 +377,12 @@ def test_mtp_sequential_drafting_passes_spec_step_indices():
     proposer.draft_attn_groups = [mock_attn_group]
 
     result = proposer.propose(
+        # Read from the proposer rather than restated: these three tests are
+        # ours, and they broke when an upstream merge made this a required
+        # positional argument on SpecDecodeBaseProposer.propose(). Taking it from
+        # the object that was configured keeps them correct if the fixture's
+        # value changes, which restating a literal would not.
+        num_speculative_tokens=proposer.num_speculative_tokens,
         target_token_ids=torch.randint(0, vocab_size, (total_tokens,), device=device),
         target_positions=torch.arange(total_tokens, device=device),
         target_hidden_states=torch.randn(total_tokens, hidden_size, device=device),
@@ -469,6 +481,12 @@ def test_mtp_parallel_drafting_random_sampling_records_draft_probs():
     proposer.draft_attn_groups = [mock_attn_group]
 
     result = proposer.propose(
+        # Read from the proposer rather than restated: these three tests are
+        # ours, and they broke when an upstream merge made this a required
+        # positional argument on SpecDecodeBaseProposer.propose(). Taking it from
+        # the object that was configured keeps them correct if the fixture's
+        # value changes, which restating a literal would not.
+        num_speculative_tokens=proposer.num_speculative_tokens,
         target_token_ids=torch.randint(0, vocab_size, (total_tokens,), device=device),
         target_positions=torch.arange(total_tokens, device=device),
         target_hidden_states=torch.randn(
