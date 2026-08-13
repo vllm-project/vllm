@@ -76,6 +76,13 @@ class SharedExperts(torch.nn.Module):
             self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
             self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
 
+            # Persistent, module-owned copy targets for the shared-experts input
+            # (one per DBO ubatch id). Sized to the largest cudagraph decode
+            # batch so the copy in `maybe_forward_async` is allocation-free and
+            # keeps a stable address under graph capture.
+            self._input_buffer: list[torch.Tensor | None] = [None, None]
+            self._max_input_rows = self._moe_config.max_capture_size
+
     # TODO(bnell): Hack for elastic_ep. Get rid of this
     def _set_moe_config(self, new_moe_config: FusedMoEConfig):
         self.moe_config = new_moe_config
@@ -147,11 +154,21 @@ class SharedExperts(torch.nn.Module):
         idx = self._output_idx
         assert self._output[idx] is None
 
-        # Clone as some models (Qwen3.5) alias shared experts input and hidden states,
-        # and later mutate the hidden state in the routed experts. That can lead to
-        # reading mutated memory in the shared experts producing incorrect results.
-        shared_experts_input = shared_experts_input.clone()
-        shared_experts_input.record_stream(self._stream)
+        # Some models (e.g. Qwen3.5) pass the same tensor as both hidden_states
+        # and the shared-experts input, then mutate it in place inside the routed
+        # experts. Copy the input into a private, module-owned buffer so the aux
+        # stream reads a stable copy while the main stream is free to overwrite
+        # the original. The copy runs on the main stream *before* the routed
+        # experts are launched, so program order guarantees it captures the
+        # pre-mutation values; the input_ready event (recorded after the copy)
+        # then holds the aux stream until the copy is done.
+        #
+        # A persistent buffer (rather than a fresh clone) needs no
+        # record_stream() to stay alive for the aux stream, so ordering is done
+        # entirely with CUDA events. This is what keeps the path cudagraph-safe:
+        # record_stream()/wait_stream() are illegal under HIP/CUDA graph capture,
+        # whereas event record()/wait() are captured correctly.
+        shared_experts_input = self._copy_input_to_buffer(shared_experts_input)
 
         self._input_ready_event[idx].record(current_stream())
         with torch.cuda.stream(self._stream):
@@ -159,6 +176,41 @@ class SharedExperts(torch.nn.Module):
             self._output[idx] = self._layer(shared_experts_input)
             self._output_ready_event[idx].record(self._stream)
         return True
+
+    def _copy_input_to_buffer(self, x: torch.Tensor) -> torch.Tensor:
+        """Copy the aliased shared-experts input into a persistent buffer.
+
+        Returns a view of a module-owned buffer holding a private copy of ``x``,
+        so the aux stream never reads the storage the routed experts mutate in
+        place. The buffer is sized to the largest cudagraph decode batch and
+        reused across steps, so the copy is allocation-free on the hot path and
+        has a stable address under graph capture. Growth only happens eagerly
+        (during warmup or eager execution), never mid-capture: cudagraph decode
+        batches are captured largest-first and each size is warmed up eagerly
+        before capture, so replayed sizes never exceed the pre-allocated buffer.
+
+        Args:
+            x: The shared-experts input, aliased with hidden_states.
+
+        Returns:
+            A ``[x.shape[0], ...]`` view of the persistent buffer, filled with a
+            copy of ``x`` on the current (main) stream.
+        """
+        idx = self._output_idx
+        buf = self._input_buffer[idx]
+        num_rows = x.shape[0]
+        if (
+            buf is None
+            or buf.shape[0] < num_rows
+            or buf.shape[1:] != x.shape[1:]
+            or buf.dtype != x.dtype
+        ):
+            rows = max(num_rows, self._max_input_rows)
+            buf = torch.empty((rows, *x.shape[1:]), dtype=x.dtype, device=x.device)
+            self._input_buffer[idx] = buf
+        out = buf[:num_rows]
+        out.copy_(x)
+        return out
 
     def wait(self) -> None:
         """Block the main stream until `maybe_forward_async` output is ready."""
