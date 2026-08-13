@@ -670,9 +670,8 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        if (
-            backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
-            and activation == MoEActivation.SITU
+        if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and (
+            activation == MoEActivation.SITU or activation == MoEActivation.SILU
         ):
             # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
             # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
