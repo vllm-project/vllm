@@ -196,12 +196,49 @@ class RepetitionDetectionParams:
 
 
 class RequestOutputKind(Enum):
-    # Return entire output so far in every RequestOutput
+    """Controls how incremental outputs are returned in a streaming request.
+
+    This enum determines what token text (and associated metadata) is included
+    in each :class:`~vllm.RequestOutput` yielded during streaming generation.
+
+    Members:
+        CUMULATIVE: Every ``RequestOutput`` contains the **full** generated
+            text from the beginning of the request up to the current token.
+            This is the most convenient mode when the caller wants to display
+            the latest complete response without tracking previous chunks.
+        DELTA: Each ``RequestOutput`` contains **only the new tokens** added
+            since the previous output.  The caller is responsible for
+            concatenating chunks to reconstruct the full response.  This mode
+            minimises data transfer in streaming scenarios.
+        FINAL_ONLY: Intermediate ``RequestOutput`` objects are **not**
+            emitted; a single output is produced when generation finishes.
+            Use this when you only care about the completed result and want
+            to avoid the overhead of incremental updates.
+
+    Example::
+
+        from vllm import LLM, SamplingParams
+        from vllm.sampling_params import RequestOutputKind
+
+        llm = LLM(model="facebook/opt-125m")
+        sampling_params = SamplingParams(
+            output_kind=RequestOutputKind.DELTA,
+            max_tokens=50,
+        )
+        outputs = llm.generate("Hello, my name is", sampling_params)
+        for output in outputs:
+            print(output.outputs[0].text)
+    """
+
     CUMULATIVE = 0
-    # Return only deltas in each RequestOutput
+    """Return the entire output generated so far in every ``RequestOutput``."""
+
     DELTA = 1
-    # Do not return intermediate RequestOutput
+    """Return only the newly generated tokens in each ``RequestOutput``."""
+
     FINAL_ONLY = 2
+    """Do not return intermediate ``RequestOutput`` objects; only the final
+    result is emitted once generation is complete."""
 
 
 def _is_non_tekken_mistral(tokenizer: TokenizerLike) -> bool:
