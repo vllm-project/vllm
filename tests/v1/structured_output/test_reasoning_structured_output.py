@@ -385,8 +385,5 @@ class TestReasoningStructuredOutput:
         )
         assert sampling_params.all_stop_token_ids == {
             199999,
-            200006,
-            200010,
-            200028,
         }
-        assert sampling_params.stop_token_ids == [199999, 200006, 200010, 200028]
+        assert sampling_params.stop_token_ids == [199999]

@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.reasoning import ReasoningParser
-    from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 else:
     torch = LazyLoader("torch", globals(), "torch")
@@ -192,10 +191,9 @@ class StructuredOutputManager:
             request_type, grammar_spec = struct_request.structured_output_key
             assert self.backend is not None
             if request.sampling_params is not None:
-                self._update_sampling_params_for_structured_output(
-                    request.sampling_params
+                stop_token_ids = self._structured_output_stop_token_ids(
+                    request.sampling_params.all_stop_token_ids
                 )
-                stop_token_ids = request.sampling_params.all_stop_token_ids
             else:
                 stop_token_ids = None
             return self.backend.compile_grammar(
@@ -207,11 +205,9 @@ class StructuredOutputManager:
             )
             raise
 
-    def _update_sampling_params_for_structured_output(
-        self, sampling_params: "SamplingParams"
-    ) -> None:
+    def _structured_output_stop_token_ids(self, stop_token_ids: set[int]) -> set[int]:
         if self.vllm_config.structured_outputs_config.reasoning_parser != "inkling":
-            return
+            return stop_token_ids
 
         vocab = self.tokenizer.get_vocab()
         inkling_stop_token_ids = [
@@ -220,13 +216,9 @@ class StructuredOutputManager:
             if (token_id := vocab.get(token)) is not None
         ]
         if not inkling_stop_token_ids:
-            return
+            return stop_token_ids
 
-        sampling_params._all_stop_token_ids.update(inkling_stop_token_ids)
-        assert sampling_params.stop_token_ids is not None
-        sampling_params.stop_token_ids = list(
-            dict.fromkeys([*sampling_params.stop_token_ids, *inkling_stop_token_ids])
-        )
+        return stop_token_ids | set(inkling_stop_token_ids)
 
     def _fill_bitmasks(
         self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]

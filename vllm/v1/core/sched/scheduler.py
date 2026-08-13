@@ -1855,18 +1855,20 @@ class Scheduler(SchedulerInterface):
                         request, new_token_ids
                     )
                 )
-                if advance_token_ids and not grammar.accept_tokens(
-                    req_id, advance_token_ids
-                ):
-                    logger.error(
-                        "Unexpected: grammar rejected tokens %s for request %s. "
-                        "Terminating request.",
-                        advance_token_ids,
-                        req_id,
-                    )
-                    request.status = RequestStatus.FINISHED_ERROR
-                    request.resumable = False
-                    stopped = True
+                if advance_token_ids:
+                    if not grammar.accept_tokens(req_id, advance_token_ids):
+                        logger.error(
+                            "Unexpected: grammar rejected tokens %s for request %s. "
+                            "Terminating request.",
+                            advance_token_ids,
+                            req_id,
+                        )
+                        request.status = RequestStatus.FINISHED_ERROR
+                        request.resumable = False
+                        stopped = True
+                    elif grammar.is_terminated():
+                        request.status = RequestStatus.FINISHED_STOPPED
+                        stopped = True
 
             routed_experts = None
             if (

@@ -3242,24 +3242,10 @@ def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     ]
 
 
-def test_abort_request_when_structured_output_fsm_cannot_advance():
+def _make_scheduler_for_structured_output_advance(
+    request: Request,
+) -> tuple[Scheduler, SchedulerOutput, ModelRunnerOutput]:
     scheduler = object.__new__(Scheduler)
-    sampling_params = SamplingParams(ignore_eos=True, max_tokens=4)
-    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
-
-    request = Request(
-        request_id="0",
-        prompt_token_ids=[0, 1],
-        mm_features=None,
-        sampling_params=sampling_params,
-        pooling_params=None,
-    )
-    request.structured_output_request = Mock()
-    request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
-    request.structured_output_request.grammar.accept_tokens.return_value = False
-    request.status = RequestStatus.RUNNING
-    request.num_computed_tokens = request.num_tokens
-
     scheduler.perf_metrics = None
     scheduler.connector = None
     scheduler.ec_connector = None
@@ -3314,6 +3300,29 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
         prompt_logprobs_dict={},
         pooler_output=[],
     )
+    return scheduler, output, model_runner_output
+
+
+def test_abort_request_when_structured_output_fsm_cannot_advance():
+    sampling_params = SamplingParams(ignore_eos=True, max_tokens=4)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+
+    request = Request(
+        request_id="0",
+        prompt_token_ids=[0, 1],
+        mm_features=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    request.structured_output_request = Mock()
+    request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
+    request.structured_output_request.grammar.accept_tokens.return_value = False
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = request.num_tokens
+
+    scheduler, output, model_runner_output = (
+        _make_scheduler_for_structured_output_advance(request)
+    )
     engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
 
     request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
@@ -3329,6 +3338,44 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     assert engine_core_output.request_id == request.request_id
     assert engine_core_output.new_token_ids == [123]
     assert engine_core_output.finish_reason == FinishReason.ERROR
+
+
+def test_stop_request_when_structured_output_fsm_terminates():
+    sampling_params = SamplingParams(ignore_eos=True, max_tokens=4)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+
+    request = Request(
+        request_id="0",
+        prompt_token_ids=[0, 1],
+        mm_features=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    request.structured_output_request = Mock()
+    request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
+    request.structured_output_request.grammar.accept_tokens.return_value = True
+    request.structured_output_request.grammar.is_terminated.return_value = True
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = request.num_tokens
+
+    scheduler, output, model_runner_output = (
+        _make_scheduler_for_structured_output_advance(request)
+    )
+    engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
+
+    request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
+        request.request_id, [123]
+    )
+    request.structured_output_request.grammar.is_terminated.assert_called_once()
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.running
+    scheduler._free_request.assert_called_once_with(request)
+    assert len(engine_core_outputs[0].outputs) == 1
+    engine_core_output = engine_core_outputs[0].outputs[0]
+    assert engine_core_output.request_id == request.request_id
+    assert engine_core_output.new_token_ids == [123]
+    assert engine_core_output.finish_reason == FinishReason.STOP
 
 
 @pytest.mark.parametrize("use_v2_model_runner", [False, True])
