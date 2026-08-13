@@ -4,6 +4,10 @@
 
 The architecture is the same as granitemoe but with the addition of shared
 experts.
+
+Also serves the `granitemoe_swa` checkpoints (`GraniteMoeSWAForCausalLM`), which
+add the same per-layer sliding window, attention sink and per-layer RoPE support
+as `granite_swa` (see `granite.py`).
 """
 
 from collections.abc import Iterable
@@ -30,7 +34,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .granitemoe import GraniteMoeAttention, GraniteMoeModel, GraniteMoeMoE
+from .granitemoe import (
+    GraniteMoeAttention,
+    GraniteMoeModel,
+    GraniteMoeMoE,
+    granitemoe_split_expert_weights,
+)
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import AutoWeightsLoader, make_layers, maybe_prefix
 
@@ -94,6 +103,7 @@ class GraniteMoeSharedDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             attention_multiplier=config.attention_multiplier,
+            config=config,
         )
         self.block_sparse_moe = GraniteMoeMoE(
             num_experts=config.num_local_experts,
@@ -208,42 +218,9 @@ class GraniteMoeSharedModel(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        new_weights = {}
-        for n, p in weights:
-            if n.endswith(".block_sparse_moe.input_linear.weight"):
-                for e in range(p.size(0)):
-                    w1_name = n.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w1.weight",
-                    )
-                    w3_name = n.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w3.weight",
-                    )
-                    w1_param, w3_param = p[e].chunk(2, dim=0)
-                    assert w1_name not in new_weights
-                    assert w3_name not in new_weights
-                    new_weights[w1_name] = w1_param
-                    new_weights[w3_name] = w3_param
-            elif n.endswith(".block_sparse_moe.output_linear.weight"):
-                for e in range(p.size(0)):
-                    w2_name = n.replace(
-                        ".block_sparse_moe.output_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w2.weight",
-                    )
-                    w2_param = p[e]
-                    assert w2_name not in new_weights
-                    new_weights[w2_name] = w2_param
-            elif n.endswith(".block_sparse_moe.router.layer.weight"):
-                gate_name = n.replace(
-                    ".block_sparse_moe.router.layer.weight",
-                    ".block_sparse_moe.gate.weight",
-                )
-                assert gate_name not in new_weights
-                new_weights[gate_name] = p
-            else:
-                new_weights[n] = p
-        return GraniteMoeModel._load_weights(self, new_weights.items())
+        return GraniteMoeModel._load_weights(
+            self, granitemoe_split_expert_weights(weights)
+        )
 
 
 class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):

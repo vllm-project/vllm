@@ -24,12 +24,13 @@
 # limitations under the License.
 """Inference-only GraniteMoe model."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from itertools import islice
 from typing import Any
 
 import torch
 from torch import nn
+from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -59,12 +60,61 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    sharded_weight_loader,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
+from .granite import granite_layer_attn_params
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import AutoWeightsLoader, is_pp_missing_parameter, make_layers, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    extract_layer_index,
+    is_pp_missing_parameter,
+    make_layers,
+    maybe_prefix,
+)
+
+# Packed expert / router tensors, in both the legacy checkpoint spelling and the
+# current one. The layouts are identical, so only the names differ.
+_MOE_GATE_UP_NAMES = (
+    ".block_sparse_moe.input_linear.weight",
+    ".block_sparse_moe.experts.gate_up_proj",
+)
+_MOE_DOWN_NAMES = (
+    ".block_sparse_moe.output_linear.weight",
+    ".block_sparse_moe.experts.down_proj",
+)
+_MOE_ROUTER_NAMES = (
+    ".block_sparse_moe.router.layer.weight",
+    ".block_sparse_moe.router.weight",
+)
+
+
+def _endswith_any(name: str, suffixes: tuple[str, ...]) -> str | None:
+    return next((s for s in suffixes if name.endswith(s)), None)
+
+
+def granitemoe_split_expert_weights(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Split packed GraniteMoe expert tensors into per-expert `w1`/`w2`/`w3`."""
+    for n, p in weights:
+        if suffix := _endswith_any(n, _MOE_GATE_UP_NAMES):
+            for e in range(p.size(0)):
+                w1_param, w3_param = p[e].chunk(2, dim=0)
+                base = n.removesuffix(suffix) + f".block_sparse_moe.experts.{e}"
+                yield f"{base}.w1.weight", w1_param
+                yield f"{base}.w3.weight", w3_param
+        elif suffix := _endswith_any(n, _MOE_DOWN_NAMES):
+            for e in range(p.size(0)):
+                base = n.removesuffix(suffix) + f".block_sparse_moe.experts.{e}"
+                yield f"{base}.w2.weight", p[e]
+        elif suffix := _endswith_any(n, _MOE_ROUTER_NAMES):
+            yield n.removesuffix(suffix) + ".block_sparse_moe.gate.weight", p
+        else:
+            yield n, p
 
 
 class GraniteMoeMoE(nn.Module):
@@ -148,6 +198,7 @@ class GraniteMoeAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         attention_multiplier: float | None = None,
         prefix: str = "",
+        config: PretrainedConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -190,12 +241,30 @@ class GraniteMoeAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position,
-            rope_parameters=rope_parameters,
-            is_neox_style=True,
-        )
+        if config is None:
+            sliding_window, has_sink = None, False
+            rope_theta = (rope_parameters or {}).get("rope_theta")
+        else:
+            sliding_window, rope_theta, has_sink = granite_layer_attn_params(
+                config, extract_layer_index(prefix)
+            )
+            rope_parameters = {**rope_parameters, "rope_theta": rope_theta}
+
+        self.use_rope = rope_theta != 0
+        if self.use_rope:
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                max_position=max_position,
+                rope_parameters=rope_parameters,
+                is_neox_style=True,
+            )
+
+        if has_sink:
+            self.sinks = nn.Parameter(torch.zeros(self.num_heads), requires_grad=False)
+            set_weight_attrs(self.sinks, {"weight_loader": sharded_weight_loader(0)})
+        else:
+            self.sinks = None
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -203,7 +272,9 @@ class GraniteMoeAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
+            sinks=self.sinks,
         )
 
     def forward(
@@ -213,7 +284,8 @@ class GraniteMoeAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        if self.use_rope:
+            q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -243,6 +315,7 @@ class GraniteMoeDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             attention_multiplier=config.attention_multiplier,
+            config=config,
         )
         self.block_sparse_moe = GraniteMoeMoE(
             num_experts=config.num_local_experts,
@@ -432,42 +505,7 @@ class GraniteMoeModel(nn.Module):
         return loaded_params
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        new_weights = {}
-        for n, p in weights:
-            if n.endswith(".block_sparse_moe.input_linear.weight"):
-                for e in range(p.size(0)):
-                    w1_name = n.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w1.weight",
-                    )
-                    w3_name = n.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w3.weight",
-                    )
-                    w1_param, w3_param = p[e].chunk(2, dim=0)
-                    assert w1_name not in new_weights
-                    assert w3_name not in new_weights
-                    new_weights[w1_name] = w1_param
-                    new_weights[w3_name] = w3_param
-            elif n.endswith(".block_sparse_moe.output_linear.weight"):
-                for e in range(p.size(0)):
-                    w2_name = n.replace(
-                        ".block_sparse_moe.output_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w2.weight",
-                    )
-                    w2_param = p[e]
-                    assert w2_name not in new_weights
-                    new_weights[w2_name] = w2_param
-            elif n.endswith(".block_sparse_moe.router.layer.weight"):
-                gate_name = n.replace(
-                    ".block_sparse_moe.router.layer.weight",
-                    ".block_sparse_moe.gate.weight",
-                )
-                assert gate_name not in new_weights
-                new_weights[gate_name] = p
-            else:
-                new_weights[n] = p
-        return self._load_weights(new_weights.items())
+        return self._load_weights(granitemoe_split_expert_weights(weights))
 
 
 class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
