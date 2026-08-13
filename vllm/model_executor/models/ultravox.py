@@ -245,7 +245,11 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
             # higher than the number of audio samples
             audio_features=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
             audio_token_len=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
-            audio_lens=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
+            # Only ever used to derive the encoder attention metadata on the
+            # host, so keep it there.
+            audio_lens=MultiModalFieldConfig.flat_from_sizes(
+                "audio", num_chunks, keep_on_cpu=True
+            ),
             # num_chunks can convert audio_chunked to audio batch dimension
             audio_num_chunks=MultiModalFieldConfig.batched("audio"),
             audio_embeds=MultiModalFieldConfig.batched("audio"),

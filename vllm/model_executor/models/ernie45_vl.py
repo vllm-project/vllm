@@ -788,7 +788,10 @@ class VariableResolutionResamplerModel(nn.Module):
             return x
 
         def fwd_placeholder(x, grid_thw, to_tensor=False):
-            grid_thw_cpu = grid_thw.cpu().numpy()
+            # The per-image grids drive the Python-level offset arithmetic
+            # below; the same read is wrapped on the cudagraph path.
+            with gpu_sync_allowed():
+                grid_thw_cpu = grid_thw.cpu().numpy()
             grid_t, grid_hw = grid_thw_cpu[:, 0], grid_thw_cpu[:, 1:]
             grid_hw_after_conv = grid_hw.prod(-1) // (self.spatial_conv_size**2)
 
