@@ -1119,7 +1119,7 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
             config.vocab_size, config.hidden_size, quant_config=quant_config
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

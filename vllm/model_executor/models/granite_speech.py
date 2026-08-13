@@ -62,6 +62,7 @@ from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import PIN_MEMORY
 
 from .blip2 import Blip2QFormerModel
 from .interfaces import (
@@ -733,7 +734,8 @@ class GraniteSpeechForConditionalGeneration(
         target_device = self.encoder.input_linear.weight.device
         if target_device == input_features_mask.device:
             return input_features_mask
-        return input_features_mask.pin_memory().to(target_device, non_blocking=True)
+        masked = input_features_mask.pin_memory() if PIN_MEMORY else input_features_mask
+        return masked.to(target_device, non_blocking=True)
 
     def _pad_and_stack_input_features(
         self,

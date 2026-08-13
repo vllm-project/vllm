@@ -32,6 +32,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
@@ -195,8 +196,10 @@ class DiffusionGemmaForConditionalGeneration(
 
         # ---- Vision tower ----
         vision_config = getattr(config, "vision_config", None)
+        self.embed_vision: Gemma4MultimodalEmbedder | None
         if vision_config is not None:
             quant_config = vllm_config.quant_config
+            tower_quant: QuantizationConfig | None
             if quant_config and quant_config.get_name() in [
                 "bitsandbytes",
                 "torchao",
@@ -1049,7 +1052,7 @@ class DiffusionSampler:
         sampler: Any,
         diffusion_config: Any,
         vocab_size: int,
-        diffusion_states: DiffusionGemmaRequestStates | None = None,
+        diffusion_states: DiffusionGemmaRequestStates,
         *,
         confidence_threshold: float,
         t_min: float,

@@ -112,6 +112,7 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from ...utils.gpu_sync_debug import gpu_sync_allowed
@@ -710,7 +711,7 @@ class Qwen3_VisionTransformer(nn.Module):
         pinned = torch.empty(
             (num_pos, pos_ids[0].shape[1]),
             dtype=pos_ids[0].dtype,
-            pin_memory=True,
+            pin_memory=PIN_MEMORY,
         )
         pos_ids = torch.cat(pos_ids, dim=0, out=pinned).to(
             self.device, non_blocking=True
@@ -1707,15 +1708,14 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
         )
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix="lm_head",
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix="lm_head",
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 

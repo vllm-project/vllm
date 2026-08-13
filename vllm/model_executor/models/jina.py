@@ -11,6 +11,8 @@ from safetensors.torch import load as safetensors_load
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
@@ -27,7 +29,13 @@ from .interfaces import SupportsLateInteraction
 from .interfaces_base import VllmModelForPooling
 from .llama import LlamaForCausalLM
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    StageMissingLayer,
+    WeightsMapper,
+    maybe_prefix,
+    no_init_weights,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +281,12 @@ class JinaEmbeddingsV5DecoderModel(Qwen3ForCausalLM, VllmModelForPooling):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        with no_init_weights(
+            self,
+            lambda mod: StageMissingLayer("output", mod),
+            targets=(LogitsProcessor, ParallelLMHead),
+        ):
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
         _setup_jina_v5_task_and_pooler(self, vllm_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -295,7 +308,12 @@ class JinaEmbeddingsV5EncoderModel(LlamaForCausalLM, VllmModelForPooling):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        with no_init_weights(
+            self,
+            lambda mod: StageMissingLayer("output", mod),
+            targets=(LogitsProcessor, ParallelLMHead),
+        ):
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
         _setup_jina_v5_task_and_pooler(self, vllm_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
