@@ -1096,30 +1096,6 @@ class SpeculativeConfig:
 
                 dspark_draft_topk = None
                 if self.method == "dspark":
-                    # DSpark is a semi-autoregressive *block* drafter. A
-                    # speculative length smaller than the checkpoint's block
-                    # feeds the block / Markov-head machinery an unsupported
-                    # layout and yields incorrect (garbled) output rather than
-                    # merely lower acceptance. Require num_speculative_tokens to
-                    # be at least the block size (e.g. 5 or 7 for DeepSeek-V4).
-                    dspark_block_size = getattr(
-                        self.draft_model_config.hf_config,
-                        "dspark_block_size",
-                        None,
-                    )
-                    if (
-                        dspark_block_size is not None
-                        and self.num_speculative_tokens < dspark_block_size
-                    ):
-                        raise ValueError(
-                            "DSpark requires num_speculative_tokens >= "
-                            f"dspark_block_size ({dspark_block_size}); got "
-                            f"{self.num_speculative_tokens}. Smaller values "
-                            "produce incorrect output. Use "
-                            f"num_speculative_tokens={dspark_block_size} or "
-                            "larger (e.g. 7)."
-                        )
-
                     hf_config = self.draft_model_config.hf_config
                     dspark_draft_topk = self.dspark_draft_topk
                     if dspark_draft_topk is None:
