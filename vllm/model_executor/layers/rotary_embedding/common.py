@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from contextlib import suppress
 from importlib import import_module
 
 import torch
@@ -137,10 +136,21 @@ class ApplyRotaryEmb(CustomOp):
 
         self.apply_rotary_emb_flash_attn = None
         if not current_platform.is_cpu():
-            with suppress(ModuleNotFoundError):
+            try:
                 self.apply_rotary_emb_flash_attn = import_module(
                     "flash_attn.ops.triton.rotary"
                 ).apply_rotary
+            except ModuleNotFoundError:
+                pass
+            except ImportError as e:
+                logger.warning_once(
+                    "flash-attn is installed but its rotary kernels could not "
+                    "be loaded (%s); falling back to the native rotary "
+                    "implementation. This usually means flash-attn was built "
+                    "against a different PyTorch version than the one "
+                    "currently installed.",
+                    e,
+                )
 
     @staticmethod
     def forward_static(
