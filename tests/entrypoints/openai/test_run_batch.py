@@ -290,6 +290,7 @@ INPUT_REASONING_BATCH = "\n".join(
 
 MINIMAL_WAV_BASE64 = "UklGRigAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQQAAAAAAP9/"
 _EXACT_LIMIT_AUDIO = b"a" * MiB_bytes
+_OVERSIZED_BASE64_AUDIO = "A" * (4 * ((MiB_bytes + 2) // 3))
 _OVERSIZED_HTTP_AUDIO = b"b" * (MiB_bytes + 1)
 
 
@@ -962,6 +963,30 @@ async def test_download_bytes_backslash_bypass():
         await download_bytes_from_url(
             bypass_url, allowed_media_domains=["evil.internal"]
         )
+
+
+@pytest.mark.asyncio
+async def test_transcription_wrapper_rejects_oversized_data_url_before_decode(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
+    handler = AsyncMock()
+    wrapped_handler = make_transcription_wrapper(is_translation=False)(handler)
+    request = BatchTranscriptionRequest.model_validate(
+        {
+            "model": SPEECH_LARGE_MODEL_NAME,
+            "file_url": f"data:audio/wav;base64,{_OVERSIZED_BASE64_AUDIO}",
+            "response_format": "json",
+        }
+    )
+
+    with patch("vllm.entrypoints.openai.run_batch.base64.b64decode") as decode:
+        response = await wrapped_handler(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert "Maximum file size exceeded" in response.error.message
+    decode.assert_not_called()
+    handler.assert_not_awaited()
 
 
 @pytest.mark.asyncio

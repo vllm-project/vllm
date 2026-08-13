@@ -487,6 +487,9 @@ async def download_bytes_from_url(
         if "," in url:
             header, data = url.split(",", 1)
             if "base64" in header:
+                decoded_size_bytes = len(data.rstrip("=")) * 3 // 4
+                if decoded_size_bytes > _get_audio_download_limit_bytes():
+                    _raise_audio_filesize_limit(decoded_size_bytes)
                 return base64.b64decode(data)
             else:
                 raise ValueError(f"Unsupported data URL encoding: {header}")
