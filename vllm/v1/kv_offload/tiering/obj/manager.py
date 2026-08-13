@@ -139,8 +139,13 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
+        self._enable_event_provenance = bool(
+            self.events is not None
+            and offloading_spec.kv_events_config.self_describing_kv_events
+        )
         # Keys of in-flight store jobs, tracked only when events are enabled.
         self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        self._store_job_contexts: dict[JobId, ReqContext] = {}
         # Keys of in-flight load (promotion) jobs, so a failed download can
         # mark its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
@@ -282,20 +287,30 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: TransferJob) -> None:
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
+            if self._enable_event_provenance:
+                self._store_job_contexts[job_metadata.job_id] = job_metadata.req_context
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
-        self._submit_transfer(
-            job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE
-        )
+        try:
+            self._submit_transfer(
+                job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE
+            )
+        except Exception:
+            self._store_job_keys.pop(job_metadata.job_id, None)
+            self._store_job_contexts.pop(job_metadata.job_id, None)
+            raise
 
     def submit_load(self, job_metadata: TransferJob) -> None:
-        self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
+        job_id = job_metadata.job_id
+        self._load_job_keys[job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
-        self._submit_transfer(
-            job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
-        )
+        try:
+            self._submit_transfer(job_id, job_metadata.block_ids, obj_keys, NIXL_READ)
+        except Exception:
+            self._load_job_keys.pop(job_id, None)
+            raise
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        self._lookup_manager.cleanup(req_context.req_id)
+        self._lookup_manager.cleanup(req_context)
 
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         self._lookup_manager.flush()
@@ -367,6 +382,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         for result in results:
             if self.events is not None:
                 keys = self._store_job_keys.pop(result.job_id, None)
+                req_context = self._store_job_contexts.pop(result.job_id, None)
                 if result.success and keys:
                     self.events.append(
                         OffloadingEvent(
@@ -374,6 +390,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
+                            req_context=req_context,
                         )
                     )
             # Mark only the keys that did not load as a miss; the request
@@ -391,8 +408,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:
-            yield from self.events
-            self.events.clear()
+            events = self.events
+            self.events = []
+            yield from events
 
     def drain_jobs(self) -> None:
         """Block until every submitted transfer has completed or failed.
@@ -436,6 +454,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             except Exception as exc:
                 logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
         self._transfers.clear()
+        self._store_job_keys.clear()
+        self._store_job_contexts.clear()
+        if self.events is not None:
+            self.events.clear()
         if self._dram_prepped_handle is not None:
             try:
                 self._agent.release_dlist_handle(self._dram_prepped_handle)

@@ -55,6 +55,7 @@ _CTX = ReqContext(req_id="test")
 def _make_offloading_spec(
     enable_kv_cache_events: bool = False,
     *,
+    self_describing_kv_events: bool = False,
     tp_size: int = 1,
     rank: int = 0,
     world_size: int | None = None,
@@ -90,7 +91,7 @@ def _make_offloading_spec(
     spec.blocks_per_chunk = 1
     spec.kv_events_config = OffloadingKVEventsConfig(
         enable_kv_cache_events=enable_kv_cache_events,
-        self_describing_kv_events=False,
+        self_describing_kv_events=self_describing_kv_events,
     )
     return spec
 
@@ -195,7 +196,10 @@ def fs_tier_with_events(tmp_path):
     tensor = _page_aligned_zero_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
     mock_view = memoryview(tensor.numpy())
     tier = FileSystemTierManager(
-        offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
+        offloading_spec=_make_offloading_spec(
+            enable_kv_cache_events=True,
+            self_describing_kv_events=True,
+        ),
         primary_kv_view=mock_view,
         tier_type="fs",
         root_dir=str(tmp_path),
@@ -745,12 +749,16 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     tier.submit_store(make_job(1, keys, [0, 1]))
     assert all(r.success for r in drain(tier))
 
-    events = list(tier.take_events())
-    assert len(events) == 1
-    assert events[0].keys == keys
-    assert events[0].medium == Medium.STORAGE
-    assert events[0].locality is Locality.LOCAL
-    assert not events[0].removed
+    event_iter = iter(tier.take_events())
+    event = next(event_iter)
+    assert tier.events == []
+    assert event.keys == keys
+    assert event.medium == Medium.STORAGE
+    assert event.locality is Locality.LOCAL
+    assert not event.removed
+    assert event.req_context is _CTX
+    assert tier._store_job_contexts == {}
+    event_iter.close()
     # take_events drains the buffer.
     assert list(tier.take_events()) == []
 
@@ -777,6 +785,7 @@ def test_store_event_uses_configured_locality(tmp_path, locality, expected):
         events = list(tier.take_events())
         assert len(events) == 1
         assert events[0].locality is expected
+        assert events[0].req_context is None
     finally:
         tier.shutdown()
 
@@ -848,6 +857,22 @@ def test_partially_failed_store_emits_no_event(fs_tier_with_events, monkeypatch)
     assert not results[0].success
     assert list(tier.take_events()) == []
     assert tier._store_job_keys == {}
+    assert tier._store_job_contexts == {}
+
+
+def test_submit_load_exception_clears_job_keys(fs_tier, monkeypatch):
+    tier, _ = fs_tier
+    monkeypatch.setattr(
+        tier._pool,
+        "enqueue_load",
+        MagicMock(side_effect=RuntimeError("submit failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="submit failed"):
+        tier.submit_load(make_job(1, [key(1)], [0], is_promotion=True))
+
+    assert tier._load_job_keys == {}
+    assert tier._load_progress == {}
 
 
 def test_events_disabled_by_default(fs_tier):

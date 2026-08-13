@@ -146,8 +146,13 @@ class FileSystemTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
+        self._enable_event_provenance = bool(
+            self.events is not None
+            and offloading_spec.kv_events_config.self_describing_kv_events
+        )
         # Keys of in-flight store jobs, tracked only when events are enabled.
         self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        self._store_job_contexts: dict[JobId, ReqContext] = {}
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
@@ -218,6 +223,8 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = keys
+            if self._enable_event_provenance:
+                self._store_job_contexts[job_metadata.job_id] = job_metadata.req_context
         task = functools.partial(
             batch_store_block,
             [self.file_mapper.get_file_name(key) for key in keys],
@@ -226,7 +233,12 @@ class FileSystemTierManager(SecondaryTierManager):
             self._block_size,
             self._use_o_direct,
         )
-        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
+        try:
+            self._pool.enqueue_store(job_metadata.job_id, 1, [task])
+        except Exception:
+            self._store_job_keys.pop(job_metadata.job_id, None)
+            self._store_job_contexts.pop(job_metadata.job_id, None)
+            raise
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
@@ -265,7 +277,12 @@ class FileSystemTierManager(SecondaryTierManager):
                 )
                 raise
 
-        self._pool.enqueue_load(job_id, 1, [load_task])
+        try:
+            self._pool.enqueue_load(job_id, 1, [load_task])
+        except Exception:
+            self._load_job_keys.pop(job_id, None)
+            self._load_progress.pop(job_id, None)
+            raise
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -275,6 +292,7 @@ class FileSystemTierManager(SecondaryTierManager):
         for job_id, success, transfer_time in self._pool.get_finished():
             if self.events is not None:
                 keys = self._store_job_keys.pop(job_id, None)
+                req_context = self._store_job_contexts.pop(job_id, None)
                 if success and keys:
                     self.events.append(
                         OffloadingEvent(
@@ -282,6 +300,7 @@ class FileSystemTierManager(SecondaryTierManager):
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
+                            req_context=req_context,
                         )
                     )
             load_keys = self._load_job_keys.pop(job_id, None)
@@ -315,8 +334,9 @@ class FileSystemTierManager(SecondaryTierManager):
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:
-            yield from self.events
-            self.events.clear()
+            events = self.events
+            self.events = []
+            yield from events
 
     @override
     def drain_jobs(self) -> None:
@@ -324,7 +344,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self._pool.wait_idle()
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        self._lookup_manager.cleanup(req_context.req_id)
+        self._lookup_manager.cleanup(req_context)
 
     @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
@@ -340,3 +360,7 @@ class FileSystemTierManager(SecondaryTierManager):
         """
         self._lookup_manager.shutdown()
         self._pool.shutdown(wait=True)
+        self._store_job_keys.clear()
+        self._store_job_contexts.clear()
+        if self.events is not None:
+            self.events.clear()

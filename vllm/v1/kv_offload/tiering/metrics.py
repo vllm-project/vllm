@@ -53,7 +53,7 @@ class TieringMetricsTracker:
         self._tier_types = tier_types
         self._num_primary_blocks = num_primary_blocks
         self._primary_block_size = primary_block_size
-        self._request_states: dict[str, _RequestMetricsState] = {}
+        self._request_states: dict[int, _RequestMetricsState] = {}
         self._tier_states = [_TierState() for _ in tier_types]
         self._stats = OffloadingConnectorStats()
 
@@ -66,16 +66,16 @@ class TieringMetricsTracker:
         return PRIMARY_TIER_LABEL
 
     def on_new_request(self, req_context: ReqContext) -> None:
-        self._request_states[req_context.req_id] = _RequestMetricsState()
+        self._request_states[id(req_context)] = _RequestMetricsState()
 
     def on_request_allocated(self, req_context: ReqContext) -> None:
-        state = self._request_states.get(req_context.req_id)
+        state = self._request_states.get(id(req_context))
         if state is None:
             return
         state.observed_lookups = None
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        self._request_states.pop(req_context.req_id, None)
+        self._request_states.pop(id(req_context), None)
 
     def on_lookup(
         self,
@@ -85,10 +85,11 @@ class TieringMetricsTracker:
         result: LookupResult,
         lookup_duration: float,
     ) -> None:
-        state = self._request_states.get(req_context.req_id)
+        context_id = id(req_context)
+        state = self._request_states.get(context_id)
         if state is None:
             state = _RequestMetricsState()
-            self._request_states[req_context.req_id] = state
+            self._request_states[context_id] = state
 
         if state.observed_lookups is not None and result in (
             LookupResult.HIT,

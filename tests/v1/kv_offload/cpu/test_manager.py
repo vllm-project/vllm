@@ -40,6 +40,7 @@ def make_cpu_manager(
     cache_policy: str = "lru",
     cache_policy_module_path: str | None = None,
     enable_events: bool = False,
+    enable_event_provenance: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
 ) -> CPUOffloadingManager:
@@ -48,6 +49,7 @@ def make_cpu_manager(
         cache_policy=cache_policy,
         cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
+        enable_event_provenance=enable_event_provenance,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
     )
@@ -146,7 +148,11 @@ def verify_events(
 
 def test_cpu_eviction_removed_precedes_stored():
     """An eviction is announced before the store that reuses its capacity."""
-    manager = make_cpu_manager(num_blocks=2, enable_events=True)
+    manager = make_cpu_manager(
+        num_blocks=2,
+        enable_events=True,
+        enable_event_provenance=True,
+    )
 
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -161,6 +167,61 @@ def test_cpu_eviction_removed_precedes_stored():
     assert removed_idx and stored_idx, events
     assert max(removed_idx) < min(stored_idx)
     assert all(event.medium == manager.medium for event in events)
+    assert all(events[i].req_context is None for i in removed_idx)
+    assert all(events[i].req_context is _EMPTY_REQ_CTX for i in stored_idx)
+
+
+def test_cpu_reset_discards_stores_but_keeps_removals():
+    manager = make_cpu_manager(
+        num_blocks=1,
+        enable_events=True,
+        enable_event_provenance=True,
+    )
+    key1 = to_keys([1])
+    manager.prepare_store(key1, _EMPTY_REQ_CTX)
+    manager.complete_store(key1, _EMPTY_REQ_CTX)
+    list(manager.take_events())
+
+    key2 = to_keys([2])
+    manager.prepare_store(key2, _EMPTY_REQ_CTX)
+    manager.complete_store(key2, _EMPTY_REQ_CTX)
+
+    manager.reset_cache()
+
+    [event] = manager.take_events()
+    assert event.removed
+    assert event.keys == key1
+    assert event.req_context is None
+
+
+def test_cpu_take_events_detaches_queue_before_yielding():
+    manager = make_cpu_manager(
+        num_blocks=2,
+        enable_events=True,
+        enable_event_provenance=True,
+    )
+    keys = to_keys([1])
+    manager.prepare_store(keys, _EMPTY_REQ_CTX)
+    manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+    event_iter = iter(manager.take_events())
+    event = next(event_iter)
+
+    assert event.req_context is _EMPTY_REQ_CTX
+    assert manager.events == []
+    event_iter.close()
+    assert list(manager.take_events()) == []
+
+
+def test_cpu_events_do_not_retain_context_when_provenance_is_disabled():
+    manager = make_cpu_manager(num_blocks=2, enable_events=True)
+    keys = to_keys([1])
+    manager.prepare_store(keys, _EMPTY_REQ_CTX)
+    manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+    [event] = manager.take_events()
+
+    assert event.req_context is None
 
 
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
@@ -356,13 +417,14 @@ def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
 
 
 def test_cpu_manager_clears_write_usage_after_failed_store():
-    manager = make_cpu_manager(num_blocks=4)
+    manager = make_cpu_manager(num_blocks=4, enable_events=True)
 
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
 
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
     check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
+    assert list(manager.take_events()) == []
 
 
 def test_cpu_manager():
