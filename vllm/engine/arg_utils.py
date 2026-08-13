@@ -599,6 +599,7 @@ class EngineArgs:
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     mm_processor_device: MMProcessorDevice = "auto"
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
+    mm_device_do_normalize: bool | None = MultiModalConfig.mm_device_do_normalize
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -1099,7 +1100,8 @@ class EngineArgs:
             "--data-parallel-rpc-port",
             "-dpp",
             type=int,
-            help="Port for data parallel RPC communication.",
+            help="Fixed port for data parallel RPC communication. All nodes "
+            "must use the same port.",
         )
         parallel_group.add_argument(
             "--data-parallel-backend",
@@ -1382,6 +1384,13 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-ipc-gpu-memory-gb",
             **multimodal_kwargs["mm_ipc_gpu_memory_gb"],
+        )
+        multimodal_group.add_argument(
+            "--mm-device-do-normalize",
+            **{
+                **multimodal_kwargs["mm_device_do_normalize"],
+                "default": None,
+            },
         )
 
         # LoRA related configs
@@ -1769,6 +1778,7 @@ class EngineArgs:
             video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
+            mm_device_do_normalize=self.mm_device_do_normalize,
             mm_processor_device=self.mm_processor_device,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
@@ -1784,9 +1794,6 @@ class EngineArgs:
                 )
 
     def create_load_config(self) -> LoadConfig:
-        if self.quantization == "bitsandbytes":
-            self.load_format = "bitsandbytes"
-
         if self.load_format == "tensorizer":
             if hasattr(self.model_loader_extra_config, "to_serializable"):
                 self.model_loader_extra_config = (
@@ -2350,10 +2357,6 @@ class EngineArgs:
                 "decreasing num_speculative_tokens"
             )
 
-        # bitsandbytes pre-quantized model need a specific model loader
-        if model_config.quantization == "bitsandbytes":
-            self.quantization = self.load_format = "bitsandbytes"
-
         # Attention config overrides
         attention_config = copy.deepcopy(self.attention_config)
         if self.attention_backend is not None:
@@ -2563,8 +2566,18 @@ class EngineArgs:
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
         # So here we do an extra device name check to prevent such regression.
-        if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
-            # For GPUs like H100 and MI300x, use larger default values.
+        if device_memory >= 160 * GiB_bytes:
+            # for GPUs like B200/B300 with >= 160GB memory, use the largest defaults
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 16384,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 1024,
+                UsageContext.OPENAI_API_SERVER: 1024,
+            }
+        elif device_memory >= 70 * GiB_bytes and "a100" not in device_name:
+            # For GPUs like H100 and H200, use larger offline defaults.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 8192,
