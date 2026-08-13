@@ -209,7 +209,7 @@ def _try_import_melody():
         raise ImportError(
             "The `cohere` tokenizer/renderer mode requires the "
             "`cohere_melody` package. Install it via "
-            "`pip install cohere-melody` or build from "
+            "`pip install 'cohere-melody>=0.11.1'` or build from "
             "https://github.com/cohere-ai/melody."
         ) from e
 
