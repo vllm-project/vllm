@@ -182,6 +182,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_HUMMING_CAP_MOE_TUNING_K_BLOCK: bool = True
+    VLLM_HUMMING_WIDEN_MOE_WARP_N: bool = True
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
@@ -1490,6 +1491,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # to 0 to test whether a newer Humming/driver no longer needs the cap.
     "VLLM_HUMMING_CAP_MOE_TUNING_K_BLOCK": lambda: maybe_convert_bool(
         os.environ.get("VLLM_HUMMING_CAP_MOE_TUNING_K_BLOCK", "1")
+    ),
+    # Whether to widen Humming MoE tuning tiles with warp_shape[1] (warp-N) < 32
+    # up to 32. get_config2 (block-FP8 group-128 activation) pins warp-N to 16,
+    # under-filling the Hopper WGMMA N dimension. Default on; set to 0 to
+    # restore the unwidened tiles.
+    "VLLM_HUMMING_WIDEN_MOE_WARP_N": lambda: maybe_convert_bool(
+        os.environ.get("VLLM_HUMMING_WIDEN_MOE_WARP_N", "1")
     ),
     # Whether to use DeepEPLL kernels for NVFP4 quantization and dispatch method
     # only supported on Blackwell GPUs and with
