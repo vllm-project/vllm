@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+import math
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -11,6 +12,13 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    get_pcp_group,
+    get_pp_group,
+    get_tp_group,
+    model_parallel_is_initialized,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
@@ -38,10 +46,11 @@ logger = init_logger(__name__)
 def _select_swap_blocks_fn(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]],
     gpu_to_cpu: bool,
+    host_memory_is_pinned: bool = True,
 ):
     """Resolve the swap_blocks function for a handler at init time."""
     # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
-    if gpu_to_cpu:
+    if gpu_to_cpu or not host_memory_is_pinned:
         return ops.swap_blocks_batch
     # Fall back to the C++ DMA path on platforms where Triton isn't usable
     # (e.g. ROCm host mappings) or where GPU kernels cannot directly
@@ -190,8 +199,52 @@ def _canonical_block_sizes(
     return canonical_bytes_per_block
 
 
-def pin_mmap_region(region: SharedOffloadRegion) -> None:
-    """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+@dataclass(frozen=True)
+class _ModelParallelCoordination:
+    groups: tuple[GroupCoordinator, GroupCoordinator, GroupCoordinator]
+
+    @property
+    def rank(self) -> int:
+        tp, pcp, pp = self.groups
+        return (
+            (pp.rank_in_group * pcp.world_size + pcp.rank_in_group) * tp.world_size
+            + tp.rank_in_group
+        )
+
+    @property
+    def world_size(self) -> int:
+        return math.prod(group.world_size for group in self.groups)
+
+    def barrier(self) -> None:
+        for group in self.groups:
+            if group.world_size > 1:
+                group.barrier()
+
+
+def _model_parallel_coordination() -> _ModelParallelCoordination:
+    # The mmap is shared by all TP x PCP x PP workers of one engine. These
+    # axis groups keep a DP coordinate fixed, unlike the global world group.
+    return _ModelParallelCoordination((get_tp_group(), get_pcp_group(), get_pp_group()))
+
+
+def _group_max(status: int, groups: Sequence[GroupCoordinator]) -> int:
+    status_tensor = torch.tensor([status], dtype=torch.int32, device="cpu")
+    for group in groups:
+        if group.world_size == 1:
+            continue
+        torch.distributed.all_reduce(
+            status_tensor,
+            op=torch.distributed.ReduceOp.MAX,
+            group=group.cpu_group,
+        )
+    return int(status_tensor.item())
+
+
+def pin_mmap_region(
+    region: SharedOffloadRegion,
+    coordination: _ModelParallelCoordination | None = None,
+) -> None:
+    """Register an mmap consistently across all workers sharing it."""
     if not current_platform.is_cuda_alike():
         logger.info(
             "Skipping mmap host registration on %s; cudaHostRegister is only "
@@ -200,24 +253,127 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
         )
         return
 
-    rank = region.rank
-
-    base_ptr = region._base.data_ptr()
-    result = torch.cuda.cudart().cudaHostRegister(base_ptr, region.total_size_bytes, 0)
-    if result.value != 0:
-        logger.warning(
-            "cudaHostRegister failed for rank=%d (code=%d) — "
-            "transfers will still work but may be slower (unpinned DMA)",
-            rank,
-            result,
-        )
-    else:
+    if coordination is None:
+        base_ptr = region._base.data_ptr()
+        cudart = torch.cuda.cudart()
+        result = cudart.cudaHostRegister(base_ptr, region.total_size_bytes, 0)
+        if result.value != 0:
+            logger.warning(
+                "cudaHostRegister failed for rank=%d (code=%d) — "
+                "transfers will still work but may be slower (unpinned DMA)",
+                region.rank,
+                result.value,
+            )
+            return
+        region.is_pinned = True
         logger.debug(
             "cudaHostRegister rank=%d %.2f GB",
-            rank,
+            region.rank,
             region.total_size_bytes / 1e9,
         )
-        region.is_pinned = True
+        return
+
+    rank = coordination.rank
+    local_registration_status = 0
+    local_registration_error: Exception | None = None
+    base_ptr: int | None = None
+    cudart = None
+
+    try:
+        base_ptr = region._base.data_ptr()
+        cudart = torch.cuda.cudart()
+    except Exception as error:
+        local_registration_status = 2
+        local_registration_error = error
+        logger.exception("Failed to prepare mmap host registration for rank=%d", rank)
+
+    # Every rank must finish mapping and pre-faulting the shared region before
+    # registration begins. Register one process VA at a time so the driver
+    # never sees concurrent registrations of the same shared backing pages.
+    coordination.barrier()
+    for turn in range(coordination.world_size):
+        if rank == turn and local_registration_status == 0:
+            assert base_ptr is not None and cudart is not None
+            try:
+                result = cudart.cudaHostRegister(
+                    base_ptr, region.total_size_bytes, 0
+                )
+                if result.value == 0:
+                    region.is_pinned = True
+                else:
+                    local_registration_status = 1
+                    logger.warning(
+                        "cudaHostRegister failed for group rank=%d, mmap rank=%d "
+                        "(code=%d)",
+                        rank,
+                        region.rank,
+                        result.value,
+                    )
+            except Exception as error:
+                local_registration_status = 2
+                local_registration_error = error
+                logger.exception(
+                    "cudaHostRegister raised for group rank=%d, mmap rank=%d",
+                    rank,
+                    region.rank,
+                )
+        coordination.barrier()
+
+    group_registration_status = _group_max(
+        local_registration_status, coordination.groups
+    )
+    if group_registration_status == 0:
+        logger.debug(
+            "cudaHostRegister group rank=%d, mmap rank=%d %.2f GB",
+            rank,
+            region.rank,
+            region.total_size_bytes / 1e9,
+        )
+        return
+
+    local_rollback_status = 0
+    for turn in range(coordination.world_size):
+        if rank == turn and region.is_pinned:
+            assert base_ptr is not None and cudart is not None
+            try:
+                result = cudart.cudaHostUnregister(base_ptr)
+                if result.value != 0:
+                    local_rollback_status = 1
+                    logger.error(
+                        "cudaHostUnregister rollback failed for group rank=%d, "
+                        "mmap rank=%d (code=%d)",
+                        rank,
+                        region.rank,
+                        result.value,
+                    )
+                else:
+                    region.is_pinned = False
+            except Exception:
+                local_rollback_status = 1
+                logger.exception(
+                    "cudaHostUnregister rollback raised for group rank=%d, "
+                    "mmap rank=%d",
+                    rank,
+                    region.rank,
+                )
+        coordination.barrier()
+
+    group_rollback_status = _group_max(local_rollback_status, coordination.groups)
+    if group_registration_status == 1 and group_rollback_status == 0:
+        if rank == 0:
+            logger.warning(
+                "cudaHostRegister failed on at least one worker; all workers "
+                "will use unpinned DMA"
+            )
+        return
+
+    error = RuntimeError(
+        "Coordinated cudaHostRegister failed because a CUDA call raised or "
+        "the group could not roll back every successful registration"
+    )
+    if local_registration_error is not None:
+        raise error from local_registration_error
+    raise error
 
 
 def _new_descriptor_buffers(
@@ -249,6 +405,7 @@ class SingleDirectionOffloadingHandler:
         layer_refs_per_group: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
+        host_memory_is_pinned: bool = True,
     ):
         """
         Initialize a SingleDirectionOffloadingHandler.
@@ -263,6 +420,8 @@ class SingleDirectionOffloadingHandler:
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
             canonical_layout: if True, CPU pages use the canonical layout
                 described by the refs' mappings.
+            host_memory_is_pinned: whether GPU kernels may dereference the
+                host tensors directly.
         """
         assert len(gpu_tensors) == len(cpu_tensors)
         assert len(gpu_tensors) > 0
@@ -299,7 +458,9 @@ class SingleDirectionOffloadingHandler:
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
         self._swap_blocks_batch = _select_swap_blocks_fn(
-            layer_refs_per_group, gpu_to_cpu
+            layer_refs_per_group,
+            gpu_to_cpu,
+            host_memory_is_pinned=host_memory_is_pinned,
         )
 
         # GPU blocks may be smaller
@@ -761,7 +922,16 @@ class CPUOffloadingWorker(OffloadingWorker):
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
-            pin_mmap_region(mmap_region)
+            coordination = (
+                _model_parallel_coordination()
+                if model_parallel_is_initialized()
+                else None
+            )
+            pin_mmap_region(mmap_region, coordination)
+
+        host_memory_is_pinned = pin_memory and (
+            mmap_region is None or mmap_region.is_pinned
+        )
 
         canonical_bytes_per_block = (
             _canonical_block_sizes(kv_caches.group_data_refs, len(kv_caches.tensors))
@@ -811,6 +981,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=True,
             canonical_layout=canonical_layout,
+            host_memory_is_pinned=host_memory_is_pinned,
         )
 
         self._load_handler = SingleDirectionOffloadingHandler(
@@ -820,6 +991,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=False,
             canonical_layout=canonical_layout,
+            host_memory_is_pinned=host_memory_is_pinned,
         )
 
     def submit_store(
