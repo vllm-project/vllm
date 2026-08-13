@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
-from transformers import MistralCommonBackend
+from transformers import MistralCommonBackend, PreTrainedTokenizerFast
 
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -31,6 +31,17 @@ else:
     llguidance_torch = LazyLoader("llguidance.torch", globals(), "llguidance.torch")
 
 logger = init_logger(__name__)
+
+
+def is_guidance_tokenizer_supported(tokenizer: Any) -> bool:
+    """Return whether GuidanceBackend can construct an LLTokenizer."""
+    if is_mistral_tokenizer(tokenizer):
+        return tokenizer.is_tekken
+    if isinstance(tokenizer, MistralCommonBackend):
+        from vllm.tokenizers.mistral import mistral_common_tekkenizer
+
+        return mistral_common_tekkenizer(tokenizer) is not None
+    return isinstance(tokenizer, PreTrainedTokenizerFast)
 
 
 def _walk_json_for_additional_properties(data: object):

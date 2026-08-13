@@ -1030,6 +1030,7 @@ class SamplingParams(
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
+            is_guidance_tokenizer_supported,
             validate_guidance_grammar,
         )
         from vllm.v1.structured_output.backend_lm_format_enforcer import (
@@ -1050,6 +1051,13 @@ class SamplingParams(
                     " structured output backend. Please either use a more recent "
                     "Mistral model, the ['xgrammar', 'outlines'] "
                     "backends or tokenizer_mode='hf' instead."
+                )
+            if not is_guidance_tokenizer_supported(tokenizer):
+                raise VLLMValidationError(
+                    "The 'guidance' structured output backend only supports fast "
+                    "Hugging Face tokenizers and Tekken-based Mistral tokenizers. "
+                    "Please use the 'xgrammar' backend or configure a fast "
+                    "tokenizer instead."
                 )
             # TODO: ideally we would have the LLTokenizer here as Lark syntax
             # allows <|special_token|> and similar, see
@@ -1087,6 +1095,13 @@ class SamplingParams(
                 # are not supported in xgrammar.
 
                 skip_guidance = _is_non_tekken_mistral(tokenizer)
+                if not skip_guidance and not is_guidance_tokenizer_supported(tokenizer):
+                    raise VLLMValidationError(
+                        "No compatible structured output backend was found for "
+                        "this request. XGrammar rejected the constraint, and "
+                        "Guidance does not support this tokenizer. Configure a "
+                        "fast tokenizer or select a compatible backend explicitly."
+                    ) from None
 
                 # Check if schema has features unsupported by guidance
                 so_params = self.structured_outputs
@@ -1098,8 +1113,8 @@ class SamplingParams(
                     skip_guidance = has_guidance_unsupported_json_features(schema)
 
                 if skip_guidance:
-                    # Fall back to outlines if the tokenizer is non-tekken Mistral or
-                    # the schema contains features unsupported by guidance
+                    # Fall back to outlines for non-Tekken Mistral tokenizers or
+                    # schemas containing features unsupported by guidance.
                     validate_structured_output_request_outlines(self)
                     self.structured_outputs._backend = "outlines"
                 else:
