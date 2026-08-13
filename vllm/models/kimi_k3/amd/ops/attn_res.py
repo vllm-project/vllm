@@ -11,6 +11,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
@@ -136,7 +137,7 @@ def _attn_res_kernel(
     )
 
 
-def attn_res(
+def _attn_res_impl(
     prefix: torch.Tensor,
     delta: torch.Tensor | None,
     blocks: torch.Tensor,
@@ -191,3 +192,82 @@ def attn_res(
         num_stages=2,
     )
     return output
+
+
+def _kimi_attn_res(
+    prefix: torch.Tensor,
+    delta: torch.Tensor | None,
+    blocks: torch.Tensor,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor | None,
+    num_blocks: int,
+    block_write_idx: int,
+    eps: float,
+    output_norm_eps: float,
+) -> torch.Tensor:
+    return _attn_res_impl(
+        prefix, delta, blocks, norm_weight, qk_weight, output_norm_weight,
+        num_blocks, block_write_idx, eps, output_norm_eps,
+    )
+
+
+def _kimi_attn_res_fake(
+    prefix: torch.Tensor,
+    delta: torch.Tensor | None,
+    blocks: torch.Tensor,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor | None,
+    num_blocks: int,
+    block_write_idx: int,
+    eps: float,
+    output_norm_eps: float,
+) -> torch.Tensor:
+    return prefix.new_empty(prefix.shape)
+
+
+direct_register_custom_op(
+    op_name="kimi_attn_res",
+    op_func=_kimi_attn_res,
+    # WRITE_BLOCK=block_write_idx >= 0 makes the kernel store this layer's
+    # prefix sum into blocks[:, block_write_idx, :].
+    mutates_args=["blocks"],
+    fake_impl=_kimi_attn_res_fake,
+)
+
+
+def attn_res(
+    prefix: torch.Tensor,
+    delta: torch.Tensor | None,
+    blocks: torch.Tensor,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor | None,
+    num_blocks: int,
+    block_write_idx: int,
+    eps: float,
+    output_norm_eps: float,
+) -> torch.Tensor:
+    """Custom-op entry point for the attn-res kernel.
+
+    Two reasons this must not be traced by Dynamo:
+
+    * The launcher picks its tile/warp config from the token count
+      (``num_tokens == 0``, ``num_tokens >= 256``) and uses a ``(num_tokens,)``
+      grid. Traced directly, Dynamo evaluates those against the profile-run
+      batch and emits a dynamic-shape guard (``s >= 256``). vLLM drops such
+      guards, so the artifact specialised for the large-batch branch is then
+      reused for small decode batches.
+    * With ``block_write_idx >= 0`` the kernel writes into ``blocks`` in place.
+      Traced, that functionalises into ``select_scatter`` + ``copy_`` on a
+      graph input, forcing the attn-res block bank -- a buffer created inside
+      the traced region -- to be lifted to a mutated graph input.
+
+    Both showed up as failing ``assert_size_stride`` and CUDA illegal memory
+    accesses once CUDA graphs were enabled.
+    """
+    return torch.ops.vllm.kimi_attn_res(
+        prefix, delta, blocks, norm_weight, qk_weight, output_norm_weight,
+        num_blocks, block_write_idx, eps, output_norm_eps,
+    )
