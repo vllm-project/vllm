@@ -560,7 +560,11 @@ def test_flash_attn_accepts_handled_fp8_variants(
 
 def _mock_sm100_fa4(monkeypatch: pytest.MonkeyPatch) -> DeviceCapability:
     import vllm.v1.attention.backends.fa_utils as fa_utils_mod
-    from vllm.vllm_flash_attn import flash_attn_interface
+
+    flash_attn_interface = pytest.importorskip(
+        "vllm.vllm_flash_attn.flash_attn_interface",
+        exc_type=ImportError,
+    )
 
     capability = DeviceCapability(10, 0)
     monkeypatch.setattr(fa_utils_mod.current_platform, "is_xpu", lambda: False)
