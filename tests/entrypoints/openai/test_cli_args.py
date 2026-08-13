@@ -255,22 +255,6 @@ def test_default_chat_template_kwargs_default_none(serve_parser):
     assert args.default_chat_template_kwargs is None
 
 
-def test_log_output_token_ids_arg(serve_parser):
-    assert serve_parser.parse_args([]).enable_log_output_token_ids is True
-    assert (
-        serve_parser.parse_args(
-            ["--enable-log-output-token-ids"]
-        ).enable_log_output_token_ids
-        is True
-    )
-    assert (
-        serve_parser.parse_args(
-            ["--no-enable-log-output-token-ids"]
-        ).enable_log_output_token_ids
-        is False
-    )
-
-
 def test_default_chat_template_kwargs_invalid_json(serve_parser):
     """Ensure invalid JSON raises an error"""
     with pytest.raises(SystemExit):

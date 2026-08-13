@@ -15,14 +15,8 @@ logger = init_logger(__name__)
 
 
 class RequestLogger:
-    def __init__(
-        self,
-        *,
-        max_log_len: int | None,
-        enable_log_output_token_ids: bool = True,
-    ) -> None:
+    def __init__(self, *, max_log_len: int | None) -> None:
         self.max_log_len = max_log_len
-        self.enable_log_output_token_ids = enable_log_output_token_ids
 
         if not logger.isEnabledFor(logging.INFO):
             logger.warning_once(
@@ -83,33 +77,28 @@ class RequestLogger:
         delta: bool = False,
     ) -> None:
         max_log_len = self.max_log_len
-        if max_log_len is not None:
-            if outputs is not None:
-                outputs = outputs[:max_log_len]
-
-            if self.enable_log_output_token_ids and output_token_ids is not None:
-                # Convert to list and apply truncation
-                output_token_ids = list(output_token_ids)[:max_log_len]
+        if max_log_len is not None and outputs is not None:
+            outputs = outputs[:max_log_len]
 
         stream_info = ""
         if is_streaming:
             stream_info = " (streaming delta)" if delta else " (streaming complete)"
 
-        if self.enable_log_output_token_ids:
-            logger.info(
-                "Generated response %s%s: output: %r, "
-                "output_token_ids: %s, finish_reason: %s",
+        if logger.isEnabledFor(logging.DEBUG):
+            if max_log_len is not None and output_token_ids is not None:
+                output_token_ids = list(output_token_ids)[:max_log_len]
+
+            logger.debug(
+                "Generated response %s%s details: output_token_ids: %s",
                 request_id,
                 stream_info,
-                outputs,
                 output_token_ids,
-                finish_reason,
             )
-        else:
-            logger.info(
-                "Generated response %s%s: output: %r, finish_reason: %s",
-                request_id,
-                stream_info,
-                outputs,
-                finish_reason,
-            )
+
+        logger.info(
+            "Generated response %s%s: output: %r, finish_reason: %s",
+            request_id,
+            stream_info,
+            outputs,
+            finish_reason,
+        )

@@ -141,12 +141,9 @@ class BaseFrontendArgs:
     """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
-    """If set to True, log model outputs (generations).
-    Requires `--enable-log-requests`. As with `--enable-log-requests`,
-    information is only logged at INFO level at maximum."""
-    enable_log_output_token_ids: bool = True
-    """If set to False, omit output token IDs from model output logs.
-    Relevant only if `--enable-log-outputs` is set."""
+    """If set to True, log model outputs (generations). Requires
+    `--enable-log-requests`. Output text and finish reasons are logged at INFO,
+    while output token IDs are logged at DEBUG."""
     enable_log_deltas: bool = True
     """If set to False, output deltas will not be logged. Relevant only if 
     --enable-log-outputs is set.
