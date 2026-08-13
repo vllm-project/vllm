@@ -800,12 +800,25 @@ class KVCacheManager:
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
+    def take_new_block_ids_by_group(self) -> list[list[int]]:
+        """Drain new attention block IDs, preserving their cache group.
+
+        Block IDs are allocated from a shared pool, but each ID is used by
+        only one cache group at a time. Keeping the group association lets the
+        worker zero just that group's physical cache pages instead of applying
+        every new ID to every attention cache group.
+        """
+        return [
+            mgr.take_new_block_ids() for mgr in self.coordinator.single_type_managers
+        ]
+
     def take_new_block_ids(self) -> list[int]:
         """Drain and return new attention block IDs for zeroing."""
-        ids: list[int] = []
-        for mgr in self.coordinator.single_type_managers:
-            ids.extend(mgr.take_new_block_ids())
-        return ids
+        return [
+            block_id
+            for group_block_ids in self.take_new_block_ids_by_group()
+            for block_id in group_block_ids
+        ]
 
     def get_zeroing_block_ids_in_range(
         self, request_id: str, start_token: int, end_token: int

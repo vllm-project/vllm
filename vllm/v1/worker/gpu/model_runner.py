@@ -1016,7 +1016,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # stale NaN/data from corrupting attention or SSM computation.
         if scheduler_output.new_block_ids_to_zero:
             assert self.kv_block_zeroer is not None
-            self.kv_block_zeroer.zero_block_ids(scheduler_output.new_block_ids_to_zero)
+            self.kv_block_zeroer.zero_block_ids_by_group(
+                scheduler_output.new_block_ids_to_zero
+            )
 
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.

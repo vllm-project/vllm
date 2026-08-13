@@ -1196,10 +1196,10 @@ class GPUModelRunner(
             static_forward_context=self.compilation_config.static_forward_context,
         )
 
-    def _zero_block_ids(self, block_ids: list[int]) -> None:
-        """Zero the KV cache memory for the given block IDs."""
+    def _zero_block_ids(self, block_ids_by_group: list[list[int]]) -> None:
+        """Zero KV cache blocks in their owning cache groups."""
         if hasattr(self, "_kv_block_zeroer"):
-            self._kv_block_zeroer.zero_block_ids(block_ids)
+            self._kv_block_zeroer.zero_block_ids_by_group(block_ids_by_group)
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
