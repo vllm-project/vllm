@@ -401,10 +401,6 @@ _MULTIMODAL_MODELS = {
         "FireRedASR2ForConditionalGeneration",
     ),
     "FunASRForConditionalGeneration": ("funasr", "FunASRForConditionalGeneration"),
-    "FireRedLIDForConditionalGeneration": (
-        "fireredlid",
-        "FireRedLIDForConditionalGeneration",
-    ),
     "FunAudioChatForConditionalGeneration": (
         "funaudiochat",
         "FunAudioChatForConditionalGeneration",
@@ -809,6 +805,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "FuyuForCausalLM": "0.25.0",
     "Plamo2ForCausalLM": "0.26.0",
     "OuroForCausalLM": "0.26.0",
+    "FireRedLIDForConditionalGeneration": "0.27.1",
 }
 
 _OOT_SUPPORTED_MODELS = {
