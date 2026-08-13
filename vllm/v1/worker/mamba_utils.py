@@ -3,11 +3,12 @@
 import dataclasses
 import itertools
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 
 from vllm.config import CacheConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     get_conv_copy_spec,
@@ -22,8 +23,230 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 
+logger = init_logger(__name__)
+
+# 16 saturates HBM on H100/GB200 across the reqs=8..128 range in
+# microbenchmarks
+_TEMPORAL_TILES = 16
+
 
 @triton.jit
+def _memcpy_u64_tiled(
+    src_addr,
+    dst_addr,
+    copy_size,
+    tile_idx,
+    COPY_BLOCK_SIZE: tl.constexpr,
+    NUM_TILES: tl.constexpr,
+):
+    """Head/body/tail memcpy with the u64 body split across ``NUM_TILES`` CTAs.
+
+    Fast path (``src`` and ``dst`` share sub-8B alignment): tile 0 owns the
+    byte head that lifts dst to 8B and the 0-7 byte tail; body tiles vectorize
+    as u64 over the aligned interior. ``NUM_TILES=1`` collapses to a single-
+    CTA memcpy. Production callers derive both addresses from the same
+    ``state_base_addr + block_id * stride`` and always take this path.
+
+    Slow path (mismatched sub-8B alignment): byte-wide tiled copy. Some
+    NVIDIA parts (e.g. GB200) reject misaligned u64 loads with
+    ``cudaErrorMisalignedAddress`` instead of accepting the misaligned-sector
+    cost, so we can't just let the fast path run with a misaligned src.
+    """
+    src_addr_i = src_addr.to(tl.int64)
+    dst_addr_i = dst_addr.to(tl.int64)
+
+    if ((src_addr_i ^ dst_addr_i) & 7) == 0:
+        head_bytes = tl.minimum(((-dst_addr_i) & 7).to(tl.int64), copy_size)
+        if tile_idx == 0:
+            head_off = tl.arange(0, 8)
+            head_mask = head_off < head_bytes
+            head_src = src_addr.to(tl.pointer_type(tl.uint8))
+            head_dst = dst_addr.to(tl.pointer_type(tl.uint8))
+            tl.store(
+                head_dst + head_off,
+                tl.load(head_src + head_off, mask=head_mask),
+                mask=head_mask,
+            )
+
+        # Body: u64 tiled. Rounding per_tile up to COPY_BLOCK_SIZE keeps every
+        # inner-loop iteration full-width vectorized; only the last non-empty
+        # tile can be masked. Late tiles fall off the end and iterate zero
+        # times.
+        body_bytes = copy_size - head_bytes
+        body_u64 = body_bytes // 8
+        per_tile_u64_raw = tl.cdiv(body_u64, NUM_TILES)
+        per_tile_u64 = tl.cdiv(per_tile_u64_raw, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+        tile_start = tile_idx.to(tl.int64) * per_tile_u64
+        tile_end = tl.minimum(tile_start + per_tile_u64, body_u64)
+
+        src_body_u64 = (src_addr + head_bytes).to(tl.pointer_type(tl.uint64))
+        dst_body_u64 = (dst_addr + head_bytes).to(tl.pointer_type(tl.uint64))
+        offsets = tl.arange(0, COPY_BLOCK_SIZE)
+        for i in range(tile_start, tile_end, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < tile_end
+            data = tl.load(src_body_u64 + i + offsets, mask=mask)
+            tl.store(dst_body_u64 + i + offsets, data, mask=mask)
+
+        if tile_idx == 0:
+            tail_start = head_bytes + body_u64 * 8
+            tail_bytes = copy_size - tail_start
+            tail_off = tl.arange(0, 8)
+            tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
+            tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
+            tail_mask = tail_off < tail_bytes
+            tl.store(
+                tail_dst + tail_off,
+                tl.load(tail_src + tail_off, mask=tail_mask),
+                mask=tail_mask,
+            )
+    else:
+        src_u8 = src_addr.to(tl.pointer_type(tl.uint8))
+        dst_u8 = dst_addr.to(tl.pointer_type(tl.uint8))
+        per_tile_bytes_raw = tl.cdiv(copy_size, NUM_TILES)
+        per_tile_bytes = tl.cdiv(per_tile_bytes_raw, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+        tile_start = tile_idx.to(tl.int64) * per_tile_bytes
+        tile_end = tl.minimum(tile_start + per_tile_bytes, copy_size)
+        offsets = tl.arange(0, COPY_BLOCK_SIZE)
+        for i in range(tile_start, tile_end, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < tile_end
+            data = tl.load(src_u8 + i + offsets, mask=mask)
+            tl.store(dst_u8 + i + offsets, data, mask=mask)
+
+
+@triton.jit
+def _copy_mamba_state_block(
+    state_idx,
+    bt_row_idx,
+    src_col,
+    dst_col,
+    token_bias,
+    block_table_ptrs_ptr,
+    block_table_stride_req,
+    state_base_addrs_ptr,
+    state_block_strides_ptr,
+    state_elem_sizes_ptr,
+    state_inner_sizes_ptr,
+    state_conv_widths_ptr,
+    state_group_indices_ptr,
+    # DS conv row metadata. Zero keeps the single-region copy path.
+    state_dim_row_count_ptr,
+    state_dim_row_stride_ptr,
+    tile_idx,
+    COPY_BLOCK_SIZE: tl.constexpr,
+    CONV_STATE_DIM_FIRST: tl.constexpr,
+    TEMPORAL_TILES: tl.constexpr,
+):
+    """Copy one (layer, state-type) mamba state block between block columns.
+
+    Shared copy body of ``postprocess_mamba_fused_kernel`` and
+    ``precopy_mamba_align_fused_kernel``, mirroring the V1 copy specs
+    (``get_conv_copy_spec`` / ``get_temporal_copy_spec``):
+    - conv state (conv_width > 0): shift the window by ``token_bias`` tokens,
+      ``state[bt[src_col], token_bias:] ->
+      state[bt[dst_col], :conv_width - token_bias]``
+    - temporal state: ``token_bias`` selects the accepted speculative column,
+      ``state[bt[src_col + token_bias]] -> state[bt[dst_col]]``
+
+    The caller owns the decision logic (which columns, whether to copy); this
+    device function only performs the byte copy for the given metadata slot.
+
+    ``tile_idx`` in ``[0, TEMPORAL_TILES)`` partitions the temporal state's
+    u64 range into ``TEMPORAL_TILES`` contiguous, COPY_BLOCK_SIZE-aligned
+    slices, giving more CTAs to fill the SMs at small batch (multi-MiB
+    temporal copies otherwise leave the GPU under-filled). Conv states are
+    small; only ``tile_idx == 0`` copies them. ``TEMPORAL_TILES == 1`` and
+    ``tile_idx == 0`` reproduces the untiled behavior.
+    """
+    state_base_addr = tl.load(state_base_addrs_ptr + state_idx)
+    state_block_stride = tl.load(state_block_strides_ptr + state_idx)
+    state_elem_size = tl.load(state_elem_sizes_ptr + state_idx)
+    state_inner_size = tl.load(state_inner_sizes_ptr + state_idx)
+    conv_width = tl.load(state_conv_widths_ptr + state_idx)
+
+    # Load the group index for this state, then index into the correct
+    # group's block table. Each mamba group has independently allocated
+    # physical blocks. Reinterpret as int32* since block ids are int32.
+    group_idx = tl.load(state_group_indices_ptr + state_idx).to(tl.int64)
+    group_base_addr = tl.load(block_table_ptrs_ptr + group_idx)
+    block_table_typed = group_base_addr.to(tl.pointer_type(tl.int32))
+    block_table_base = block_table_typed + bt_row_idx * block_table_stride_req
+
+    # Widen block ids to int64 before they reach `block_id * state_block_stride`
+    # below: state_block_stride can exceed 2**31 bytes for large mamba caches,
+    # and Triton would otherwise do the multiply in int32 and wrap.
+    dest_block_id = tl.load(block_table_base + dst_col).to(tl.int64)
+    dst_addr = state_base_addr + dest_block_id * state_block_stride
+
+    is_conv_state = conv_width > 0
+
+    if CONV_STATE_DIM_FIRST and is_conv_state:
+        # Conv states are small; only tile 0 does the copy. Higher tiles
+        # early-return so they contribute nothing beyond a bounds check.
+        if tile_idx > 0:
+            return
+        # DS conv layout: state_len is the slide axis; copy per dim row.
+        src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
+        dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
+        row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
+        per_row_bytes = (conv_width - token_bias).to(tl.int64) * state_elem_size
+        bias_bytes = token_bias.to(tl.int64) * state_elem_size
+        src_block_addr = state_base_addr + src_block_id * state_block_stride
+        offsets = tl.arange(0, COPY_BLOCK_SIZE)
+        for d in range(0, dim_rows):
+            row_src = src_block_addr + d * row_stride + bias_bytes
+            row_dst = dst_addr + d * row_stride
+            for i in range(0, per_row_bytes, COPY_BLOCK_SIZE):
+                mask = (i + offsets) < per_row_bytes
+                curr_src = (row_src + i + offsets).to(tl.pointer_type(tl.uint8))
+                curr_dst = (row_dst + i + offsets).to(tl.pointer_type(tl.uint8))
+                data = tl.load(curr_src, mask=mask)
+                tl.store(curr_dst, data, mask=mask)
+        return
+
+    if is_conv_state:
+        if tile_idx > 0:
+            return
+        # SD conv: copy
+        #   state[bt[src_col], token_bias:] ->
+        #   state[bt[dst_col], :conv_width - token_bias]
+        # Small per-block bytes (~60-80 KiB) make tiling degenerate, so
+        # conv runs as a single-CTA memcpy (NUM_TILES=1).
+        src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
+        src_offset = token_bias.to(tl.int64) * state_inner_size * state_elem_size
+        src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
+        copy_size = (
+            (conv_width - token_bias).to(tl.int64) * state_inner_size * state_elem_size
+        )
+        _memcpy_u64_tiled(
+            src_addr,
+            dst_addr,
+            copy_size,
+            tile_idx,
+            COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+            NUM_TILES=1,
+        )
+        return
+
+    # Temporal state: copy state[bt[src_col + token_bias]] -> state[bt[dst_col]]
+    # Body u64 range is partitioned across TEMPORAL_TILES CTAs to keep the
+    # SMs filled at small batch.
+    actual_src_block_id = tl.load(block_table_base + src_col + token_bias).to(tl.int64)
+    src_addr = state_base_addr + actual_src_block_id * state_block_stride
+    # Use natural block data size (inner_size * elem_size), NOT
+    # state_block_stride which is the page stride and can exceed the
+    # actual data when the state tensor uses as_strided page padding.
+    copy_size = state_inner_size * state_elem_size
+    _memcpy_u64_tiled(
+        src_addr,
+        dst_addr,
+        copy_size,
+        tile_idx,
+        COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+        NUM_TILES=TEMPORAL_TILES,
+    )
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
 def postprocess_mamba_fused_kernel(
     # Decision inputs (per-request)
     num_accepted_tokens_ptr,
@@ -49,6 +272,10 @@ def postprocess_mamba_fused_kernel(
     state_dim_row_stride_ptr,  # int64: bytes between rows for DS conv
     # Output: num_accepted_tokens update (for src==dst case)
     num_accepted_tokens_out_ptr,
+    # Optional: batch_idx -> req_idx mapping (V2 model runner / PP). The
+    # per-request decision arrays are in req-state-slot order; the block table
+    # is in batch order, so HAS_IDX_MAPPING splits the two indexings.
+    idx_mapping_ptr,
     # Runtime parameter (varies per batch - NOT constexpr to avoid recompilation)
     num_reqs,
     # Compile-time constants (fixed after model initialization)
@@ -57,35 +284,60 @@ def postprocess_mamba_fused_kernel(
     # COPY_BLOCK_SIZE: fixed tuning parameter for memory copy loop
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
+    # HAS_IDX_MAPPING: when True, program_id(0) is a batch index resolved to a
+    # req-state slot via idx_mapping_ptr (V2). When False, it is the req index.
+    HAS_IDX_MAPPING: tl.constexpr = False,
+    # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
+    # the post-step new_num_computed value (V2 supplies the advanced count).
+    PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
+    # TEMPORAL_TILES: when > 1, the temporal copy body is partitioned across
+    # TEMPORAL_TILES CTAs along the u64 inner range. Callers must launch a
+    # 3D grid (num_reqs, total_states, TEMPORAL_TILES). Default 1 preserves
+    # the existing 2D-grid contract.
+    TEMPORAL_TILES: tl.constexpr = 1,
 ):
     """
     Fused GPU kernel for postprocess_mamba that computes decisions AND performs
     mamba state copies without any CPU-GPU synchronization.
 
-    Grid: (num_reqs, num_layers * num_state_types)
-    - program_id(0) = request index
+    Grid: (num_reqs, num_layers * num_state_types [, TEMPORAL_TILES])
+    - program_id(0) = request/batch index
     - program_id(1) = state_idx (flattened index into layer/state_type metadata)
+    - program_id(2) = temporal-copy tile index (0 when TEMPORAL_TILES == 1)
 
     Note: num_layers and num_state_types are not passed as kernel parameters
     because the kernel indexes directly into pre-flattened metadata arrays
     using program_id(1). The grid dimensions encode the total state count.
     """
-    req_idx = tl.program_id(0)
+    batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
 
     # Bounds check
-    if req_idx >= num_reqs:
+    if batch_idx >= num_reqs:
         return
+
+    if HAS_IDX_MAPPING:
+        req_idx = tl.load(idx_mapping_ptr + batch_idx)
+        if req_idx < 0:
+            return
+    else:
+        req_idx = batch_idx
 
     # Compute decision logic (mirrors postprocess_mamba Python reference)
     num_accepted = tl.load(num_accepted_tokens_ptr + req_idx)
     src_block_idx = tl.load(mamba_state_idx_ptr + req_idx)
-    num_scheduled = tl.load(num_scheduled_tokens_ptr + req_idx)
-    num_computed = tl.load(num_computed_tokens_ptr + req_idx)
-    num_draft = tl.load(num_draft_tokens_ptr + req_idx)
 
-    num_tokens_running_state = num_computed + num_scheduled - num_draft
-    new_num_computed = num_tokens_running_state + num_accepted - 1
+    if PRECOMPUTED_NEW_COMPUTED:
+        new_num_computed = tl.load(num_computed_tokens_ptr + req_idx)
+        num_tokens_running_state = new_num_computed - num_accepted + 1
+    else:
+        num_scheduled = tl.load(num_scheduled_tokens_ptr + req_idx)
+        num_computed = tl.load(num_computed_tokens_ptr + req_idx)
+        num_draft = tl.load(num_draft_tokens_ptr + req_idx)
+        num_tokens_running_state = num_computed + num_scheduled - num_draft
+        new_num_computed = num_tokens_running_state + num_accepted - 1
+
     aligned_new_computed = (new_num_computed // block_size) * block_size
 
     needs_copy = aligned_new_computed >= num_tokens_running_state
@@ -97,99 +349,169 @@ def postprocess_mamba_fused_kernel(
     accept_token_bias = aligned_new_computed - num_tokens_running_state
     dest_block_idx = aligned_new_computed // block_size - 1
 
-    # Load state metadata for this layer/state_type
-    state_base_addr = tl.load(state_base_addrs_ptr + state_idx)
-    state_block_stride = tl.load(state_block_strides_ptr + state_idx)
-    state_elem_size = tl.load(state_elem_sizes_ptr + state_idx)
-    state_inner_size = tl.load(state_inner_sizes_ptr + state_idx)
-    conv_width = tl.load(state_conv_widths_ptr + state_idx)
-
-    # Load the group index for this state, then index into the correct
-    # group's block table. Each mamba group has independently allocated
-    # physical blocks.
-    group_idx = tl.load(state_group_indices_ptr + state_idx).to(tl.int64)
-
-    # block_table_ptrs_ptr holds one pointer per group (each group owns its own
-    # block table). Reinterpret as int32* since block ids are int32.
-    group_base_addr = tl.load(block_table_ptrs_ptr + group_idx)
-    block_table_typed = group_base_addr.to(tl.pointer_type(tl.int32))
-    block_table_base = block_table_typed + req_idx * block_table_stride_req
-
-    # Widen block ids to int64 before they reach `block_id * state_block_stride`
-    # below: state_block_stride can exceed 2**31 bytes for large mamba caches,
-    # and Triton would otherwise do the multiply in int32 and wrap.
-    src_block_id = tl.load(block_table_base + src_block_idx).to(tl.int64)
-    dest_block_id = tl.load(block_table_base + dest_block_idx).to(tl.int64)
-
-    # Compute source and destination addresses based on state type
-    # conv_width > 0 means this is a conv state (get_conv_copy_spec logic)
-    # conv_width == 0 means this is a temporal state (get_temporal_copy_spec logic)
-    is_conv_state = conv_width > 0
-
-    # Update accepted-token count before early exits.
-    if src_block_idx == dest_block_idx and state_idx == 0:
+    # Update accepted-token count before early exits (per-request, so only
+    # state_idx == 0 writes). Also guard on tile_idx == 0 so tiles > 0
+    # (when TEMPORAL_TILES > 1) do not duplicate the store.
+    if src_block_idx == dest_block_idx and state_idx == 0 and tile_idx == 0:
         tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
 
     # Skip no-op self-copy.
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
 
-    if CONV_STATE_DIM_FIRST and is_conv_state:
-        dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
-        row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
-        per_row_bytes = (conv_width - accept_token_bias).to(tl.int64) * state_elem_size
-        bias_bytes = accept_token_bias.to(tl.int64) * state_elem_size
-        src_block_addr = state_base_addr + src_block_id * state_block_stride
-        dst_block_addr = state_base_addr + dest_block_id * state_block_stride
-        offsets = tl.arange(0, COPY_BLOCK_SIZE)
-        for d in range(0, dim_rows):
-            row_src = src_block_addr + d * row_stride + bias_bytes
-            row_dst = dst_block_addr + d * row_stride
-            for i in range(0, per_row_bytes, COPY_BLOCK_SIZE):
-                mask = (i + offsets) < per_row_bytes
-                curr_src = (row_src + i + offsets).to(tl.pointer_type(tl.uint8))
-                curr_dst = (row_dst + i + offsets).to(tl.pointer_type(tl.uint8))
-                data = tl.load(curr_src, mask=mask)
-                tl.store(curr_dst, data, mask=mask)
+    bt_row_idx = batch_idx if HAS_IDX_MAPPING else req_idx
+    _copy_mamba_state_block(
+        state_idx,
+        bt_row_idx,
+        src_block_idx,
+        dest_block_idx,
+        accept_token_bias,
+        block_table_ptrs_ptr,
+        block_table_stride_req,
+        state_base_addrs_ptr,
+        state_block_strides_ptr,
+        state_elem_sizes_ptr,
+        state_inner_sizes_ptr,
+        state_conv_widths_ptr,
+        state_group_indices_ptr,
+        state_dim_row_count_ptr,
+        state_dim_row_stride_ptr,
+        tile_idx,
+        COPY_BLOCK_SIZE,
+        CONV_STATE_DIM_FIRST,
+        TEMPORAL_TILES,
+    )
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
+def preprocess_mamba_align_fused_kernel(
+    idx_mapping_ptr,
+    state_idx_ptr,
+    num_computed_tokens_ptr,
+    query_start_loc_ptr,
+    num_accepted_tokens_ptr,
+    src_col_ptr,
+    src_off_ptr,
+    num_reqs,
+    BLOCK_SIZE: tl.constexpr,
+    MAMBA_BLOCK_SIZE: tl.constexpr,
+):
+    """Fused align preprocess: emit the pre-copy src column/offset AND advance
+    state_idx (with accepted-token reset) in a single launch (V2 align).
+
+    Per batch_idx (0..num_reqs-1), resolving req slot via idx_mapping:
+      1. Read pre-advance state_idx and num_accepted (last step's values).
+      2. Store the pre-copy src columns for ``precopy_mamba_align_fused_kernel``:
+         - src_col = state_idx (the previous running block column)
+         - src_off = max(num_accepted - 1, 0) (the accepted-token bias)
+      3. Advance state_idx to the new running block, and reset num_accepted to 1
+         when a block boundary is crossed (so the migrated state, now at the
+         start of the new block, is read with the neutral bias).
+    """
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < num_reqs
+    req_indices = tl.load(idx_mapping_ptr + offsets, mask=mask, other=0)
+
+    state_idx = tl.load(state_idx_ptr + req_indices, mask=mask, other=-1)
+    num_accepted = tl.load(num_accepted_tokens_ptr + req_indices, mask=mask, other=1)
+
+    src_off = tl.maximum(num_accepted - 1, 0)
+    tl.store(src_col_ptr + req_indices, state_idx, mask=mask)
+    tl.store(src_off_ptr + req_indices, src_off, mask=mask)
+
+    num_computed = tl.load(num_computed_tokens_ptr + req_indices, mask=mask, other=0)
+    query_start = tl.load(query_start_loc_ptr + offsets, mask=mask, other=0)
+    query_end = tl.load(query_start_loc_ptr + offsets + 1, mask=mask, other=0)
+    computed_after = num_computed + query_end - query_start
+    new_state_idx = (computed_after + MAMBA_BLOCK_SIZE - 1) // MAMBA_BLOCK_SIZE - 1
+    tl.store(state_idx_ptr + req_indices, new_state_idx, mask=mask)
+    should_reset = (state_idx >= 0) & (state_idx != new_state_idx)
+    tl.store(num_accepted_tokens_ptr + req_indices, 1, mask=mask & should_reset)
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
+def precopy_mamba_align_fused_kernel(
+    # Per-request-slot inputs (indexed by req_idx via idx_mapping), produced by
+    # the V2 fused align preprocess kernel for the current step:
+    mamba_state_idx_ptr,  # post-advance dst block column
+    src_col_ptr,  # pre-advance src block column (-1 = fresh)
+    token_bias_ptr,  # accepted-token bias = num_accepted - 1 (pre-reset)
+    # Same flattened state-layout metadata as postprocess_mamba_fused_kernel
+    block_table_ptrs_ptr,
+    block_table_stride_req: tl.int64,
+    state_base_addrs_ptr,
+    state_block_strides_ptr,
+    state_elem_sizes_ptr,
+    state_inner_sizes_ptr,
+    state_conv_widths_ptr,
+    state_group_indices_ptr,
+    state_dim_row_count_ptr,
+    state_dim_row_stride_ptr,
+    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
+    num_reqs,
+    COPY_BLOCK_SIZE: tl.constexpr,
+    CONV_STATE_DIM_FIRST: tl.constexpr,
+    HAS_IDX_MAPPING: tl.constexpr = True,
+    # TEMPORAL_TILES: see postprocess_mamba_fused_kernel. Default 1 preserves
+    # the 2D-grid contract; > 1 requires a 3D grid.
+    TEMPORAL_TILES: tl.constexpr = 1,
+):
+    """Pre-copy mamba "align" state across block boundaries.
+
+    Before the forward pass, copy each request's last SSM/conv state from its
+    previous block column into the new window block column, so the kernels read
+    the initial state from the write-side block as usual (V1 align semantics).
+    Same per-(layer, state) copy semantics as ``postprocess_mamba_fused_kernel``
+    (shared ``_copy_mamba_state_block`` body, i.e. the V1 ``preprocess_mamba``
+    copy specs), but driven by the GPU-resident src columns so it needs no
+    CPU-GPU sync (async-scheduling safe).
+
+    Grid: (num_reqs, num_layers * num_state_types [, TEMPORAL_TILES]). V2 passes
+    a batch-to-state idx_mapping; V1 already stores the staged arrays in batch
+    order and uses HAS_IDX_MAPPING=False.
+    """
+    batch_idx = tl.program_id(0)
+    state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
+    if batch_idx >= num_reqs:
+        return
+    if HAS_IDX_MAPPING:
+        req_idx = tl.load(idx_mapping_ptr + batch_idx)
+        if req_idx < 0:
+            return
+    else:
+        req_idx = batch_idx
+
+    src_col = tl.load(src_col_ptr + req_idx)
+    dst_col = tl.load(mamba_state_idx_ptr + req_idx)
+    # Fresh state, or still writing the same block: kernels locate the initial
+    # state in-block via num_accepted (preserved when no boundary is crossed),
+    # so there is nothing to copy.
+    if src_col < 0 or src_col == dst_col:
         return
 
-    if is_conv_state:
-        # SD conv: copy
-        #   state[block_table[req_idx, src_block_idx],  accept_token_bias:]
-        # to
-        #   state[block_table[req_idx, dest_block_idx], :conv_width - accept_token_bias]
-        src_offset = accept_token_bias.to(tl.int64) * state_inner_size * state_elem_size
-        src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
-        dst_addr = state_base_addr + dest_block_id * state_block_stride
-        # Number of elements to copy:
-        # (conv_width - accept_token_bias) * inner_size
-        num_elems_to_copy = (conv_width - accept_token_bias).to(
-            tl.int64
-        ) * state_inner_size
-        copy_size = num_elems_to_copy * state_elem_size
-    else:
-        # Temporal state: copy
-        #   state[block_table[req_idx, src_block_idx + accept_token_bias]]
-        # to
-        #   state[block_table[req_idx, dest_block_idx]]
-        actual_src_block_idx = src_block_idx + accept_token_bias
-        actual_src_block_id = tl.load(block_table_base + actual_src_block_idx).to(
-            tl.int64
-        )
-        src_addr = state_base_addr + actual_src_block_id * state_block_stride
-        dst_addr = state_base_addr + dest_block_id * state_block_stride
-        # Use natural block data size (inner_size * elem_size), NOT
-        # state_block_stride which is the page stride and can exceed the
-        # actual data when the state tensor uses as_strided page padding.
-        copy_size = state_inner_size * state_elem_size
-
-    offsets = tl.arange(0, COPY_BLOCK_SIZE)
-    for i in range(0, copy_size, COPY_BLOCK_SIZE):
-        mask = (i + offsets) < copy_size
-        curr_src = (src_addr + i + offsets).to(tl.pointer_type(tl.uint8))
-        curr_dst = (dst_addr + i + offsets).to(tl.pointer_type(tl.uint8))
-        data = tl.load(curr_src, mask=mask)
-        tl.store(curr_dst, data, mask=mask)
+    token_bias = tl.load(token_bias_ptr + req_idx)
+    _copy_mamba_state_block(
+        state_idx,
+        batch_idx,
+        src_col,
+        dst_col,
+        token_bias,
+        block_table_ptrs_ptr,
+        block_table_stride_req,
+        state_base_addrs_ptr,
+        state_block_strides_ptr,
+        state_elem_sizes_ptr,
+        state_inner_sizes_ptr,
+        state_conv_widths_ptr,
+        state_group_indices_ptr,
+        state_dim_row_count_ptr,
+        state_dim_row_stride_ptr,
+        tile_idx,
+        COPY_BLOCK_SIZE,
+        CONV_STATE_DIM_FIRST,
+        TEMPORAL_TILES,
+    )
 
 
 @triton.jit
@@ -319,6 +641,8 @@ class MambaSpecDecodeGPUContext:
     num_scheduled_tokens_buf: CpuGpuBuffer | None = None
     num_computed_tokens_buf: CpuGpuBuffer | None = None
     num_draft_tokens_buf: CpuGpuBuffer | None = None
+    precopy_src_col_buf: CpuGpuBuffer | None = None
+    precopy_token_bias_buf: CpuGpuBuffer | None = None
 
     # Flag to track if metadata has been populated
     is_initialized: bool = False
@@ -382,6 +706,8 @@ class MambaSpecDecodeGPUContext:
             num_scheduled_tokens_buf=make_buffer(max_num_reqs, dtype=torch.int32),
             num_computed_tokens_buf=make_buffer(max_num_reqs, dtype=torch.int32),
             num_draft_tokens_buf=make_buffer(max_num_reqs, dtype=torch.int32),
+            precopy_src_col_buf=make_buffer(max_num_reqs, dtype=torch.int32),
+            precopy_token_bias_buf=make_buffer(max_num_reqs, dtype=torch.int32),
             is_initialized=False,
         )
 
@@ -487,6 +813,28 @@ class MambaSpecDecodeGPUContext:
                         self.state_inner_sizes[idx] = (
                             state[0].numel() if state.dim() > 1 else 1
                         )
+                        # Temporal copies vectorize with uint64 loads/stores.
+                        # The kernel's head/tail handles misalignment for
+                        # correctness, but unaligned base/stride costs in
+                        # throughput.
+                        base_addr = state.data_ptr()
+                        block_stride_bytes = block_stride_elems * state.element_size()
+                        if base_addr % 8 != 0:
+                            logger.warning_once(
+                                "layer %s: state.data_ptr() = %#x is not "
+                                "8B-aligned; _memcpy_u64_tiled uint64 "
+                                "vectorization will pay misaligned load cost",
+                                layer_name,
+                                base_addr,
+                            )
+                        if block_stride_bytes % 8 != 0:
+                            logger.warning_once(
+                                "layer %s: block stride = %dB is not "
+                                "8B-aligned; _memcpy_u64_tiled uint64 "
+                                "vectorization will pay misaligned load cost",
+                                layer_name,
+                                block_stride_bytes,
+                            )
 
                     self.state_group_indices[idx] = group_local_idx
                     idx += 1
@@ -540,7 +888,7 @@ class MambaSpecDecodeGPUContext:
         )
 
         total_states = self.num_layers * self.num_state_types
-        grid = (num_reqs, total_states)
+        grid = (num_reqs, total_states, _TEMPORAL_TILES)
 
         postprocess_mamba_fused_kernel[grid](
             num_accepted_tokens_gpu,
@@ -559,10 +907,112 @@ class MambaSpecDecodeGPUContext:
             self.state_dim_row_count,
             self.state_dim_row_stride,
             self.num_accepted_tokens_out,
+            None,  # idx_mapping: V1 decision arrays are already in req order
             num_reqs,
             block_size=self.block_size,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            TEMPORAL_TILES=_TEMPORAL_TILES,
+        )
+
+    def run_fused_precopy(
+        self,
+        num_reqs: int,
+        state_idx_gpu: torch.Tensor,
+        src_col_gpu: torch.Tensor,
+        token_bias_gpu: torch.Tensor,
+        idx_mapping: torch.Tensor | None,
+    ) -> None:
+        """Pre-copy each request's previous running block into its new window
+        block before the forward pass (align boundary migration).
+
+        Args:
+            num_reqs: Number of active requests (batch order).
+            state_idx_gpu: [max_reqs] post-advance dst block column per req slot.
+            src_col_gpu: [max_reqs] pre-advance src block column (-1 = fresh).
+            token_bias_gpu: [max_reqs] accepted-token bias (num_accepted - 1).
+            idx_mapping: optional [num_reqs] batch_idx -> req_state_idx.
+                None means V1 batch order already equals request state order.
+        """
+        if num_reqs == 0 or not self.is_initialized:
+            return
+        total_states = self.num_layers * self.num_state_types
+        grid = (num_reqs, total_states, _TEMPORAL_TILES)
+        precopy_mamba_align_fused_kernel[grid](
+            state_idx_gpu,
+            src_col_gpu,
+            token_bias_gpu,
+            self.block_table_ptrs,
+            self.block_table_stride_req,
+            self.state_base_addrs,
+            self.state_block_strides,
+            self.state_elem_sizes,
+            self.state_inner_sizes,
+            self.state_conv_widths,
+            self.state_group_indices,
+            self.state_dim_row_count,
+            self.state_dim_row_stride,
+            idx_mapping,
+            num_reqs,
+            COPY_BLOCK_SIZE=1024,
+            CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            HAS_IDX_MAPPING=idx_mapping is not None,
+            TEMPORAL_TILES=_TEMPORAL_TILES,
+        )
+
+    def run_fused_postprocess_align(
+        self,
+        num_reqs: int,
+        num_accepted_tokens_gpu: torch.Tensor,
+        state_idx_gpu: torch.Tensor,
+        new_num_computed_tokens_gpu: torch.Tensor,
+        idx_mapping: torch.Tensor,
+    ) -> None:
+        """V2 align postprocess: save the running state to the block-aligned
+        position after spec-decode acceptance leaves the sequence non-aligned.
+
+        ``num_accepted_tokens_gpu`` is updated in place while the kernel reads
+        from a snapshot to avoid cross-program races when the accepted position
+        stays in the running block and the count is reset to 1.
+        ``new_num_computed_tokens`` already holds the post-step computed count
+        (PRECOMPUTED_NEW_COMPUTED).
+        ``idx_mapping`` maps batch row -> req-state slot (HAS_IDX_MAPPING).
+        """
+        if num_reqs == 0 or not self.is_initialized:
+            return
+
+        # V2 reads non-contiguous idx_mapping positions, so snapshot the whole
+        # decision buffer rather than only [:num_reqs].
+        num_accepted_tokens_snapshot = self.num_accepted_tokens_out
+        num_accepted_tokens_snapshot.copy_(num_accepted_tokens_gpu)
+
+        total_states = self.num_layers * self.num_state_types
+        grid = (num_reqs, total_states, _TEMPORAL_TILES)
+        postprocess_mamba_fused_kernel[grid](
+            num_accepted_tokens_snapshot,
+            state_idx_gpu,
+            None,  # num_scheduled: unused under PRECOMPUTED_NEW_COMPUTED
+            new_num_computed_tokens_gpu,
+            None,  # num_draft: unused under PRECOMPUTED_NEW_COMPUTED
+            self.block_table_ptrs,
+            self.block_table_stride_req,
+            self.state_base_addrs,
+            self.state_block_strides,
+            self.state_elem_sizes,
+            self.state_inner_sizes,
+            self.state_conv_widths,
+            self.state_group_indices,
+            self.state_dim_row_count,
+            self.state_dim_row_stride,
+            num_accepted_tokens_gpu,
+            idx_mapping,
+            num_reqs,
+            block_size=self.block_size,
+            COPY_BLOCK_SIZE=1024,
+            CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            HAS_IDX_MAPPING=True,
+            PRECOMPUTED_NEW_COMPUTED=True,
+            TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
 
@@ -675,6 +1125,36 @@ def cleanup_mamba_state_idx(
         mamba_state_idx.pop(req_id, None)
 
 
+class _FusedPrecopy(NamedTuple):
+    """Resolved fused align pre-copy resources (all non-None once resolved)."""
+
+    ctx: "MambaSpecDecodeGPUContext"
+    state_idx: CpuGpuBuffer
+    src_col: CpuGpuBuffer
+    token_bias: CpuGpuBuffer
+
+
+def _resolve_fused_precopy(
+    align_ctx: "MambaSpecDecodeGPUContext | None",
+) -> _FusedPrecopy | None:
+    """Bundle the fused-path buffers, or None for the scalar path.
+
+    Returning one non-None bundle lets callers narrow all four members with a
+    single ``is not None`` check instead of re-asserting each buffer per use.
+    """
+    if align_ctx is None:
+        return None
+    assert align_ctx.mamba_state_idx_buf is not None
+    assert align_ctx.precopy_src_col_buf is not None
+    assert align_ctx.precopy_token_bias_buf is not None
+    return _FusedPrecopy(
+        align_ctx,
+        align_ctx.mamba_state_idx_buf,
+        align_ctx.precopy_src_col_buf,
+        align_ctx.precopy_token_bias_buf,
+    )
+
+
 def preprocess_mamba(
     scheduler_output: SchedulerOutput,
     kv_cache_config: KVCacheConfig,
@@ -685,11 +1165,13 @@ def preprocess_mamba(
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     copy_bufs: MambaCopyBuffers,
+    align_ctx: MambaSpecDecodeGPUContext | None = None,
 ):
     """
     Copy the mamba state of previous step to the last
     (1 + num_speculative_blocks) block.
     """
+    fused = _resolve_fused_precopy(align_ctx)
     mamba_group_ids = copy_bufs.mamba_group_ids
     mamba_spec = copy_bufs.mamba_spec
     num_speculative_blocks = mamba_spec.num_speculative_blocks
@@ -699,20 +1181,37 @@ def preprocess_mamba(
     cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
 
     copy_bufs.offset = 0
+    num_reqs = len(input_batch.req_ids)
+
+    if fused is not None:
+        if num_reqs == 0:
+            return
+        if not fused.ctx.is_initialized:
+            fused.ctx.initialize_from_forward_context(
+                kv_cache_config,
+                forward_context,
+                mamba_state_copy_funcs,
+                [
+                    input_batch.block_table[gid].get_device_tensor(num_reqs)
+                    for gid in fused.ctx.mamba_group_ids
+                ],
+            )
+
+        fused.src_col.np[:num_reqs] = -1
+        fused.token_bias.np[:num_reqs] = 0
+
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         prev_state_idx = mamba_state_idx.get(req_id)
         if prev_state_idx is None:
-            # new / resumed request, no previous state
-            # if num_computed_tokens is 0, prev_state_idx will be -1
+            # New / resumed request; num_computed_tokens == 0 gives -1.
             prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
 
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        num_blocks: int = (
+        num_blocks = (
             cdiv(req_state.num_computed_tokens + num_scheduled_tokens, block_size)
             + num_speculative_blocks
         )
-
         # We always save the current running state at the last
         # (1 + num_speculative_blocks) block.
         # A corner case worth mention here: assume we have block_size = 4 and
@@ -725,20 +1224,42 @@ def preprocess_mamba(
         # And use block 1 to save the running state.
         curr_state_idx = num_blocks - 1 - num_speculative_blocks
         mamba_state_idx[req_id] = curr_state_idx
+        if fused is not None:
+            fused.state_idx.np[i] = curr_state_idx
+
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
-            collect_mamba_copy_meta(
-                copy_bufs,
-                kv_cache_config,
-                mamba_state_copy_funcs,
-                mamba_group_ids,
-                prev_state_idx,
-                curr_state_idx,
-                input_batch.num_accepted_tokens_cpu[i] - 1,
-                req_state,
-                forward_context,
-            )
+            accept_token_bias = int(input_batch.num_accepted_tokens_cpu[i]) - 1
+            if fused is not None:
+                assert accept_token_bias >= 0
+                fused.src_col.np[i] = prev_state_idx
+                fused.token_bias.np[i] = accept_token_bias
+            else:
+                collect_mamba_copy_meta(
+                    copy_bufs,
+                    kv_cache_config,
+                    mamba_state_copy_funcs,
+                    mamba_group_ids,
+                    prev_state_idx,
+                    curr_state_idx,
+                    accept_token_bias,
+                    req_state,
+                    forward_context,
+                )
             input_batch.num_accepted_tokens_cpu[i] = 1
-    do_mamba_copy_block(copy_bufs)
+
+    if fused is not None:
+        fused.state_idx.copy_to_gpu(num_reqs)
+        fused.src_col.copy_to_gpu(num_reqs)
+        fused.token_bias.copy_to_gpu(num_reqs)
+        fused.ctx.run_fused_precopy(
+            num_reqs=num_reqs,
+            state_idx_gpu=fused.state_idx.gpu,
+            src_col_gpu=fused.src_col.gpu,
+            token_bias_gpu=fused.token_bias.gpu,
+            idx_mapping=None,
+        )
+    else:
+        do_mamba_copy_block(copy_bufs)
 
 
 def postprocess_mamba_all(
@@ -842,66 +1363,6 @@ def postprocess_mamba_align_gpu(
     )
 
 
-def stage_postprocess_metadata_to_gpu(
-    scheduler_output: SchedulerOutput,
-    req_ids: list[str],
-    num_reqs: int,
-    requests: dict[str, CachedRequestState],
-    num_scheduled_tokens_buf: CpuGpuBuffer,
-    num_computed_tokens_buf: CpuGpuBuffer,
-    num_draft_tokens_buf: CpuGpuBuffer,
-) -> None:
-    """Stage per-request postprocess metadata into GPU buffers (non-blocking).
-
-    Walks ``req_ids[:num_reqs]`` in batch order and writes each request's
-    scheduled/computed/draft token counts into the matching pinned numpy
-    views, then issues three non-blocking H→D copies. These values don't
-    change between ``_prepare_inputs`` and ``_update_states_after_model_execute``.
-    The fused postprocess kernel indexes the resulting GPU tensors
-    by ``req_idx``.
-    """
-    scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
-    num_scheduled = scheduler_output.num_scheduled_tokens
-    scheduled_np = num_scheduled_tokens_buf.np
-    computed_np = num_computed_tokens_buf.np
-    draft_np = num_draft_tokens_buf.np
-    for i in range(num_reqs):
-        req_id = req_ids[i]
-        scheduled_np[i] = num_scheduled[req_id]
-        computed_np[i] = requests[req_id].num_computed_tokens
-        draft_np[i] = len(scheduled_spec_tokens.get(req_id, []))
-    num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
-    num_computed_tokens_buf.copy_to_gpu(num_reqs)
-    num_draft_tokens_buf.copy_to_gpu(num_reqs)
-
-
-def stage_mamba_state_idx_to_gpu(
-    mamba_state_idx: dict[str, int],
-    req_ids: list[str],
-    num_reqs: int,
-    gpu_buf: CpuGpuBuffer,
-) -> None:
-    """Materialize ``mamba_state_idx`` into ``gpu_buf`` and copy to GPU.
-
-    Walks ``req_ids[:num_reqs]`` in batch order, writing each request's block
-    index into the buffer's pinned numpy view, then issues a non-blocking H→D
-    copy. The fused kernel indexes the resulting GPU tensor by ``req_idx``.
-
-    Invariant: ``preprocess_mamba`` must have run first for the same batch so
-    that every ``req_ids[i]`` has an entry in ``mamba_state_idx``.
-    """
-    np_view = gpu_buf.np
-    for i in range(num_reqs):
-        req_id = req_ids[i]
-        state_idx = mamba_state_idx.get(req_id)
-        assert state_idx is not None, (
-            f"mamba_state_idx missing entry for {req_id!r}; "
-            "preprocess_mamba must run before stage_mamba_state_idx_to_gpu"
-        )
-        np_view[i] = state_idx
-    gpu_buf.copy_to_gpu(num_reqs)
-
-
 def stage_postprocess_inputs_to_gpu(
     ctx: MambaSpecDecodeGPUContext,
     scheduler_output: SchedulerOutput,
@@ -912,27 +1373,40 @@ def stage_postprocess_inputs_to_gpu(
 ) -> None:
     """Stage all per-request inputs the fused mamba postprocess kernel reads.
 
-    Bundles ``stage_mamba_state_idx_to_gpu`` and
-    ``stage_postprocess_metadata_to_gpu`` into a single call so the runner
-    has one entry point for postprocess staging. Buffers live on ``ctx``
+    Walks ``req_ids[:num_reqs]`` once, writing each request's mamba block
+    index and scheduled/computed/draft token counts into the matching pinned
+    numpy views, then issues four non-blocking H→D copies. The fused kernel
+    indexes the resulting GPU tensors by ``req_idx``. Buffers live on ``ctx``
     and only exist when the postprocess kernel is enabled.
+
+    Invariant: ``preprocess_mamba`` must have run first for the same batch so
+    that every ``req_ids[i]`` has an entry in ``mamba_state_idx``.
     """
     assert ctx.mamba_state_idx_buf is not None
     assert ctx.num_scheduled_tokens_buf is not None
     assert ctx.num_computed_tokens_buf is not None
     assert ctx.num_draft_tokens_buf is not None
-    stage_mamba_state_idx_to_gpu(
-        mamba_state_idx,
-        req_ids,
-        num_reqs,
-        ctx.mamba_state_idx_buf,
-    )
-    stage_postprocess_metadata_to_gpu(
-        scheduler_output,
-        req_ids,
-        num_reqs,
-        requests,
-        ctx.num_scheduled_tokens_buf,
-        ctx.num_computed_tokens_buf,
-        ctx.num_draft_tokens_buf,
-    )
+
+    scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+    num_scheduled = scheduler_output.num_scheduled_tokens
+    state_idx_np = ctx.mamba_state_idx_buf.np
+    scheduled_np = ctx.num_scheduled_tokens_buf.np
+    computed_np = ctx.num_computed_tokens_buf.np
+    draft_np = ctx.num_draft_tokens_buf.np
+
+    for i in range(num_reqs):
+        req_id = req_ids[i]
+        state_idx = mamba_state_idx.get(req_id)
+        assert state_idx is not None, (
+            f"mamba_state_idx missing entry for {req_id!r}; "
+            "preprocess_mamba must run before stage_postprocess_inputs_to_gpu"
+        )
+        state_idx_np[i] = state_idx
+        scheduled_np[i] = num_scheduled[req_id]
+        computed_np[i] = requests[req_id].num_computed_tokens
+        draft_np[i] = len(scheduled_spec_tokens.get(req_id, []))
+
+    ctx.mamba_state_idx_buf.copy_to_gpu(num_reqs)
+    ctx.num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
+    ctx.num_computed_tokens_buf.copy_to_gpu(num_reqs)
+    ctx.num_draft_tokens_buf.copy_to_gpu(num_reqs)

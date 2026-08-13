@@ -6,25 +6,84 @@ incremental lexing, and state-machine-driven semantic event emission."""
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.incremental_lexer import (
     CONTENT_TERMINAL,
     IncrementalLexer,
+    LexerShape,
     LexToken,
+    TerminalDef,
 )
 from vllm.parser.engine.parser_engine_config import (
-    STRUCTURAL_DROP_TOKENS,
     ParserEngineConfig,
     ParserState,
     Transition,
 )
 from vllm.parser.engine.token_id_scanner import (
+    DROP_TERMINAL,
     LexerInput,
     PreLexedTerminal,
     TextChunk,
     TokenIDScanner,
 )
+
+
+@dataclass(slots=True)
+class _DropInfo:
+    lexer_shape: LexerShape
+    extra_token_ids: dict[int, str]
+
+
+def _build_drop_info(
+    config: ParserEngineConfig,
+    tokenizer,
+) -> _DropInfo | None:
+    try:
+        special_tokens: list[str] = list(tokenizer.all_special_tokens)
+        special_ids: list[int] = list(tokenizer.all_special_ids)
+    except (AttributeError, NotImplementedError):
+        return None
+
+    if not special_tokens:
+        return None
+
+    configured_texts = (
+        set(config.token_id_terminals.values())
+        | set(config.terminals.values())
+        | config.preserve_tokens
+    )
+
+    extra_token_ids: dict[int, str] = {}
+    drop_texts: set[str] = set()
+    for text, tid in zip(special_tokens, special_ids):
+        if text not in configured_texts:
+            extra_token_ids[tid] = DROP_TERMINAL
+            drop_texts.add(text)
+
+    if not drop_texts:
+        return None
+
+    import regex as re
+
+    drop_terminal_defs = [
+        TerminalDef(
+            name=DROP_TERMINAL,
+            pattern=re.compile(re.escape(text)),
+            is_literal=True,
+            literal=text,
+        )
+        for text in drop_texts
+    ]
+
+    all_terminal_defs = list(config.terminal_defs) + drop_terminal_defs
+    lexer_shape = LexerShape(all_terminal_defs)
+
+    return _DropInfo(
+        lexer_shape=lexer_shape,
+        extra_token_ids=extra_token_ids,
+    )
 
 
 class StreamingParserEngine:
@@ -60,7 +119,6 @@ class StreamingParserEngine:
         self.config = config
 
         resolved_token_ids: dict[int, str] = {}
-        drop_token_ids: set[int] = set()
         if tokenizer is not None:
             if vocab is None:
                 vocab = tokenizer.get_vocab()
@@ -69,37 +127,41 @@ class StreamingParserEngine:
                     tid = vocab.get(token_text)
                     if tid is not None:
                         resolved_token_ids[tid] = terminal_name
-            all_drop = config.drop_tokens | STRUCTURAL_DROP_TOKENS
-            for token_text in all_drop:
-                tid = vocab.get(token_text)
-                if tid is not None:
-                    drop_token_ids.add(tid)
-            for attr in ("eos_token_id", "bos_token_id", "pad_token_id"):
-                tid = getattr(tokenizer, attr, None)
-                if tid is not None:
-                    drop_token_ids.add(tid)
+
+        drop_info: _DropInfo | None = None
+        if tokenizer is not None:
+            drop_info = _build_drop_info(config, tokenizer)
+
+        lexer_shape = config.lexer_shape
+        if drop_info is not None:
+            resolved_token_ids.update(drop_info.extra_token_ids)
+            lexer_shape = drop_info.lexer_shape
 
         self._resolved_token_ids = resolved_token_ids
-        self._drop_token_ids = drop_token_ids
+        self._has_drops = drop_info is not None
 
         self._scanner = TokenIDScanner(
             resolved_token_ids,
             tokenizer,
-            drop_token_ids,
         )
 
         self._token_id_terminal_names: frozenset[str] = frozenset(
             resolved_token_ids.values()
         )
 
-        self._lexer = IncrementalLexer(
-            config.lexer_shape, content_terminal=CONTENT_TERMINAL
-        )
+        self._lexer = IncrementalLexer(lexer_shape, content_terminal=CONTENT_TERMINAL)
 
         self._tool_terminals: frozenset[str] = frozenset(
             terminal
             for (state, terminal), tr in config.transitions.items()
             if tr.next_state in self._TOOL_STATES or state in self._TOOL_STATES
+        )
+        # TOOL_CALL_END may close an inner call rather than its lexical wrapper,
+        # as in MiniMax, so identify exits from state transitions instead.
+        self._tool_exit_terminals: frozenset[str] = frozenset(
+            terminal
+            for (state, terminal), tr in config.transitions.items()
+            if state in self._TOOL_STATES and tr.next_state not in self._TOOL_STATES
         )
 
         self.skip_tool_parsing = False
@@ -130,6 +192,8 @@ class StreamingParserEngine:
         # implicit-reasoning-end (content returns None).
         self._scanner.reset()
         self._lexer.reset()
+        self._message_header_buffer = ""
+        self._in_skipped_tool_span = False
         self._reset_args_state()
 
     def feed(
@@ -150,7 +214,7 @@ class StreamingParserEngine:
         ):
             has_special = False
             for tid in delta_token_ids:
-                if tid in self._resolved_token_ids or tid in self._drop_token_ids:
+                if tid in self._resolved_token_ids:
                     has_special = True
                     break
             if not has_special:
@@ -214,6 +278,17 @@ class StreamingParserEngine:
                 SemanticEvent(EventType.REASONING_END, tool_index=self.tool_index)
             )
             self.state = ParserState.CONTENT
+        elif self.state == ParserState.MESSAGE_HEADER:
+            if self._message_header_buffer:
+                events.append(
+                    SemanticEvent(
+                        EventType.TEXT_CHUNK,
+                        value=self._message_header_buffer,
+                        tool_index=self.tool_index,
+                    )
+                )
+                self._message_header_buffer = ""
+            self.state = ParserState.CONTENT
 
         return events
 
@@ -247,29 +322,63 @@ class StreamingParserEngine:
         transition = self.config.transitions.get(key)
 
         if transition is None:
+            if self._has_drops and terminal == DROP_TERMINAL:
+                return []
+            # The projected skip state may not define the wrapper closer.
+            if self.skip_tool_parsing and terminal in self._tool_exit_terminals:
+                self._in_skipped_tool_span = False
             return self._emit_for_state(value)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
-            if EventType.REASONING_END in transition.events:
-                self.state = ParserState.CONTENT
-                return [
-                    SemanticEvent(
-                        EventType.REASONING_END,
-                        value=value,
-                        tool_index=self.tool_index,
-                    ),
-                    SemanticEvent(
-                        EventType.TEXT_CHUNK,
-                        value=value,
-                        tool_index=self.tool_index,
-                    ),
-                ]
-            content_type = self.config.content_events.get(self.state)
-            if content_type is not None:
-                return [
-                    SemanticEvent(content_type, value=value, tool_index=self.tool_index)
-                ]
-            return []
+            # Inkling reuses one terminal for tool, text, and reasoning exits.
+            # Outside a forwarded tool span, apply its normal transition.
+            is_opener = transition.next_state in self._TOOL_STATES
+            is_exit = terminal in self._tool_exit_terminals
+            used_as_plain_closer = (
+                is_exit and not is_opener and not self._in_skipped_tool_span
+            )
+            if not used_as_plain_closer:
+                if is_opener:
+                    self._in_skipped_tool_span = True
+                elif is_exit:
+                    self._in_skipped_tool_span = False
+                leaving_message_header = self.state == ParserState.MESSAGE_HEADER
+                if leaving_message_header:
+                    self._message_header_buffer = ""
+                # A tool terminal that implicitly ends reasoning must report
+                # that even from the header state, or the reasoning pass never
+                # hands the block to the tool pass.
+                if EventType.REASONING_END in transition.events:
+                    self.state = ParserState.CONTENT
+                    return [
+                        SemanticEvent(
+                            EventType.REASONING_END,
+                            value=value,
+                            tool_index=self.tool_index,
+                        ),
+                        SemanticEvent(
+                            EventType.TEXT_CHUNK,
+                            value=value,
+                            tool_index=self.tool_index,
+                        ),
+                    ]
+                elif leaving_message_header:
+                    self.state = ParserState.CONTENT
+                    return [
+                        SemanticEvent(
+                            EventType.TEXT_CHUNK,
+                            value=value,
+                            tool_index=self.tool_index,
+                        )
+                    ]
+                content_type = self.config.content_events.get(self.state)
+                if content_type is not None:
+                    return [
+                        SemanticEvent(
+                            content_type, value=value, tool_index=self.tool_index
+                        )
+                    ]
+                return []
 
         if transition.skip_in_token_id_mode and self._ever_had_token_ids:
             return self._emit_for_state(value)
@@ -277,6 +386,9 @@ class StreamingParserEngine:
         return self._apply_transition(transition, value)
 
     def _emit_for_state(self, text: str) -> list[SemanticEvent]:
+        if self.state == ParserState.MESSAGE_HEADER:
+            self._message_header_buffer += text
+            return []
         if self.state == ParserState.TOOL_ARGS:
             if self.config.tool_args_json:
                 return self._feed_args_text(text)
@@ -303,6 +415,8 @@ class StreamingParserEngine:
         value: str,
     ) -> list[SemanticEvent]:
         events: list[SemanticEvent] = []
+        previous_state = self.state
+        message_header = ""
 
         if (
             self.state == ParserState.TOOL_ARGS
@@ -318,15 +432,27 @@ class StreamingParserEngine:
             )
             self._args_buffer = ""
 
+        if previous_state == ParserState.MESSAGE_HEADER:
+            message_header = self._message_header_buffer
+            self._message_header_buffer = ""
+
         self.state = transition.next_state
 
         for event_type in transition.events:
             if event_type == EventType.TOOL_CALL_START:
                 self.tool_index += 1
+            event_value = (
+                message_header
+                if previous_state == ParserState.MESSAGE_HEADER
+                and event_type == EventType.TEXT_CHUNK
+                else value
+            )
+            if event_type == EventType.TEXT_CHUNK and not event_value:
+                continue
             events.append(
                 SemanticEvent(
                     event_type,
-                    value=value,
+                    value=event_value,
                     tool_index=self.tool_index,
                 )
             )

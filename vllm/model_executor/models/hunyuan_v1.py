@@ -43,7 +43,7 @@ from vllm.distributed import (
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -238,10 +238,10 @@ class HunYuanAttention(nn.Module):
         ori_k = k
         if self.use_qk_norm:
             q = self.query_layernorm(
-                q.view(-1, self.num_heads, self.head_dim).contiguous()
+                q.view(-1, self.num_heads, self.head_dim),
             )
             k = self.key_layernorm(
-                k.view(-1, self.num_kv_heads, self.head_dim).contiguous()
+                k.view(-1, self.num_kv_heads, self.head_dim),
             )
 
         attn_output = self.attn(q, k, v)
@@ -346,10 +346,10 @@ class HunYuanCrossAttention(nn.Module):
         q, _ = self.rotary_emb(positions, q, k_tmp)
         if self.use_qk_norm:
             q = self.query_layernorm(
-                q.view(-1, self.num_heads, self.head_dim).contiguous()
+                q.view(-1, self.num_heads, self.head_dim),
             )
             k = self.key_layernorm(
-                k.view(-1, self.num_kv_heads, self.head_dim).contiguous()
+                k.view(-1, self.num_kv_heads, self.head_dim),
             )
 
         attn_output = self.attn(q, k, v)
@@ -372,7 +372,6 @@ class HunYuanSparseMoeBlock(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -408,11 +407,6 @@ class HunYuanSparseMoeBlock(nn.Module):
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.num_experts,
@@ -441,7 +435,7 @@ class HunYuanSparseMoeBlock(nn.Module):
         else:
             self.shared_mlp = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_mlp,
             num_experts=self.n_routed_experts,
             top_k=top_k,
@@ -991,7 +985,6 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         # Set MoE hyperparameters
-        self.expert_weights = []
         self.num_expert_groups = 1
         self.moe_layers = []
         example_layer = None

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -18,6 +21,27 @@ pub(crate) struct CoordinatorStateSnapshot {
     /// Whether the engines are currently running or paused, which determines if
     /// the frontend must trigger a new wave on the next request.
     pub engines_running: bool,
+}
+
+impl CoordinatorStateSnapshot {
+    /// Resume the engines for a `FirstRequest` and return the wave to broadcast
+    /// and the engine to exclude from the wakeup.
+    ///
+    /// The request may have been stamped with a `request_wave` older than
+    /// `current_wave` if a `WaveComplete` advanced it after the command was
+    /// enqueued. Such a request still needs serving, so the current wave is
+    /// broadcast to every engine (`exclude = None`); the wave is never rewound.
+    /// A non-stale request excludes the engine that already received it. Mirrors
+    /// the Python coordinator's front-end path.
+    pub(crate) fn start_wave_for_first_request(
+        &mut self,
+        request_wave: u32,
+        target_engine_index: u32,
+    ) -> (u32, Option<u32>) {
+        self.engines_running = true;
+        let exclude = (request_wave >= self.current_wave).then_some(target_engine_index);
+        (self.current_wave, exclude)
+    }
 }
 
 /// Shared in-process coordinator state.

@@ -13,7 +13,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import (
     nvfp4_kv_cache_full_dim,
-    nvfp4_kv_cache_split_views,
+    nvfp4_split_data_scale,
     set_random_seed,
 )
 
@@ -74,17 +74,18 @@ def make_nvfp4_kv_cache(
         kv_scale_val, dtype=torch.float32, device=kv_bf16_hnd.device
     )
 
-    # Allocate in HND physical order, permute to NHD logical order.
-    # hnd_order swaps dims 2↔3; it is its own inverse.
+    # layout: (B, 2*H, N, full_dim)
+    #   where K heads occupy the first H heads and V heads occupy the second H heads.
     full_dim = nvfp4_kv_cache_full_dim(head_size)
-    hnd_order = (0, 1, 3, 2, 4)
-    kv_cache = torch.zeros(
-        (num_blocks, 2, num_kv_heads, block_size, full_dim),
+    kv_cache_hnd = torch.zeros(
+        (num_blocks, 2 * num_kv_heads, block_size, full_dim),
         dtype=torch.uint8,
         device=kv_bf16_hnd.device,
-    ).permute(*hnd_order)
+    )
+    kv_cache_nhd = kv_cache_hnd.permute(0, 2, 1, 3)
+    k_view_nhd, v_view_nhd = kv_cache_nhd.split(num_kv_heads, dim=-2)
 
-    # Flatten NHD [N, T, H, D] → token tensors [N*T, H, D] for the kernel.
+    # Flatten input KV → token tensors [B*N, H, head_size] for the kernel.
     num_tokens = num_blocks * block_size
     k_tokens = (
         kv_bf16_hnd[:, 0]
@@ -98,22 +99,21 @@ def make_nvfp4_kv_cache(
     )
     slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=kv_bf16_hnd.device)
 
-    # reshape_and_cache_flash: kernel receives kv_cache[:, 0] and [:, 1]
-    # (full K/V buffers containing both data and scale).
     torch.ops._C_cache_ops.reshape_and_cache_flash(
         k_tokens,
         v_tokens,
-        kv_cache[:, 0],
-        kv_cache[:, 1],
+        k_view_nhd,
+        v_view_nhd,
         slot_mapping,
         "nvfp4",
         kv_scale_tensor,
         kv_scale_tensor,
     )
 
-    # Split in HND order for trtllm kernel (expects HND numTokensPerPage).
-    kv_cache_hnd = kv_cache.permute(*hnd_order)
-    (k_data, v_data), (k_scales, v_scales) = nvfp4_kv_cache_split_views(kv_cache_hnd)
+    # Split into data/scale views in HNC order for trtllm kernel.
+    k_cache_hnc, v_cache_hnc = kv_cache_hnd.split(num_kv_heads, dim=1)
+    k_data, k_scales = nvfp4_split_data_scale(k_cache_hnc)
+    v_data, v_scales = nvfp4_split_data_scale(v_cache_hnc)
 
     # Dequantize for the FA2 reference baseline.
     ref_k = dequant_nvfp4_kv_cache(

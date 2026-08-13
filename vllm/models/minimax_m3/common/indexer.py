@@ -27,12 +27,21 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.models.minimax_m3.common.ops.index_topk import (
-    minimax_m3_index_decode,
-    minimax_m3_index_score,
-    minimax_m3_index_topk,
-)
 from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+else:
+    from vllm.models.minimax_m3.common.ops.index_topk import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -247,6 +256,13 @@ class MiniMaxM3IndexerMetadataBuilder(
             dtype=torch.int32,
             device=device,
         )
+        # Stable per-token causal page-count buffer for decode cudagraph replays
+        # (consumed by the MSA top-k path's sparse_topk_select num_valid_pages).
+        self.num_valid_pages_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
 
 
 class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
@@ -408,6 +424,9 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
         # (decode at [:, :nd], prefill at [:, nd:]) and return views into it; the
         # kernels' out= writes out[:, :total_q]. None -> allocate fresh.
         buf = self.topk_indices_buffer
+        buf_htk = (
+            buf if buf is None or current_platform.is_rocm() else buf.transpose(0, 1)
+        )
         decode_topk: torch.Tensor | None = None
         prefill_topk: torch.Tensor | None = None
         if index_md.num_decodes > 0:
@@ -425,7 +444,7 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 self.num_kv_heads,
                 d.decode_query_len,
                 d.max_decode_query_len,
-                out=buf,
+                out=buf_htk,
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill
@@ -449,7 +468,7 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 self.topk_blocks,
                 self.init_blocks,
                 self.local_blocks,
-                out=buf[:, nd:, :] if buf is not None else None,
+                out=buf_htk[:, nd:, :] if buf_htk is not None else None,
             )
         return decode_topk, prefill_topk
 
@@ -461,10 +480,10 @@ def select_indexer_impl_cls(
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
-    On Blackwell (SM100) with ``topk_blocks`` in ``(4, 8, 16, 32)`` (matching the
-    main MSA attend), the fmha_sm100 score path + Triton top-k is used for both
-    bf16 and fp8 index caches. Everything else falls back to the Triton indexer
-    (bf16 only).
+    On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
+    ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
+    used for both bf16 and fp8 index caches. Everything else falls back to the
+    Triton indexer (bf16 only).
     """
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
         raise NotImplementedError(
@@ -476,7 +495,7 @@ def select_indexer_impl_cls(
     )
     use_msa = (
         is_sm100
-        and topk_blocks in (4, 8, 16, 32)
+        and topk_blocks == 16
         and indexer_kv_dtype in ("bf16", "fp8", "fp8_e4m3")
     )
     if use_msa:
@@ -486,7 +505,7 @@ def select_indexer_impl_cls(
         )
 
         logger.info_once(
-            "MiniMax M3 indexer: selected MSA (fmha_sm100 score + Triton top-k) "
+            "MiniMax M3 indexer: selected MSA (fmha_sm100 score + top-k) "
             "[topk_blocks=%d, indexer_kv_dtype=%s]",
             topk_blocks,
             indexer_kv_dtype,

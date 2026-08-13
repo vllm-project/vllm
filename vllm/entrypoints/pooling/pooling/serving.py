@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import cast
+
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
@@ -9,7 +11,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
 from ..base.io_processor import PoolingIOProcessor
-from ..base.serving import PoolingServingBase
+from ..base.serving import PoolingBaseServing
 from ..factories import init_pooling_io_processors
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from ..utils import (
@@ -30,7 +32,7 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-class ServingPooling(PoolingServingBase):
+class ServingPooling(PoolingBaseServing):
     request_id_prefix = "pooling"
 
     def __init__(
@@ -52,7 +54,7 @@ class ServingPooling(PoolingServingBase):
         self.json_response_cls = get_json_response_cls()
 
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
-        assert isinstance(request, PoolingRequest)
+        request = cast(PoolingRequest, request)
         pooling_task = self._verify_pooling_task(request)
         return self.io_processors[pooling_task]
 

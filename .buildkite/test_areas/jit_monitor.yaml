@@ -1,0 +1,22 @@
+group: JIT Monitor
+depends_on:
+  - image-build
+steps:
+- label: No Runtime JITs e2e tests
+  key: jit-monitor-no-runtime-jit
+  device: h200_35gb
+  timeout_in_minutes: 45
+  source_file_dependencies:
+  - vllm/utils/jit_monitor.py
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/model_executor/warmup/
+  - vllm/config/observability.py
+  - tests/jit_monitor/test_no_runtime_jit.py
+  - tests/models/registry.py
+  commands:
+    # Boot a curated JIT-heavy model set with the JIT monitor in "error" mode
+    # and run generation; any post-warmup JIT compilation fails the test.
+    # Per-test watchdog so a wedged engine/CUDA init fails with a traceback
+    # instead of running until the build timeout.
+    - export PYTHONFAULTHANDLER=1
+    - pytest -v -s jit_monitor/test_no_runtime_jit.py --timeout=900 --timeout-method=thread

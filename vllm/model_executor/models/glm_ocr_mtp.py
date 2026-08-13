@@ -41,13 +41,14 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .glm4 import Glm4DecoderLayer, get_spec_layer_idx_from_weight_name
+from .glm4 import Glm4DecoderLayer
 from .glm4_moe_lite_mtp import (
     Glm4MoeLiteMultiTokenPredictor,
     SharedHead,
 )
 from .interfaces import SupportsPP
 from .utils import (
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     maybe_prefix,
 )
@@ -134,7 +135,6 @@ class GlmOcrMTP(nn.Module, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.expert_weights = []
         self.num_layers = self.config.num_nextn_predict_layers
         for layer in self.model.layers.values():
             assert isinstance(layer, GlmOcrMultiTokenPredictorLayer)
