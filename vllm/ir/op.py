@@ -126,7 +126,10 @@ def register_op(
 
     @vllm.ir.register_op(name="custom_mul")
     def multiply(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        return x * y"""
+        return x * y
+    ```
+
+    """
 
     def decorator(_f: Callable):
         op_name: str = _f.__name__ if name is None else name

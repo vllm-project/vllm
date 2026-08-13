@@ -229,7 +229,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
             A tuple of (can_implement, reason):
                 - can_implement: True if this kernel supports the config
                 - reason: If not supported, a string explaining why; otherwise None
-            ```
+
         """
         raise NotImplementedError
 
