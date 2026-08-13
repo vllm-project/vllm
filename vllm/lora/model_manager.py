@@ -132,8 +132,13 @@ class LoRAModelManager:
             and self.model.is_3d_moe_weight
             and not self._enable_mixed_moe_lora_format
         )
+        # Shared MoE adapters: w13 lora_A / w2 lora_B shared across experts,
+        # stored as pre-stacked experts.w{1,2,3} tensors (startup opt-in).
+        self._enable_moe_shared_loras = is_moe and lora_config.enable_moe_shared_loras
         self.packed_modules_mapping = process_packed_modules_mapping(
-            self.model, force_2d_moe=self._enable_mixed_moe_lora_format
+            self.model,
+            force_2d_moe=self._enable_mixed_moe_lora_format,
+            enable_moe_shared_loras=self._enable_moe_shared_loras,
         )
         self._is_non_gated_moe = is_moe and self.model.is_non_gated_moe
         self._use_ep = bool(
@@ -242,8 +247,17 @@ class LoRAModelManager:
 
         mm_budget = MultiModalBudget(vllm_config, mm_registry)
         limit_per_prompt = max(mm_budget.mm_max_items_per_prompt.values())
-        num_encoder_tokens = self.model.get_num_mm_encoder_tokens(
-            mm_budget.get_encoder_budget()
+        max_lora_tokens = mm_budget.get_encoder_budget()
+        lora_token_counts_by_modality = [
+            self.model.get_mm_lora_token_counts(
+                modality=modality,
+                mm_kwargs=None,
+                num_mm_embeds=max_lora_tokens,
+            )
+            for modality in mm_budget.mm_max_toks_per_item
+        ]
+        num_encoder_tokens = max(
+            tower_tokens for tower_tokens, _ in lora_token_counts_by_modality
         )
 
         # Tower wrappers
@@ -258,10 +272,15 @@ class LoRAModelManager:
 
         # Use wrapper for connector if present.
         if self.mm_mapping.connector:
-            if hasattr(self.model, "get_num_mm_connector_tokens"):
-                connector_tokens = self.model.get_num_mm_connector_tokens(
-                    num_encoder_tokens
-                )
+            connector_tokens = max(
+                (
+                    connector_tokens
+                    for _, connector_tokens in lora_token_counts_by_modality
+                    if connector_tokens is not None
+                ),
+                default=None,
+            )
+            if connector_tokens is not None:
                 connector_punica_wrapper = get_punica_wrapper(
                     connector_tokens,
                     max_batches=self.max_num_seqs * limit_per_prompt,
@@ -382,6 +401,8 @@ class LoRAModelManager:
         self._registered_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()
+        self._last_mapping = None
+        self._last_slot_layout = None
 
     def _create_lora_modules(self):
         def _parent_module(module_name: str) -> str:
@@ -734,7 +755,7 @@ class LoRAModelManager:
 
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
         for module_name, new_module_names in self.packed_modules.items():
-            # For 2D FusedMoE modules with EP, narrow the per-expert
+            # For 2D RoutedExperts modules with EP, narrow the per-expert
             # sub-module list to this rank's owned experts so pack_moe
             # produces a tensor sized to local_num_experts directly.
             packed_module_names = new_module_names
@@ -761,6 +782,16 @@ class LoRAModelManager:
                 if lora_model.check_lora_name(replaced_module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
+                if self._enable_moe_shared_loras:
+                    lora_model.loras[module_name] = (
+                        PackedLoRALayerWeights.pack_moe_stacked(
+                            replacement_loras,
+                            module_name,
+                        )
+                    )
+                    for module in packed_module_names:
+                        lora_model.loras.pop(module, None)
+                    continue
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
                     replacement_loras = self._pad_lora_pairs_to_triplets(
                         replacement_loras
@@ -1019,20 +1050,10 @@ class LoRAModelManager:
         module: FusedMoEWithLoRA,
         module_name: str,
     ) -> None:
-        """Slice the cached LoRA tensors down to this rank's local experts.
+        """Slice cached LoRA tensors down to this rank's local experts.
 
-        The 2D MoE checkpoint enters as a list of per-(w1/w2/w3) tensors of
-        shape (num_experts, rank, in) / (num_experts, out, rank). When EP
-        is active each rank only owns local_num_experts; without this slice
-        the CPU LoRAModel keeps the full global weight and set_lora has to
-        re-slice on every activation.
-
-        With the load-time / pack-time slicing in
-        ``_restrict_to_local_experts``, the stacked tensors already match
-        ``local_num_experts`` and the inner branch becomes a no-op. The
-        guard remains so checkpoints that bypassed the pre-slicing (e.g.
-        ``.bin``/``.pt`` adapters with weights mappers we don't recognize)
-        still get sliced here.
+        Shared factors have expert dimension one and remain available on every
+        rank. Per-expert factors are narrowed to the local expert block.
         """
         if not module.use_ep:
             return
@@ -1046,16 +1067,13 @@ class LoRAModelManager:
         expert_start = ep_rank * local_num_experts
         expert_end = expert_start + local_num_experts
 
-        new_lora_a: list[torch.Tensor | None] = []
-        new_lora_b: list[torch.Tensor | None] = []
-        for a, b in zip(module_lora.lora_a, module_lora.lora_b):
-            if a is not None and b is not None and a.shape[0] == global_num_experts:
-                a = a[expert_start:expert_end].contiguous()
-                b = b[expert_start:expert_end].contiguous()
-            new_lora_a.append(a)
-            new_lora_b.append(b)
-        module_lora.lora_a = new_lora_a
-        module_lora.lora_b = new_lora_b
+        def _slice_local(t: torch.Tensor | None) -> torch.Tensor | None:
+            if t is not None and t.shape[0] == global_num_experts:
+                return t[expert_start:expert_end].contiguous()
+            return t
+
+        module_lora.lora_a = [_slice_local(a) for a in module_lora.lora_a]
+        module_lora.lora_b = [_slice_local(b) for b in module_lora.lora_b]
 
     def _restrict_to_local_experts(
         self, module_name: str, new_module_names: list[str]
@@ -1094,7 +1112,7 @@ class LoRAModelManager:
 
     def _build_moe_ep_load_spec(self) -> MoEEPLoadSpec | None:
         """
-        Per-rank slicing metadata for 2D FusedMoE LoRA modules.
+        Per-rank slicing metadata for 2D RoutedEXperts LoRA modules.
         """
         if not self._use_ep or not self._is_moe:
             return None

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -161,6 +164,9 @@ pub struct CompletionRequest {
     /// External request ID used for response correlation.
     pub request_id: Option<String>,
 
+    /// Stable session identity shared by related requests.
+    pub session_id: Option<String>,
+
     /// Tokens represented as strings of the form 'token_id:{token_id}' in
     /// logprobs
     pub return_tokens_as_token_ids: Option<bool>,
@@ -173,6 +179,9 @@ pub struct CompletionRequest {
 
     /// KV transfer parameters for disaggregated serving
     pub kv_transfer_params: Option<HashMap<String, Value>>,
+
+    /// Encoder cache transfer parameters for disaggregated serving
+    pub ec_transfer_params: Option<HashMap<String, Value>>,
 
     /// Additional request parameters with string or numeric values for custom
     /// extensions
@@ -209,6 +218,7 @@ pub(super) struct CompletionResponse {
     pub usage: Option<Usage>,
     pub system_fingerprint: Option<String>,
     pub kv_transfer_params: Option<Value>,
+    pub ec_transfer_params: Option<Value>,
 }
 
 /// Mirrors the Python vLLM `CompletionResponseChoice` class.

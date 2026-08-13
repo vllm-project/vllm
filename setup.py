@@ -78,6 +78,10 @@ def has_precompiled_rust_extensions() -> bool:
     return not get_missing_precompiled_rust_extension_modules()
 
 
+def is_metadata_only_build() -> bool:
+    return bool({"egg_info", "dist_info"}.intersection(sys.argv[1:]))
+
+
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
     VLLM_TARGET_DEVICE = "cpu"
@@ -127,7 +131,7 @@ def should_bundle_tcmalloc() -> bool:
     return (
         VLLM_TARGET_DEVICE == "cpu"
         and sys.platform.startswith("linux")
-        and platform.machine() in ("aarch64", "x86_64")
+        and platform.machine() in ("aarch64", "x86_64", "s390x")
     )
 
 
@@ -442,6 +446,17 @@ class cmake_build_ext(build_ext):
                 shutil.copytree(
                     fmha_sm100_build,
                     "vllm/third_party/fmha_sm100",
+                    dirs_exist_ok=True,
+                )
+
+            tml_fa4_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "tml_fa4"
+            )
+            if os.path.exists(tml_fa4_build):
+                print(f"Copying {tml_fa4_build} to vllm/third_party/tml_fa4")
+                shutil.copytree(
+                    tml_fa4_build,
+                    "vllm/third_party/tml_fa4",
                     dirs_exist_ok=True,
                 )
 
@@ -772,6 +787,7 @@ class precompiled_wheel_utils:
                             "vllm/_qutlass_C.abi3.so",
                             "vllm/_flashmla_C.abi3.so",
                             "vllm/_flashmla_extension_C.abi3.so",
+                            "vllm/_flashkda_C.abi3.so",
                             "vllm/_sparse_flashmla_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
@@ -803,6 +819,7 @@ class precompiled_wheel_utils:
                 # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
                 deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
                 fmha_sm100_regex = re.compile(r"vllm/third_party/fmha_sm100/.*")
+                tml_fa4_regex = re.compile(r"vllm/third_party/tml_fa4/.*")
                 file_members = []
                 for member in wheel.filelist:
                     if member.filename in exact_members:
@@ -828,6 +845,7 @@ class precompiled_wheel_utils:
                         or triton_kernels_regex.match(member.filename)
                         or flashmla_regex.match(member.filename)
                         or deep_gemm_regex.match(member.filename)
+                        or tml_fa4_regex.match(member.filename)
                         or fmha_sm100_regex.match(member.filename)
                     ):
                         file_members.append(member)
@@ -1075,6 +1093,11 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
+            if "flashinfer-cubin" in req:
+                # Not on PyPI since 0.6.14 (only https://flashinfer.ai/whl), so
+                # it cannot be a wheel dependency; flashinfer falls back to
+                # fetching cubins at runtime when the package is absent.
+                continue
             if "nvidia-cutlass-dsl[cu13]" in req and cuda_major == "12":
                 # [cu13] extra is the default; strip it on CUDA 12 builds.
                 req = req.replace("nvidia-cutlass-dsl[cu13]", "nvidia-cutlass-dsl")
@@ -1103,7 +1126,7 @@ if _is_cuda() or _is_hip():
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
-if sys.version_info >= (3, 11):
+if not _is_xpu() and sys.version_info >= (3, 11):
     ext_modules.append(CMakeExtension(name="vllm.spinloop"))
     ext_modules.append(CMakeExtension(name="vllm.fs_io_C"))
 
@@ -1132,6 +1155,10 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
+    if USE_PRECOMPILED_EXTENSIONS or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.0")
+    ):
+        ext_modules.append(CMakeExtension(name="vllm._flashkda_C", optional=True))
     if envs.VLLM_USE_PRECOMPILED or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
     ):
@@ -1141,6 +1168,8 @@ if _is_cuda():
         ext_modules.append(CMakeExtension(name="vllm._qutlass_C", optional=True))
     # fmha_sm100 is a Python/CuTe-DSL package installed into vllm.third_party.
     ext_modules.append(CMakeExtension(name="vllm.fmha_sm100", optional=True))
+    # tml-fa4 is copied into an isolated vllm.third_party package.
+    ext_modules.append(CMakeExtension(name="vllm.tml_fa4", optional=True))
 
 if _is_cpu():
     import platform
@@ -1168,6 +1197,7 @@ package_data = {
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
+        "third_party/flash_linear_attention/LICENSE",
         # DeepGEMM JIT include headers (vendored via cmake)
         "third_party/deep_gemm/include/**/*.cuh",
         "third_party/deep_gemm/include/**/*.h",
@@ -1192,8 +1222,8 @@ def add_vllm_package_data(filename: str) -> None:
         vllm_files.append(filename)
 
 
-# If using precompiled artifacts, extract and patch package_data in advance.
-if USE_PRECOMPILED_RUST_FRONTEND:
+# PEP 517 invokes setup.py for metadata before invoking the actual build.
+if USE_PRECOMPILED_RUST_FRONTEND and not is_metadata_only_build():
     wheel_url, download_filename = precompiled_wheel_utils.determine_wheel_url()
     patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
         wheel_url,
@@ -1243,11 +1273,11 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch==2.11.0.0"],
+        "zen": ["zentorch==2.13.0.0"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.3.2"],
-        "instanttensor": ["instanttensor >= 0.1.5"],
+        "fastsafetensors": ["fastsafetensors >= 0.3.3"],
+        "instanttensor": ["instanttensor >= 0.1.9"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
             "av",
@@ -1257,12 +1287,15 @@ setup(
             "mistral_common[audio]",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
+        # NVIDIA DeepStream (NVDEC) GPU video-decode backend. Linux x86-64
+        # only; also needs system GStreamer + libv4l (see docs).
+        "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
         "flashinfer": [],  # Kept for backwards compatibility
         # Optional deps for Helion kernel development
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
-        "helion": ["helion==1.1.0"],
+        "helion": ["helion==1.4.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing
