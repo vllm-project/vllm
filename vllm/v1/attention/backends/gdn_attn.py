@@ -258,6 +258,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_token_indx = None
             spec_state_indices_tensor = None
             non_spec_state_indices_tensor = block_table_tensor[:, 0]
+            # The recurrent decode kernel requires a 1-D, stride-1 tensor, but
+            # ``block_table_tensor[:, 0]`` is a strided column view (stride equals
+            # the block-table width). For a single-decode batch this is shape (1,)
+            # with stride (block_width,), and ``.contiguous()`` is a no-op on
+            # <=1-element tensors, so force a contiguous clone here at
+            # metadata-build time (outside any captured graph -> cudagraph-safe).
+            if non_spec_state_indices_tensor.stride(0) != 1:
+                non_spec_state_indices_tensor = non_spec_state_indices_tensor.clone(
+                    memory_format=torch.contiguous_format
+                )
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
             non_spec_query_start_loc_cpu = query_start_loc_cpu
