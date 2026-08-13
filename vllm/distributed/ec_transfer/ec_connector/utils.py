@@ -42,5 +42,10 @@ class ECOutputAggregator:
             finished_recving=finished_recving or None,
             ec_connector_worker_meta=worker_meta,
         )
-        output.ec_connector_output = None if aggregated.is_empty() else aggregated
-        return output
+        if aggregated.is_empty():
+            output.ec_connector_output = None
+            return output
+
+        # `output` is the shared empty output whenever `output_rank` had no work,
+        # so attach through the copy-on-write helper.
+        return ModelRunnerOutput.with_ec_conn_output(output, aggregated)

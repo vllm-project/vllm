@@ -7,7 +7,12 @@ import pytest
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.v1.outputs import ECConnectorOutput, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
+    ECConnectorOutput,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -66,6 +71,26 @@ def test_aggregate_leaves_no_ec_output_when_no_worker_reported():
     assert result is outputs[0]
     assert result.ec_connector_output is None
     assert ECOutputAggregator().aggregate([None], output_rank=0) is None
+
+
+def test_aggregate_does_not_write_through_the_shared_empty_output():
+    """A rank with nothing to report yields the shared empty output singleton.
+
+    Folding another rank's metadata onto it must not write through to the
+    module-level object, which every later step would then carry.
+    """
+    outputs = [
+        _worker_output(
+            ECConnectorOutput(ec_connector_worker_meta=FakeWorkerMeta(["mm0"]))
+        ),
+        EMPTY_MODEL_RUNNER_OUTPUT,
+    ]
+
+    result = ECOutputAggregator().aggregate(outputs, output_rank=1)
+
+    assert EMPTY_MODEL_RUNNER_OUTPUT.ec_connector_output is None
+    assert result is not EMPTY_MODEL_RUNNER_OUTPUT
+    assert result.ec_connector_output.ec_connector_worker_meta.saves == ["mm0"]
 
 
 def test_chaining_with_kv_aggregator_preserves_both_outputs():
