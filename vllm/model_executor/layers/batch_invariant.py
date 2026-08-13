@@ -288,9 +288,9 @@ def matmul_descriptor_persistent(
     b_t = b.t().contiguous()
 
     c = torch.empty((M, N), device=a.device, dtype=dtype)
-    # This path is XPU-only (via _matmul_dispatch). _NUM_SMS is set by
-    # enable_batch_invariant_mode() before torch.compile traces this function,
-    # so Dynamo can lift it as a compile-time constant.
+    # This path is XPU-only. _NUM_SMS is set by enable_batch_invariant_mode()
+    # before torch.compile traces this function, so Dynamo can lift it
+    # as a compile-time constant.
     NUM_SMS = _NUM_SMS if _NUM_SMS > 0 else num_compute_units(a.device.index)
 
     def grid(META):
@@ -775,22 +775,17 @@ def mean_dim(
     return output
 
 
-def _matmul_dispatch(a, b, bias=None):
-    """Dispatch to the best matmul kernel based on device type."""
+def mm_batch_invariant(a, b, bias=None):
     if a.device.type == "xpu":
         return matmul_descriptor_persistent(a, b, bias=bias)
     return matmul_persistent(a, b, bias=bias)
-
-
-def mm_batch_invariant(a, b):
-    return _matmul_dispatch(a, b)
 
 
 def matmul_batch_invariant(a, b, *, out=None):
     # torch.matmul can handle various dimensions
     # For 2D x 2D, it's the same as mm
     if a.ndim == 2 and b.ndim == 2:
-        result = _matmul_dispatch(a, b)
+        result = mm_batch_invariant(a, b)
         if out is not None:
             out.copy_(result)
             return out
@@ -802,7 +797,7 @@ def matmul_batch_invariant(a, b, *, out=None):
         hidden = a.shape[-1]
         out_dim = b.shape[-1]
         a_2d = a.reshape(-1, hidden)
-        result_2d = _matmul_dispatch(a_2d, b)
+        result_2d = mm_batch_invariant(a_2d, b)
         result = result_2d.reshape(batch_dims + (out_dim,))
         if out is not None:
             out.copy_(result)
@@ -925,7 +920,7 @@ def bmm_batch_invariant(a, b, *, out=None):
 
 
 def addmm_batch_invariant(bias, a, b):
-    return _matmul_dispatch(a, b, bias=bias)
+    return mm_batch_invariant(a, b, bias=bias)
 
 
 def _log_softmax_batch_invariant(input, dim, _half_to_float):
