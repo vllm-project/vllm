@@ -914,13 +914,13 @@ class HfRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        from tests.utils import wait_for_rocm_memory_to_settle
+        from tests.utils import wait_for_memory_to_settle
 
         del self.model
         cleanup_dist_env_and_memory()
         # ROCm frees VRAM lazily; wait so a runner started right after this HF
         # model exits does not OOM on its startup memory guard.
-        wait_for_rocm_memory_to_settle(
+        wait_for_memory_to_settle(
             threshold_ratio=getattr(self, "threshold_ratios", None)
         )
         if hasattr(self, "threshold_ratios"):
@@ -998,9 +998,9 @@ class VllmRunner:
             # V1 startup requires free_memory >= total * gpu_memory_utilization.
             # ROCm CI can hand a test a device that is still lazily releasing
             # VRAM from a previous process, so wait before constructing LLM.
-            from tests.utils import wait_for_rocm_memory_to_settle
+            from tests.utils import wait_for_memory_to_settle
 
-            wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+            wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
         elif current_platform.is_xpu():
             # The XPU/oneAPI runtime keeps ~1 GiB of context resident in the
             # parent pytest process for its whole lifetime (grown by in-process
@@ -1013,9 +1013,9 @@ class VllmRunner:
             gpu_memory_utilization = kwargs["gpu_memory_utilization"]
             # XPU (Level Zero) can also release device memory lazily after a
             # previous engine shuts down, so wait before constructing LLM.
-            from tests.utils import wait_for_xpu_memory_to_settle
+            from tests.utils import wait_for_memory_to_settle
 
-            wait_for_xpu_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+            wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
         with init_ctx:
             self.llm = LLM(
@@ -1341,23 +1341,14 @@ class VllmRunner:
     def __enter__(self):
         return self
 
-    def _wait_for_rocm_memory_release(self, gpu_memory_utilization: float) -> None:
-        from tests.utils import wait_for_rocm_memory_to_settle
+    def _wait_for_memory_release(self, gpu_memory_utilization: float) -> None:
+        from tests.utils import wait_for_memory_to_settle
 
         # V1 startup requires free_memory >= total * gpu_memory_utilization.
         # Wait for the complementary used-memory ratio so the next runner does
         # not fail the startup guard immediately after this runner exits. The
         # wait is bounded so cleanup failures fail this test instead of hanging.
-        wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
-
-    def _wait_for_xpu_memory_release(self, gpu_memory_utilization: float) -> None:
-        from tests.utils import wait_for_xpu_memory_to_settle
-
-        # V1 startup requires free_memory >= total * gpu_memory_utilization.
-        # XPU (Level Zero) releases device memory lazily after an engine shuts
-        # down, so wait for the complementary used-memory ratio to settle before
-        # the next allocation. Bounded so cleanup failures do not hang the suite.
-        wait_for_xpu_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+        wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Explicitly shutdown the engine core to release GPU resources
@@ -1383,8 +1374,7 @@ class VllmRunner:
         del self.llm
         torch._dynamo.reset()
         cleanup_dist_env_and_memory()
-        self._wait_for_rocm_memory_release(gpu_memory_utilization)
-        self._wait_for_xpu_memory_release(gpu_memory_utilization)
+        self._wait_for_memory_release(gpu_memory_utilization)
 
 
 @pytest.fixture(scope="session")
@@ -1771,7 +1761,7 @@ def clean_gpu_memory_between_tests():
 
     import gc
 
-    from tests.utils import wait_for_gpu_memory_to_clear, wait_for_rocm_memory_to_settle
+    from tests.utils import wait_for_gpu_memory_to_clear, wait_for_memory_to_settle
 
     num_gpus = torch.accelerator.device_count()
 
@@ -1780,7 +1770,7 @@ def clean_gpu_memory_between_tests():
             return
         try:
             if current_platform.is_rocm():
-                wait_for_rocm_memory_to_settle()
+                wait_for_memory_to_settle()
             else:
                 wait_for_gpu_memory_to_clear(
                     devices=list(range(num_gpus)),

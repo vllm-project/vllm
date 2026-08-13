@@ -1687,50 +1687,19 @@ def wait_for_gpu_memory_to_clear(
         time.sleep(poll_interval_s)
 
 
-def wait_for_rocm_memory_to_settle(
+def wait_for_memory_to_settle(
     *,
     threshold_ratio: float | dict[int, float] | None = 0.1,
     timeout_s: float = 240,
 ) -> None:
-    """Block until ROCm device VRAM usage drops below ``threshold_ratio``.
+    """Block until ROCm or XPU device VRAM usage drops below ``threshold_ratio``.
 
-    ROCm reclaims GPU memory more lazily than CUDA, so back-to-back model
+    ROCm and XPU reclaims GPU memory more lazily than CUDA, so back-to-back model
     loads in a single test process can OOM the *next* engine/model startup
     even after ``cleanup_dist_env_and_memory``. This gives the driver time to
     actually release VRAM before the next allocation. No-op off ROCm.
     """
-    if not current_platform.is_rocm():
-        return
-
-    num_gpus = current_platform.device_count()
-    if num_gpus == 0:
-        return
-    if threshold_ratio is None:
-        threshold_ratio = 0.1
-
-    wait_for_gpu_memory_to_clear(
-        devices=list(range(num_gpus)),
-        threshold_ratio=threshold_ratio,
-        timeout_s=timeout_s,
-        stable_duration_s=2.0,
-        poll_interval_s=1.0,
-    )
-
-
-def wait_for_xpu_memory_to_settle(
-    *,
-    threshold_ratio: float | dict[int, float] | None = 0.1,
-    timeout_s: float = 240,
-) -> None:
-    """Block until XPU device memory usage drops below ``threshold_ratio``.
-
-    Like ROCm, XPU (Level Zero) can release device memory lazily after an
-    engine shuts down, so back-to-back model loads in a single test process
-    can OOM the *next* engine/model startup even after
-    ``cleanup_dist_env_and_memory``. This gives the driver time to actually
-    release device memory before the next allocation. No-op off XPU.
-    """
-    if not current_platform.is_xpu():
+    if not current_platform.is_rocm() and not current_platform.is_xpu():
         return
 
     num_gpus = current_platform.device_count()
