@@ -111,6 +111,8 @@ class SharedExperts(torch.nn.Module):
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            and hidden_states.shape[0]
+            >= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_MIN
         )
 
         if should_run_shared_in_aux_stream:
