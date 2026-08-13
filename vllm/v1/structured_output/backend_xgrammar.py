@@ -18,6 +18,8 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputOptions,
 )
 from vllm.v1.structured_output.utils import (
+    _xgr_compile_regex,
+    _xgr_grammar_from_regex,
     choice_as_grammar,
     compile_regex_with_timeout,
     convert_lark_to_ebnf,
@@ -68,6 +70,8 @@ class XgrammarBackend(StructuredOutputBackend):
             cache_enabled=True,
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
+        self.tokenizer_info = tokenizer_info
+        self.tokenizer_info_json = tokenizer_info.serialize_json()
 
         self.num_speculative_tokens = 0
         if self.vllm_config.speculative_config is not None:
@@ -92,10 +96,12 @@ class XgrammarBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
-            ctx = compile_regex_with_timeout(
-                self.compiler.compile_regex,
+            serialized = compile_regex_with_timeout(
+                _xgr_compile_regex,
+                self.tokenizer_info_json,
                 grammar_spec,
             )
+            ctx = xgr.CompiledGrammar.deserialize_json(serialized, self.tokenizer_info)
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
             if "structures" in s_tag:
@@ -286,7 +292,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     if so_params.regex:
         try:
             compile_regex_with_timeout(
-                xgr.Grammar.from_regex,
+                _xgr_grammar_from_regex,
                 so_params.regex,
             )
         except Exception as err:
