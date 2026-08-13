@@ -401,6 +401,19 @@ def test_basic_interface():
         assert block_id == block.block_id
 
 
+@pytest.mark.parametrize("enable_prefix_caching", [True, False])
+def test_eagle_prefix_hashing_capability_is_independent_of_local_apc(
+    enable_prefix_caching: bool,
+):
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
+    connector = object.__new__(MooncakeConnector)
+
+    assert connector.supports_eagle_prefix_cache_hashing
+
+
 def test_prompt_less_than_block_size():
     """Test that we can handle case where prompt is < block."""
 

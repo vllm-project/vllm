@@ -48,6 +48,15 @@ from vllm.v1.request import Request
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     @property
+    def supports_eagle_prefix_cache_hashing(self) -> bool:
+        return True
+
+    def set_eagle_prefix_cache_hashing(self, enabled: bool) -> None:
+        super().set_eagle_prefix_cache_hashing(enabled)
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.use_eagle_prefix_cache_hashing = enabled
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         return True
 

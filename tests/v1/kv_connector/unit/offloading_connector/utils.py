@@ -357,7 +357,7 @@ class RequestRunner:
         token_ids: list[int],
         kv_transfer_params: dict | None = None,
         skip_reading_prefix_cache: bool = False,
-    ):
+    ) -> Request:
         self.req_id += 1
 
         sampling_params = SamplingParams(
@@ -377,6 +377,7 @@ class RequestRunner:
             req.kv_transfer_params = kv_transfer_params
 
         self.scheduler.add_request(req)
+        return req
 
     def _parse_transfers(self):
         for src_spec, dst_spec in self.offloading_spec.get_flushed_transfers():

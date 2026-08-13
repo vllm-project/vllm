@@ -467,6 +467,16 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
+    @property
+    def supports_eagle_prefix_cache_hashing(self) -> bool:
+        # P/D transfers identify physical blocks rather than cache hashes.
+        return True
+
+    def set_eagle_prefix_cache_hashing(self, enabled: bool) -> None:
+        super().set_eagle_prefix_cache_hashing(enabled)
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.use_eagle_prefix_cache_hashing = enabled
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -621,6 +631,7 @@ class MooncakeConnectorScheduler:
     ):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
+        self.use_eagle_prefix_cache_hashing = False
 
         assert vllm_config.kv_transfer_config
         self.is_kv_producer: bool = (
@@ -689,11 +700,15 @@ class MooncakeConnectorScheduler:
         h(N-1) instead of h(N). The decoder recomputes the last token to
         derive h(N) correctly.
 
+        Successor-aware hashes keep the full prompt on P while D still loads
+        only through N-1.
+
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
         params = request.kv_transfer_params
         if (
             params is not None
+            and not self.use_eagle_prefix_cache_hashing
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > 1
         ):

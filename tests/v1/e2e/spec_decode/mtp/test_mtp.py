@@ -153,7 +153,7 @@ def test_mtp_correctness(
 def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Successor hashes avoid an extra MTP page drop without changing output."""
+    """Offloading uses the successor-proven MTP boundary without accuracy loss."""
     aligned_page_size = 544
     prompt_len = 2 * aligned_page_size + 1
     sampling_params = SamplingParams(
@@ -173,6 +173,13 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
                 "method": "mtp",
                 "num_speculative_tokens": 1,
                 "max_model_len": 2048,
+            },
+            kv_transfer_config={
+                "kv_connector": "OffloadingConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "cpu_bytes_to_use": 512 << 20,
+                },
             },
             limit_mm_per_prompt={"image": 0, "video": 0},
         )
