@@ -48,6 +48,7 @@ from vllm.model_executor.layers.attention import (
 from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
@@ -77,6 +78,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -85,6 +87,9 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+SINK_PARAM_NAMES = ("sinks", "sink")
+"""Names Transformers gives the learnable per-head attention sink parameter."""
 
 
 class PreTrainedModelClasses(NamedTuple):
@@ -172,6 +177,10 @@ class Base(
         self.recursive_replace()
         # Create attention instances for KV cache allocation
         self.attention_instances = self.create_attention_instances()
+        # The instances are passed to the model's forward through a plain dict, so
+        # register them as submodules too, otherwise `named_modules` never yields
+        # them and their `process_weights_after_loading` does not run
+        self._attention_layers = nn.ModuleList(self.attention_instances.values())
 
         # Input embeddings
         input_embeddings = self.model.get_input_embeddings()
@@ -523,6 +532,42 @@ class Base(
 
         _recursive_replace(self.model, prefix="model")
 
+    def find_sinks(self) -> dict[int, tuple[nn.Module, str]]:
+        """Layer index -> its attention module and the name of that module's sink.
+
+        Models with attention sinks (e.g. GPT-OSS, GraniteSWA) pass a learnable
+        per-head bias to the attention interface as `s_aux`. Only the attention
+        impl can apply it, so it must be given to `Attention` when it is created.
+        Layers without a sink are absent, as are models without sinks entirely.
+        """
+        sinks = {}
+        for module in self.model.get_decoder().modules():
+            if (layer_idx := getattr(module, "layer_idx", None)) is None:
+                continue
+            names = {name for name, _ in module.named_parameters(recurse=False)}
+            if name := next((n for n in SINK_PARAM_NAMES if n in names), None):
+                sinks[layer_idx] = (module, name)
+        return sinks
+
+    def init_sink(self, module: nn.Module, name: str, num_heads: int) -> nn.Parameter:
+        """Materialize a sink parameter as this rank's slice of the model's heads.
+
+        `Attention` holds a reference to the tensor the checkpoint is loaded into,
+        so the parameter is replaced here rather than in `init_parameters`, which
+        runs after the attention instances have been created.
+        """
+        param = nn.Parameter(
+            torch.empty(
+                num_heads,
+                dtype=self.model_config.dtype,
+                device=self.device_config.device,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(param, {"weight_loader": sharded_weight_loader(0)})
+        setattr(module, name, param)
+        return param
+
     def create_attention_instances(self) -> dict[int, Attention]:
         """
         Create `Attention` instances to inform KV cache allocation.
@@ -549,6 +594,7 @@ class Base(
                     self.model_config.model_arch_config.head_size = qk_head_dim
 
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
+        sinks = self.find_sinks()
 
         pp_rank = self.pp_group.rank_in_group
         pp_size = self.pp_group.world_size
@@ -603,12 +649,11 @@ class Base(
                 ):
                     kwargs["per_layer_sliding_window"] = text_config.sliding_window
 
-            attn_instance = attn_cls(**kwargs)
-            if attn_cls is MLAAttention:
-                # Attach MLA attn_instance to mla_module so it appears in
-                # model.named_modules() and runs its process_weights_after_loading
-                mla_module._vllm_mla_attn = attn_instance
-            attention_instances[i] = attn_instance
+                # Handle learnable attention sinks
+                if (sink := sinks.get(i)) is not None:
+                    kwargs["sinks"] = self.init_sink(*sink, num_heads)
+
+            attention_instances[i] = attn_cls(**kwargs)
         return attention_instances
 
     def _get_attn_cls(self) -> type[AttentionLayerBase]:

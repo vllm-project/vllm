@@ -53,6 +53,14 @@ def count_mla_layers(model) -> int:
     return sum(isinstance(m, MLAAttention) for m in model.attention_instances.values())
 
 
+def attention_is_registered(model) -> bool:
+    """Attention instances are passed to the Transformers model in a plain dict,
+    so they must also be registered as submodules, otherwise `named_modules` skips
+    them and their `process_weights_after_loading` never runs."""
+    submodules = {id(module) for module in model.modules()}
+    return all(id(attn) in submodules for attn in model.attention_instances.values())
+
+
 def check_implementation(
     runner_ref: type[HfRunner | VllmRunner],
     runner_test: type[VllmRunner],
@@ -82,6 +90,8 @@ def check_implementation(
         for num_glu, num_qkv in model_test.apply_model(get_num_fused):
             assert num_glu == expected_glu * num_layers
             assert num_qkv == expected_qkv * num_layers
+
+        assert all(model_test.apply_model(attention_is_registered))
 
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
@@ -137,6 +147,42 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
         kwargs_ref=kwargs_ref,
         kwargs_test=kwargs_test,
     )
+
+
+def get_sinks(model) -> dict[int, torch.Tensor]:
+    """The sink tensor each attention layer was handed, keyed by layer index."""
+    assert all(attn.has_sink for attn in model.attention_instances.values())
+    return {
+        i: module.get_parameter(name).float().cpu()
+        for i, (module, name) in model.find_sinks().items()
+    }
+
+
+def test_sinks(vllm_runner: type[VllmRunner]) -> None:
+    """Learnable attention sinks must reach the attention layers.
+
+    Only the attention impl can apply them, so if they are not passed to
+    `Attention` they are dropped and every softmax is subtly wrong.
+    """
+    from vllm.platforms import current_platform
+
+    if not current_platform.has_device_capability(90):
+        pytest.skip("Attention sinks need FlashAttention 3 or TRTLLM attention")
+
+    model = "tiny-random/gpt-oss-bf16"
+    with vllm_runner(
+        model, model_impl="transformers", max_model_len=1024, enforce_eager=True
+    ) as model_test:
+        assert model_test.llm.llm_engine.model_config.using_transformers_backend()
+        sinks = model_test.apply_model(get_sinks)[0]
+
+    with HfRunner(model, dtype="bfloat16") as model_ref:
+        layers = model_ref.model.model.get_decoder().layers
+        expected = {i: layer.self_attn.sinks.float() for i, layer in enumerate(layers)}
+
+    assert sinks.keys() == expected.keys()
+    for i, sink in sinks.items():
+        torch.testing.assert_close(sink, expected[i].cpu())
 
 
 def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:

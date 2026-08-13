@@ -59,6 +59,13 @@ def vllm_attention_forward(
     self_attn = attention_instances[module.layer_idx]
     if scaling is not None:
         self_attn.impl.scale = float(scaling)
+    if kwargs.get("s_aux") is not None and not self_attn.has_sink:
+        raise ValueError(
+            f"{type(module).__name__} applies attention sinks, but the Transformers "
+            "modeling backend could not find the parameter holding them, so the "
+            "output would be wrong. Please open an issue at "
+            "https://github.com/vllm-project/vllm/issues/new"
+        )
     hidden = query.shape[-2]
     head_dim_qk = query.shape[-1]
     head_dim_v = value.shape[-1]
