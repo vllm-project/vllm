@@ -33,6 +33,25 @@ def test_logprobs_tensors_cat():
     assert LogprobsTensors.cat([first]) is first
 
 
+def test_logprobs_tensors_tolists_with_tensor_boundaries():
+    """Adaptive verification hands over the request boundaries as a tensor
+    (they only exist on device); tolists() must materialize it as a plain
+    list so slice_request splits requests correctly."""
+    tensors = LogprobsTensors(
+        torch.tensor([[1, 2], [3, 4], [5, 6]]),
+        torch.tensor([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]),
+        torch.tensor([1, 2, 3]),
+        cu_num_generated_tokens_tensor=torch.tensor([0, 2, 3], dtype=torch.int32),
+    )
+
+    lists = tensors.to_cpu_nonblocking().tolists()
+
+    assert lists.cu_num_generated_tokens == [0, 2, 3]
+    sliced = lists.slice_request(1, 1)
+    assert sliced.logprob_token_ids.tolist() == [[5, 6]]
+    assert sliced.sampled_token_ranks.tolist() == [3]
+
+
 def test_sampling_mask_tensors_tolist():
     tensors = SamplingMaskTensors(
         packed_mask=torch.tensor(
