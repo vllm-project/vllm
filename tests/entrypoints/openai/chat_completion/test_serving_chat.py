@@ -669,11 +669,12 @@ async def _single_request_output(
 async def _collect_metrics_stream_chunks(
     serving: OpenAIServingChat,
     request: ChatCompletionRequest,
+    request_output: RequestOutput | None = None,
 ) -> list[dict[str, Any]]:
     chunks: list[dict[str, Any]] = []
     async for line in serving.chat_completion_stream_generator(
         request,
-        _single_request_output(_make_metrics_request_output()),
+        _single_request_output(request_output or _make_metrics_request_output()),
         "chatcmpl-test-id",
         "test-model",
         conversation=[{"role": "user", "content": "Test"}],
@@ -848,6 +849,63 @@ def test_mm_prompt_tokens_details():
     assert details.cached_tokens == 3
     assert details.created_cache_tokens == 0
     assert details.multimodal_tokens == {"image": 600, "video": 1200}
+
+
+def test_prompt_tokens_details_cache_source_breakdown():
+    # The local/external split is opt-in: callers that do not know the breakdown
+    # leave both fields unset rather than reporting a bogus zero.
+    details = _make_prompt_tokens_details(True, 3, 0, None)
+    assert details.local_cached_tokens is None
+    assert details.external_cached_tokens is None
+
+    details = _make_prompt_tokens_details(True, 600, 0, None, 400, 200)
+    assert details.cached_tokens == 600
+    assert details.local_cached_tokens == 400
+    assert details.external_cached_tokens == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_chat_reports_cache_source_breakdown(stream: bool):
+    """Distributed prefix-cache hits reach the client split by source."""
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.enable_prompt_tokens_details = True
+
+    request_output = _make_metrics_request_output()
+    request_output.num_cached_tokens = 600
+    request_output.num_local_cached_tokens = 400
+    request_output.num_external_cached_tokens = 200
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=stream,
+        stream_options={"include_usage": True} if stream else None,
+    )
+
+    if stream:
+        chunks = await _collect_metrics_stream_chunks(serving, request, request_output)
+        usage = [chunk["usage"] for chunk in chunks if chunk.get("usage")][-1]
+        details = usage["prompt_tokens_details"]
+    else:
+        response = await serving.chat_completion_full_generator(
+            request,
+            _single_request_output(request_output),
+            "chatcmpl-test-id",
+            "test-model",
+            conversation=[{"role": "user", "content": "Test"}],
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        )
+        details = response.usage.prompt_tokens_details.model_dump()
+
+    assert details["local_cached_tokens"] == 400
+    assert details["external_cached_tokens"] == 200
+    assert (
+        details["cached_tokens"]
+        == details["local_cached_tokens"] + details["external_cached_tokens"]
+    )
 
 
 @pytest.mark.asyncio

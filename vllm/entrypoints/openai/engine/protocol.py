@@ -111,12 +111,18 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: int | None = None
     created_cache_tokens: int | None = None
     multimodal_tokens: dict[str, int] | None = None
-    local_cached_tokens: int | None = None
-    external_cached_tokens: int | None = None
     """Prompt tokens contributed by each input modality, keyed by modality name
     (e.g. `image`, `audio`, `video`). A breakdown of the multimodal
     placeholder tokens already counted in `prompt_tokens`; `None` when the
     request has no multimodal input."""
+    local_cached_tokens: int | None = None
+    """Cache hits served by this instance's local prefix cache. A breakdown of
+    `cached_tokens` together with `external_cached_tokens`; `None` when the
+    breakdown is unavailable."""
+    external_cached_tokens: int | None = None
+    """Cache hits fetched from an external KV store via a KV connector. A
+    breakdown of `cached_tokens` together with `local_cached_tokens`; `None`
+    when the breakdown is unavailable."""
 
 
 class UsageInfo(OpenAIBaseModel):

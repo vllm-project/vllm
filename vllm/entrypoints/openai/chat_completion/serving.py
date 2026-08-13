@@ -88,8 +88,8 @@ def _make_prompt_tokens_details(
     num_cached_tokens: int | None,
     num_cache_creation_tokens: int | None,
     mm_token_counts: dict[str, int] | None,
-    num_local_cached_tokens: int | None,
-    num_external_cached_tokens: int | None,
+    num_local_cached_tokens: int | None = None,
+    num_external_cached_tokens: int | None = None,
 ) -> PromptTokenUsageInfo | None:
     """Build ``prompt_tokens_details`` from cached + multimodal token counts."""
     if not enable_prompt_tokens_details:
