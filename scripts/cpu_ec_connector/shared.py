@@ -68,6 +68,12 @@ class ServerSpec:
     # `gpu`. Its length is the tensor-parallel size, one rank per device. In
     # K8s mode this stays empty because device assignment lives in the pod spec.
     devices: tuple[int, ...] = ()
+    # Passed through as --load-format; None leaves vLLM on "auto". Mainly for
+    # "fastsafetensors", where each rank reads only its own subset of
+    # checkpoint files and the owning rank then broadcasts replicated tensors
+    # and scatters TP-sharded ones over NCCL, so a TP>1 instance loads weights
+    # without every rank re-reading the whole checkpoint.
+    load_format: str | None = None
 
     @property
     def device_list(self) -> tuple[int, ...]:

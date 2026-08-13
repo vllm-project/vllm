@@ -19,13 +19,15 @@ instance can be widened with tensor parallelism by listing more devices::
         --producer-gpus 0,1,2,3 --consumer-gpus 4,5,6,7
 
 The device count per instance is its --tensor-parallel-size, so that example
-needs eight GPUs.
+needs eight GPUs. At TP>1, ``--load-format fastsafetensors`` splits the
+checkpoint read across ranks rather than having each rank read all of it.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.util
 import json
 import os
 import signal
@@ -110,6 +112,8 @@ def build_vllm_argv(spec: ServerSpec, model: str) -> list[str]:
         "--ec-transfer-config",
         json.dumps(ec_cfg),
     ]
+    if spec.load_format is not None:
+        argv += ["--load-format", spec.load_format]
     if spec.role == "producer":
         argv.append("--no-enable-prefix-caching")
     return argv
@@ -231,6 +235,7 @@ def make_specs(
         gpu_memory_utilization=0.01,
         log_path=log_dir / "producer.log",
         ec_cpu_bytes=producer_ec_cpu_bytes,
+        load_format=args.load_format,
     )
     consumer = ServerSpec(
         role="consumer",
@@ -242,6 +247,7 @@ def make_specs(
         gpu_memory_utilization=0.5,
         log_path=log_dir / "consumer.log",
         ec_cpu_bytes=consumer_ec_cpu_bytes,
+        load_format=args.load_format,
     )
     return producer, consumer
 
@@ -367,6 +373,14 @@ def main() -> int:
     parser.add_argument("--producer-port", type=int, default=DEFAULT_PRODUCER_PORT)
     parser.add_argument("--consumer-port", type=int, default=DEFAULT_CONSUMER_PORT)
     parser.add_argument(
+        "--load-format",
+        default=None,
+        help="passed through to both instances as --load-format. Use "
+        "'fastsafetensors' to have each TP rank read only its own subset of "
+        "checkpoint files and redistribute over NCCL instead of every rank "
+        "re-reading the whole checkpoint. Default leaves vLLM on 'auto'",
+    )
+    parser.add_argument(
         "--keep-servers",
         action="store_true",
         help="leave the shared-harness servers running on success",
@@ -390,6 +404,18 @@ def main() -> int:
 
     args.producer_devices = _parse_devices(args.producer_gpus, "--producer-gpus")
     args.consumer_devices = _parse_devices(args.consumer_gpus, "--consumer-gpus")
+    if args.load_format == "fastsafetensors" and (
+        importlib.util.find_spec("fastsafetensors") is None
+    ):
+        # Checked here rather than left to the servers: otherwise the failure
+        # surfaces as a health-check timeout with the real cause buried in a log.
+        print(
+            "--load-format fastsafetensors needs the extra installed: "
+            "pip install 'vllm[fastsafetensors]'",
+            file=sys.stderr,
+        )
+        return 2
+
     shared_devices = set(args.producer_devices) & set(args.consumer_devices)
     if shared_devices:
         # Both instances reserve gpu_memory_utilization of every device they
