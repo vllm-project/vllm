@@ -493,6 +493,24 @@ def test_prefix_cache_default():
     assert engine_args.prefix_cache_retention_interval == 64
 
 
+def test_prefix_cache_retention_interval_from_deprecated_env(
+    monkeypatch, caplog, disable_log_dedup
+):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "64")
+
+    engine_args = EngineArgs()
+
+    assert engine_args.prefix_cache_retention_interval == 64
+    assert "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in caplog.text
+    assert "deprecated" in caplog.text
+    assert "prefix_cache_retention_interval" in caplog.text
+
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--prefix-cache-retention-interval", "32"])
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.prefix_cache_retention_interval == 32
+
+
 @pytest.mark.parametrize(
     ("arg", "expected", "option"),
     [
