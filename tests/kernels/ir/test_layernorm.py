@@ -256,6 +256,44 @@ def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
     assert_close(ir.ops.fused_add_rms_norm, residual, ref_residual)
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.skipif(
+    not IS_GPGPU_DEVICE,
+    reason="Currently only kernels on CUDA, ROCm and XPU",
+)
+def test_vllm_c_fused_add_rms_norm_uses_fp32_sum_for_variance(dtype):
+    impl = ir.ops.fused_add_rms_norm.impls["vllm_c"]
+    if not impl.supported:
+        pytest.skip("vllm_c impl not supported on this platform")
+
+    torch.manual_seed(0)
+    device = current_platform.device_type
+    tokens = 4
+    hidden_size = 2048
+    epsilon = 1e-6
+    x = torch.randn(tokens, hidden_size, device=device, dtype=dtype)
+    x_residual = torch.randn_like(x)
+    weight = torch.randn(hidden_size, device=device, dtype=dtype)
+
+    summed_fp32 = x.float() + x_residual.float()
+    variance = summed_fp32.square().mean(dim=-1, keepdim=True)
+    expected_output = summed_fp32 * torch.rsqrt(variance + epsilon)
+    expected_output = (expected_output.to(weight.dtype) * weight).to(dtype)
+    expected_residual = summed_fp32.to(dtype)
+    rounded_sum = expected_residual.float()
+    rounded_variance = rounded_sum.square().mean(dim=-1, keepdim=True)
+    rounded_output = rounded_sum * torch.rsqrt(rounded_variance + epsilon)
+    rounded_output = (rounded_output.to(weight.dtype) * weight).to(dtype)
+
+    output, residual = impl.impl_fn(x.clone(), x_residual.clone(), weight, epsilon)
+
+    assert_close(ir.ops.fused_add_rms_norm, output, expected_output)
+    fp32_sum_error = (output.float() - expected_output.float()).abs().mean()
+    rounded_sum_error = (output.float() - rounded_output.float()).abs().mean()
+    assert fp32_sum_error < rounded_sum_error
+    torch.testing.assert_close(residual, expected_residual, rtol=0.0, atol=0.0)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)

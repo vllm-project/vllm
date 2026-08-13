@@ -133,10 +133,16 @@ fused_add_rms_norm_kernel(
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int64_t id = blockIdx.x * residual_stride / width + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
-    _f16Vec<scalar_t, width> temp = input_v[strided_id];
-    temp += residual_v[id];
-    variance += temp.sum_squares();
-    residual_v[id] = temp;
+    _f16Vec<scalar_t, width> input_vec = input_v[strided_id];
+    _f16Vec<scalar_t, width> residual_vec = residual_v[id];
+    using Converter = _typeConvert<scalar_t>;
+#pragma unroll
+    for (int j = 0; j < width; ++j) {
+      float x = Converter::convert(input_vec.data[j]);
+      float r = Converter::convert(residual_vec.data[j]);
+      float sum = x + r;
+      variance += sum * sum;
+    }
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -151,24 +157,32 @@ fused_add_rms_norm_kernel(
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int64_t id = blockIdx.x * residual_stride / width + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
-    _f16Vec<scalar_t, width> res = residual_v[id];
+    _f16Vec<scalar_t, width> input_vec = input_v[strided_id];
+    _f16Vec<scalar_t, width> residual_vec = residual_v[id];
     _f16Vec<scalar_t, width> out;
     using Converter = _typeConvert<scalar_t>;
     if constexpr (HasWeight) {
       _f16Vec<scalar_t, width> w = weight_v[idx];
 #pragma unroll
       for (int j = 0; j < width; ++j) {
-        float x = Converter::convert(res.data[j]);
+        float x = Converter::convert(input_vec.data[j]);
+        float r = Converter::convert(residual_vec.data[j]);
+        float sum = x + r;
         float wf = Converter::convert(w.data[j]);
-        out.data[j] = Converter::convert(x * s_variance * wf);
+        residual_vec.data[j] = Converter::convert(sum);
+        out.data[j] = Converter::convert(sum * s_variance * wf);
       }
     } else {
 #pragma unroll
       for (int j = 0; j < width; ++j) {
-        float x = Converter::convert(res.data[j]);
-        out.data[j] = Converter::convert(x * s_variance);
+        float x = Converter::convert(input_vec.data[j]);
+        float r = Converter::convert(residual_vec.data[j]);
+        float sum = x + r;
+        residual_vec.data[j] = Converter::convert(sum);
+        out.data[j] = Converter::convert(sum * s_variance);
       }
     }
+    residual_v[id] = residual_vec;
     input_v[strided_id] = out;
   }
 }
@@ -189,11 +203,10 @@ fused_add_rms_norm_kernel(
   float variance = 0.0f;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    scalar_t z = input[blockIdx.x * input_stride + idx];
-    z += residual[blockIdx.x * residual_stride + idx];
-    float x = (float)z;
-    variance += x * x;
-    residual[blockIdx.x * residual_stride + idx] = z;
+    float x = (float)input[blockIdx.x * input_stride + idx];
+    float r = (float)residual[blockIdx.x * residual_stride + idx];
+    float z = x + r;
+    variance += z * z;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -206,12 +219,15 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * residual_stride + idx];
+    float x = (float)input[blockIdx.x * input_stride + idx];
+    float r = (float)residual[blockIdx.x * residual_stride + idx];
+    float z = x + r;
+    residual[blockIdx.x * residual_stride + idx] = (scalar_t)z;
     if constexpr (HasWeight) {
       float w = (float)weight[idx];
-      input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance * w);
+      input[blockIdx.x * input_stride + idx] = (scalar_t)(z * s_variance * w);
     } else {
-      input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance);
+      input[blockIdx.x * input_stride + idx] = (scalar_t)(z * s_variance);
     }
   }
 }
