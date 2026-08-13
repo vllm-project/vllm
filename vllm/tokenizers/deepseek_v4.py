@@ -6,10 +6,13 @@ from typing import Any
 from transformers import TokenizersBackend
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.logger import init_logger
 
 from .deepseek_v4_encoding import encode_messages
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
+
+logger = init_logger(__name__)
 
 
 def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
@@ -30,9 +33,23 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             thinking = kwargs.get("thinking")
             enable_thinking = kwargs.get("enable_thinking")
             thinking_enabled = bool(thinking) or bool(enable_thinking)
-            if "thinking" not in kwargs and "enable_thinking" not in kwargs:
+            thinking_unset = (
+                "thinking" not in kwargs and "enable_thinking" not in kwargs
+            )
+            if thinking_unset:
                 thinking_enabled = True
             thinking_mode = "thinking" if thinking_enabled else "chat"
+
+            if thinking_unset and not isinstance(kwargs.get("reasoning_effort"), str):
+                logger.warning_once(
+                    "DeepSeek-V4 request omitted both `thinking`/`enable_thinking` "
+                    "and `reasoning_effort`; this now defaults to thinking mode "
+                    'with reasoning_effort="high", which renders a '
+                    "reasoning-effort prompt prefix that was previously omitted "
+                    'by default. Pass reasoning_effort="low" explicitly to '
+                    "restore the prior default. See "
+                    "https://github.com/vllm-project/vllm/issues/52083."
+                )
 
             conversation = kwargs.get("conversation", messages)
             messages = conversation.copy()

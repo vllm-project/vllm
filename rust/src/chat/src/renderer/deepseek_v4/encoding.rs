@@ -8,14 +8,18 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::Once;
 
 use serde::Serialize;
 use serde_json::Value;
 use serde_json_fmt::JsonFormat;
+use tracing::warn;
 
 use crate::error::{Error, Result};
 use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatTool, ReasoningEffort};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
+
+static DEFAULT_REASONING_EFFORT_WARNING: Once = Once::new();
 
 const BOS_TOKEN: &str = "<｜begin▁of▁sentence｜>";
 const EOS_TOKEN: &str = "<｜end▁of▁sentence｜>";
@@ -130,7 +134,8 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
 /// `reasoning_effort`; the generic template-kwargs map is left for HF
 /// templates.
 fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, &'static str)> {
-    let mut thinking_mode = match request.enable_thinking()?.unwrap_or(true) {
+    let enable_thinking = request.enable_thinking()?;
+    let mut thinking_mode = match enable_thinking.unwrap_or(true) {
         true => ThinkingMode::Thinking,
         false => ThinkingMode::Chat,
     };
@@ -147,7 +152,20 @@ fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, &'st
         Some(ReasoningEffort::Minimal | ReasoningEffort::Medium | ReasoningEffort::Low) => {
             reasoning_effort_prompt = "";
         }
-        None => {}
+        None => {
+            if enable_thinking.is_none() {
+                DEFAULT_REASONING_EFFORT_WARNING.call_once(|| {
+                    warn!(
+                        "DeepSeek-V4 request omitted both thinking/enable_thinking and \
+                         reasoning_effort; this now defaults to thinking mode with \
+                         reasoning_effort=\"high\", which renders a reasoning-effort prompt \
+                         prefix that was previously omitted by default. Pass \
+                         reasoning_effort=\"low\" explicitly to restore the prior default. \
+                         See https://github.com/vllm-project/vllm/issues/52083."
+                    );
+                });
+            }
+        }
     }
 
     Ok((thinking_mode, reasoning_effort_prompt))
