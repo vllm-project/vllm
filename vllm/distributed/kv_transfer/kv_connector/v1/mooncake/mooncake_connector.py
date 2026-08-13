@@ -1706,7 +1706,7 @@ class MooncakeConnectorWorker:
                     # physical padded stride (cache.stride(0)*elsize = idx_page)
                     # because it is the per-slot address stride used to locate
                     # tail block b at base + b*idx_page. Overriding it to the
-                    # logical unpadded page mis-addresses every tail block b!=0
+                    # logical unpadded page misaddresses every tail block b!=0
                     # (base + b*unpadded lands inside a neighbouring indexer
                     # slot of the shared tensor) and clobbers the compressed
                     # indexer cache. Only the K/score half length uses the

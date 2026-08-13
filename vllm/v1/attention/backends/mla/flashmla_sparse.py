@@ -829,8 +829,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # scores only the NoPE part, so the softmax scale must be over d_v
         # (kv_lora_rank) rather than the with-rope head size. Mirrors the
         # only_qv scale used by the FA-based sparse MLA path.
-        sm_scale = (self.kv_lora_rank ** -0.5
-                    if self.qk_rope_head_dim == 0 else self.softmax_scale)
+        sm_scale = (
+            self.kv_lora_rank**-0.5
+            if self.qk_rope_head_dim == 0
+            else self.softmax_scale
+        )
         output = flash_mla_sparse_fwd(
             q,
             kv_c_and_k_pe_cache,
