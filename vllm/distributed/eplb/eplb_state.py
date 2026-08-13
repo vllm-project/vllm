@@ -51,6 +51,7 @@ from vllm.platforms import current_platform
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .eplb_utils import CpuGpuEvent
+from .metrics import EplbMetricsSnapshot
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEplbLayerResult,
@@ -234,6 +235,8 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
+        self.pending_rebalance_events: int = 0
+        """Real rearrangements not yet included in a normal output."""
         self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
         """
         Selected EPLB algorithm class
@@ -537,7 +540,7 @@ class EplbState:
         is_dummy: bool = False,
         is_profile: bool = False,
         log_stats: bool = False,
-    ) -> None:
+    ) -> EplbMetricsSnapshot | None:
         """
         Step the EPLB state.
 
@@ -560,7 +563,7 @@ class EplbState:
         ep_group = get_ep_group().device_group
         if is_profile:
             self.rearrange(is_profile=True)
-            return
+            return None
 
         if is_dummy:
             # Do not record load metrics for dummy steps
@@ -661,11 +664,31 @@ class EplbState:
                 # should_record (step > step_interval, so always True) and
                 # bail out before the step counter is reset.
                 self._update_layer_should_record(log_stats=log_stats)
-                return
+                return self._make_metrics_snapshot(
+                    consume_events=not is_dummy,
+                )
             self.expert_rearrangement_step = 0
             self.rearrange()
 
         self._update_layer_should_record(log_stats=log_stats)
+        return self._make_metrics_snapshot(
+            consume_events=not is_dummy,
+        )
+
+    def _make_metrics_snapshot(
+        self,
+        *,
+        consume_events: bool,
+    ) -> EplbMetricsSnapshot:
+        snapshot = EplbMetricsSnapshot(
+            rebalancing=any(
+                model_state.rebalanced for model_state in self.model_states.values()
+            ),
+            rebalance_events=self.pending_rebalance_events,
+        )
+        if consume_events:
+            self.pending_rebalance_events = 0
+        return snapshot
 
     def _should_record_current_step(self, log_stats: bool = False) -> bool:
         """Return whether expert-load recording should be enabled this step.
@@ -820,6 +843,8 @@ class EplbState:
                 f"{num_gpus=}, {num_nodes=}"
             )
 
+        rearranged = False
+
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
@@ -909,6 +934,7 @@ class EplbState:
                             eplb_model_state,
                             new_physical_to_logical_map=new_physical_to_logical_map,
                         )
+                        rearranged = True
 
                 if is_main_rank:
                     assert start_event is not None
@@ -933,6 +959,9 @@ class EplbState:
                     num_gpus=num_gpus,
                 )
                 eplb_model_state.rebalanced = True
+                rearranged = True
+        if rearranged:
+            self.pending_rebalance_events += 1
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
             self.rearrange_event.record()

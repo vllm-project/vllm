@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import copy
 from types import SimpleNamespace
 from typing import Any
 
 import torch
 
+from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
@@ -199,3 +201,42 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     output = mrv2.GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]
+
+
+def test_step_decorator_attaches_metrics_without_mutating_empty_output():
+    snapshot = EplbMetricsSnapshot()
+    runner = SimpleNamespace(
+        eplb=SimpleNamespace(step=lambda **_: snapshot),
+    )
+
+    @eplb.step_eplb_after()
+    def run(_runner):
+        return EMPTY_MODEL_RUNNER_OUTPUT
+
+    output = run(runner)
+
+    assert output is not EMPTY_MODEL_RUNNER_OUTPUT
+    assert output.eplb_metrics is snapshot
+    assert EMPTY_MODEL_RUNNER_OUTPUT.eplb_metrics is None
+
+
+def test_step_decorator_attaches_metrics_to_async_output(monkeypatch):
+    snapshot = EplbMetricsSnapshot()
+    model_runner_output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+
+    class FakeAsyncOutput:
+        def __init__(self):
+            self.model_runner_output = model_runner_output
+
+    monkeypatch.setattr(eplb, "AsyncOutput", FakeAsyncOutput)
+    runner = SimpleNamespace(
+        eplb=SimpleNamespace(step=lambda **_: snapshot),
+    )
+
+    @eplb.step_eplb_after()
+    def run(_runner):
+        return FakeAsyncOutput()
+
+    output = run(runner)
+
+    assert output.model_runner_output.eplb_metrics is snapshot

@@ -15,6 +15,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorRole,
 )
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
+from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -1692,6 +1693,7 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        eplb_metrics = model_runner_output.eplb_metrics
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -2063,6 +2065,7 @@ class Scheduler(SchedulerInterface):
                 kv_connector_stats,
                 cudagraph_stats,
                 perf_stats,
+                eplb_metrics,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -2525,6 +2528,7 @@ class Scheduler(SchedulerInterface):
         kv_connector_stats: KVConnectorStats | None = None,
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
+        eplb_metrics: EplbMetricsSnapshot | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -2554,6 +2558,7 @@ class Scheduler(SchedulerInterface):
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
+            eplb_metrics=eplb_metrics,
             perf_stats=perf_stats,
         )
 

@@ -41,6 +41,7 @@ from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
@@ -3484,16 +3485,18 @@ class GPUModelRunner(
             {k: v[:num_tokens] for k, v in self.intermediate_tensors.items()}
         )
 
-    def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
+    def eplb_step(
+        self, is_dummy: bool = False, is_profile: bool = False
+    ) -> EplbMetricsSnapshot | None:
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
         """
         if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
-            return
+            return None
 
         assert self.eplb_state is not None
         assert self._moe_model is not None
-        self.eplb_state.step(
+        return self.eplb_state.step(
             is_dummy,
             is_profile,
             log_stats=self.parallel_config.eplb_config.log_balancedness,
@@ -4861,7 +4864,7 @@ class GPUModelRunner(
             self.finalize_kv_connector()
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
-            self.eplb_step()
+            eplb_metrics = self.eplb_step()
 
         # self.kv_connector_output may be modified during drafting
         kv_connector_output = self.kv_connector_output
@@ -4880,6 +4883,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                eplb_metrics=eplb_metrics,
                 routed_experts=None,
             )
 

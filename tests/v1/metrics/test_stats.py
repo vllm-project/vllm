@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
@@ -43,6 +44,22 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
+
+
+def test_eplb_metrics_serialization():
+    eplb_metrics = EplbMetricsSnapshot(
+        rebalancing=True,
+        rebalance_events=3,
+    )
+    outputs = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(eplb_metrics=eplb_metrics)
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.scheduler_stats is not None
+    assert decoded.scheduler_stats.eplb_metrics == eplb_metrics
 
 
 def test_compute_iteration_details_includes_encoder_stats():

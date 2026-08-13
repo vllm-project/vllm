@@ -20,6 +20,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.reasoning import ReasoningConfig
+from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -62,6 +63,22 @@ from vllm.v1.worker.utils import select_common_block_size
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_eplb_step_returns_metrics_snapshot():
+    snapshot = EplbMetricsSnapshot()
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.parallel_config = SimpleNamespace(
+        enable_eplb=True,
+        eplb_config=SimpleNamespace(log_balancedness=True),
+    )
+    runner.eep_eplb_suppressed = False
+    runner.eplb_state = SimpleNamespace(step=Mock(return_value=snapshot))
+    runner._moe_model = SimpleNamespace()
+
+    result = GPUModelRunner.eplb_step(runner)
+
+    assert result is snapshot
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
