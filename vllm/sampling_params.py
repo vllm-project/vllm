@@ -406,6 +406,7 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
+        routed_experts_prompt_start: int = 0,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -468,6 +469,7 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            routed_experts_prompt_start=routed_experts_prompt_start,
         )
 
     def __post_init__(self) -> None:
@@ -907,6 +909,20 @@ class SamplingParams(
     ) -> None:
         if speculative_config is None:
             return
+
+        # Adaptive verification compacts logits after the forward pass, while
+        # compute_topk_scores uses the scheduled layout in cu_num_logits_np.
+        # TODO(lucas): lift this restriction. The true boundaries exist on device as
+        # cu_num_logits; cu_num_generated_tokens is only read host-side after
+        # the logprobs D2H, so it could ride along on that copy.
+        if (
+            speculative_config.enable_adaptive_verification
+            and self.num_logprobs is not None
+        ):
+            raise ValueError(
+                "Output logprobs are not supported with DSpark confidence-based "
+                "verification."
+            )
 
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
