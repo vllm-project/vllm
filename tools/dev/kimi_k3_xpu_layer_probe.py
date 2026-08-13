@@ -5,14 +5,18 @@
 Layer indices are zero-based. The default ``--layer-index 3`` therefore runs
 the fourth transformer layer. Activations can be synthetic or loaded from a
 ``torch.save`` file containing ``hidden_states`` and, when attn-res is enabled,
-``prefix_sum`` and ``residual`` tensors.
+``prefix_sum`` and ``residual`` tensors. Set ``--benchmark-iters`` to measure
+steady-state, host-observed decoder-layer forward latency. Set
+``--profile-output`` to export a trace for Perfetto.
 """
 
 import argparse
 import json
 import os
+import statistics
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -46,6 +50,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-dir", type=Path, required=True)
     parser.add_argument("--layer-index", type=int, default=3)
     parser.add_argument("--num-tokens", type=int, default=1)
+    parser.add_argument(
+        "--warmup-iters",
+        type=int,
+        default=5,
+        help="Warmup forwards before benchmarking.",
+    )
+    parser.add_argument(
+        "--benchmark-iters",
+        type=int,
+        default=0,
+        help="Timed forwards; zero disables benchmarking.",
+    )
+    parser.add_argument(
+        "--profile-output",
+        type=Path,
+        help="Write a Perfetto-compatible PyTorch profiler trace.",
+    )
     parser.add_argument(
         "--num-experts",
         type=int,
@@ -81,6 +102,7 @@ def initialize_single_rank() -> None:
 def make_model_config(
     source_config: Any,
     checkpoint_dir: Path,
+    max_model_len: int,
 ) -> ModelConfig:
     config_dir = Path(tempfile.mkdtemp(prefix="kimi_linear_config_"))
     config_dict = source_config.to_dict()
@@ -96,7 +118,7 @@ def make_model_config(
         model=str(config_dir),
         model_weights=str(checkpoint_dir),
         dtype=torch.bfloat16,
-        max_model_len=128,
+        max_model_len=max_model_len,
         enforce_eager=True,
     )
 
@@ -358,6 +380,150 @@ def make_input_state(
     return hidden_states, prefix_sum, residual
 
 
+def capture_attention_cache(layer: KimiDecoderLayer) -> tuple[torch.Tensor, ...]:
+    if isinstance(layer.self_attn, KimiK3DeltaAttention):
+        return tuple(state.clone() for state in layer.self_attn.kv_cache)
+    mla = layer.self_attn.mla_attn.mla_attn
+    return (mla.kv_cache.clone(),)
+
+
+def restore_attention_cache(
+    layer: KimiDecoderLayer,
+    cache_state: tuple[torch.Tensor, ...],
+) -> None:
+    if isinstance(layer.self_attn, KimiK3DeltaAttention):
+        for state, initial_state in zip(layer.self_attn.kv_cache, cache_state):
+            state.copy_(initial_state)
+        return
+    mla = layer.self_attn.mla_attn.mla_attn
+    mla.kv_cache.copy_(cache_state[0])
+
+
+def percentile(samples: list[float], fraction: float) -> float:
+    ordered = sorted(samples)
+    position = fraction * (len(ordered) - 1)
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def benchmark_layer_forward(
+    layer: KimiDecoderLayer,
+    positions: torch.Tensor,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    prefix_sum: torch.Tensor | None,
+    metadata: dict[str, Any],
+    slot_mapping: dict[str, torch.Tensor],
+    vllm_config: VllmConfig,
+    cache_state: tuple[torch.Tensor, ...],
+    warmup_iters: int,
+    benchmark_iters: int,
+) -> dict[str, Any]:
+    def make_iteration_inputs() -> tuple[
+        torch.Tensor, torch.Tensor | None, torch.Tensor | None
+    ]:
+        restore_attention_cache(layer, cache_state)
+        iteration_hidden_states = hidden_states.clone()
+        iteration_residual = None if residual is None else residual.clone()
+        iteration_prefix_sum = None if prefix_sum is None else prefix_sum.clone()
+        return iteration_hidden_states, iteration_residual, iteration_prefix_sum
+
+    with torch.inference_mode():
+        with set_forward_context(
+            metadata,
+            vllm_config,
+            num_tokens=hidden_states.size(0),
+            slot_mapping=slot_mapping,
+        ):
+            for _ in range(warmup_iters):
+                iteration_inputs = make_iteration_inputs()
+                layer(positions, *iteration_inputs)
+            torch.xpu.synchronize()
+
+            latencies_ms: list[float] = []
+            for _ in range(benchmark_iters):
+                iteration_inputs = make_iteration_inputs()
+                torch.xpu.synchronize()
+                start_ns = time.perf_counter_ns()
+                layer(positions, *iteration_inputs)
+                torch.xpu.synchronize()
+                latencies_ms.append(
+                    (time.perf_counter_ns() - start_ns) / 1_000_000
+                )
+
+    median_ms = statistics.median(latencies_ms)
+    return {
+        "warmup_iters": warmup_iters,
+        "benchmark_iters": benchmark_iters,
+        "latency_mean_ms": statistics.fmean(latencies_ms),
+        "latency_min_ms": min(latencies_ms),
+        "latency_max_ms": max(latencies_ms),
+        "latency_p50_ms": median_ms,
+        "latency_median_ms": median_ms,
+        "latency_p90_ms": percentile(latencies_ms, 0.90),
+        "latency_p99_ms": percentile(latencies_ms, 0.99),
+        "tokens_per_second_median": hidden_states.size(0) * 1000 / median_ms,
+        "attention_mode": (
+            "cold_decode" if hidden_states.size(0) == 1 else "prefill"
+        ),
+        "cache_reset_between_iters": True,
+        "input_reset_between_iters": True,
+        "timing_method": "synchronized_host_wall_clock",
+        "timing_scope": "KimiDecoderLayer.forward and device completion",
+    }
+
+
+def profile_layer_forward(
+    layer: KimiDecoderLayer,
+    positions: torch.Tensor,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    prefix_sum: torch.Tensor | None,
+    metadata: dict[str, Any],
+    slot_mapping: dict[str, torch.Tensor],
+    vllm_config: VllmConfig,
+    cache_state: tuple[torch.Tensor, ...],
+    output_path: Path,
+) -> None:
+    restore_attention_cache(layer, cache_state)
+    iteration_hidden_states = hidden_states.clone()
+    iteration_residual = None if residual is None else residual.clone()
+    iteration_prefix_sum = None if prefix_sum is None else prefix_sum.clone()
+    torch.xpu.synchronize()
+
+    with torch.inference_mode():
+        with set_forward_context(
+            metadata,
+            vllm_config,
+            num_tokens=hidden_states.size(0),
+            slot_mapping=slot_mapping,
+        ):
+            with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.XPU,
+                ],
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=False,
+            ) as profiler:
+                with torch.profiler.record_function(
+                    "kimi_decoder_layer_forward"
+                ):
+                    layer(
+                        positions,
+                        iteration_hidden_states,
+                        iteration_residual,
+                        iteration_prefix_sum,
+                    )
+                torch.xpu.synchronize()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    profiler.export_chrome_trace(str(output_path))
+
+
 def main() -> int:
     args = parse_args()
     report: dict[str, Any] = {
@@ -366,8 +532,12 @@ def main() -> int:
         "layer_index": args.layer_index,
     }
     try:
-        if args.layer_index < 0 or args.num_tokens < 1:
-            raise ProbeError("Layer index must be non-negative and tokens positive")
+        if args.layer_index < 0:
+            raise ProbeError("--layer-index must be non-negative")
+        if args.num_tokens < 1:
+            raise ProbeError("--num-tokens must be positive")
+        if args.warmup_iters < 0 or args.benchmark_iters < 0:
+            raise ProbeError("Benchmark iteration counts must be non-negative")
         raw_config = load_checkpoint_config(args.checkpoint_dir)
         source_config = load_text_config(raw_config)
         source_num_experts = source_config.num_experts
@@ -410,11 +580,11 @@ def main() -> int:
 
         device = torch.device("xpu:0")
         torch.xpu.set_device(device)
-        model_config = make_model_config(source_config, args.checkpoint_dir)
-        if args.num_tokens > model_config.max_model_len:
-            raise ProbeError(
-                f"--num-tokens exceeds max_model_len={model_config.max_model_len}"
-            )
+        model_config = make_model_config(
+            source_config,
+            args.checkpoint_dir,
+            args.num_tokens,
+        )
         cache_config = CacheConfig(
             block_size=16,
             cache_dtype="auto",
@@ -434,6 +604,7 @@ def main() -> int:
                     vllm_config,
                     prefix=f"model.layers.{args.layer_index}",
                 ).to(device)
+            layer.eval()
             loaded, moe_records = load_layer_weights(
                 layer,
                 weight_map,
@@ -483,18 +654,20 @@ def main() -> int:
             )
             hidden_states, prefix_sum, residual = make_input_state(args, layer, device)
             positions = torch.zeros(args.num_tokens, dtype=torch.int64, device=device)
-            with set_forward_context(
-                metadata,
-                vllm_config,
-                num_tokens=args.num_tokens,
-                slot_mapping=slot_mapping,
-            ):
-                output, output_prefix_sum, output_residual = layer(
-                    positions,
-                    hidden_states,
-                    residual,
-                    prefix_sum,
-                )
+            initial_cache_state = capture_attention_cache(layer)
+            with torch.inference_mode():
+                with set_forward_context(
+                    metadata,
+                    vllm_config,
+                    num_tokens=args.num_tokens,
+                    slot_mapping=slot_mapping,
+                ):
+                    output, output_prefix_sum, output_residual = layer(
+                        positions,
+                        hidden_states.clone(),
+                        None if residual is None else residual.clone(),
+                        None if prefix_sum is None else prefix_sum.clone(),
+                    )
             torch.xpu.synchronize()
             if not bool(torch.isfinite(output).all()):
                 raise ProbeError("Layer output contains non-finite values")
@@ -512,6 +685,34 @@ def main() -> int:
                 output_state.update(
                     conv_state=conv_state.cpu(),
                     recurrent_state=recurrent_state.cpu(),
+                )
+            benchmark_result = None
+            if args.benchmark_iters > 0:
+                benchmark_result = benchmark_layer_forward(
+                    layer=layer,
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                    prefix_sum=prefix_sum,
+                    metadata=metadata,
+                    slot_mapping=slot_mapping,
+                    vllm_config=vllm_config,
+                    cache_state=initial_cache_state,
+                    warmup_iters=args.warmup_iters,
+                    benchmark_iters=args.benchmark_iters,
+                )
+            if args.profile_output is not None:
+                profile_layer_forward(
+                    layer=layer,
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                    prefix_sum=prefix_sum,
+                    metadata=metadata,
+                    slot_mapping=slot_mapping,
+                    vllm_config=vllm_config,
+                    cache_state=initial_cache_state,
+                    output_path=args.profile_output,
                 )
             if args.save_output is not None:
                 args.save_output.parent.mkdir(parents=True, exist_ok=True)
@@ -531,6 +732,16 @@ def main() -> int:
                 output_all_finite=True,
                 output_max_abs=float(output.abs().max()),
             )
+            if benchmark_result is not None:
+                report["benchmark"] = benchmark_result
+            if args.profile_output is not None:
+                report["profile"] = {
+                    "output": str(args.profile_output),
+                    "format": "chrome_trace_json",
+                    "activities": ["cpu", "xpu"],
+                    "forward_iters": 1,
+                    "perfetto_url": "https://ui.perfetto.dev/",
+                }
             if is_kda:
                 report.update(
                     conv_state_shape=list(conv_state.shape),
