@@ -154,6 +154,7 @@ def test_dsv4_packed_zeroer_geometry():
         kernel_block_sizes=[KERNEL_BS],
         cache_dtype="fp8_ds_mla",
         static_forward_context=sctx,
+        num_blocks=NUM_BLOCKS,
     )
     segs, legacy_why, n_segs = _extract_segments(zeroer._meta, base)
 

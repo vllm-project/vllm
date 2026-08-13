@@ -129,6 +129,7 @@ class KVBlockZeroer:
         kernel_block_sizes: list[int],
         cache_dtype: str,
         static_forward_context: dict[str, Any],
+        num_blocks: int,
         runner_only_attn_layers: set[str] | None = None,
     ) -> None:
         """Precompute the absolute-address table for the Triton zeroing kernel.
@@ -163,7 +164,6 @@ class KVBlockZeroer:
                 continue
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
             assert spec.block_size % kernel_bs == 0
-            ratio = spec.block_size // kernel_bs
             block_dim = group.backend.get_kv_cache_block_dim(
                 kernel_bs,
                 spec.num_kv_heads,
@@ -182,10 +182,24 @@ class KVBlockZeroer:
                     continue
                 seen_ptrs.add(dp)
 
+                # Kernel pages per logical block, read off the allocated
+                # tensor rather than spec.block_size // kernel_bs: a group's
+                # kernel_block_size is a single per-group value, but layers
+                # within one group can store a logical block in different
+                # numbers of kernel pages (GLM-5-Next puts MLA latent and the
+                # compressed kpool indexer in one group, at 18 and 9 pages per
+                # block respectively). Deriving it per layer keeps the stride
+                # and the zeroed span matched to the real allocation.
+                num_kernel_blocks = kv.shape[block_dim]
+                assert num_kernel_blocks % num_blocks == 0, (
+                    f"{layer_name}: {num_kernel_blocks} kernel blocks is not a "
+                    f"multiple of {num_blocks} logical blocks"
+                )
+                ratio = num_kernel_blocks // num_blocks
+
                 el = kv.element_size()
                 block_stride_bytes = kv.stride(block_dim) * el
                 assert block_stride_bytes % 4 == 0
-                assert kv.shape[block_dim] % ratio == 0
                 outer_dims = [
                     d
                     for d in range(block_dim)
