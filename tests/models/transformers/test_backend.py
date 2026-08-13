@@ -10,6 +10,13 @@ from typing import Any
 import pytest
 import torch
 import torch.nn as nn
+from transformers import AutoConfig, AutoModel
+
+from vllm.config import ModelConfig, VllmConfig
+from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
+from vllm.model_executor.models.utils import StageMissingLayer
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import multi_gpu_test, prep_prompts
@@ -144,7 +151,7 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
             f"transformers>={required}, but got {installed}"
         )
 
-    model = get_model("DeepseekV2ForCausalLM")  # DeepSeek-V2-Lite, MLA + MoE
+    model = "hmellor/tiny-random-DeepseekV2ForCausalLM"
     args = (example_prompts, 32, 5)
     kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
 
@@ -468,3 +475,50 @@ def test_replaced_embedding_exposes_one_vpe(vpe):
 
     lm_head = ParallelLMHead(VOCAB_SIZE, HIDDEN_SIZE)
     assert lm_head.tie_weights(composed.embed).weight is composed.embed.weight
+
+
+MULTIMODAL_MODEL = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+
+
+class MarkingStub(SupportsMultiModal, nn.Module):
+    """Just enough of the backend to exercise component marking."""
+
+    _mark_model_components = MultiModalMixin._mark_model_components
+    _find_encoder_classes = MultiModalMixin._find_encoder_classes
+    _from_config_kwargs = Base._from_config_kwargs
+    _pre_trained_model_classes = Base._pre_trained_model_classes
+
+
+def build_marked_model(image_limit: int, skip_tokenizer_init: bool = False):
+    """Build the HF model inside the marking context and return it."""
+    model_config = ModelConfig(
+        model=MULTIMODAL_MODEL,
+        model_impl="transformers",
+        limit_mm_per_prompt={"image": image_limit},
+    )
+    # Set after construction: building the config itself needs the tokenizer
+    model_config.skip_tokenizer_init = skip_tokenizer_init
+    stub = MarkingStub()
+    stub.config = AutoConfig.from_pretrained(MULTIMODAL_MODEL)
+    stub.model_config = model_config
+
+    vllm_config = VllmConfig(model_config=model_config)
+    with stub._mark_model_components(vllm_config), torch.device("meta"):
+        stub.model = AutoModel.from_config(**stub._from_config_kwargs)
+    return stub.model
+
+
+@pytest.mark.parametrize(("image_limit", "skipped"), [(0, True), (4, False)])
+def test_tower_weights_skipped_when_modality_disabled(image_limit, skipped):
+    """`--limit-mm-per-prompt image=0` should drop the vision tower's weights."""
+    vision_tower = build_marked_model(image_limit).vision_tower
+    assert isinstance(vision_tower, StageMissingLayer) is skipped
+
+
+def test_marking_skipped_without_tokenizer():
+    """Marking needs the HF processor, which needs a tokenizer, so it is skipped.
+
+    The tower is built as normal rather than the model failing to load.
+    """
+    vision_tower = build_marked_model(0, skip_tokenizer_init=True).vision_tower
+    assert not isinstance(vision_tower, StageMissingLayer)
