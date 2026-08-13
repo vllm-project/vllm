@@ -23,6 +23,7 @@ import uvloop
 from fastapi import FastAPI, Response
 
 import vllm.envs as envs
+from vllm.entrypoints.launcher import NoSignalServer
 from vllm.logger import init_logger
 from vllm.utils.system_utils import (
     decorate_logs,
@@ -335,7 +336,7 @@ class DPSupervisor:
             ssl_cert_reqs=self.args.ssl_cert_reqs,
             ssl_ciphers=self.args.ssl_ciphers,
         )
-        supervisor_server = uvicorn.Server(config)
+        supervisor_server = NoSignalServer(config)
         supervisor_server_task = asyncio.create_task(
             supervisor_server.serve(),
             name="dp-supervisor",
