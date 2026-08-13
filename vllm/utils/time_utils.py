@@ -17,7 +17,8 @@ def set_arrival_time(arrival: float | None = None):
 def debug_spend_time(name: str):
     global arrival_time, previous_timestamp
     now = time.perf_counter()
-    print(f"{name}: {(now - previous_timestamp) * 1000} ms, {(now - arrival_time) * 1000} ms")
+    print(f"{name}: {(now - previous_timestamp) * 1000} ms, "
+          f"{(now - arrival_time) * 1000} ms")
     previous_timestamp = now
 
 

@@ -10,7 +10,6 @@ from vllm.inputs import MultiModalInput
 from vllm.multimodal.inputs import (
     MultiModalFieldElem,
     MultiModalKwargsItem,
-    MultiModalKwargsItems,
 )
 from vllm.utils import random_uuid
 
@@ -72,24 +71,22 @@ class PagedShmTensorIPC:
     def write(self, mm_inputs: MultiModalInput) -> None:
         if not self.is_paged_shm_enabled:
             return None
-
-        assert self.client_sync is not None
+        if self.client_sync is None:
+            return None
 
         elements: list[MultiModalFieldElem] = []
-        mm_kwargs: MultiModalKwargsItems = mm_inputs["mm_kwargs"]
-        for modality, items in mm_kwargs.items():
-            for item in items:
-                if items is None:
+        mm_kwargs = mm_inputs["mm_kwargs"]
+        for modality, mm_items in mm_kwargs.items():
+            for mm_item in mm_items:
+                if mm_item is None:
                     continue
-                if "pixel_values" not in item:
-                    continue
-
-                elem: MultiModalFieldElem = item["pixel_values"]
-                if not isinstance(elem.data, torch.Tensor):
-                    continue
-                if elem.data.nbytes < self.block_size:
-                    continue
-                elements.append(elem)
+                if "pixel_values" in mm_item:
+                    elem: MultiModalFieldElem = mm_item["pixel_values"]
+                    if not isinstance(elem.data, torch.Tensor):
+                        continue
+                    if elem.data.nbytes < self.block_size:
+                        continue
+                    elements.append(elem)
 
         items: list[ShmItem] = []
         for elem in elements:
@@ -150,8 +147,8 @@ class PagedShmTensorIPC:
     def shutdown(self):
         if not self.is_paged_shm_enabled:
             return None
+        if self.client_async is None:
+            return None
 
         self.client_sync = None
-
-        assert self.client_async is not None
         self.client_async.shutdown()
