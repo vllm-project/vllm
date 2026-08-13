@@ -32,6 +32,7 @@ from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
+from vllm.sampling_params import RepetitionDetectionParams
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
@@ -914,6 +915,22 @@ def test_generation_config_loading():
     )
 
     assert model_config.get_diff_sampling_param() == override_generation_config
+
+    # repetition_detection is accepted as a server-side default and converted
+    # from the raw JSON dict into typed params for the serving layers.
+    model_config = ModelConfig(
+        model_id,
+        generation_config="vllm",
+        override_generation_config={
+            "repetition_detection": {"max_pattern_size": 8, "min_count": 4}
+        },
+    )
+
+    assert model_config.get_diff_sampling_param() == {
+        "repetition_detection": RepetitionDetectionParams(
+            max_pattern_size=8, min_count=4
+        )
+    }
 
 
 @pytest.mark.parametrize(
