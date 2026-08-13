@@ -185,7 +185,7 @@ class LogprobsProcessor:
             )
 
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
-        """Pop and return all request prompt logprobs
+        """Pop and return all request prompt logprobs.
 
         The logprobs processor aggregates prompt chunk logprobs
         over one or more prefill chunks. This method returns

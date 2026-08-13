@@ -376,7 +376,7 @@ def zmq_socket_ctx(
     identity: bytes | None = None,
     router_handover: bool = False,
 ) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
+    """Context manager for a ZMQ socket."""
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
         yield make_zmq_socket(

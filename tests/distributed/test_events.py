@@ -20,26 +20,26 @@ class EventSample(
     tag=True,  # type: ignore
     array_like=True,  # type: ignore
 ):
-    """Test event for publisher testing"""
+    """Test event for publisher testing."""
 
     id: int
     value: str
 
 
 class SampleBatch(EventBatch):
-    """Test event batch for publisher testing"""
+    """Test event batch for publisher testing."""
 
     events: list[EventSample]
 
 
 def create_test_events(count: int) -> SampleBatch:
-    """Create a batch of test events"""
+    """Create a batch of test events."""
     events = [EventSample(id=i, value=f"test-{i}") for i in range(count)]
     return SampleBatch(ts=time.time(), events=events)
 
 
 def test_basic_publishing(publisher, subscriber):
-    """Test basic event publishing works"""
+    """Test basic event publishing works."""
     test_batch = create_test_events(5)
     publisher.publish(test_batch)
 
@@ -57,7 +57,7 @@ def test_basic_publishing(publisher, subscriber):
 
 
 def test_multiple_events(publisher, subscriber):
-    """Test publishing and receiving multiple event batches"""
+    """Test publishing and receiving multiple event batches."""
     for _ in range(10):
         batch = create_test_events(2)
         publisher.publish(batch)
@@ -74,7 +74,7 @@ def test_multiple_events(publisher, subscriber):
 
 
 def test_replay_mechanism(publisher, subscriber):
-    """Test the replay mechanism works correctly"""
+    """Test the replay mechanism works correctly."""
     for _ in range(19):
         batch = create_test_events(1)
         publisher.publish(batch)
@@ -95,7 +95,7 @@ def test_replay_mechanism(publisher, subscriber):
 
 
 def test_replay_includes_topic(publisher, subscriber, publisher_config):
-    """Test that replay responses include the topic, matching PUB format"""
+    """Test that replay responses include the topic, matching PUB format."""
     for _ in range(5):
         publisher.publish(create_test_events(1))
 
@@ -114,7 +114,7 @@ def test_replay_includes_topic(publisher, subscriber, publisher_config):
 
 
 def test_buffer_limit(publisher, subscriber, publisher_config):
-    """Test buffer limit behavior"""
+    """Test buffer limit behavior."""
     buffer_size = publisher_config.buffer_steps
 
     # Publish more events than the buffer can hold
@@ -138,7 +138,7 @@ def test_buffer_limit(publisher, subscriber, publisher_config):
 
 
 def test_topic_filtering(publisher_config):
-    """Test that a subscriber only receives messages matching its topic filter"""
+    """Test that a subscriber only receives messages matching its topic filter."""
     publisher_config.replay_endpoint = None
 
     publisher_config.topic = "foo"
@@ -171,7 +171,7 @@ def test_topic_filtering(publisher_config):
 
 
 def test_high_volume(publisher, subscriber):
-    """Test publishing and receiving a high volume of events"""
+    """Test publishing and receiving a high volume of events."""
     num_batches = 10_000
     events_per_batch = 100
 
@@ -207,7 +207,7 @@ def test_high_volume(publisher, subscriber):
 
 
 def test_null_publisher():
-    """Test that NullEventPublisher can be used without errors"""
+    """Test that NullEventPublisher can be used without errors."""
     publisher = NullEventPublisher(DP_RANK)
 
     # This should not raise any errors
@@ -217,7 +217,7 @@ def test_null_publisher():
 
 
 def test_data_parallel_rank_tagging(publisher_config):
-    """Test that events are properly tagged with their data parallel rank"""
+    """Test that events are properly tagged with their data parallel rank."""
     publisher_config.topic = "foo"
     pub_0 = EventPublisherFactory.create(publisher_config, DP_RANK)
     pub_1 = EventPublisherFactory.create(publisher_config, DP_RANK + 1)
@@ -281,7 +281,7 @@ def test_data_parallel_rank_tagging(publisher_config):
 
 
 def test_event_publisher_factory(random_port):
-    """Test event publisher factory creation behavior under different configurations"""
+    """Test event publisher factory creation behavior under different configurations."""
     from vllm.config.kv_events import KVEventsConfig
     from vllm.distributed.kv_events import ZmqEventPublisher
 

@@ -74,7 +74,7 @@ class CustomQwen2Decoder(PluggableLayer):
         del self.model.embed_tokens
 
     def _create_custom_model(self, config):
-        """Qwen2Model"""
+        """Qwen2Model."""
 
         class CustomQwen2ModelInner(Qwen2Model):
             def forward(

@@ -24,7 +24,7 @@ def _get_lora_id(
     top_k_num,
     naive_block_assignment: tl.constexpr,
 ):
-    """Returns lora_id"""
+    """Returns lora_id."""
     if naive_block_assignment:
         token_idx = pid_m // top_k_num
         return tl.load(token_lora_mapping_ptr + token_idx)
@@ -41,7 +41,7 @@ def _get_expert_id(
     max_loras,
     naive_block_assignment: tl.constexpr,
 ):
-    """Returns expert_id"""
+    """Returns expert_id."""
     if naive_block_assignment:
         return tl.load(expert_ids_ptr + pid_m)
     else:
@@ -61,7 +61,7 @@ def _get_token_offs(
     naive_block_assignment: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
-    """Returns token offsets"""
+    """Returns token offsets."""
     if naive_block_assignment:
         return tl.where(offs == 0, pid_m, num_valid_tokens)
     else:
@@ -100,7 +100,7 @@ def _adjust_kernel_inputs(
     sorted_token_ids: torch.Tensor | None,
     expert_ids: torch.Tensor,
 ):
-    """Helper function to adjust kernel inputs when sorted_token_ids is None"""
+    """Helper function to adjust kernel inputs when sorted_token_ids is None."""
     if sorted_token_ids is None:
         stride_tl = 0
         stride_el = 0

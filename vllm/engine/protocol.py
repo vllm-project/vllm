@@ -39,7 +39,7 @@ class StreamingInput:
 
 
 class EngineClient(ABC):
-    """Protocol class for Clients to Engine"""
+    """Protocol class for Clients to Engine."""
 
     vllm_config: VllmConfig
     model_config: ModelConfig
@@ -133,49 +133,49 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def check_health(self) -> None:
-        """Raise if unhealthy"""
+        """Raise if unhealthy."""
         ...
 
     @abstractmethod
     async def start_profile(self) -> None:
-        """Start profiling the engine"""
+        """Start profiling the engine."""
         ...
 
     @abstractmethod
     async def stop_profile(self) -> None:
-        """Stop profiling the engine"""
+        """Stop profiling the engine."""
         ...
 
     @abstractmethod
     async def reset_mm_cache(self) -> None:
-        """Reset the multi-modal cache"""
+        """Reset the multi-modal cache."""
         ...
 
     @abstractmethod
     async def reset_encoder_cache(self) -> None:
-        """Reset the encoder cache"""
+        """Reset the encoder cache."""
         ...
 
     @abstractmethod
     async def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
-        """Reset the prefix cache and optionally any configured connector cache"""
+        """Reset the prefix cache and optionally any configured connector cache."""
         ...
 
     @abstractmethod
     async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
-        """Sleep the engine"""
+        """Sleep the engine."""
         ...
 
     @abstractmethod
     async def wake_up(self, tags: list[str] | None = None) -> None:
-        """Wake up the engine"""
+        """Wake up the engine."""
         ...
 
     @abstractmethod
     async def is_sleeping(self) -> bool:
-        """Check whether the engine is sleeping"""
+        """Check whether the engine is sleeping."""
         ...
 
     @abstractmethod
@@ -225,7 +225,7 @@ class EngineClient(ABC):
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ) -> None:
-        """Scale the engine"""
+        """Scale the engine."""
         raise NotImplementedError
 
     async def collective_rpc(
@@ -241,7 +241,7 @@ class EngineClient(ABC):
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
-        """Send fault tolerance instruction to the engine"""
+        """Send fault tolerance instruction to the engine."""
         raise NotImplementedError
 
     async def get_status(self):
@@ -249,7 +249,7 @@ class EngineClient(ABC):
         raise NotImplementedError
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        """Get supported tasks"""
+        """Get supported tasks."""
         raise NotImplementedError
 
     async def init_weight_transfer_engine(

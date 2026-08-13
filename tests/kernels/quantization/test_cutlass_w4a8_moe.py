@@ -272,7 +272,7 @@ def test_cutlass_w4a8_moe_mm_end_to_end(shape, random_zero):
 
 
 class W4A8MoELayer(torch.nn.Module):
-    """Minimal wrapper module to test cuda graphs"""
+    """Minimal wrapper module to test cuda graphs."""
 
     def __init__(self, setup: MoETestSetup):
         super().__init__()

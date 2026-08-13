@@ -16,14 +16,14 @@ from vllm.utils import random_uuid
 
 
 class InputAudioBufferAppend(OpenAIBaseModel):
-    """Append audio chunk to buffer"""
+    """Append audio chunk to buffer."""
 
     type: Literal["input_audio_buffer.append"] = "input_audio_buffer.append"
     audio: str  # base64-encoded PCM16 @ 16kHz
 
 
 class InputAudioBufferCommit(OpenAIBaseModel):
-    """Process accumulated audio buffer"""
+    """Process accumulated audio buffer."""
 
     type: Literal["input_audio_buffer.commit"] = "input_audio_buffer.commit"
     final: bool = False
@@ -31,14 +31,14 @@ class InputAudioBufferCommit(OpenAIBaseModel):
 
 # Server -> Client Events
 class SessionUpdate(OpenAIBaseModel):
-    """Configure session parameters"""
+    """Configure session parameters."""
 
     type: Literal["session.update"] = "session.update"
     model: str | None = None
 
 
 class SessionCreated(OpenAIBaseModel):
-    """Connection established notification"""
+    """Connection established notification."""
 
     type: Literal["session.created"] = "session.created"
     id: str = Field(default_factory=lambda: f"sess-{random_uuid()}")
@@ -46,14 +46,14 @@ class SessionCreated(OpenAIBaseModel):
 
 
 class TranscriptionDelta(OpenAIBaseModel):
-    """Incremental transcription text"""
+    """Incremental transcription text."""
 
     type: Literal["transcription.delta"] = "transcription.delta"
     delta: str  # Incremental text
 
 
 class TranscriptionDone(OpenAIBaseModel):
-    """Final transcription with usage stats"""
+    """Final transcription with usage stats."""
 
     type: Literal["transcription.done"] = "transcription.done"
     text: str  # Complete transcription
@@ -61,7 +61,7 @@ class TranscriptionDone(OpenAIBaseModel):
 
 
 class ErrorEvent(OpenAIBaseModel):
-    """Error notification"""
+    """Error notification."""
 
     type: Literal["error"] = "error"
     error: str

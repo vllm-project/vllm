@@ -50,7 +50,7 @@ from llama_index.vector_stores.milvus import MilvusVectorStore
 
 
 def init_config(args: Namespace):
-    """Initialize configuration with command line arguments"""
+    """Initialize configuration with command line arguments."""
     return {
         "url": args.url,
         "embedding_model": args.embedding_model,
@@ -66,12 +66,12 @@ def init_config(args: Namespace):
 
 
 def load_documents(url: str) -> list:
-    """Load and process web documents"""
+    """Load and process web documents."""
     return SimpleWebPageReader(html_to_text=True).load_data([url])
 
 
 def setup_models(config: dict[str, Any]):
-    """Configure embedding and chat models"""
+    """Configure embedding and chat models."""
     Settings.embed_model = OpenAILikeEmbedding(
         api_base=config["embedding_endpoint"],
         api_key=config["vllm_api_key"],
@@ -96,14 +96,14 @@ def setup_models(config: dict[str, Any]):
 
 
 def setup_vector_store(db_path: str) -> MilvusVectorStore:
-    """Initialize vector store"""
+    """Initialize vector store."""
     sample_emb = Settings.embed_model.get_text_embedding("test")
     print(f"Embedding dimension: {len(sample_emb)}")
     return MilvusVectorStore(uri=db_path, dim=len(sample_emb), overwrite=True)
 
 
 def create_index(documents: list, vector_store: MilvusVectorStore):
-    """Create document index"""
+    """Create document index."""
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
     return VectorStoreIndex.from_documents(
         documents,
@@ -112,13 +112,13 @@ def create_index(documents: list, vector_store: MilvusVectorStore):
 
 
 def query_document(index: VectorStoreIndex, question: str, top_k: int):
-    """Query document with given question"""
+    """Query document with given question."""
     query_engine = index.as_query_engine(similarity_top_k=top_k)
     return query_engine.query(question)
 
 
 def get_parser() -> argparse.ArgumentParser:
-    """Parse command line arguments"""
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="RAG with vLLM and LlamaIndex")
 
     # Add command line arguments

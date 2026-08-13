@@ -25,7 +25,7 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
     def forward(
         self, input_: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward of ReplicatedLinearWithLoRA
+        """Forward of ReplicatedLinearWithLoRA.
 
         Args:
             input_: Tensor whose last dimension is `input_size`.

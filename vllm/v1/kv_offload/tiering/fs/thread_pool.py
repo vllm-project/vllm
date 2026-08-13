@@ -48,7 +48,7 @@ class JobState:
     def task_done(
         self, success: bool, transfer_time: float
     ) -> tuple[bool, bool, float]:
-        """Returns if job completed and success flag"""
+        """Returns if job completed and success flag."""
         with self._lock:
             self._completed += 1
             self._transfer_time += transfer_time

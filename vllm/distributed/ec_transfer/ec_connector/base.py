@@ -198,7 +198,7 @@ class ECConnectorBase(ABC):
         self,
         identifier: str,
     ) -> bool:
-        """Check if a single encoder cache exists
+        """Check if a single encoder cache exists.
 
         Args:
             identifier (str): the identifier of the media.
@@ -229,7 +229,7 @@ class ECConnectorBase(ABC):
 
     @abstractmethod
     def update_state_after_alloc(self, request: "Request", index: int):
-        """Update ECConnector state to decide allocate cache for requests
+        """Update ECConnector state to decide allocate cache for requests.
 
         Args:
             request (Request): the request object.

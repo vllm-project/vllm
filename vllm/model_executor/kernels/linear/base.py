@@ -73,7 +73,7 @@ class Params:
 
 @dataclass
 class FP8Params(Params):
-    """FP8 layer parameters with typed fields"""
+    """FP8 layer parameters with typed fields."""
 
     input_scale_ub: torch.Tensor | None
 
@@ -81,7 +81,7 @@ class FP8Params(Params):
 
     @classmethod
     def from_layer(cls, layer: torch.nn.Module) -> "FP8Params":
-        """Extract parameters from layer"""
+        """Extract parameters from layer."""
         return cls(
             weight=getattr(layer, cls.WEIGHT),
             weight_scale=getattr(layer, cls.WEIGHT_SCALE),
@@ -92,7 +92,7 @@ class FP8Params(Params):
 
 @dataclass
 class Int8Params(Params):
-    """Int8 layer parameters with typed fields"""
+    """Int8 layer parameters with typed fields."""
 
     input_zero_point: torch.Tensor | None
     azp_adj: torch.Tensor | None
@@ -102,7 +102,7 @@ class Int8Params(Params):
 
     @classmethod
     def from_layer(cls, layer: torch.nn.Module) -> "Int8Params":
-        """Extract parameters from layer"""
+        """Extract parameters from layer."""
         return cls(
             weight=getattr(layer, cls.WEIGHT),
             weight_scale=getattr(layer, cls.WEIGHT_SCALE),

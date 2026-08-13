@@ -123,7 +123,7 @@ def test_commit_eplb_maps():
 
 
 def test_commit_eplb_maps_for_layer():
-    """Test that only the target layer is updated"""
+    """Test that only the target layer is updated."""
     num_layers, num_logical, max_replicas = 2, 3, 2
 
     original_phy2log = torch.tensor([[9, 9, 9, 9], [8, 8, 8, 8]], dtype=torch.long)

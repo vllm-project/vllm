@@ -395,7 +395,7 @@ def test_engine_core_concurrent_batches():
 
 @multi_gpu_test(num_gpus=2)
 def test_engine_core_tp():
-    """Test engine can initialize worker in tp properly"""
+    """Test engine can initialize worker in tp properly."""
     """Setup the EngineCore."""
     engine_args = EngineArgs(
         model=MODEL_NAME,
@@ -481,7 +481,7 @@ def test_encoder_instance_zero_kv_cache(
     enable_prefix_caching: bool,
     use_kv_connector: bool,
 ):
-    """EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests
+    """EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests.
 
     This test verifies encoder-only instance initializes with 0 KV cache blocks.
     Under EPD disagg mode, Encoder instances (EC producer role) only execute

@@ -1238,7 +1238,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models"""
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="model.",
             connector=["audio_projection_for_vision", "audio_projection"],

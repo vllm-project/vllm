@@ -584,34 +584,34 @@ class GroupCoordinator:
 
     @property
     def first_rank(self):
-        """Return the global rank of the first process in the group"""
+        """Return the global rank of the first process in the group."""
         return self.ranks[0]
 
     @property
     def last_rank(self):
-        """Return the global rank of the last process in the group"""
+        """Return the global rank of the last process in the group."""
         return self.ranks[-1]
 
     @property
     def is_first_rank(self):
-        """Return whether the caller is the first process in the group"""
+        """Return whether the caller is the first process in the group."""
         return self.rank == self.first_rank
 
     @property
     def is_last_rank(self):
-        """Return whether the caller is the last process in the group"""
+        """Return whether the caller is the last process in the group."""
         return self.rank == self.last_rank
 
     @property
     def next_rank(self):
-        """Return the global rank of the process that follows the caller"""
+        """Return the global rank of the process that follows the caller."""
         rank_in_group = self.rank_in_group
         world_size = self.world_size
         return self.ranks[(rank_in_group + 1) % world_size]
 
     @property
     def prev_rank(self):
-        """Return the global rank of the process that precedes the caller"""
+        """Return the global rank of the process that precedes the caller."""
         rank_in_group = self.rank_in_group
         world_size = self.world_size
         return self.ranks[(rank_in_group - 1) % world_size]
@@ -1206,7 +1206,7 @@ class GroupCoordinator:
         torch.distributed.barrier(group=self.cpu_group)
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
-        """Sends a tensor to the destination rank in a blocking way"""
+        """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""
         if self.device_communicator is None:
             raise ValueError("No device communicator found")

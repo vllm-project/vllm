@@ -92,7 +92,7 @@ def _create_random_top_token_test_vector(
     sampled_token_id: int,
     adjust_num_logprobs: bool = True,
 ) -> tuple[torch.Tensor, int]:
-    """Create a random vector of top logprob token indices
+    """Create a random vector of top logprob token indices.
 
     Use to create fake sample logprobs for testing. The sampled token
     ID must always be one of the top logprobs, which this dummy test
@@ -148,7 +148,7 @@ def _create_random_top_token_test_matrix(
     upper: int,
     tokens_list: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Create a random matrix of top logprob token indices
+    """Create a random matrix of top logprob token indices.
 
     Use to create fake prompt logprobs for testing.
 
@@ -216,7 +216,7 @@ def generate_dummy_sample_logprobs(
     num_logprobs: int,
     tokenizer: PythonBackend,
 ) -> list[tuple[list[int], list[float], int]]:
-    """Generate dummy sample logprobs
+    """Generate dummy sample logprobs.
 
     Generate a test data structure which imitates the list of sample logprobs
     which would be assembled in the engine core during decode phase.
@@ -266,7 +266,7 @@ def generate_dummy_prompt_logprobs_tensors(
     num_logprobs: int,
     tokenizer: PythonBackend,
 ) -> LogprobsTensors:
-    """Generate dummy prompt logprobs tensors
+    """Generate dummy prompt logprobs tensors.
 
     Generate a test data structure which imitates the torch Tensors of prompt
     logprobs which would be assembled in the engine core during chunked
@@ -312,7 +312,7 @@ def generate_dummy_prompt_logprobs_tensors(
 
 @dataclass
 class DummyOutputProcessorTestVectors:
-    """Dummy test vectors for output processor tests"""
+    """Dummy test vectors for output processor tests."""
 
     tokenizer: GeneralTokenizerType
     vllm_config: EngineArgs

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Modules below used for the audio encoder component in: models/nano_nemotron_vl.py"""
+"""Modules below used for the audio encoder component in: models/nano_nemotron_vl.py."""
 
 from collections.abc import Iterable
 from functools import cache

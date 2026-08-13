@@ -38,7 +38,7 @@ class CUDAGraphStat:
 
 
 class CUDAGraphLogging:
-    """Aggregate and log cudagraph metrics"""
+    """Aggregate and log cudagraph metrics."""
 
     COLUMN_HEADERS = [
         "Unpadded Tokens",

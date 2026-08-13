@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The CLI entrypoints of vLLM
+"""The CLI entrypoints of vLLM.
 
 Note that all future modules must be lazily loaded within main
 to avoid certain eager import breakage.

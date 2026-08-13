@@ -615,7 +615,7 @@ class InternS1ProForConditionalGeneration(
         return mapper
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        """Load weights"""
+        """Load weights."""
         skip_prefixes = ["model.time_series."]
         if self.visual is None:
             skip_prefixes.append("visual.")

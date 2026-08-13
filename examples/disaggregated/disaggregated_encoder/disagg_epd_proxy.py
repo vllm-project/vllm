@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""disagg_encoder_proxy.py
+"""disagg_encoder_proxy.py.
 
 Proxy that routes OpenAI-compatible “/v1/chat/completions” requests to two
 clusters:
@@ -303,7 +303,7 @@ async def process_prefill_stage(
     p_url: str,
     req_id: str,
 ) -> dict:
-    """Process request through Prefill stage and return kv_transfer_params"""
+    """Process request through Prefill stage and return kv_transfer_params."""
     logger.info("[%s] Sending prefill request to: %s", req_id, p_url)
 
     prefill_request = req_data.copy()
@@ -360,7 +360,7 @@ async def process_prefill_stage(
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    """Middleware to log all incoming requests and responses"""
+    """Middleware to log all incoming requests and responses."""
     req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
 
     # Log incoming request

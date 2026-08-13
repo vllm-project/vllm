@@ -57,5 +57,5 @@ def weak_lru_cache(maxsize: int | None = 128, typed: bool = False):
 
 
 def weak_cache(user_function, /):
-    """Simple weak equivalent to functools.cache"""
+    """Simple weak equivalent to functools.cache."""
     return weak_lru_cache(maxsize=None)(user_function)

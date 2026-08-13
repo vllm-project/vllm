@@ -1202,7 +1202,7 @@ class GPUModelRunner(
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
-        """Initialize attributes from torch.cuda.get_device_properties"""
+        """Initialize attributes from torch.cuda.get_device_properties."""
         self.num_sms = num_compute_units(self.device.index)
 
     # Note: used for model runner override.
@@ -4934,7 +4934,7 @@ class GPUModelRunner(
     def _pp_broadcast_prev_sampled_token_ids(
         self, sampled_token_ids: torch.Tensor
     ) -> None:
-        """Broadcast sampled token ids (GPU) from last PP stage"""
+        """Broadcast sampled token ids (GPU) from last PP stage."""
         pp = get_pp_group()
         assert pp.is_last_rank
         # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
@@ -4949,7 +4949,7 @@ class GPUModelRunner(
             )
 
     def _pp_receive_prev_sampled_token_ids_to_input_batch(self) -> None:
-        """Receive sampled token ids broadcast from last PP stage"""
+        """Receive sampled token ids broadcast from last PP stage."""
         pp = get_pp_group()
         assert not pp.is_last_rank
         num_reqs = self.input_batch.num_reqs
@@ -5628,7 +5628,7 @@ class GPUModelRunner(
         weights_path: str | None = None,
         is_checkpoint_format: bool = True,
     ) -> None:
-        """Reload weights from a weights iterator or from disk
+        """Reload weights from a weights iterator or from disk.
 
         Args:
             weights_iterator: weights to load into model

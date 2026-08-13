@@ -204,7 +204,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
 
     @staticmethod
     def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
-        """Pulls the data parallel rank from a header, if provided"""
+        """Pulls the data parallel rank from a header, if provided."""
         if raw_request is None:
             return None
 

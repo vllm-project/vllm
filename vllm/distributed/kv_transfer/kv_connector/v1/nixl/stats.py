@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Container for transfer performance metrics."""
 
     def __post_init__(self):
         if not self.data:

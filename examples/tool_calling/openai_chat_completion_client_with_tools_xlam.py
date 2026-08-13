@@ -104,7 +104,7 @@ tool_functions = {
 
 
 def process_response(response, tool_functions, original_query):
-    """Process a non-streaming response with possible tool calls"""
+    """Process a non-streaming response with possible tool calls."""
     print("\n--- Response Output ---")
 
     # Check if the response has content
@@ -193,7 +193,7 @@ def process_response(response, tool_functions, original_query):
 
 
 def run_test_case(query, test_name):
-    """Run a single test case with the given query"""
+    """Run a single test case with the given query."""
     print(f"\n{'=' * 50}\nTEST CASE: {test_name}\n{'=' * 50}")
     print(f"Query: '{query}'")
 

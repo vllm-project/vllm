@@ -277,7 +277,7 @@ def _prefix_needs_context(parsed) -> bool:
 
 
 def _check_unsupported(parsed) -> None:
-    """Check for regex features unsupported by regex-automata"""
+    """Check for regex features unsupported by regex-automata."""
     tokens = parsed.data if hasattr(parsed, "data") else parsed
     for ttype, tval in tokens:
         # backreference

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""vLLM Chat Assistant - A Streamlit Web Interface
+"""vLLM Chat Assistant - A Streamlit Web Interface.
 
 A streamlined chat interface that quickly integrates
 with vLLM API server.

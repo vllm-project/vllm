@@ -39,7 +39,7 @@ class BasevLLMParameter(Parameter):
         return super().__new__(cls, data=data, requires_grad=False)
 
     def __init__(self, data: torch.Tensor, weight_loader: Callable):
-        """Initialize the BasevLLMParameter
+        """Initialize the BasevLLMParameter.
 
         Args:
             data: torch tensor with the parameter data
@@ -391,7 +391,7 @@ class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
 
 
 class SharedWeightParameter(BasevLLMParameter):
-    """Parameter for weights with many shared tensors across a model
+    """Parameter for weights with many shared tensors across a model.
 
     For example, when applying transforms to the "gate" and "up" partitions of
     `MergedColumnParallelLinear`, the transform weights must stay separate

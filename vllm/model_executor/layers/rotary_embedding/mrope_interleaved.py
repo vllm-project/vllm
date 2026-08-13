@@ -85,7 +85,7 @@ class MRotaryEmbeddingInterleaved(MRotaryEmbedding):
         self,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Interleave the rotary embedding"""
+        """Interleave the rotary embedding."""
         cos_sin = self.cos_sin_cache[positions]
         mrope_section_3d = [1] * len(self.mrope_dim)
         mrope_dim = self.mrope_dim

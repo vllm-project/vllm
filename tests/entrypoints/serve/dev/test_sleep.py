@@ -87,7 +87,7 @@ def test_sleep_mode():
 
 
 def _get_sleep_metrics_from_api(response: requests.Response):
-    """Return (awake, weights_offloaded, discard_all)"""
+    """Return (awake, weights_offloaded, discard_all)."""
     awake, weights_offloaded, discard_all = None, None, None
 
     for family in text_string_to_metric_families(response.text):

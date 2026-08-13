@@ -497,7 +497,7 @@ def causal_conv1d_fn(
     metadata=None,
     validate_data=False,
 ):
-    """Support varlen + continuous batching when x is 2D tensor
+    """Support varlen + continuous batching when x is 2D tensor.
 
     x: (dim,cu_seq_len)
         cu_seq_len = total tokens of all seqs in that batch

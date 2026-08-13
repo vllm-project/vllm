@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark: Fused FP8 output quantization in merge_attn_states
+"""Benchmark: Fused FP8 output quantization in merge_attn_states.
 
 Compares fused vs unfused approaches for producing FP8-quantized merged
 attention output:

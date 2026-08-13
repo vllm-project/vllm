@@ -487,7 +487,7 @@ def _create_req_context(req: Request) -> ReqContext:
 
 
 class OffloadingConnectorScheduler:
-    """Implementation of Scheduler side methods"""
+    """Implementation of Scheduler side methods."""
 
     def __init__(
         self,

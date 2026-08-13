@@ -4723,7 +4723,7 @@ class BFCLDataset(HuggingFaceDataset):
 
 
 class SpeedBench(CustomDataset):
-    """SPEED-Bench dataset: https://huggingface.co/datasets/nvidia/SPEED-Bench
+    """SPEED-Bench dataset: https://huggingface.co/datasets/nvidia/SPEED-Bench.
 
     Download the dataset using:
 

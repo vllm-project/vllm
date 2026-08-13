@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # mypy: ignore-errors
-"""vLLM gRPC Server
+"""vLLM gRPC Server.
 
 Starts a gRPC server backed by AsyncLLM, using the VllmEngineServicer
 from the smg-grpc-servicer package.

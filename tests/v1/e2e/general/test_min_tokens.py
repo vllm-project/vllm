@@ -24,7 +24,7 @@ GREEDY = 0.0  # Deterministic generation for consistent testing
 
 
 class MinTokensTestCase:
-    """Data class for min_tokens test scenarios"""
+    """Data class for min_tokens test scenarios."""
 
     def __init__(
         self,
@@ -157,7 +157,7 @@ MIN_TOKENS_TEST_CASES = [
 
 @pytest.fixture(scope="module")
 def llm_v1():
-    """Create V1 LLM instance for testing"""
+    """Create V1 LLM instance for testing."""
     llm = LLM(
         model=TEST_MODEL,
         tensor_parallel_size=1,
@@ -168,7 +168,7 @@ def llm_v1():
 
 
 def get_token_count(output: RequestOutput) -> int:
-    """Extract token count from LLM output"""
+    """Extract token count from LLM output."""
     if not output.outputs:
         return 0
     return len(output.outputs[0].token_ids)
@@ -177,7 +177,7 @@ def get_token_count(output: RequestOutput) -> int:
 def assert_min_tokens_satisfied(
     output: RequestOutput, test_case: MinTokensTestCase
 ) -> None:
-    """Assert that min_tokens requirement is satisfied"""
+    """Assert that min_tokens requirement is satisfied."""
     token_count = get_token_count(output)
     stop_reason = output.outputs[0].stop_reason if output.outputs else "no output"
 

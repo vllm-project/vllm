@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test modular OAI Triton MoE"""
+"""Test modular OAI Triton MoE."""
 
 from __future__ import annotations
 

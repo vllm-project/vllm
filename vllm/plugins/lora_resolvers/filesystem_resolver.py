@@ -47,7 +47,7 @@ class FilesystemResolver(LoRAResolver):
 
 
 def register_filesystem_resolver():
-    """Register the filesystem LoRA Resolver with vLLM"""
+    """Register the filesystem LoRA Resolver with vLLM."""
     lora_cache_dir = envs.VLLM_LORA_RESOLVER_CACHE_DIR
     if lora_cache_dir:
         if not os.path.exists(lora_cache_dir) or not os.path.isdir(lora_cache_dir):

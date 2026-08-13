@@ -821,7 +821,7 @@ _aux_stream: torch.cuda.Stream | None = None
 
 
 def aux_stream() -> torch.cuda.Stream | None:
-    """Ensures aux_stream is initialized only once"""
+    """Ensures aux_stream is initialized only once."""
     global _aux_stream
 
     from vllm.platforms import current_platform

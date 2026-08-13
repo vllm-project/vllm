@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Radio vision model configuration"""
+"""Radio vision model configuration."""
 
 from typing import Any
 

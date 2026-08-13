@@ -126,7 +126,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         )
 
     def download_model(self, model_config: ModelConfig) -> None:
-        """Download model if necessary"""
+        """Download model if necessary."""
         self._prepare_weights(model_config.model, model_config.revision)
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:

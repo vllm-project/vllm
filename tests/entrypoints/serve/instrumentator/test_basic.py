@@ -20,7 +20,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 @pytest.fixture(scope="module")
 def server_args(request: pytest.FixtureRequest) -> list[str]:
-    """Provide extra arguments to the server via indirect parametrization
+    """Provide extra arguments to the server via indirect parametrization.
 
     Usage:
 

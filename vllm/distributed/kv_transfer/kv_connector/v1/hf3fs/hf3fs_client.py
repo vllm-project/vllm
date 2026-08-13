@@ -155,7 +155,7 @@ class Hf3fsClient:
         )
 
     def _release_resources(self) -> None:
-        """Release all acquired resources safely"""
+        """Release all acquired resources safely."""
         # iov must be released before ioring and shm
         for attr in ("iov_r", "iov_w", "ior_r", "ior_w"):
             obj = getattr(self, attr, None)

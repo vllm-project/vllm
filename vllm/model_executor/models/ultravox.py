@@ -695,7 +695,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         )
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models"""
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model.",
             connector="multi_modal_projector.",
@@ -874,7 +874,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
-        """Run forward pass for Ultravox
+        """Run forward pass for Ultravox.
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted audio embeddings. The to-be-inserted

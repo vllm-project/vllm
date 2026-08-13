@@ -919,7 +919,7 @@ class ModelConfig:
 
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
-        """Called after __post_init__"""
+        """Called after __post_init__."""
         if not isinstance(self.tokenizer, str):
             raise ValueError(
                 f"tokenizer must be a string, got "
@@ -1610,7 +1610,7 @@ class ModelConfig:
             raise AssertionError(f"Unsupported block type: {block_type}")
 
     def get_mamba_chunk_size(self) -> int:
-        """Returns the mamba chunk size if it exists"""
+        """Returns the mamba chunk size if it exists."""
         # used by e.g. Bamba, FalconH1, Granite
         chunk_size = getattr(self.hf_text_config, "mamba_chunk_size", None)
         if chunk_size is None:

@@ -367,7 +367,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
 
 
 class MoRIIOConnectorScheduler:
-    """Implementation of Scheduler side methods"""
+    """Implementation of Scheduler side methods."""
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
@@ -1070,7 +1070,7 @@ class MoRIIOConnectorScheduler:
 
 
 class MoRIIOConnectorWorker:
-    """Implementation of Worker side methods"""
+    """Implementation of Worker side methods."""
 
     def __init__(
         self,

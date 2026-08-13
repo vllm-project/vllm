@@ -124,7 +124,7 @@ class ECExampleConnector(ECConnectorBase):
         self,
         identifier: str,
     ) -> bool:
-        """Check if cache exist externally for the media
+        """Check if cache exist externally for the media.
 
         Args:
             identifier (str): the identifier of the media.

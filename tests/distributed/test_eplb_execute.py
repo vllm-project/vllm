@@ -768,7 +768,7 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
 
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_rearrange_expert_weights_profile_mode(world_size):
-    """Test profile mode (should not copy actual weights)"""
+    """Test profile mode (should not copy actual weights)."""
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(

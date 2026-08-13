@@ -35,7 +35,7 @@ FailureCallback = Callable[[], None]
 
 
 class Executor(ABC):
-    """Abstract base class for vLLM executors."
+    """Abstract base class for vLLM executors.".
 
     An executor is responsible for executing the model on one device,
     or it can be a distributed executor that can execute the model on multiple devices.
@@ -278,7 +278,7 @@ class Executor(ABC):
         self.collective_rpc("shutdown")
 
     def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
-        """Init KVOutputAggregator"""
+        """Init KVOutputAggregator."""
         self.kv_output_aggregator = KVOutputAggregator.from_connector(
             connector, self.parallel_config.world_size
         )

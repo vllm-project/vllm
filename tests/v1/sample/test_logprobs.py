@@ -313,7 +313,7 @@ def test_get_logprobs_and_prompt_logprobs(
     temperature: float,
     example_prompts: list[str],
 ) -> None:
-    """Test V1 Engine logprobs & prompt logprobs
+    """Test V1 Engine logprobs & prompt logprobs.
 
     Exercise a variety of combinations of `logprobs` and `prompt_logprobs`
     settings and validate that
@@ -433,7 +433,7 @@ def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
 
 
 def test_none_logprobs(vllm_model, example_prompts):
-    """Engine should return `logprobs` and `prompt_logprobs` as `None`
+    """Engine should return `logprobs` and `prompt_logprobs` as `None`.
 
     Args:
       vllm_model: vLLM model fixture
@@ -462,7 +462,7 @@ def test_none_logprobs(vllm_model, example_prompts):
 
 
 def test_zero_logprobs(vllm_model, example_prompts):
-    """Engine should return sampled token and prompt token logprobs
+    """Engine should return sampled token and prompt token logprobs.
 
     Args:
       vllm_model: vLLM model fixture
@@ -495,7 +495,7 @@ def test_zero_logprobs(vllm_model, example_prompts):
 
 
 def test_all_logprobs(example_prompts):
-    """Engine should return all vocabulary logprobs and prompt logprobs
+    """Engine should return all vocabulary logprobs and prompt logprobs.
 
     Args:
       example_prompts: list of example prompts (test fixture)

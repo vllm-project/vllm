@@ -208,7 +208,7 @@ class BatchResponseData(OpenAIBaseModel):
 
 
 class BatchRequestOutput(OpenAIBaseModel):
-    """The per-line object of the batch output and error files"""
+    """The per-line object of the batch output and error files."""
 
     id: str
 

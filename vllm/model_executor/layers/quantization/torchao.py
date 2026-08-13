@@ -169,7 +169,7 @@ class TorchAOConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "TorchAOConfig":
-        """Create the quant config from an hf model config"""
+        """Create the quant config from an hf model config."""
         try:
             from torchao.core.config import config_from_dict
         except ImportError as err:
@@ -289,7 +289,7 @@ class TorchAOConfig(QuantizationConfig):
 def torchao_quantize_param_data(
     param: torch.Tensor, torchao_config: Any
 ) -> torch.nn.Parameter:
-    """Quantize a Tensor with torchao quantization specified by torchao_config
+    """Quantize a Tensor with torchao quantization specified by torchao_config.
 
     Args:
         param: weight parameter of the linear module

@@ -24,7 +24,7 @@ class MLPSpeculatorConfig(PretrainedConfig):
         scale_input: bool = False,
         **kwargs,
     ):
-        """Initialize an MLPSpeculatorConfig
+        """Initialize an MLPSpeculatorConfig.
 
         Args:
             vocab_size: int

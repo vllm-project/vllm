@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pydantic models for Anthropic API protocol"""
+"""Pydantic models for Anthropic API protocol."""
 
 import time
 from typing import Annotated, Any, Literal
@@ -11,21 +11,21 @@ import vllm.envs as envs
 
 
 class AnthropicError(BaseModel):
-    """Error structure for Anthropic API"""
+    """Error structure for Anthropic API."""
 
     type: str
     message: str
 
 
 class AnthropicErrorResponse(BaseModel):
-    """Error response structure for Anthropic API"""
+    """Error response structure for Anthropic API."""
 
     type: Literal["error"] = "error"
     error: AnthropicError
 
 
 class AnthropicUsage(BaseModel):
-    """Token usage information"""
+    """Token usage information."""
 
     input_tokens: int
     output_tokens: int
@@ -34,7 +34,7 @@ class AnthropicUsage(BaseModel):
 
 
 class AnthropicContentBlock(BaseModel):
-    """Content block in message"""
+    """Content block in message."""
 
     type: Literal[
         "text",
@@ -65,14 +65,14 @@ class AnthropicContentBlock(BaseModel):
 
 
 class AnthropicMessage(BaseModel):
-    """Message structure"""
+    """Message structure."""
 
     role: Literal["user", "assistant", "system"]
     content: str | list[AnthropicContentBlock]
 
 
 class AnthropicTool(BaseModel):
-    """Tool definition"""
+    """Tool definition."""
 
     name: str
     description: str | None = None
@@ -91,7 +91,7 @@ class AnthropicTool(BaseModel):
 
 
 class AnthropicToolChoice(BaseModel):
-    """Tool Choice definition"""
+    """Tool Choice definition."""
 
     type: Literal["auto", "any", "tool", "none"]
     name: str | None = None
@@ -104,7 +104,7 @@ class AnthropicToolChoice(BaseModel):
 
 
 class AnthropicJsonOutputFormat(BaseModel):
-    """JSON output format configuration"""
+    """JSON output format configuration."""
 
     json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
     type: Literal["json_schema"] = "json_schema"
@@ -118,7 +118,7 @@ class AnthropicOutputConfig(BaseModel):
 
 
 class AnthropicMessagesRequest(BaseModel):
-    """Anthropic Messages API request"""
+    """Anthropic Messages API request."""
 
     model: str
     messages: list[AnthropicMessage]
@@ -183,7 +183,7 @@ class AnthropicMessagesRequest(BaseModel):
 
 
 class AnthropicDelta(BaseModel):
-    """Delta for streaming responses"""
+    """Delta for streaming responses."""
 
     type: (
         Literal["text_delta", "input_json_delta", "thinking_delta", "signature_delta"]
@@ -202,7 +202,7 @@ class AnthropicDelta(BaseModel):
 
 
 class AnthropicStreamEvent(BaseModel):
-    """Streaming event"""
+    """Streaming event."""
 
     type: Literal[
         "message_start",
@@ -223,7 +223,7 @@ class AnthropicStreamEvent(BaseModel):
 
 
 class AnthropicMessagesResponse(BaseModel):
-    """Anthropic Messages API response"""
+    """Anthropic Messages API response."""
 
     id: str
     type: Literal["message"] = "message"
@@ -256,7 +256,7 @@ class AnthropicContextManagement(BaseModel):
 
 
 class AnthropicCountTokensRequest(BaseModel):
-    """Anthropic messages.count_tokens request"""
+    """Anthropic messages.count_tokens request."""
 
     model: str
     messages: list[AnthropicMessage]
@@ -282,7 +282,7 @@ class AnthropicCountTokensRequest(BaseModel):
 
 
 class AnthropicCountTokensResponse(BaseModel):
-    """Anthropic messages.count_tokens response"""
+    """Anthropic messages.count_tokens response."""
 
     input_tokens: int
     context_management: AnthropicContextManagement | None = None

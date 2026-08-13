@@ -131,7 +131,7 @@ def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("logitproc_source", list(CustomLogitprocSource))
 def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource):
-    """Test offline Python interface for passing custom logitsprocs
+    """Test offline Python interface for passing custom logitsprocs.
 
     Construct an `LLM` instance which loads a custom logitproc that has a
     well-defined behavior (mask out all tokens except one `target_token`)
@@ -192,7 +192,7 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
 
 @create_new_process_for_each_test()
 def test_custom_logitsprocs_req(monkeypatch):
-    """Test passing request-level logits processor to offline Python interface
+    """Test passing request-level logits processor to offline Python interface.
 
     Wrap a request-level logits processor to create a batch level logits
     processor that has a well-defined behavior (mask out all tokens except one

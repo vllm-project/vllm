@@ -153,7 +153,7 @@ class RequestOutput:
         self.ec_transfer_params = ec_transfer_params
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
-        """Merge subsequent RequestOutput into this one"""
+        """Merge subsequent RequestOutput into this one."""
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params

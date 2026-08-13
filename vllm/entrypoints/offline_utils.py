@@ -47,7 +47,7 @@ _R = TypeVar("_R", default=Any)
 
 
 class OfflineInferenceMixin:
-    """Offline inference utils"""
+    """Offline inference utils."""
 
     request_counter: Counter
     renderer: BaseRenderer

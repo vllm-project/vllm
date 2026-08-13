@@ -1029,7 +1029,7 @@ def test_prefill_hybrid_model_mamba_align():
 
 
 def test_hybrid_cache_mamba_align_shared_prefix_detection():
-    """Test shared prefix detection heuristic for mamba align cache mode
+    """Test shared prefix detection heuristic for mamba align cache mode.
 
     HybridKVCacheCoordinator returns num_uncached_common > 0 when a shared
     uncached prefix is detected. With mamba_align cache, _mamba_block_aligned_split

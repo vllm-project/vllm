@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""This file is used for /tests and /benchmarks"""
+"""This file is used for /tests and /benchmarks."""
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -493,7 +493,7 @@ def get_attribute_fallback(obj, attributes: list[str]):
 def get_and_maybe_dequant_weights(
     layer: "LinearBase", out_dtype: torch.dtype = torch.float32
 ):
-    """Return layer's unquantized weights in [out, in] layout"""
+    """Return layer's unquantized weights in [out, in] layout."""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
     from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -995,7 +995,7 @@ def convert_bf16_scales_to_fp8(
 
 
 def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tensor:
-    """Convert int4b8 (packed to int32) to signed int4"""
+    """Convert int4b8 (packed to int32) to signed int4."""
     assert t.is_cuda, "tensor must be on gpu"
     assert t.dtype == torch.int32, f"expected int32 packed weights but got {t.dtype}"
 

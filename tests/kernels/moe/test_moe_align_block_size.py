@@ -187,7 +187,7 @@ def torch_moe_align_block_size(
 def test_moe_align_block_size(
     m: int, topk: int, num_experts: int, block_size: int, pad_sorted_ids: bool
 ):
-    """Test moe_align_block_size without expert mapping"""
+    """Test moe_align_block_size without expert mapping."""
     topk_ids = torch.zeros((m, topk), device="cuda", dtype=torch.int32)
     for i in range(m):
         experts = torch.randperm(num_experts, device="cuda")[:topk]
@@ -252,7 +252,7 @@ def test_moe_align_block_size_with_expert_map(
     block_size: int,
     mask_inactive_experts: bool,
 ):
-    """Test moe_align_block_size with expert mapping (EP scenario)"""
+    """Test moe_align_block_size with expert mapping (EP scenario)."""
     expert_map = torch.full((num_experts,), -1, device="cuda", dtype=torch.int32)
     local_experts = list(range(0, num_experts, 2))
     for i, expert_id in enumerate(local_experts):

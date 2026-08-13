@@ -348,7 +348,7 @@ def _compress_gather_split_sparse_attn(
     NUM_SPLITS: tl.constexpr,
     HEAD_TILE: tl.constexpr,  # HEAD_SIZE // NUM_SPLITS
 ):
-    """Stage 1: per-(token, head-split) compress gather, write to fp32 scratch
+    """Stage 1: per-(token, head-split) compress gather, write to fp32 scratch.
 
     No-overlap gather (cr>=128) on rows [0, COMPRESS_RATIO)
     """
@@ -592,7 +592,7 @@ def compress_norm_rope_store_two_stage_triton(
     num_decode_tokens: int,
     compress_scratch: torch.Tensor,
 ) -> None:
-    """Two-stage split compressor dispatch for head=512 cr>=128 (no-overlap)
+    """Two-stage split compressor dispatch for head=512 cr>=128 (no-overlap).
 
     Run the occupancy-fanned two-stage split for prefill [num_decodee_tokens:]
     to fill the CUs, and use the original single-pass launcher

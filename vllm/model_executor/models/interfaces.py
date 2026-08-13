@@ -1126,7 +1126,7 @@ class SupportsQuant:
 
     @staticmethod
     def _find_quant_config(*args, **kwargs) -> QuantizationConfig | None:
-        """Find quant config passed through model constructor args"""
+        """Find quant config passed through model constructor args."""
         from vllm.config import VllmConfig  # avoid circular import
 
         args_values = list(args) + list(kwargs.values())
@@ -1140,7 +1140,7 @@ class SupportsQuant:
         return None
 
     def _maybe_apply_model_mapping(self):
-        """Apply model mappings to config for proper config-model matching"""
+        """Apply model mappings to config for proper config-model matching."""
         if self.quant_config is None:
             return
         if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:

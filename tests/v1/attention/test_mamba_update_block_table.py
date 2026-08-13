@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression test for https://github.com/vllm-project/vllm/issues/34865
+"""Regression test for https://github.com/vllm-project/vllm/issues/34865.
 
 When multiple KV cache groups share the same MambaSpec (as in Nemotron
 hybrid models), the metadata caching optimization reuses metadata from

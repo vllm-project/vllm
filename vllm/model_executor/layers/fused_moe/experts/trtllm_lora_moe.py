@@ -111,7 +111,7 @@ def _finalize_lora_kernel(
 
 
 class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
-    """LoRA-aware trtllm MoE experts"""
+    """LoRA-aware trtllm MoE experts."""
 
     def __init__(
         self,

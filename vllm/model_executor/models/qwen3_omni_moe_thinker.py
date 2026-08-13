@@ -2265,7 +2265,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         return torch.from_numpy(llm_positions), mrope_position_delta
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models"""
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="visual.merger",

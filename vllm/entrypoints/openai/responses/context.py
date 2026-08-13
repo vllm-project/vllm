@@ -161,7 +161,7 @@ def _create_json_parse_error_messages(
 
 
 class SimpleContext(ConversationContext):
-    """This is a context that cannot handle MCP tool calls"""
+    """This is a context that cannot handle MCP tool calls."""
 
     def __init__(
         self,
@@ -580,7 +580,7 @@ class ParsableContext(ConversationContext):
                 exit_stack.push_async_exit(self.cleanup_session)
 
     async def cleanup_session(self, *args, **kwargs) -> None:
-        """Can be used as coro to used in __aexit__"""
+        """Can be used as coro to used in __aexit__."""
 
         async def cleanup_tool_session(tool_session):
             if not isinstance(tool_session, Tool):
@@ -920,7 +920,7 @@ class HarmonyContext(ConversationContext):
         ]
 
     async def cleanup_session(self, *args, **kwargs) -> None:
-        """Can be used as coro to used in __aexit__"""
+        """Can be used as coro to used in __aexit__."""
 
         async def cleanup_tool_session(tool_session):
             if not isinstance(tool_session, Tool):

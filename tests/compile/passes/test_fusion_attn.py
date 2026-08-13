@@ -291,7 +291,7 @@ def test_attention_quant_pattern(
     dist_init,
     disable_vllm_compile_cache,
 ):
-    """Test AttentionStaticQuantPattern fusion pass"""
+    """Test AttentionStaticQuantPattern fusion pass."""
     if backend == AttentionBackendEnum.FLASHINFER and (
         not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
     ):

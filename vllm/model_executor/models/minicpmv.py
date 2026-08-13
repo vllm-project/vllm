@@ -1327,7 +1327,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         return loaded
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models"""
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="llm", connector="resampler", tower_model="vpm"
         )

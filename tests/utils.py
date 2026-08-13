@@ -224,7 +224,7 @@ class RemoteVLLMServer:
     def _start_server(
         self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
     ) -> None:
-        """Subclasses override this method to customize server process launch"""
+        """Subclasses override this method to customize server process launch."""
         raise NotImplementedError
 
     def _pre_download_model(self, model: str, args) -> None:
@@ -678,7 +678,7 @@ class RemoteVLLMServer:
         )
 
     def _poll(self) -> int | None:
-        """Subclasses override this method to customize process polling"""
+        """Subclasses override this method to customize process polling."""
         return self.proc.poll()
 
     def _wait_for_server(self, *, url: str, timeout: float):
@@ -830,7 +830,7 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
 
 
 class RemoteOpenAIServerCustom(RemoteOpenAIServer):
-    """Launch test server with custom child process"""
+    """Launch test server with custom child process."""
 
     def _start_server(
         self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None

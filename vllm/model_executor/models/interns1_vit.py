@@ -162,7 +162,7 @@ class InternS1VisionEmbeddings(nn.Module):
 
 
 class InternSdpaAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -223,7 +223,7 @@ class InternSdpaAttention(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """X shape: (B, N, C)"""
+        """X shape: (B, N, C)."""
         q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)

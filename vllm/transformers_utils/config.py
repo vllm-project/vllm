@@ -608,7 +608,7 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
 
 
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
-    """Update kwargs for AutoConfig initialization based on model_type"""
+    """Update kwargs for AutoConfig initialization based on model_type."""
     if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
         kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
     return kwargs

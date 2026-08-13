@@ -200,7 +200,7 @@ def process_runner_outputs(
 
 
 def process_outputs(output_processor, model, outputs_per_image):
-    """Applies a model specific post-processor function to a runner's output"""
+    """Applies a model specific post-processor function to a runner's output."""
     return [
         [output_processor(res, model) for res in outputs]
         for outputs in outputs_per_image

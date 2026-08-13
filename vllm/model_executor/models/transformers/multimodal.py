@@ -655,7 +655,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         return LanguageModel(self)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models"""
+        """Get the module prefix in multimodal models."""
         for name in ("language_model", "text_model"):
             if getattr(self.model, name, None) is not None:
                 return MultiModelKeys.from_string_field(language_model=f"model.{name}")

@@ -1629,7 +1629,7 @@ def test_get_max_concurrency_packed_kv_cache_config():
 
 
 def test_allocate_with_lookahead():
-    """Verify that lookahead tokens correctly affect block allocation"""
+    """Verify that lookahead tokens correctly affect block allocation."""
     block_size = 4
     config = KVCacheConfig(
         num_blocks=10,

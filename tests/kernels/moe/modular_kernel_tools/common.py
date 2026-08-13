@@ -443,7 +443,7 @@ class RankTensors:
     def make_hidden_states(
         config: Config,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Return hidden_states"""
+        """Return hidden_states."""
         m, k, dtype = (config.M, config.K, config.dtype)
         device = torch.accelerator.current_device_index()
         a = torch.randn((m, k), device=device, dtype=dtype) / 15.0

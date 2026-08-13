@@ -46,7 +46,7 @@ def get_layer_size(layer: torch.nn.Module) -> int:
 
 
 def has_device_tensors(bound_args: BoundArguments) -> bool:
-    """Return True if the loaded weights exist on an accelerator device
+    """Return True if the loaded weights exist on an accelerator device.
 
     Args:
         bound_args: args to load weights
@@ -62,7 +62,7 @@ def has_device_tensors(bound_args: BoundArguments) -> bool:
 
 
 def get_info_size(info: LayerReloadingInfo) -> int:
-    """Calculate the number of bytes used by loaded weights for a given layer
+    """Calculate the number of bytes used by loaded weights for a given layer.
 
     Args:
         info: layerwise info to get size of

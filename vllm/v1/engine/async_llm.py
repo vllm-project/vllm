@@ -1087,7 +1087,7 @@ class AsyncLLM(EngineClient):
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
-        """Send fault tolerance instruction to the engine"""
+        """Send fault tolerance instruction to the engine."""
         return await self.engine_core.handle_fault(fault_tolerance_request)
 
     async def get_status(self):

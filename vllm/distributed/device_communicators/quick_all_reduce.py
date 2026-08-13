@@ -311,7 +311,7 @@ class QuickAllReduce:
         ops.qr_open_handles(self._ptr, handles)
 
     def should_quick_allreduce(self, inp: torch.Tensor):
-        """Check if quickreduce is available"""
+        """Check if quickreduce is available."""
         if self.disabled:
             return False
         if inp.dtype not in self._SUPPORTED_DTYPES:

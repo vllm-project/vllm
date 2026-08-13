@@ -150,7 +150,7 @@ KVConnectorFactory.register_connector(
 
 @pytest.fixture
 def mc() -> MultiConnector:
-    """MultiConnector using two mocked connectors"""
+    """MultiConnector using two mocked connectors."""
     mock_connector_config = {
         "kv_connector": "MockConnector",
         "kv_role": "kv_both",

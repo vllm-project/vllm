@@ -43,7 +43,7 @@ def download_and_cache_file(url: str, filename: str | None = None) -> str:
 
 
 def load_gsm8k_data() -> tuple[list[dict], list[dict]]:
-    """Load GSM8K train and test data"""
+    """Load GSM8K train and test data."""
     train_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/train.jsonl"
     test_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/test.jsonl"
 

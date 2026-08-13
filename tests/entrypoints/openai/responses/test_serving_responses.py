@@ -56,7 +56,7 @@ from vllm.sampling_params import SamplingParams
 
 
 class MockConversationContext(ConversationContext):
-    """Mock conversation context for testing"""
+    """Mock conversation context for testing."""
 
     def __init__(self):
         self.init_tool_sessions_called = False
@@ -98,7 +98,7 @@ def test_serialize_message_pydantic_model_returns_dict() -> None:
 
 @pytest.fixture
 def mock_serving_responses():
-    """Create a mock OpenAIServingResponses instance"""
+    """Create a mock OpenAIServingResponses instance."""
     serving_responses = MagicMock(spec=OpenAIServingResponses)
     serving_responses.tool_server = MagicMock(spec=ToolServer)
     return serving_responses
@@ -106,13 +106,13 @@ def mock_serving_responses():
 
 @pytest.fixture
 def mock_context():
-    """Create a mock conversation context"""
+    """Create a mock conversation context."""
     return MockConversationContext()
 
 
 @pytest.fixture
 def mock_exit_stack():
-    """Create a mock async exit stack"""
+    """Create a mock async exit stack."""
     return MagicMock(spec=AsyncExitStack)
 
 
@@ -206,11 +206,11 @@ def test_response_created_event_uses_public_json_schema_alias() -> None:
 
 
 class TestInitializeToolSessions:
-    """Test class for _initialize_tool_sessions method"""
+    """Test class for _initialize_tool_sessions method."""
 
     @pytest_asyncio.fixture
     async def serving_responses_instance(self):
-        """Create a real OpenAIServingResponses instance for testing"""
+        """Create a real OpenAIServingResponses instance for testing."""
         # Create minimal mocks for required dependencies
         engine_client = MagicMock()
 
@@ -244,7 +244,7 @@ class TestInitializeToolSessions:
     async def test_initialize_tool_sessions(
         self, serving_responses_instance, mock_context, mock_exit_stack
     ):
-        """Test that method works correctly with only MCP tools"""
+        """Test that method works correctly with only MCP tools."""
         request = ResponsesRequest(input="test input", tools=[])
 
         # Call the method
@@ -293,11 +293,11 @@ class TestInitializeToolSessions:
 
 
 class TestValidateGeneratorInput:
-    """Test class for _validate_generator_input method"""
+    """Test class for _validate_generator_input method."""
 
     @pytest_asyncio.fixture
     async def serving_responses_instance(self):
-        """Create a real OpenAIServingResponses instance for testing"""
+        """Create a real OpenAIServingResponses instance for testing."""
         # Create minimal mocks for required dependencies
         engine_client = MagicMock()
 
@@ -325,7 +325,7 @@ class TestValidateGeneratorInput:
         return instance
 
     def test_validate_generator_input(self, serving_responses_instance):
-        """Test _validate_generator_input with valid prompt length"""
+        """Test _validate_generator_input with valid prompt length."""
         # Create an engine prompt with valid length (less than max_model_len)
         valid_prompt_token_ids = list(range(5))  # 5 tokens < 100 max_model_len
         engine_input = tokens_input(valid_prompt_token_ids)
@@ -436,7 +436,7 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
 
 
 class TestExtractAllowedToolsFromMcpRequests:
-    """Test class for _extract_allowed_tools_from_mcp_requests function"""
+    """Test class for _extract_allowed_tools_from_mcp_requests function."""
 
     def test_extract_allowed_tools_basic_formats(self):
         """Test extraction with list format, object format, and None."""

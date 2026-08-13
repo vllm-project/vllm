@@ -374,7 +374,7 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks += len(blocks)
 
     def append_n(self, blocks: list[KVCacheBlock]) -> None:
-        """Put a list of blocks back into the free list
+        """Put a list of blocks back into the free list.
 
         Args:
             blocks: The blocks to append.

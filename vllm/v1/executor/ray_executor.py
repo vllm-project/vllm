@@ -61,7 +61,7 @@ class RayWorkerMetaData:
 
 
 class RayDistributedExecutor(Executor):
-    """Ray-based distributed executor"""
+    """Ray-based distributed executor."""
 
     uses_ray: bool = True
     supports_pp: bool = True

@@ -346,7 +346,7 @@ class RoutedExperts(PluggableLayer):
         tp_rank: int,
         load_full_w2: bool = False,
     ):
-        """Load grouped weight scales for group quantization or model weights
+        """Load grouped weight scales for group quantization or model weights.
 
         Args:
             shard_dim: dimension to shard

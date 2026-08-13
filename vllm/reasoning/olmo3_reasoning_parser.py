@@ -187,7 +187,7 @@ class Olmo3ReasoningBuffer:
 
 
 class Olmo3ReasoningParser(ReasoningParser):
-    """Reasoning parser for Olmo 3 model
+    """Reasoning parser for Olmo 3 model.
 
     Olmo3ReasoningParser
 
@@ -303,7 +303,7 @@ class Olmo3ReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """Extract content using token ID sequence state machine"""
+        """Extract content using token ID sequence state machine."""
         delta_message = self.buffer.add_text(delta_text)
         if delta_message is None and self.buffer.think_end in self.buffer.buffer:
             # this is a bit hacky, but, because of how the buffer is

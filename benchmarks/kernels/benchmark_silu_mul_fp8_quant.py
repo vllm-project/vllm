@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Comprehensive 3-way SiLU Benchmark Suite
+"""Comprehensive 3-way SiLU Benchmark Suite.
 
 This benchmark compares three SiLU implementations:
 1. SiLU V2 (CUDA) - Optimized CUDA kernel implementation
@@ -109,7 +109,7 @@ def silu_mul_fp8_quant_deep_gemm_triton(
     eps: float = 1e-10,
     expert_offsets: torch.Tensor = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
+    """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales.
 
     y has shape (E, T, 2*H). The first half of the last dimension is
     silu-activated, multiplied by the second half, then quantized into FP8.
@@ -205,7 +205,7 @@ def benchmark(
     iterations_per_run: int = 20,
 ):
     def generate_data(seed_offset=0):
-        """Generate input data with given seed offset"""
+        """Generate input data with given seed offset."""
         set_random_seed(42 + seed_offset)
         y = torch.rand((E, T, 2 * H), dtype=torch.bfloat16, device="cuda").contiguous()
 

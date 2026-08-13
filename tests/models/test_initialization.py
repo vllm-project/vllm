@@ -185,13 +185,13 @@ def can_initialize(
 
 @pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)
 def test_can_initialize_small_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
-    """Test initializing small subset of supported models"""
+    """Test initializing small subset of supported models."""
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
 @pytest.mark.parametrize("model_arch", OTHER_MODEL_ARCH_LIST)
 def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
-    """Test initializing large subset of supported models
+    """Test initializing large subset of supported models.
 
     This test covers the complement of the tests covered in the "small subset"
     test.

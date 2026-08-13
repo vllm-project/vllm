@@ -45,7 +45,7 @@ class MinPLogitsProcessor(LogitsProcessor):
         self.min_p: torch.Tensor = self.min_p_device[:0]
 
     def is_argmax_invariant(self) -> bool:
-        """Min-p never impacts greedy sampling"""
+        """Min-p never impacts greedy sampling."""
         return True
 
     def get_min_p_by_index(self, index: int) -> float:

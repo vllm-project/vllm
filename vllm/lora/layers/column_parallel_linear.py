@@ -131,7 +131,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def forward(
         self, input_: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward of ColumnParallelLinear
+        """Forward of ColumnParallelLinear.
 
         Args:
             input_: Tensor whose last dimension is `input_size`.

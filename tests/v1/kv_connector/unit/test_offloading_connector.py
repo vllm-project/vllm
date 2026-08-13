@@ -62,7 +62,7 @@ _EVENT_DRAIN_TIMEOUT = 60
 
 
 class MockSubscriber:
-    """Helper class to receive and verify published events"""
+    """Helper class to receive and verify published events."""
 
     def __init__(
         self,
@@ -107,7 +107,7 @@ class MockSubscriber:
         return cpu_stored_events
 
     def close(self):
-        """Clean up resources"""
+        """Clean up resources."""
         self.sub.close()
 
 

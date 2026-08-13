@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Utility helpers for MxInt4 + FlashInfer fused-MoE path"""
+"""Utility helpers for MxInt4 + FlashInfer fused-MoE path."""
 
 import functools
 

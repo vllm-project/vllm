@@ -86,7 +86,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         return end_token_id in delta_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """Extract the content after the end tokens"""
+        """Extract the content after the end tokens."""
         if self.end_token_id not in islice(input_ids, 0, max(0, len(input_ids) - 1)):
             return []
         else:

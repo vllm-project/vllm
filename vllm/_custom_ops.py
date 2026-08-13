@@ -902,7 +902,7 @@ def get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     k: int,
     swap_ab: bool,
 ):
-    """Compute per-expert (M, N, K) problem sizes from expert_first_token_offset"""
+    """Compute per-expert (M, N, K) problem sizes from expert_first_token_offset."""
     return torch.ops._C.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
         expert_first_token_offset,
         problem_sizes1,

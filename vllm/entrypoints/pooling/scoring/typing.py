@@ -21,7 +21,7 @@ ScoreContentPartParam: TypeAlias = (
 
 
 class ScoreMultiModalParam(TypedDict, total=False):
-    """A specialized parameter type for scoring multimodal content
+    """A specialized parameter type for scoring multimodal content.
 
     The reasons why don't reuse `CustomChatCompletionMessageParam` directly:
     1. Score tasks don't need the 'role' field (user/assistant/system) that's required in chat completions

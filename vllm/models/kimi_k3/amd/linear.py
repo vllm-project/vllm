@@ -316,7 +316,7 @@ class KimiMoE(nn.Module):
 
 
 class KimiMLAAttention(nn.Module):
-    """Main reference: DeepseekV2 vllm Implementation"""
+    """Main reference: DeepseekV2 vllm Implementation."""
 
     def __init__(
         self,

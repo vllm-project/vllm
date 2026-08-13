@@ -21,7 +21,7 @@ class QuarkScheme(ABC):
 
     @abstractmethod
     def create_weights(self, *args, **kwargs):
-        """Weight creation for the particular scheme. Inputs to this function"""
+        """Weight creation for the particular scheme. Inputs to this function."""
         raise NotImplementedError
 
     @abstractmethod

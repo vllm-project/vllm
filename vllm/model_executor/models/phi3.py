@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from llama.py
-"""Inference-only Phi3 model code inherit from Llama.py"""
+"""Inference-only Phi3 model code inherit from Llama.py."""
 
 from vllm.model_executor.models.llama import LlamaForCausalLM
 

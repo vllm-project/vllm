@@ -98,7 +98,7 @@ if TYPE_CHECKING:
 
 
 class AsyncIntermediateTensors(IntermediateTensors):
-    """IntermediateTensors with lazy comm synchronization"""
+    """IntermediateTensors with lazy comm synchronization."""
 
     def __init__(
         self,

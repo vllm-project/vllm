@@ -65,7 +65,7 @@ class DummyKVConnector(KVConnectorBase_V1):
 
 
 def _my_plugin():
-    """Registers the dummy KV connector and overrides _build_kv_connector_meta"""
+    """Registers the dummy KV connector and overrides _build_kv_connector_meta."""
     KVConnectorFactory.register_connector(
         "DummyKVConnector",
         __name__,

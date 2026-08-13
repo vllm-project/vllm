@@ -411,7 +411,7 @@ class DeltaMessage(OpenAIBaseModel):
 
 
 class GenerationError(VLLMServerError):
-    """raised when finish_reason indicates internal server error (500)"""
+    """raised when finish_reason indicates internal server error (500)."""
 
     def __init__(self, message: str = "Internal server error"):
         super().__init__(message)

@@ -105,7 +105,7 @@ def get_memory_affinity(pid: int = 0) -> list[int]:
 
 
 def parse_id_list(raw_str: str) -> list[int]:
-    """Parses strings like '0-2,4,7-8' into [0, 1, 2, 4, 7, 8]"""
+    """Parses strings like '0-2,4,7-8' into [0, 1, 2, 4, 7, 8]."""
     result: list[int] = []
     if not raw_str:
         return result

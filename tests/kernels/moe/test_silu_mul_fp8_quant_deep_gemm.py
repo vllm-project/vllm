@@ -142,7 +142,7 @@ def silu_mul_quant(
 
 
 def pack_scales(x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
-    """Pack float32 scales into a int32 tensor"""
+    """Pack float32 scales into a int32 tensor."""
     assert x.dtype == torch.float32
     E, T, G = x.size()
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Universal vLLM Attention Benchmark
+"""Universal vLLM Attention Benchmark.
 
 Benchmark any attention backend with the extended grammar.
 Supports standard attention (Flash/Triton/FlashInfer) and MLA backends.

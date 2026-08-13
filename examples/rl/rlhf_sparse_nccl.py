@@ -115,7 +115,7 @@ class TrainModel:
         return self.master_address, self.port
 
     def init_dense_engine(self, world_size: int, llm_handle) -> None:
-        """Build the dense NCCL trainer engine"""
+        """Build the dense NCCL trainer engine."""
         self.dense_engine = WeightTransferTrainerFactory.trainer_init(
             init_info=NCCLTrainerInitInfo(
                 master_address=self.master_address,
@@ -254,7 +254,7 @@ class TrainModel:
         return (time.perf_counter() - start) * 1000.0
 
     def init_sparse_engine(self, world_size: int, llm_handle) -> None:
-        """Build the sparse trainer engine"""
+        """Build the sparse trainer engine."""
         self.sparse_engine = WeightTransferTrainerFactory.trainer_init(
             init_info=SparseNCCLTrainerInitInfo(
                 master_address=self.master_address,

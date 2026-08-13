@@ -192,7 +192,7 @@ class OutlinesVocabulary:
 
 
 def get_outlines_cache_path() -> str:
-    """Get the context object that contains previously-computed return values"""
+    """Get the context object that contains previously-computed return values."""
     outlines_cache_dir = os.getenv("OUTLINES_CACHE_DIR")
     xdg_cache_home = os.getenv("XDG_CACHE_HOME")
     home_dir = os.path.expanduser("~")
@@ -280,7 +280,7 @@ class OutlinesDiskCache:
 
 
 def get_outlines_cache():
-    """Get the Cache instance to be used for index caching"""
+    """Get the Cache instance to be used for index caching."""
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
         logger.warning(

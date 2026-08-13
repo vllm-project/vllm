@@ -118,7 +118,7 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
 
 
 def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
-    """Restore a layer to model format with tensors on the meta device"""
+    """Restore a layer to model format with tensors on the meta device."""
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 

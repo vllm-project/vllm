@@ -107,7 +107,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
     )
 
     def _replace_op_overloads(self, string: str) -> str:
-        """Replace <OpOverload(..., ...)> with nicer formulations"""
+        """Replace <OpOverload(..., ...)> with nicer formulations."""
         return str(
             self._OP_OVERLOAD_PATTERN.sub(
                 lambda m: f"torch.ops.{m.group(1)}.{m.group(2)}",

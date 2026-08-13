@@ -122,7 +122,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
 
 @pytest.mark.asyncio
 async def test_chat_error_non_stream():
-    """Test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (non-streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -247,7 +247,7 @@ async def test_renderer_only_chat_request_skips_mm_cache():
 
 @pytest.mark.asyncio
 async def test_chat_error_stream():
-    """Test finish_reason='error' returns 500 InternalServerError (streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()

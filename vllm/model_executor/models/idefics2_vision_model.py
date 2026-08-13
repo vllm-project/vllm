@@ -120,7 +120,7 @@ class Idefics2VisionEmbeddings(nn.Module):
 
 
 class Idefics2VisionAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,

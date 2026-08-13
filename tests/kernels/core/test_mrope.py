@@ -184,7 +184,7 @@ def test_mrope_torch_compile_tracing(
 
     # Create a wrapper that makes the in-place function appear functional
     def functional_forward_cuda(pos, q, k):
-        """Wrapper that converts in-place operation to functional style
+        """Wrapper that converts in-place operation to functional style.
 
         CUDA Graph does not support in-place operations.
         This wrapper creates working copies of the

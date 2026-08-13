@@ -256,7 +256,7 @@ def test_model_text_image(
     model: str,
     dtype: str,
 ) -> None:
-    """Visual Documents Reranking"""
+    """Visual Documents Reranking."""
     _run_test(
         hf_runner,
         vllm_runner,
@@ -279,7 +279,7 @@ def test_model_text_text(
     model: str,
     dtype: str,
 ) -> None:
-    """Textual Documents Reranking"""
+    """Textual Documents Reranking."""
     _run_test(
         hf_runner,
         vllm_runner,
@@ -302,7 +302,7 @@ def test_model_image_text(
     model: str,
     dtype: str,
 ) -> None:
-    """Image Querying for Textual Documents"""
+    """Image Querying for Textual Documents."""
     _run_test(
         hf_runner,
         vllm_runner,
@@ -325,7 +325,7 @@ def test_model_image_image(
     model: str,
     dtype: str,
 ) -> None:
-    """Image Querying for Image Documents"""
+    """Image Querying for Image Documents."""
     _run_test(
         hf_runner,
         vllm_runner,
@@ -348,7 +348,7 @@ def test_model_text_mixed_documents(
     model: str,
     dtype: str,
 ) -> None:
-    """Text Query for Mixed Text and Image Documents"""
+    """Text Query for Mixed Text and Image Documents."""
     _run_test(
         hf_runner,
         vllm_runner,

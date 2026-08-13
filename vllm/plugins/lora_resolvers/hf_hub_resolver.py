@@ -127,7 +127,7 @@ class HfHubResolver(FilesystemResolver):
 
 
 def register_hf_hub_resolver():
-    """Register the Hf hub LoRA Resolver with vLLM"""
+    """Register the Hf hub LoRA Resolver with vLLM."""
     hf_repo_list = envs.VLLM_LORA_RESOLVER_HF_REPO_LIST
     is_enabled = (
         envs.VLLM_PLUGINS is not None and "lora_hf_hub_resolver" in envs.VLLM_PLUGINS

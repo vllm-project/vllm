@@ -611,7 +611,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 
 
 class MooncakeConnectorScheduler:
-    """Implementation of Scheduler side methods"""
+    """Implementation of Scheduler side methods."""
 
     def __init__(
         self,
@@ -892,7 +892,7 @@ class MooncakeConnectorScheduler:
 
 
 class MooncakeConnectorWorker:
-    """Implementation of Worker side methods"""
+    """Implementation of Worker side methods."""
 
     def __init__(
         self,

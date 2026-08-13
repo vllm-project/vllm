@@ -185,19 +185,19 @@ class ScalarType:
         return self.signed
 
     def is_floating_point(self) -> bool:
-        """If the type is a floating point type"""
+        """If the type is a floating point type."""
         return self.exponent != 0
 
     def is_integer(self) -> bool:
-        """If the type is an integer type"""
+        """If the type is an integer type."""
         return self.exponent == 0
 
     def has_bias(self) -> bool:
-        """If the type has a non-zero bias"""
+        """If the type has a non-zero bias."""
         return self.bias != 0
 
     def has_infs(self) -> bool:
-        """If the type is floating point and supports infinity"""
+        """If the type is floating point and supports infinity."""
         return not self._finite_values_only
 
     def has_nans(self) -> bool:

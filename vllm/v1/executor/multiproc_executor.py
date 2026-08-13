@@ -485,7 +485,7 @@ class MultiprocExecutor(Executor):
                 p.kill()
 
     def shutdown(self):
-        """Properly shut down the executor and its workers"""
+        """Properly shut down the executor and its workers."""
         if not getattr(self, "shutting_down", False):
             worker_count = len(getattr(self, "workers", None) or [])
             logger.debug(
@@ -1011,7 +1011,7 @@ class WorkerProc:
             self.enqueue_output(output)
 
     def worker_busy_loop(self):
-        """Main busy loop for Multiprocessing Workers"""
+        """Main busy loop for Multiprocessing Workers."""
         assert self.rpc_broadcast_mq is not None
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(

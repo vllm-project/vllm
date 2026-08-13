@@ -175,7 +175,7 @@ class Platform:
 
     @property
     def pass_key(self) -> str:
-        """Inductor config key for the PassManager custom pass"""
+        """Inductor config key for the PassManager custom pass."""
         return "post_grad_custom_post_pass"
 
     @property
@@ -999,17 +999,17 @@ class Platform:
 
     @classmethod
     def get_infinity_values(cls, dtype: torch.dtype) -> tuple[float, float]:
-        """Return the platform specific values for (-inf, inf)"""
+        """Return the platform specific values for (-inf, inf)."""
         return float("-inf"), float("inf")
 
     @classmethod
     def can_update_inplace(cls) -> bool:
-        """Checks if the platform allows inplace memory updates"""
+        """Checks if the platform allows inplace memory updates."""
         return True
 
     @classmethod
     def get_lora_vocab_padding_size(cls) -> int:
-        """Returns how much padding the LoRA logits need for kernels"""
+        """Returns how much padding the LoRA logits need for kernels."""
         return 256
 
     @classmethod
@@ -1066,7 +1066,7 @@ class Platform:
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
-        """Returns if custom allreduce is supported on the current platform"""
+        """Returns if custom allreduce is supported on the current platform."""
         return False
 
     @classmethod
@@ -1082,7 +1082,7 @@ class Platform:
         processed_inputs: "EngineInput",
         params: "SamplingParams | PoolingParams",
     ) -> None:
-        """Raises if this request is unsupported on this platform"""
+        """Raises if this request is unsupported on this platform."""
 
     def __getattr__(self, key: str):
         # Pickle checks dunder methods like __getstate__. If we return None

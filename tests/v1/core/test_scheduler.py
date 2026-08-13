@@ -223,7 +223,7 @@ def test_schedule_multimodal_requests():
 
 
 def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
-    """Async scheduling + PP: allow multi-step in-flight scheduling per request"""
+    """Async scheduling + PP: allow multi-step in-flight scheduling per request."""
     scheduler = create_scheduler(async_scheduling=True, pipeline_parallel_size=2)
     (req,) = create_requests(num_requests=1, num_tokens=8)
     scheduler.add_request(req)
@@ -670,7 +670,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
 
 
 def test_stop_via_update_from_output():
-    """Test stopping behavior through update_from_output"""
+    """Test stopping behavior through update_from_output."""
     scheduler = create_scheduler(num_speculative_tokens=1)
 
     # Test case 1: Stop on EOS token
@@ -3575,7 +3575,7 @@ def _assert_right_ec_connector_metadata(
     output: SchedulerOutput,
     mm_features_list: list[MultiModalFeatureSpec],
 ):
-    """Verify that ECConnector metadata EXACTLY matches the input MM data"""
+    """Verify that ECConnector metadata EXACTLY matches the input MM data."""
     # Get the connector metadata
     metadata = output.ec_connector_metadata
 

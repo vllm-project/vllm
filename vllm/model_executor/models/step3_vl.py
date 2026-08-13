@@ -291,7 +291,7 @@ class Step3VisionEmbeddings(nn.Module):
 
 
 class Step3VisionAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -344,7 +344,7 @@ class Step3VisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ):
-        """Input shape: Batch x Time x Channel"""
+        """Input shape: Batch x Time x Channel."""
         bsz, tgt_len, _ = hidden_states.size()
 
         # get query proj

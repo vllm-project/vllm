@@ -224,7 +224,7 @@ class LayerwiseProfileResults(profile):
         return next(iterator, None)
 
     def _cumulative_cuda_time(self, node: _ModuleTreeNode):
-        """Return cuda time in microseconds"""
+        """Return cuda time in microseconds."""
 
         def _cumulative_cuda_time_recursive(node: _ModuleTreeNode):
             if node.is_leaf and (gpu_kineto_event := self._get_kineto_gpu_event(node)):

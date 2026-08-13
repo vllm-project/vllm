@@ -2328,7 +2328,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
 
 class EngineCoreActorMixin:
-    """Ray actor for running EngineCore in a data parallel context"""
+    """Ray actor for running EngineCore in a data parallel context."""
 
     def __init__(
         self,

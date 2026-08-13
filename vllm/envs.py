@@ -378,7 +378,7 @@ def env_with_choices(
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
 ) -> Callable[[], str | None]:
-    """Create a lambda that validates environment variable against allowed choices
+    """Create a lambda that validates environment variable against allowed choices.
 
     Args:
         env_name: Name of the environment variable
@@ -2126,7 +2126,7 @@ def __getattr__(name: str):
 
 
 def _is_envs_cache_enabled() -> bool:
-    """Checked if __getattr__ is wrapped with functools.cache"""
+    """Checked if __getattr__ is wrapped with functools.cache."""
     global __getattr__
     return hasattr(__getattr__, "cache_clear")
 

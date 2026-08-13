@@ -795,7 +795,7 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
-        """Query if the set of gpus are fully connected by xgmi (1 hop)"""
+        """Query if the set of gpus are fully connected by xgmi (1 hop)."""
         handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):

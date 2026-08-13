@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""# MLA Common Components
+"""# MLA Common Components.
 
 This file implements common components for MLA implementations.
 
@@ -1407,7 +1407,7 @@ class MLACommonBackend(AttentionBackend):
 
 @dataclass
 class MLACommonPrefillMetadata:
-    """Prefill Specific Metadata"""
+    """Prefill Specific Metadata."""
 
     @dataclass
     class ContextChunk:

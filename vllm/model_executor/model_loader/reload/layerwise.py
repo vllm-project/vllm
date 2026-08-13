@@ -374,7 +374,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
 
 
 def _get_original_loader(tensor: torch.Tensor) -> Callable:
-    """Return the weight loader with any layerwise wrappers removed"""
+    """Return the weight loader with any layerwise wrappers removed."""
     loader = _get_weight_loader(tensor)
     while loader.__name__ == "online_process_loader":
         loader = loader.__wrapped__  # type: ignore[union-attr]

@@ -961,7 +961,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             return None
 
     def _save_modelinfo_to_cache(self, mi: _ModelInfo, module_hash: str) -> None:
-        """Save dictionary json file to cache"""
+        """Save dictionary json file to cache."""
         from vllm.model_executor.model_loader.weight_utils import atomic_writer
 
         try:

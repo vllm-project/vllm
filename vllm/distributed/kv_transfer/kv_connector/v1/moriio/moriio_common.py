@@ -586,7 +586,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
+    """Context manager for a ZMQ socket."""
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
         raise ValueError(f"Unexpected socket type: {socket_type}")
 

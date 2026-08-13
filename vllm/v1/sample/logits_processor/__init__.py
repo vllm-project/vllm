@@ -55,7 +55,7 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
 
 
 def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
-    """Load all installed logit processor plugins"""
+    """Load all installed logit processor plugins."""
     from importlib.metadata import entry_points
 
     installed_logitsprocs_plugins = entry_points(group=LOGITSPROCS_GROUP)
@@ -238,7 +238,7 @@ def validate_logits_processors_parameters(
 
 
 class AdapterLogitsProcessor(LogitsProcessor):
-    """Wrapper for per-request logits processors
+    """Wrapper for per-request logits processors.
 
     To wrap a specific per-request logits processor,
     * Subclass `AdapterLogitsProcessor`
@@ -300,7 +300,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
         prompt_ids: list[int] | None,
         output_ids: list[int],
     ) -> partial[torch.Tensor] | None:
-        """Return state representation for new request
+        """Return state representation for new request.
 
         Returns None if logits processor is not applicable to request
 

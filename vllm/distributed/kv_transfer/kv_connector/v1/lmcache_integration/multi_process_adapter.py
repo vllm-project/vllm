@@ -44,7 +44,7 @@ def send_lmcache_request(
     request_type: RequestType,
     payloads: list[Any],
 ) -> MessagingFuture[Any]:
-    """Helper function to send the request to the LMCache multiprocess server
+    """Helper function to send the request to the LMCache multiprocess server.
 
     Args:
         mq_client: The LMCache multiprocess mode message queue client
@@ -64,7 +64,7 @@ def send_lmcache_request(
 def get_lmcache_chunk_size(
     mq_client: MessageQueueClient,
 ) -> int:
-    """Helper function to get the LMCache chunk size from the server
+    """Helper function to get the LMCache chunk size from the server.
 
     Args:
         mq_client: The LMCache multiprocess mode message queue client
@@ -320,7 +320,7 @@ class LMCacheMPSchedulerAdapter:
         end: int = 0,
         request_id: str | None = None,
     ) -> IPCCacheEngineKey:
-        """Convert token IDs to an IPC cache engine key"""
+        """Convert token IDs to an IPC cache engine key."""
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
@@ -335,7 +335,7 @@ class LMCacheMPSchedulerAdapter:
     def _create_hash_key(
         self, chunk_hash: bytes, request_id: str | None = None
     ) -> IPCCacheEngineKey:
-        """Create a hash-mode IPC cache engine key"""
+        """Create a hash-mode IPC cache engine key."""
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
@@ -412,7 +412,7 @@ class LMCacheMPWorkerAdapter:
         )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        """Register the kv caches with LMCache server
+        """Register the kv caches with LMCache server.
 
         Args:
             kv_caches: A dict of kv caches to register. The keys are the
@@ -433,7 +433,7 @@ class LMCacheMPWorkerAdapter:
     def submit_store_request(
         self, request_id: str, op: LoadStoreOp, event: torch.cuda.Event
     ):
-        """Submit a KV cache store request to LMCache
+        """Submit a KV cache store request to LMCache.
 
         Args:
             request_id: The ID of the request
@@ -467,7 +467,7 @@ class LMCacheMPWorkerAdapter:
     def submit_retrieve_request(
         self, request_id: str, op: LoadStoreOp, event: torch.cuda.Event
     ):
-        """Submit a KV cache retrieve request to LMCache
+        """Submit a KV cache retrieve request to LMCache.
 
         Args:
             request_id: The ID of the request
@@ -504,7 +504,7 @@ class LMCacheMPWorkerAdapter:
         ops: list[LoadStoreOp],
         event: torch.cuda.Event,
     ):
-        """Submit a batched store request to LMCache
+        """Submit a batched store request to LMCache.
 
         Args:
             request_ids: The IDs of the requests
@@ -553,7 +553,7 @@ class LMCacheMPWorkerAdapter:
         ops: list[LoadStoreOp],
         event: torch.cuda.Event,
     ):
-        """Submit a batched retrieve request to LMCache
+        """Submit a batched retrieve request to LMCache.
 
         Args:
             request_ids: The IDs of the requests
@@ -683,7 +683,7 @@ class LMCacheMPWorkerAdapter:
         return self.blocks_in_chunk
 
     def shutdown(self):
-        """Shutdown the LMCache MP worker adapter"""
+        """Shutdown the LMCache MP worker adapter."""
         logger.info("Unregistering kv caches")
         send_lmcache_request(
             self.mq_client, RequestType.UNREGISTER_KV_CACHE, [self.instance_id]
@@ -711,7 +711,7 @@ class LMCacheMPWorkerAdapter:
         end: int = 0,
         request_id: str | None = None,
     ) -> IPCCacheEngineKey:
-        """Convert token IDs to an IPC cache engine key"""
+        """Convert token IDs to an IPC cache engine key."""
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
@@ -725,7 +725,7 @@ class LMCacheMPWorkerAdapter:
     def _create_hash_key(
         self, chunk_hash: bytes, request_id: str | None = None
     ) -> IPCCacheEngineKey:
-        """Create a hash-mode IPC cache engine key"""
+        """Create a hash-mode IPC cache engine key."""
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,

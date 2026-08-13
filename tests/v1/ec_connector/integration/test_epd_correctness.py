@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""EPD Correctness Test
+"""EPD Correctness Test.
 
 Tests that EPD (Encoder-Prefill-Decode) disaggregation produces the same
 outputs as a baseline single instance.

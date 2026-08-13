@@ -56,7 +56,7 @@ class VLLMValidationError(VLLMClientError):
 
 
 class VLLMNotFoundError(VLLMClientError):
-    """vLLM-specific NotFoundError"""
+    """vLLM-specific NotFoundError."""
 
     pass
 

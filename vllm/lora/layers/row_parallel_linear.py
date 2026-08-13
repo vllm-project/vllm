@@ -42,7 +42,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def forward(
         self, input_: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward of RowParallelLinear
+        """Forward of RowParallelLinear.
 
         Args:
             input_: tensor whose last dimension is `input_size`. If

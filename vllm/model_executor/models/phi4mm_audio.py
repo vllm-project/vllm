@@ -254,7 +254,7 @@ class ConformerEncoderLayer(nn.Module):
 
 
 class TransformerEncoderBase(abc.ABC, nn.Module):
-    """The Base class for Transformer based encoders
+    """The Base class for Transformer based encoders.
 
     Please set causal = True in streaming model
     Args:
@@ -558,7 +558,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             torch.Tensor,
         ]
     ):
-        """Forwarding the inputs through the top embedding layers
+        """Forwarding the inputs through the top embedding layers.
 
         Args:
             xs_pad: torch.Tensor
@@ -942,7 +942,7 @@ class ConformerEncoder(TransformerEncoderBase):
     def forward(
         self, xs_pad: torch.Tensor, masks: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Conformer Forward function
+        """Conformer Forward function.
 
         Args:
             xs_pad: torch.Tensor
@@ -1033,7 +1033,7 @@ class ConformerEncoder(TransformerEncoderBase):
 
 
 class WindowQformer(nn.Module):
-    """Window-level Qformer"""
+    """Window-level Qformer."""
 
     def __init__(
         self,
@@ -1075,7 +1075,7 @@ class WindowQformer(nn.Module):
         mask: torch.Tensor | None,
         embed_len: int | None = None,
     ) -> tuple[torch.Tensor, int | None]:
-        """Forward decoder"""
+        """Forward decoder."""
         # audio_embed: N x T x D => N x D x T
 
         audio_embed = audio_embed.transpose(1, 2)

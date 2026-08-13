@@ -173,7 +173,7 @@ def apply_rotary_pos_emb(
 
 
 class Siglip2Attention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -236,7 +236,7 @@ class Siglip2Attention(nn.Module):
         cu_seqlens: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Input shape: Batch x Time x Channel"""
+        """Input shape: Batch x Time x Channel."""
         seq_length, embed_dim = hidden_states.shape
 
         qkv_states, _ = self.qkv_proj(hidden_states)

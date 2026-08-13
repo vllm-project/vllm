@@ -602,7 +602,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         rank: int,
         gpus_per_node: int,
     ):
-        """Initialize workspace"""
+        """Initialize workspace."""
         if self.initialized:
             return
 
@@ -643,7 +643,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         )
 
     def ensure_alltoall_workspace_initialized(self):
-        """Ensure workspace is initialized"""
+        """Ensure workspace is initialized."""
         if not has_flashinfer_nvlink_two_sided():
             return False
 
@@ -662,7 +662,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         return self
 
     def cleanup(self):
-        """Clean up workspace"""
+        """Clean up workspace."""
         if (
             self.initialized
             and self.workspace_tensor is not None

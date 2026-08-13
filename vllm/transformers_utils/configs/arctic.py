@@ -5,7 +5,7 @@
 # coding=utf-8
 # Copied from
 # https://huggingface.co/Snowflake/snowflake-arctic-instruct/blob/main/configuration_arctic.py
-"""Arctic model configuration"""
+"""Arctic model configuration."""
 
 from dataclasses import asdict, dataclass
 from typing import Any

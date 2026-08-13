@@ -35,7 +35,7 @@ def should_use_cdna4_mx_scale_swizzle() -> bool:
 
 
 def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
-    """Weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel"""
+    """Weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel."""
     assert has_triton_kernels()
     import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
     from triton_kernels.numerics import InFlexData

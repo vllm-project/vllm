@@ -69,7 +69,7 @@ def run_maverick_serving(model: str):
 
 
 def get_rope_layers_config(model_path: str) -> list[int]:
-    """Get the interleaved RoPE configuration from HuggingFace config
+    """Get the interleaved RoPE configuration from HuggingFace config.
 
     Args:
         model_path: Path to the local directory containing the reduced
@@ -464,7 +464,7 @@ def create_vision_model_weights(
 def create_shared_weights(
     text_config: dict[str, Any], vision_config: dict[str, Any]
 ) -> dict[str, torch.Tensor]:
-    """Create weights for shared components (vision-language connector)"""
+    """Create weights for shared components (vision-language connector)."""
     weights = {}
 
     text_hidden_size = text_config["hidden_size"]

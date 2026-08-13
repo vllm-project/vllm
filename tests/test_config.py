@@ -955,7 +955,7 @@ def test_get_and_verify_max_len(
 
 
 class MockConfig:
-    """Simple mock object for testing maybe_pull_model_tokenizer_for_runai"""
+    """Simple mock object for testing maybe_pull_model_tokenizer_for_runai."""
 
     def __init__(self, model: str, tokenizer: str):
         self.model = model
@@ -1801,7 +1801,7 @@ def test_ir_op_priority_default():
 
 
 def test_ir_op_priority_str():
-    """Test that passing a comma-delimited string works"""
+    """Test that passing a comma-delimited string works."""
     from vllm.config.kernel import IrOpPriorityConfig
 
     priority_config = IrOpPriorityConfig(rms_norm="vllm_c")

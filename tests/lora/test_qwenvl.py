@@ -46,7 +46,7 @@ class TestConfig:
 
 
 class Qwen2VLTester:
-    """Test helper for Qwen2 VL models with LoRA"""
+    """Test helper for Qwen2 VL models with LoRA."""
 
     PROMPT_TEMPLATE = (
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
@@ -199,7 +199,7 @@ def _enable_deterministic_lora_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_qwen2vl_lora(qwen2vl_lora_files):
-    """Test Qwen 2.0 VL model with LoRA"""
+    """Test Qwen 2.0 VL model with LoRA."""
     config = TestConfig(model_path=QWEN2VL_MODEL_PATH, lora_path=qwen2vl_lora_files)
     with Qwen2VLTester(config) as tester:
         # Test with different LoRA IDs
@@ -230,7 +230,7 @@ def test_qwen2vl_lora_beam_search(qwen2vl_lora_files):
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
 def test_qwen25vl_lora(qwen25vl_lora_files):
-    """Test Qwen 2.5 VL model with LoRA"""
+    """Test Qwen 2.5 VL model with LoRA."""
     config = TestConfig(model_path=QWEN25VL_MODEL_PATH, lora_path=qwen25vl_lora_files)
     with Qwen2VLTester(config) as tester:
         # Test with different LoRA IDs

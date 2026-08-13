@@ -53,7 +53,7 @@ def _bitmask_to_token_ids(bitmask_row: torch.Tensor, vocab_size: int) -> list[in
 
 
 class BeamSearchOfflineMixin(OfflineInferenceMixin):
-    """Offline inference for beam search"""
+    """Offline inference for beam search."""
 
     def beam_search(
         self,

@@ -49,7 +49,7 @@ def create_mm_data(num_videos: int) -> dict[str, list]:
 @pytest.mark.parametrize("model_id", MODELS)
 @pytest.mark.parametrize("num_videos", [1, 2])
 def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> None:
-    """Regression test for https://github.com/vllm-project/vllm/pull/36800
+    """Regression test for https://github.com/vllm-project/vllm/pull/36800.
 
     MultiModalProcessorSenderCache.get_and_update_item returns (None, updates)
     on a cache hit, so mm_kwargs["video"] items become None on the second call.

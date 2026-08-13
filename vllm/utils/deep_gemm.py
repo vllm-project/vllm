@@ -59,7 +59,7 @@ class DeepGemmQuantScaleFMT(Enum):
 
     @classmethod
     def init_oracle_cache(cls) -> None:
-        """Initialize the oracle decision and store it in the class cache"""
+        """Initialize the oracle decision and store it in the class cache."""
         cached = getattr(cls, "_oracle_cache", None)
         if cached is not None:
             return
@@ -396,7 +396,7 @@ def mk_alignment_scope(value: int):
 
 
 def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
-    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor"""
+    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor."""
     _lazy_init()
     if _get_mn_major_tma_aligned_tensor_impl is None:
         return _missing()

@@ -84,7 +84,7 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
         )
 
     def flag_sharded_weights(self, params: dict[str, Parameter]):
-        """Sets the `is_sharded_weight` flag to True for all sharded weights"""
+        """Sets the `is_sharded_weight` flag to True for all sharded weights."""
         for name, param in params.items():
             modules = name.split(".")
             if "norm" in name and len(param.size()) < 2:

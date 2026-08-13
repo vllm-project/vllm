@@ -20,12 +20,12 @@ _global_counter = 0
 
 
 def get_global_counter():
-    """Get the current global counter value"""
+    """Get the current global counter value."""
     return _global_counter
 
 
 def reset_global_counter():
-    """Reset the global counter to 0"""
+    """Reset the global counter to 0."""
     global _global_counter
     _global_counter = 0
 
@@ -49,7 +49,7 @@ def silly_attention(
 def silly_attention_fake(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor
 ) -> None:
-    """Fake implementation for testing"""
+    """Fake implementation for testing."""
     return
 
 

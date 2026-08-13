@@ -22,7 +22,7 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 def get_test_models():
-    """Get list of models to test based on PyTorch version"""
+    """Get list of models to test based on PyTorch version."""
     models = [
         "Qwen/Qwen3-0.6B",
         "openai-community/gpt2",

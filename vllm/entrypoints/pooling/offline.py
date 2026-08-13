@@ -37,7 +37,7 @@ logger = init_logger(__name__)
 
 
 class PoolingOfflineMixin(OfflineInferenceMixin):
-    """Offline inference for pooling models"""
+    """Offline inference for pooling models."""
 
     runner_type: str
     chat_template: str | None

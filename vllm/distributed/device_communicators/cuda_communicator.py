@@ -530,7 +530,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return symm_output
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
-        """Sends a tensor to the destination rank in a blocking way"""
+        """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size

@@ -563,7 +563,7 @@ class OffloadingWorker(ABC):
 
 
 class OffloadingSpec(ABC):
-    """Spec for an offloading connector"""
+    """Spec for an offloading connector."""
 
     @classmethod
     def build_metric_definitions(

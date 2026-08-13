@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention backend registry"""
+"""Attention backend registry."""
 
 from collections.abc import Callable
 from enum import Enum, EnumMeta

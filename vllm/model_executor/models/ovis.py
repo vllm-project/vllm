@@ -199,7 +199,7 @@ class VisualTokenizer(torch.nn.Module):
         return features
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """[BatchSize, ImageShape] -> [BatchSize, Token, VocabSize]"""
+        """[BatchSize, ImageShape] -> [BatchSize, Token, VocabSize]."""
         features = self.encode(pixel_values)
         logits = self.head(features)
         tokens = self.tokenize(logits)

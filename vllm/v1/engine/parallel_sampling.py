@@ -53,7 +53,7 @@ class ParentRequest:
         self,
         index: int,
     ) -> SamplingParams:
-        """Efficiently obtain child `sampling_params`
+        """Efficiently obtain child `sampling_params`.
 
         If `sampling_params.seed` is not `None` then
         each child request requires a unique clone of

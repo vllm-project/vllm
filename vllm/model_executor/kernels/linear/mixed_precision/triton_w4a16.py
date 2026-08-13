@@ -65,7 +65,7 @@ def triton_w4a16_gemm_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """Fused W4A16 GEMM: C[M,N] = A[M,K] @ dequant(B)[K,N]
+    """Fused W4A16 GEMM: C[M,N] = A[M,K] @ dequant(B)[K,N].
 
     B is stored as [K, N//8] int32 using GPTQ sequential packing:
       each int32 packs 8 consecutive N-values at bit offsets [0,4,8,12,16,20,24,28].

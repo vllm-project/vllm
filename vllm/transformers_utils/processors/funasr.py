@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 
 
 def apply_cmvn(inputs, cmvn):  # noqa
-    """Apply CMVN with mvn data"""
+    """Apply CMVN with mvn data."""
     device = inputs.device
     # dtype = inputs.dtype
     frame, dim = inputs.shape

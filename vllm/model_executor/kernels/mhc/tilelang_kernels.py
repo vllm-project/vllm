@@ -537,7 +537,7 @@ def mhc_fused_tilelang(
     tile_n: int = 1,
     split_k: int = 1,
 ) -> tilelang.JITKernel:
-    """Fused mhc post-mapping + pre-norm GEMM FMA"""
+    """Fused mhc post-mapping + pre-norm GEMM FMA."""
     m = T.dynamic("num_tokens")
     split_k = T.dynamic("split_k")
     h = hidden

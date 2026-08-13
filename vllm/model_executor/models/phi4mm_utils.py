@@ -13,7 +13,7 @@ from torch import Tensor, nn
 
 
 class BlockBase(nn.Module):
-    """Block abstract module"""
+    """Block abstract module."""
 
     def __init__(self, input_size: int, output_size: int) -> None:
         super().__init__()
@@ -22,7 +22,7 @@ class BlockBase(nn.Module):
 
 
 def get_activation(name: str = "relu") -> torch.nn.Module:
-    """Select an activation function by name
+    """Select an activation function by name.
 
     Args:
         name: str
@@ -99,7 +99,7 @@ def adaptive_enc_mask(
 
 
 class GLU(nn.Module):
-    """Implement Gated Linear Unit (GLU) module"""
+    """Implement Gated Linear Unit (GLU) module."""
 
     def __init__(self, dim: int = -1, act_name: str = "sigmoid") -> None:
         super().__init__()
@@ -521,7 +521,7 @@ class ConvModule(nn.Module):
 
 
 class GLULinear(nn.Module):
-    """Linear + GLU module
+    """Linear + GLU module.
 
     Args:
         input_dim: int
@@ -548,7 +548,7 @@ class GLULinear(nn.Module):
         self.glu_act = GLU(-1, glu_type)
 
     def forward(self, x: Tensor) -> Tensor:
-        """GLULinear forward
+        """GLULinear forward.
 
         Args:
             x: input tensor.
@@ -857,7 +857,7 @@ class MeanVarianceNormLayer(nn.Module):
         self.global_invstd = nn.Parameter(torch.ones(input_size))
 
     def forward(self, input_: Tensor) -> Tensor:
-        """MeanVarianceNormLayer Forward
+        """MeanVarianceNormLayer Forward.
 
         Args:
             input_: input tensor.
@@ -1431,7 +1431,7 @@ class NemoConvSubsampling(torch.nn.Module):
                 torch.nn.init.uniform_(self.out.bias, -fc_scale, fc_scale)
 
     def conv_split_by_batch(self, x: Tensor) -> tuple[Tensor, bool]:
-        """Tries to split input by batch, run conv and concat results"""
+        """Tries to split input by batch, run conv and concat results."""
         b, _, _, _ = x.size()
         if b == 1:  # can't split if batch size is 1
             return x, False
@@ -1498,7 +1498,7 @@ class NemoConvSubsampling(torch.nn.Module):
     def channel_chunked_conv(
         self, conv: torch.nn.Module, chunk_size: int, x: Tensor
     ) -> Tensor:
-        """Performs channel chunked convolution"""
+        """Performs channel chunked convolution."""
         ind = 0
         out_chunks = []
         for chunk in torch.split(x, chunk_size, 1):
@@ -1575,14 +1575,14 @@ def calc_length_int(
 
 ####  multihead attention starts here
 class AttModule(nn.Module):
-    """Attention abstraction module"""
+    """Attention abstraction module."""
 
     def __init__(self) -> None:
         super().__init__()
         self.export_mode = False
 
     def set_export(self, mode: bool = True) -> None:
-        """Set the export mode"""
+        """Set the export mode."""
         self.export_mode = mode
 
     def forward(
@@ -1592,7 +1592,7 @@ class AttModule(nn.Module):
         pos_emb: Tensor | None = None,
         att_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
-        """AttModule forward
+        """AttModule forward.
 
         Args:
             x: input tensor.
@@ -1822,7 +1822,7 @@ class MultiHeadedAttention(nn.Module):
 
 
 class MultiSequential(torch.nn.Sequential):
-    """Multi-input multi-output torch.nn.Sequential"""
+    """Multi-input multi-output torch.nn.Sequential."""
 
     @torch.jit.ignore
     def forward(self, *args) -> tuple:

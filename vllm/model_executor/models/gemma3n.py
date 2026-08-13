@@ -183,7 +183,7 @@ class Gemma3nAltUp(nn.Module):
 
 
 class Gemma3nLaurelBlock(nn.Module):
-    """Learned Augmented Residual Layer"""
+    """Learned Augmented Residual Layer."""
 
     def __init__(
         self,
@@ -571,7 +571,7 @@ class Gemma3nDecoderLayer(nn.Module):
     enable_if=lambda vllm_config: vllm_config.cache_config.kv_sharing_fast_prefill
 )
 class Gemma3nSelfDecoder(nn.Module):
-    """Includes altup embedding and self decoder layers"""
+    """Includes altup embedding and self decoder layers."""
 
     def __init__(
         self,
@@ -738,7 +738,7 @@ class Gemma3nSelfDecoder(nn.Module):
     enable_if=lambda vllm_config: vllm_config.cache_config.kv_sharing_fast_prefill
 )
 class Gemma3nCrossDecoder(nn.Module):
-    """Cross-decoder layers"""
+    """Cross-decoder layers."""
 
     def __init__(
         self,

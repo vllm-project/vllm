@@ -35,7 +35,7 @@ VLLM_SUBCMD_PARSER_EPILOG = (
 
 
 async def listen_for_disconnect(request: Request) -> None:
-    """Returns if a disconnect message is received"""
+    """Returns if a disconnect message is received."""
     while True:
         message = await request.receive()
         if message["type"] == "http.disconnect":

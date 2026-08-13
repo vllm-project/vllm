@@ -116,7 +116,7 @@ def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
 
 
 class Ernie4_5_VisionAttention(nn.Module):
-    """VisionAttention using VLLM framework APIs"""
+    """VisionAttention using VLLM framework APIs."""
 
     def __init__(
         self,

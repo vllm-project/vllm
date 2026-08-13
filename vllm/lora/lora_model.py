@@ -97,7 +97,7 @@ class LoRAModel:
         )
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
-        """Get LoRA for a given module by name"""
+        """Get LoRA for a given module by name."""
         return self.loras.get(module_name, None)
 
     def check_lora_name(self, lora_name: str) -> bool:
@@ -105,7 +105,7 @@ class LoRAModel:
 
     @staticmethod
     def _should_skip_module(module_name: str, skip_prefixes: list[str]) -> bool:
-        """Check if a module should be skipped based on skip prefixes"""
+        """Check if a module should be skipped based on skip prefixes."""
         for prefix in skip_prefixes:
             if f".{prefix}" in module_name or module_name.startswith(prefix):
                 return True

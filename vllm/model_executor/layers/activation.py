@@ -645,7 +645,7 @@ class QuickGELU(CustomOp):
 # --8<-- [start:relu2]
 @CustomOp.register("relu2")
 class ReLUSquaredActivation(CustomOp):
-    """Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2"""
+    """Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2."""
 
     # --8<-- [end:relu2]
 
@@ -737,7 +737,7 @@ class XIELU(CustomOp):
         )
 
     def _xielu_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        """Firewall function to prevent torch.compile from seeing .item()"""
+        """Firewall function to prevent torch.compile from seeing .item()."""
         assert self._xielu_cuda_obj is not None, "XIELU CUDA object must not be None"
         original_shape = x.shape
         # CUDA kernel expects 3D tensors, reshape if needed

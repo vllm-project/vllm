@@ -56,7 +56,7 @@ class TestMMRSModel(torch.nn.Module):
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
     def forward(self, hidden_states):
-        """Forward pass implementing the mm + reduce scatter in the FX graph"""
+        """Forward pass implementing the mm + reduce scatter in the FX graph."""
         # Reshape input
         view = hidden_states.reshape(-1, self.hidden_size)
 
@@ -85,7 +85,7 @@ class TestAGMMModel(torch.nn.Module):
         torch.nn.init.normal_(self.weight, std=0.02)
 
     def forward(self, hidden_states):
-        """Forward pass implementing the mm + all gather in the FX graph"""
+        """Forward pass implementing the mm + all gather in the FX graph."""
         # Reshape input
         view = hidden_states.reshape(-1, self.hidden_size)
         all_gather = tensor_model_parallel_all_gather(view, dim=0)
@@ -117,7 +117,7 @@ class _BaseScaledMMModel(torch.nn.Module):
 
 class TestScaledMMRSModel(_BaseScaledMMModel):
     def forward(self, input: torch.Tensor):
-        """Forward pass implementing the scaled_mm + reduce scatter in the FX graph"""
+        """Forward pass implementing the scaled_mm + reduce scatter in the FX graph."""
         fp8_input = input.to(FP8_DTYPE)
         scale_a = torch.ones(input.shape[0], 1, dtype=torch.float32)
         scaled_mm = torch._scaled_mm(
@@ -139,7 +139,7 @@ class TestScaledMMRSModel(_BaseScaledMMModel):
 
 class TestAGScaledMMModel(_BaseScaledMMModel):
     def forward(self, input: torch.Tensor):
-        """Forward pass implementing the all gather + scaled_mm in the FX graph"""
+        """Forward pass implementing the all gather + scaled_mm in the FX graph."""
         # Reshape input
         fp8_input = input.to(FP8_DTYPE)
         all_gather = tensor_model_parallel_all_gather(fp8_input, dim=0)

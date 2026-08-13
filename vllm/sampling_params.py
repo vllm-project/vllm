@@ -652,7 +652,7 @@ class SamplingParams(
         generation_config: dict[str, Any],
         eos_token_id: int | None = None,
     ) -> None:
-        """Update if there are non-default values from generation_config"""
+        """Update if there are non-default values from generation_config."""
         if not self.ignore_eos:
             self._eos_token_id = eos_token_id
 

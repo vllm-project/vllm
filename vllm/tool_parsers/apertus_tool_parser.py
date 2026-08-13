@@ -278,7 +278,7 @@ class ApertusToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        """Handles streaming chunks
+        """Handles streaming chunks.
 
         Args:
             previous_text: The complete model text generated prior to this chunk.

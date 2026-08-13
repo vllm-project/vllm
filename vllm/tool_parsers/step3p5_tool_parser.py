@@ -45,7 +45,7 @@ class StreamingXMLToolCallParser:
         self.parameter_end_token: str = "</parameter>"
 
     def reset_streaming_state(self):
-        """Reset streaming parsing state"""
+        """Reset streaming parsing state."""
         self.deltas = []
         # state for streaming
         self.tool_call_index = 0
@@ -236,7 +236,7 @@ class StreamingXMLToolCallParser:
         return text
 
     def _process_complete_xml_elements(self) -> bool:
-        """Process complete XML elements in buffer
+        """Process complete XML elements in buffer.
 
         Returns:
             bool: Whether complete elements were found and processed
@@ -420,7 +420,7 @@ class StreamingXMLToolCallParser:
         return chunk
 
     def _validate_function_name(self, func_name: str) -> bool:
-        """Check if function name exists in tool definitions"""
+        """Check if function name exists in tool definitions."""
         if not self.tools:
             return False
 
@@ -437,7 +437,7 @@ class StreamingXMLToolCallParser:
         return False
 
     def _validate_parameter_name(self, param_name: str) -> bool:
-        """Check if parameter exists in current function's tool definition"""
+        """Check if parameter exists in current function's tool definition."""
         if not self.tools or not self.current_function_name:
             return True
 
@@ -460,7 +460,7 @@ class StreamingXMLToolCallParser:
         return True
 
     def _should_skip_element(self, element: str) -> bool:
-        """Determine whether an element should be skipped
+        """Determine whether an element should be skipped.
 
         Args:
             element: Element to evaluate
@@ -495,7 +495,7 @@ class StreamingXMLToolCallParser:
         return not element
 
     def _find_next_complete_element(self, start_pos: int) -> tuple[str | None, int]:
-        """Find next complete XML element from specified position
+        """Find next complete XML element from specified position.
 
         Args:
             start_pos: Position to start searching
@@ -778,7 +778,7 @@ class StreamingXMLToolCallParser:
         return processed
 
     def _emit_delta(self, delta: DeltaMessage):
-        """Emit Delta response (streaming output)"""
+        """Emit Delta response (streaming output)."""
         self.deltas.append(delta)
 
     def _auto_close_open_parameter_if_needed(self, incoming_tag: str | None = None):
@@ -807,7 +807,7 @@ class StreamingXMLToolCallParser:
             self._end_element("tool_call")
 
     def _start_element(self, name: str, attrs: dict[str, str]):
-        """Handle XML start element events"""
+        """Handle XML start element events."""
         if name == "root":
             return
 
@@ -896,7 +896,7 @@ class StreamingXMLToolCallParser:
                     self.current_param_is_first = False
 
     def _char_data(self, data: str):
-        """Handle XML character data events"""
+        """Handle XML character data events."""
         if data and self.current_param_name:
             # If preprocessing stage determines deferred parsing is needed,
             # only cache character data, no streaming output
@@ -971,7 +971,7 @@ class StreamingXMLToolCallParser:
             self._emit_delta(delta)
 
     def _end_element(self, name: str):
-        """Handle XML end element events"""
+        """Handle XML end element events."""
         if name == "root":
             return
 
@@ -1145,18 +1145,18 @@ class StreamingXMLToolCallParser:
             self._reset_xml_parser_after_tool_call()
 
     def setup_parser(self):
-        """Set up XML parser event handlers"""
+        """Set up XML parser event handlers."""
         self.parser.buffer_text = True
         self.parser.StartElementHandler = self._start_element
         self.parser.EndElementHandler = self._end_element
         self.parser.CharacterDataHandler = self._char_data
 
     def set_tools(self, tools: list[Tool] | None):
-        """Set tool configuration information"""
+        """Set tool configuration information."""
         self.tools = tools
 
     def _extract_function_name(self, name: str, attrs: dict[str, str]) -> str | None:
-        """Extract function name from various formats"""
+        """Extract function name from various formats."""
         if attrs and "name" in attrs:
             return attrs["name"]
 
@@ -1168,7 +1168,7 @@ class StreamingXMLToolCallParser:
         return None
 
     def _extract_parameter_name(self, name: str, attrs: dict[str, str]) -> str | None:
-        """Extract parameter name from various formats"""
+        """Extract parameter name from various formats."""
         if attrs and "name" in attrs:
             return attrs["name"]
 
@@ -1506,5 +1506,5 @@ class Step3p5ToolParser(ToolParser):
         return result
 
     def parser_should_check_for_unstreamed_tool_arg_tokens(self) -> bool:
-        """Skip the remaining_call calculation in serving_chat"""
+        """Skip the remaining_call calculation in serving_chat."""
         return False

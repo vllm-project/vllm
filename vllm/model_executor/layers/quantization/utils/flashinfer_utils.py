@@ -59,7 +59,7 @@ def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
 def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     gemm1_weights: torch.Tensor, gemm2_weights: torch.Tensor, is_gated_activation: bool
 ):
-    """Shuffle weights for FI TRT-LLM Format"""
+    """Shuffle weights for FI TRT-LLM Format."""
     from flashinfer import reorder_rows_for_gated_act_gemm, shuffle_matrix_a
 
     epilogue_tile_m = 128
@@ -449,7 +449,7 @@ def prepare_fp8_moe_layer_for_fi(
     w2_input_scale: torch.Tensor | None,
     is_trtllm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Convert Fp8 MoE weights to flashinfer kernel format
+    """Convert Fp8 MoE weights to flashinfer kernel format.
 
     Note that for trtllm we update the model state dict
     with the scale format needed for these kernels.

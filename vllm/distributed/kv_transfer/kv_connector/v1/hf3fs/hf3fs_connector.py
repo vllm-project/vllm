@@ -1012,7 +1012,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
 @dataclass
 class HF3FSKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Container for transfer performance metrics."""
 
     def __post_init__(self):
         if not self.data:

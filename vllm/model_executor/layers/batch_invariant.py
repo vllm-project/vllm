@@ -230,7 +230,7 @@ def bmm_kernel(
     B_LARGE: tl.constexpr,
     C_LARGE: tl.constexpr,
 ):
-    """Batched GEMM: (B, M, K) x (B, K, N) -> (B, M, N)
+    """Batched GEMM: (B, M, K) x (B, K, N) -> (B, M, N).
 
     Each program computes one (batch_idx, tile_m, tile_n) tile, accumulating
     along K in a fixed order to preserve batch invariance.

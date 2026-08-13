@@ -420,7 +420,7 @@ def test_mla_attention_quant_pattern(
     dist_init,
     disable_vllm_compile_cache,
 ):
-    """Test MLA AttentionQuantPattern fusion pass"""
+    """Test MLA AttentionQuantPattern fusion pass."""
     if (
         model_class is TestMLAAttentionNvfp4QuantPatternModel
         and not is_nvfp4_supported()

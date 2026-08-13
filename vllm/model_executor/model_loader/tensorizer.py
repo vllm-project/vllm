@@ -403,7 +403,7 @@ class TensorizerArgs:
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-        """Tensorizer CLI arguments"""
+        """Tensorizer CLI arguments."""
         # Tensorizer options arg group
         group = parser.add_argument_group(
             "tensorizer options",
@@ -711,7 +711,7 @@ def tensorize_vllm_model(
     tensorizer_config: TensorizerConfig,
     generate_keyfile: bool = True,
 ):
-    """Utility to load a model and then serialize it with Tensorizer
+    """Utility to load a model and then serialize it with Tensorizer.
 
     Intended to be used separately from running a vLLM server since it
     creates its own Engine instance.

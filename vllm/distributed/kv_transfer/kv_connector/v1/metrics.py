@@ -87,7 +87,7 @@ class KVConnectorLogging:
             )
 
     def log(self, log_fn=logger.info):
-        """Log transfer metrics periodically, similar to throughput logging"""
+        """Log transfer metrics periodically, similar to throughput logging."""
         if (
             self.transfer_stats_accumulator
             and not self.transfer_stats_accumulator.is_empty()

@@ -1437,7 +1437,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     blocks[last_state_block_idx] = self._null_block
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        """Cascade attention is not supported by mamba"""
+        """Cascade attention is not supported by mamba."""
         return 0
 
     def get_num_blocks_to_allocate(
@@ -1870,7 +1870,7 @@ def get_manager_for_kv_cache_spec(
 
 
 def register_all_kvcache_specs(vllm_config):
-    """Built-in spec registration"""
+    """Built-in spec registration."""
     KVCacheSpecRegistry.register(
         FullAttentionSpec,
         FullAttentionManager,

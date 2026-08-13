@@ -180,7 +180,7 @@ def load_audio_soundfile(
     max_duration_s: float | None = None,
     max_decode_bytes: int | None = None,
 ) -> tuple[np.ndarray, int]:
-    """Load audio via soundfile"""
+    """Load audio via soundfile."""
     with soundfile.SoundFile(path) as f:
         native_sr = f.samplerate
         if max_duration_s is not None:

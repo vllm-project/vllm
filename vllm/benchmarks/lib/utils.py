@@ -25,7 +25,7 @@ def extract_field(
 
 
 def use_compile(args: argparse.Namespace, extra_info: dict[str, Any]) -> bool:
-    """Check if the benchmark is run with torch.compile"""
+    """Check if the benchmark is run with torch.compile."""
     return not (
         extract_field(args, extra_info, "compilation_config.mode") == "0"
         or "eager" in getattr(args, "output_json", "")

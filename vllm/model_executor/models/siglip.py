@@ -416,7 +416,7 @@ class SiglipAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, None]:
-        """Input shape: Batch x Time x Channel"""
+        """Input shape: Batch x Time x Channel."""
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
         out = self.attn(query_states, key_states, value_states)

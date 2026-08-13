@@ -39,7 +39,7 @@ logger = init_logger(__name__)
 
 
 class OffloadingConnectorWorker:
-    """Implementation of Worker side methods"""
+    """Implementation of Worker side methods."""
 
     def __init__(
         self,

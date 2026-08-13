@@ -106,7 +106,7 @@ tool_functions = {
 
 
 def process_stream(response, tool_functions, original_query):
-    """Process a streaming response with possible tool calls"""
+    """Process a streaming response with possible tool calls."""
     # Track multiple tool calls
     tool_calls = {}  # Dictionary to store tool calls by ID
 
@@ -222,7 +222,7 @@ def process_stream(response, tool_functions, original_query):
 
 
 def run_test_case(query, test_name):
-    """Run a single test case with the given query"""
+    """Run a single test case with the given query."""
     print(f"\n{'=' * 50}\nTEST CASE: {test_name}\n{'=' * 50}")
     print(f"Query: '{query}'")
 

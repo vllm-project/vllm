@@ -225,7 +225,7 @@ class EncoderCacheManager:
         return self.request_cached_ids.get(request.request_id, set())
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
-        """Free the request's reference to the encoder input (`mm_data`)
+        """Free the request's reference to the encoder input (`mm_data`).
 
         When the reference set for the corresponding `mm_hash` becomes empty,
         the entry is appended to `freeable` and `num_freeable_slots` is

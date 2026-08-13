@@ -316,7 +316,7 @@ class APIServerProcessManager:
         return inputs, outputs  # type: ignore[return-value]
 
     def shutdown(self, timeout: float | None = None) -> None:
-        """Shutdown API server processes with configurable timeout"""
+        """Shutdown API server processes with configurable timeout."""
         for pipe in self._address_pipes:
             with contextlib.suppress(Exception):
                 pipe.close()

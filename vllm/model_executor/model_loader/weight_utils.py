@@ -72,7 +72,7 @@ temp_dir = tempfile.gettempdir()
 
 
 def enable_xet_high_performance():
-    """Automatically activates xet high performance mode"""
+    """Automatically activates xet high performance mode."""
     if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
         huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
 
@@ -1209,7 +1209,7 @@ def multi_thread_pt_weights_iterator(
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
-    """Convert PySafeSlice object from safetensors to torch.Tensor
+    """Convert PySafeSlice object from safetensors to torch.Tensor.
 
     PySafeSlice object supports indexing, which is done before loading the
     actual tensor and can reduce the amount of memory being read into the
@@ -1263,7 +1263,7 @@ LoaderFunction = Callable[[torch.Tensor, torch.Tensor], None]
 
 
 def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
-    """Create a weight loader that shards the weights along the given axis"""
+    """Create a weight loader that shards the weights along the given axis."""
 
     def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         tp_rank = get_tensor_model_parallel_rank()
@@ -1280,7 +1280,7 @@ def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
 def composed_weight_loader(
     loader: LoaderFunction, fn: Callable[[torch.Tensor], torch.Tensor]
 ) -> LoaderFunction:
-    """Create a weight loader that post-processes the weights after loading"""
+    """Create a weight loader that post-processes the weights after loading."""
 
     def composed_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         loader(param, loaded_weight)

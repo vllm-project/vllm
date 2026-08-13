@@ -91,7 +91,7 @@ def make_block_quant_fp8_weights(
     k: int,
     block_size: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return weights w1q, w2q, w1_scale, w2_scale"""
+    """Return weights w1q, w2q, w1_scale, w2_scale."""
     (_, w1q, w1_scale, _), (_, w2q, w2_scale, _) = make_test_weights(
         e, n, k, torch.bfloat16, torch.float8_e4m3fn, block_shape=block_size
     )

@@ -15,7 +15,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 
 class BatchLogprobsComposition(Enum):
-    """Types of logprobs configs to include in test batch"""
+    """Types of logprobs configs to include in test batch."""
 
     NONE = 0
     SAMPLE = 1
@@ -29,7 +29,7 @@ BatchLogprobsSpecType = list[tuple[int | None, int | None]]
 def get_test_batch(
     batch_logprobs_composition: BatchLogprobsComposition,
 ) -> BatchLogprobsSpecType:
-    """Generate logprobs configs for a batch of requests
+    """Generate logprobs configs for a batch of requests.
 
     A given request's logprobs configuration is (1) num_sample_logprobs and (2)
     num_prompt_logprobs. The batch logprobs configuration is the list of request
@@ -101,7 +101,7 @@ def assert_incr_detok_str_matches_non_incr_detok_str(
     non_incremental_detokenization_str: str,
     msg: str,
 ) -> None:
-    """Compare incrementally detok. text to non-incrementally detok. text
+    """Compare incrementally detok. text to non-incrementally detok. text.
 
     Fail if the strings mismatch after non-alphanumeric characters are stripped
     out.
@@ -129,7 +129,7 @@ def assert_incr_detok_str_matches_non_incr_detok_str(
 
 
 def compute_correct_cumulative_logprob(completion_output: CompletionOutput) -> float:
-    """Compute known-good value for evaluating cumulative logprob
+    """Compute known-good value for evaluating cumulative logprob.
 
     Args:
       completion_output: completion output from engine
@@ -172,7 +172,7 @@ def create_prompt_tokens_tensor(
 
 
 class LogitsprocsTestFakes(NamedTuple):
-    """Wraps fake data structures to support testing"""
+    """Wraps fake data structures to support testing."""
 
     logits: torch.Tensor
     sampling_metadata: SamplingMetadata

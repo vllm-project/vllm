@@ -623,7 +623,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
         return loader.load_weights(weights)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models"""
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="model.text_model",
             connector="model.connector",

@@ -16,7 +16,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 
 def with_triton_mode(fn):
-    """Temporarily force the Triton fallback path"""
+    """Temporarily force the Triton fallback path."""
 
     def wrapped(*args, **kwargs):
         with patch("vllm.platforms.current_platform.is_cuda", return_value=False):

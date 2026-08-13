@@ -37,7 +37,7 @@ DUMMY_LOGITPROC_FQCN = f"{DUMMY_LOGITPROC_MODULE}:DummyLogitsProcessor"
 
 
 class CustomLogitprocSource(Enum):
-    """How to source a logitproc for testing purposes"""
+    """How to source a logitproc for testing purposes."""
 
     LOGITPROC_SOURCE_NONE = auto()  # No custom logitproc
     LOGITPROC_SOURCE_ENTRYPOINT = auto()  # Via entrypoint
@@ -55,7 +55,7 @@ prompts = [
 
 
 class DummyLogitsProcessor(LogitsProcessor):
-    """Fake logit processor to support unit testing and examples"""
+    """Fake logit processor to support unit testing and examples."""
 
     @classmethod
     def validate_params(cls, params: SamplingParams):
@@ -73,7 +73,7 @@ class DummyLogitsProcessor(LogitsProcessor):
         self.req_info: dict[int, int] = {}
 
     def is_argmax_invariant(self) -> bool:
-        """Never impacts greedy sampling"""
+        """Never impacts greedy sampling."""
         return False
 
     def update_state(self, batch_update: BatchUpdate | None):
@@ -115,7 +115,7 @@ class DummyLogitsProcessor(LogitsProcessor):
 
 
 class EntryPoint:
-    """Dummy entrypoint class for logitsprocs testing"""
+    """Dummy entrypoint class for logitsprocs testing."""
 
     def __init__(self):
         self.name = DUMMY_LOGITPROC_ENTRYPOINT
@@ -126,7 +126,7 @@ class EntryPoint:
 
 
 class EntryPoints(list):
-    """Dummy EntryPoints class for logitsprocs testing"""
+    """Dummy EntryPoints class for logitsprocs testing."""
 
     def __init__(self, group: str):
         # Emulate list-like functionality
@@ -142,7 +142,7 @@ class DummyPerReqLogitsProcessor:
     """
 
     def __init__(self, target_token: int) -> None:
-        """Specify `target_token`"""
+        """Specify `target_token`."""
         self.target_token = target_token
 
     def __call__(

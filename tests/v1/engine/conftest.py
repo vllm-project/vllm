@@ -24,7 +24,7 @@ EngineCorePromptLogprobsType = tuple[torch.Tensor, torch.Tensor]
 
 
 def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
-    """Generate output processor dummy test vectors, without logprobs
+    """Generate output processor dummy test vectors, without logprobs.
 
     Returns:
       DummyOutputProcessorTestVectors instance with no logprobs
@@ -62,7 +62,7 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
 
 @pytest.fixture
 def dummy_test_vectors() -> DummyOutputProcessorTestVectors:
-    """Generate output processor dummy test vectors, with logprobs
+    """Generate output processor dummy test vectors, with logprobs.
 
     Returns:
       DummyOutputProcessorTestVectors instance with logprobs

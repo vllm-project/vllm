@@ -57,7 +57,7 @@ class GCDebugger:
         self.gc_top_collected_objects: str = ""
 
     def handle(self, phase: str, info: dict[str, int]) -> None:
-        """Handles a GC event (e.g. GC start or GC finish)"""
+        """Handles a GC event (e.g. GC start or GC finish)."""
         generation = info.get("generation")
         if generation is None:
             return

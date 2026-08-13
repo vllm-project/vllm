@@ -81,7 +81,7 @@ class BlockHashToBlockMap:
         return False
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
-        """Inserts the KVCacheBlock to the cache"""
+        """Inserts the KVCacheBlock to the cache."""
         blocks = self._cache.get(key)
         if blocks is None:
             # When key is not found, attach a single block to the key
@@ -97,7 +97,7 @@ class BlockHashToBlockMap:
             self._unexpected_blocks_type(blocks)
 
     def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
-        """Checks if block_hash exists and pop block_id from the cache"""
+        """Checks if block_hash exists and pop block_id from the cache."""
         blocks = self._cache.pop(key, None)
         if blocks is None:
             # block_hash not found in the cache

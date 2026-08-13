@@ -547,11 +547,11 @@ class MelSpectrogramFeatures(torch.nn.Module):
         )
 
     def __call__(self, audio: torch.Tensor) -> torch.Tensor:
-        """audio: Tensor([num_channels, num_samples])"""
+        """audio: Tensor([num_channels, num_samples])."""
         return super().__call__(audio)
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        """audio: Tensor([num_channels, num_samples])"""
+        """audio: Tensor([num_channels, num_samples])."""
         mel: torch.Tensor = self.mel_spec(audio)
         features = torch.log(torch.clip(mel, min=1e-5))
         return features

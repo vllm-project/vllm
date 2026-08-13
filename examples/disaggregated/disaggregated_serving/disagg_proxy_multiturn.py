@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Disaggregated Prefill/Decode Proxy with Bidirectional KV Transfer
+"""Disaggregated Prefill/Decode Proxy with Bidirectional KV Transfer.
 
 This proxy sits between clients and a vLLM Prefill/Decode (P/D) deployment,
 routing multi-turn chat requests so that each turn reuses KV cache blocks

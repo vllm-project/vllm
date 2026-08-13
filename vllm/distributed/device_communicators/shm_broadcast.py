@@ -214,7 +214,7 @@ class SpinCondition:
                 logger.debug("Poller timed out")
 
     def notify(self):
-        """Notifies all readers to wake up"""
+        """Notifies all readers to wake up."""
         assert not self.is_reader, "Only writers can notify"
         self.local_notify_socket.send(b"\x00")
 
@@ -822,7 +822,7 @@ class MessageQueue:
                 break
 
     def enqueue(self, obj, timeout: float | None = None):
-        """Write to message queue with optional timeout (in seconds)"""
+        """Write to message queue with optional timeout (in seconds)."""
         assert self._is_writer, "Only writers can enqueue"
         all_buffers: list[SizedBuffer] = [b""]
         total_bytes = 6  # 2 bytes for oob buffer count, 4 for main buffer size
@@ -885,7 +885,7 @@ class MessageQueue:
         timeout: float | None = None,
         indefinite: bool = False,
     ):
-        """Read from message queue with optional timeout (in seconds)"""
+        """Read from message queue with optional timeout (in seconds)."""
         if self._is_local_reader:
             with self.acquire_read(timeout, indefinite) as buf:
                 overflow = buf[0] == 1

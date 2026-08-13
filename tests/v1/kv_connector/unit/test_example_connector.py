@@ -29,12 +29,12 @@ class InputCase(NamedTuple):
 
 
 def _check_path_len(path):
-    """Return the latest length in path"""
+    """Return the latest length in path."""
     return len(list(path.iterdir()))
 
 
 def _list_path(path):
-    """Return the list of foldername (hashes generated) under the path"""
+    """Return the list of foldername (hashes generated) under the path."""
     return list(path.iterdir())
 
 
@@ -66,7 +66,7 @@ def run_test(
 
 
 def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
-    """Form the prompt based on the text and image input, then llm generate output"""
+    """Form the prompt based on the text and image input, then llm generate output."""
     placeholders = [
         {
             "type": "image_url",

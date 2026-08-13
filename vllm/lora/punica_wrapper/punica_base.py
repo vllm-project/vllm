@@ -30,7 +30,7 @@ class PunicaWrapperABC(ABC):
         vocab_size: int,
         **kwargs,
     ) -> None:
-        """Update the lora-related metadata"""
+        """Update the lora-related metadata."""
         raise NotImplementedError
 
     @abstractmethod

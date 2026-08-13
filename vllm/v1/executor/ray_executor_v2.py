@@ -69,7 +69,7 @@ class RayWorkerHandle:
     """run() ObjectRef used as a sentinel for health monitoring"""
 
     def run(self):
-        """Start the worker's busy loop"""
+        """Start the worker's busy loop."""
         self.run_ref = self.actor.run.remote()
 
 

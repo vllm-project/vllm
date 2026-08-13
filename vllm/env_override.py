@@ -360,7 +360,7 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
     # torch._inductor.scheduler.Scheduler.should_partition that modifies
     # the following piece of code so that we always return True:
     # https://github.com/pytorch/pytorch/blob/ecb53078faf86ca1b33277df33b82985675bb011/torch/_inductor/scheduler.py#L4712-L4724
-    """Return True if we should partition the inductor graph on this node"""
+    """Return True if we should partition the inductor graph on this node."""
     import torch._inductor.ir as ir
     from torch._inductor.scheduler import (
         BaseSchedulerNode,

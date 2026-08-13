@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kernel test utils"""
+"""Kernel test utils."""
 
 import itertools
 import random
@@ -129,7 +129,7 @@ class QKVO(NamedTuple):
 
 
 class PackedQKVInputs(NamedTuple):
-    """Data structure for representing packed attention inputs
+    """Data structure for representing packed attention inputs.
 
     Attributes:
         * {query,key,value}: packed (number_of_tokens x num_heads
@@ -202,7 +202,7 @@ def maybe_make_int_tensor(
     _list: list[int] | None,
     device: torch.device | str,
 ) -> torch.Tensor:
-    """Convert Python int list to a 1D int torch.Tensor on `device`
+    """Convert Python int list to a 1D int torch.Tensor on `device`.
 
     Returns:
     * If _list is not None: 1D int torch.Tensor on `device`
@@ -218,7 +218,7 @@ def maybe_make_long_tensor(
     _list: list[int] | None,
     device: torch.device | str,
 ) -> torch.Tensor:
-    """Convert Python int list to a 1D long torch.Tensor on `device`
+    """Convert Python int list to a 1D long torch.Tensor on `device`.
 
     Returns:
     * If _list is not None: 1D long torch.Tensor on `device`
@@ -243,7 +243,7 @@ def make_causal_mask(
     q_max_seq_len: int,
     kv_max_seq_len: int,
 ) -> torch.Tensor:
-    """Create a q_max_seq_len x kv_max_seq_len causal mask
+    """Create a q_max_seq_len x kv_max_seq_len causal mask.
 
     Arguments:
     * q_max_seq_len: query max seq len
@@ -816,7 +816,7 @@ def fp8_allclose(
     atol: float = 1e-08,
     equal_nan: bool = False,
 ) -> bool:
-    """Reference implementation of torch.allclose"""
+    """Reference implementation of torch.allclose."""
     torch._refs._check_close_args(name="torch.allclose", a=a, b=b, rtol=rtol, atol=atol)
 
     return bool(

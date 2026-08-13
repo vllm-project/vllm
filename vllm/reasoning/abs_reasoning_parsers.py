@@ -212,7 +212,7 @@ class ReasoningParser:
         original_tag: str | None,
         tool_server: ToolServer | None,
     ) -> str | None:
-        """Instance method that is implemented for preparing the structured tag"""
+        """Instance method that is implemented for preparing the structured tag."""
         return original_tag
 
 

@@ -189,7 +189,7 @@ def bench_run(
     torch.accelerator.synchronize()
 
     def bench_cuda_graph(graph, num_warmup=5, num_iters=100):
-        """Benchmark CUDA graph using events like benchmark_moe.py"""
+        """Benchmark CUDA graph using events like benchmark_moe.py."""
         # Warmup
         for _ in range(num_warmup):
             graph.replay()

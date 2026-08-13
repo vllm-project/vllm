@@ -571,7 +571,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_load_all_success(self, mock_deserialize):
-        """Test successful loading of all artifacts"""
+        """Test successful loading of all artifacts."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact1 = Mock()
@@ -588,7 +588,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_load_all_already_loaded(self, mock_deserialize):
-        """Test that load_all skips if already loaded"""
+        """Test that load_all skips if already loaded."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact = Mock()
@@ -601,7 +601,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_get_loaded_artifact(self, mock_deserialize):
-        """Test retrieving loaded artifacts"""
+        """Test retrieving loaded artifacts."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact = Mock()

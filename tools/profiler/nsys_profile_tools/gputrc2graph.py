@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # helper data class for annotating kernels
 def load_engine_model():
-    """Returns engine_model built from all json files in the current dir"""
+    """Returns engine_model built from all json files in the current dir."""
     import glob
     import json
 
@@ -30,7 +30,7 @@ def load_engine_model():
 
 
 class GPUTrace2Graph:
-    """Parses output of nsys report, generates csv and bar chart output"""
+    """Parses output of nsys report, generates csv and bar chart output."""
 
     def __init__(self):
         import pandas as pd  # avoid importing till needed
@@ -101,7 +101,7 @@ class GPUTrace2Graph:
 
     # functions for generating html files
     def make_html(self, df, output_dir, title):
-        """Make html graph from df"""
+        """Make html graph from df."""
         import plotly.express as px
 
         if df.empty:
@@ -159,7 +159,7 @@ class GPUTrace2Graph:
         )
 
     def anno_gpu_kernname(self, df, mapping):
-        """Add "Category" column"""
+        """Add "Category" column."""
 
         def anno_gpu_kernname_helper(name):
             for kern_name, val in mapping.items():
@@ -169,7 +169,7 @@ class GPUTrace2Graph:
         df["Category"] = df["Name"].apply(anno_gpu_kernname_helper)
 
     def make_nongpu_row(self, df, nongpu_sec):
-        """This will append non-gpu time entry at end of df"""
+        """This will append non-gpu time entry at end of df."""
         nongpu_row = self.pd.DataFrame([df.iloc[-1]])
         nongpu_row["Category"] = nongpu_row["Name"] = "CPU(non-GPU)"
         nongpu_row["Instances"] = 1
@@ -177,13 +177,13 @@ class GPUTrace2Graph:
         return nongpu_row
 
     def is_valid_file(self, base_file):
-        """Asserts if base_file is non-existent or is empty"""
+        """Asserts if base_file is non-existent or is empty."""
         assert os.path.isfile(base_file) and os.path.getsize(base_file) > 0, (
             f"{base_file} doesn't exist or is empty"
         )
 
     def should_gen_file(self, new_file, base_file):
-        """Figure out if new file should be generated from base_file"""
+        """Figure out if new file should be generated from base_file."""
         self.is_valid_file(base_file)
         if (
             os.path.exists(new_file)
@@ -241,7 +241,7 @@ class GPUTrace2Graph:
         return sum_file
 
     def gen_graph(self, in_file, out_dir, title, nsys_cmd, engine_model):
-        """Generates graph and csv file from in_file into out_dir"""
+        """Generates graph and csv file from in_file into out_dir."""
         # Initialize an empty DataFrame to store combined data
         combined_df = self.pd.DataFrame()
         for idx, (file, engine, model, total_sec) in enumerate(in_file):

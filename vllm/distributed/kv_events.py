@@ -39,7 +39,7 @@ class KVCacheEvent(
     gc=False,  # type: ignore[call-arg]
     tag=True,
 ):
-    """Base class for all KV cache-related events"""
+    """Base class for all KV cache-related events."""
 
 
 MEDIUM_GPU = "GPU"
