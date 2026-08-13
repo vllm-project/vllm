@@ -1496,9 +1496,13 @@ class MoRIIOConnectorScheduler:
         if not scheduler_output.has_sync_kv_loads:
             return False
         stream_written_block_ids = {
-            *(scheduler_output.new_block_ids_to_zero or ()),
-            *(c.dst_block_id for c in scheduler_output.kv_cache_block_copies or ()),
+            block_id
+            for group in scheduler_output.new_block_ids_to_zero or ()
+            for block_id in group
         }
+        stream_written_block_ids.update(
+            c.dst_block_id for c in scheduler_output.kv_cache_block_copies or ()
+        )
         if not read_dst_block_ids.isdisjoint(stream_written_block_ids):
             return True
         return any(
@@ -1580,29 +1584,32 @@ class MoRIIOConnectorScheduler:
         if self.mode == MoRIIOMode.READ:
             new_block_ids_to_zero = scheduler_output.new_block_ids_to_zero
             if self._failed_read_block_ids_to_zero:
-                # Failed reads left these destinations unzeroed, and the
-                # scheduler may recompute into them.
+                # Block-level failed READ recovery only supports one group.
+                assert len(self.kv_cache_config.kv_cache_groups) == 1
+                (group_block_ids,) = new_block_ids_to_zero or ([],)
                 new_block_ids_to_zero = [
-                    *(new_block_ids_to_zero or ()),
-                    *sorted(self._failed_read_block_ids_to_zero),
+                    [*group_block_ids, *sorted(self._failed_read_block_ids_to_zero)]
                 ]
                 self._failed_read_block_ids_to_zero.clear()
-            if new_block_ids_to_zero:
+            if new_block_ids_to_zero and self._reqs_need_recv:
                 # A READ writes every byte of its destination pages, so zeroing
                 # them first adds nothing and races the host-posted reads.
-                # Hybrid READ metadata puts the aligned attention groups first.
-                read_dst_block_ids = {
-                    b
-                    for _, block_ids in self._reqs_need_recv.values()
-                    for group in block_ids[: len(self._attn_group_ids)]
-                    for b in group
-                }
-                meta.unzeroed_read_block_ids = read_dst_block_ids.intersection(
-                    new_block_ids_to_zero
-                )
-                new_block_ids_to_zero = [
-                    b for b in new_block_ids_to_zero if b not in read_dst_block_ids
-                ]
+                # READ metadata puts the aligned attention groups first.
+                transfer_group_ids = self.kv_cache_config.transfer_group_ids
+                attn_group_ids = [transfer_group_ids[i] for i in self._attn_group_ids]
+                read_dst_by_group: dict[int, set[int]] = defaultdict(set)
+                for _, block_ids in self._reqs_need_recv.values():
+                    for group_id, group in zip(attn_group_ids, block_ids, strict=False):
+                        read_dst_by_group[group_id].update(group)
+                new_block_ids_to_zero = new_block_ids_to_zero.copy()
+                for group_id, destinations in read_dst_by_group.items():
+                    group = new_block_ids_to_zero[group_id]
+                    meta.unzeroed_read_block_ids.update(
+                        destinations.intersection(group)
+                    )
+                    new_block_ids_to_zero[group_id] = [
+                        block_id for block_id in group if block_id not in destinations
+                    ]
             scheduler_output.new_block_ids_to_zero = new_block_ids_to_zero
         meta.order_reads_after_compute_stream = (
             self._compute_stream_writes_read_destinations(scheduler_output)
