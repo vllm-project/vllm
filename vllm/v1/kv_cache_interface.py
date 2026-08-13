@@ -934,6 +934,15 @@ def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
         }
         if len(inner_kinds) == 1:
             return next(iter(inner_kinds))
+        # A group is only formed when all members share one registered
+        # uniform_type_base_spec, so UNKNOWN would discard what the merge
+        # already established.
+        base_specs = {
+            KVCacheSpecRegistry.get_uniform_type_base_spec(spec)
+            for spec in kv_cache_spec.kv_cache_specs.values()
+        }
+        if len(base_specs) == 1 and next(iter(base_specs)) is FullAttentionSpec:
+            return KVCacheSpecKind.FULL_ATTENTION
         return KVCacheSpecKind.UNKNOWN
     # Keep subclass checks before base classes so specialized specs keep their
     # more precise kind.
