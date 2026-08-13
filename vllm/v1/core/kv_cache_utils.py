@@ -1644,6 +1644,14 @@ def get_kv_cache_config_from_groups(
         per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
         num_blocks = available_memory // per_block
         num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+        # Round num_blocks down to a multiple of the cache block_size. Every
+        # attention group's KVBlockZeroer asserts kv.shape[block_dim] % ratio
+        # == 0 where ratio = block_size // kernel_bs; ratio divides block_size,
+        # so a block_size-aligned num_blocks satisfies it for MLA, the kpool
+        # indexer, and the tail alike. Costs < block_size blocks (< 0.6% of KV).
+        block_size = vllm_config.cache_config.block_size
+        if num_blocks > block_size:
+            num_blocks = (num_blocks // block_size) * block_size
         kv_cache_tensors = [
             KVCacheTensor(
                 size=mla_page * num_blocks,
