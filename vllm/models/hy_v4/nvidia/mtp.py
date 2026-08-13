@@ -116,9 +116,9 @@ def _create_mtp_quant_config(
 
     The MTP quantization algorithm is given by the ``mtp_quant_algo`` field in
     ``config.json``, independently of the backbone's quantization. Supported
-    values are ``"FP8"``, ``"NVFP4"``, ``"NONE"`` (inherit the backbone) and
-    ``"BF16"`` / ``"FP16"`` (unquantized). A missing or ``"NONE"`` value falls
-    back to the backbone config.
+    values are ``"FP8"``, ``"NONE"`` (inherit the backbone) and ``"BF16"`` /
+    ``"FP16"`` (unquantized). A missing or ``"NONE"`` value falls back to the
+    backbone config.
 
     Args:
         hf_config: The draft model's HF config.
@@ -170,26 +170,6 @@ def _create_mtp_quant_config(
             # declared Fp8Config field.
             setattr(fp8_config, "is_scale_e8m0", True)  # noqa: B010
         return fp8_config
-
-    if mtp_quant_algo == "NVFP4":
-        from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
-
-        group_size = getattr(hf_config, "mtp_group_size", 16)
-        logger.info_once(
-            "MTP uses NVFP4 quantization (mtp_quant_algo=NVFP4, group_size=%d).",
-            group_size,
-        )
-        kv_cache_quant = "FP8"
-        if backbone_quant_config is not None:
-            kv_cache_quant = getattr(
-                backbone_quant_config, "kv_cache_quant_algo", "FP8"
-            )
-        return ModelOptNvFp4Config(
-            is_checkpoint_nvfp4_serialized=True,
-            kv_cache_quant_algo=kv_cache_quant,
-            exclude_modules=[],
-            group_size=group_size,
-        )
 
     logger.warning(
         "Unknown mtp_quant_algo=%s, falling back to the backbone config.",

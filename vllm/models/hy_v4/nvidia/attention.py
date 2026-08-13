@@ -3,9 +3,9 @@
 """MLA attention and lightning indexer for HY V4 (NVIDIA).
 
 NOTE: The reference implementation also offers a fused MLA preprocessing
-wrapper, an HPC gated-MLA GEMM and an MXFP4 indexer cache. None of those are
-available here, so this port keeps the eager MLA path with an FP8 indexer
-cache. TODO: restore the fused variants once the kernels land.
+wrapper and an HPC gated-MLA GEMM. Neither is available here, so this port
+keeps the eager MLA path with an FP8 indexer cache. TODO: restore the fused
+variants once the kernels land.
 
 The per-head learnable sink is supported through `.flashmla_sparse`, which
 subclasses the platform's sparse MLA backend to forward ``attn_sink``.
