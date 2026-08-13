@@ -1039,27 +1039,6 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
-    def _check_capture_feature_compat(self, flag: str) -> None:
-        if self.parallel_config.pipeline_parallel_size > 1:
-            raise ValueError(
-                f"{flag} is incompatible with pipeline parallelism (PP > 1)."
-            )
-        if (
-            self.parallel_config.decode_context_parallel_size > 1
-            or self.parallel_config.prefill_context_parallel_size > 1
-        ):
-            raise ValueError(
-                f"{flag} is incompatible with context parallelism (DCP > 1 or PCP > 1)."
-            )
-        if (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.is_kv_transfer_instance
-        ):
-            raise ValueError(
-                f"{flag} is incompatible with KV connectors "
-                "(PD disaggregation, KV cache offload)."
-            )
-
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1081,7 +1060,33 @@ class VllmConfig:
             self.model_config is not None
             and self.model_config.enable_return_routed_experts
         ):
-            self._check_capture_feature_compat("--enable-return-routed-experts")
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "--enable-return-routed-experts is incompatible with "
+                    "pipeline parallelism (PP > 1)."
+                )
+            if (
+                self.parallel_config.decode_context_parallel_size > 1
+                or self.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "--enable-return-routed-experts is incompatible with context "
+                    "parallelism (DCP > 1 or PCP > 1)."
+                )
+
+            # Incompatible with any KV connector — covers both PD disaggregation
+            # (kv_producer/kv_consumer: routing captured on P can't reach D) and
+            # single-instance KV offload/sharing (kv_both: slot_mapping semantics
+            # change when KV blocks live outside local GPU memory, breaking the
+            # slot-indexed routed_experts buffer).
+            if (
+                self.kv_transfer_config is not None
+                and self.kv_transfer_config.is_kv_transfer_instance
+            ):
+                raise ValueError(
+                    "--enable-return-routed-experts is incompatible with KV "
+                    "connectors (PD disaggregation, KV cache offload)."
+                )
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)

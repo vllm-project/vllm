@@ -347,7 +347,12 @@ class SamplingParams(
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
     routed_experts_prompt_start: int = 0
-    """Skip this many prompt tokens from returned routed-expert data."""
+    """When enable_return_routed_experts is active, skip the first
+    routed_experts_prompt_start prompt tokens from the returned routing
+    data. In multi-turn agent scenarios, set this to the length of the
+    already-returned prefix to avoid duplicating routing for prompt tokens
+    covered by earlier turns. Default 0 returns routing for all prompt
+    tokens."""
 
     # Fields used for bad words
     bad_words: list[str] | None = None
@@ -593,6 +598,13 @@ class SamplingParams(
         if self.min_tokens < 0:
             raise VLLMValidationError(
                 f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
+            )
+        if self.routed_experts_prompt_start < 0:
+            raise VLLMValidationError(
+                "routed_experts_prompt_start must be non-negative, got "
+                f"{self.routed_experts_prompt_start}.",
+                parameter="routed_experts_prompt_start",
+                value=self.routed_experts_prompt_start,
             )
         if self.max_tokens is not None and self.min_tokens > self.max_tokens:
             raise VLLMValidationError(
