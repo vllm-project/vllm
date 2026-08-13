@@ -23,13 +23,17 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
 class DeepseekV32MLASparseBackend(ROCMAiterMLASparseBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list:
-        return list(set(ROCMAiterMLASparseBackend.get_supported_kernel_block_sizes() + [16, 32]))
+        return list(
+            set(ROCMAiterMLASparseBackend.get_supported_kernel_block_sizes() + [16, 32])
+        )
 
 
 class DeepseekV32ROCmIndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list:
-        return DeepseekV32IndexerBackend.get_supported_kernel_block_sizes() + [16, 32]
+        return list(
+            set(DeepseekV32IndexerBackend.get_supported_kernel_block_sizes() + [16, 32])
+        )
 
 
 class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
