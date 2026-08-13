@@ -640,8 +640,7 @@ async def _post_if_available(
 
 
 async def _profile_cmd(cmd: str, payload: dict, e_url: str, p_url: str, d_url: str):
-    """Fire & forget to both clusters, tolerate 404.
-    """
+    """Fire & forget to both clusters, tolerate 404."""
     headers = {"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}"}
 
     encode_task = _post_if_available(

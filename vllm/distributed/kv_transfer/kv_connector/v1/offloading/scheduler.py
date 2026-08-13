@@ -1102,8 +1102,7 @@ class OffloadingConnectorScheduler:
         req_status.partial_tail_boundary = None
 
     def _update_req_states(self, scheduler_output: SchedulerOutput) -> None:
-        """Update request states from the Scheduler's output.
-        """
+        """Update request states from the Scheduler's output."""
         # new_block_ids_end[req_id][i] = end of pre-existing block_ids for
         # the i-th sliding window group (before this step's extend).
         # Used to detect sliding window blocks that got re-allocated.

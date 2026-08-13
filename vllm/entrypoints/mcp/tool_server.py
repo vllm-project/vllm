@@ -74,8 +74,7 @@ def post_process_tools_description(
 class ToolServer(ABC):
     @abstractmethod
     def has_tool(self, tool_name: str) -> bool:
-        """Return True if the tool is supported, False otherwise.
-        """
+        """Return True if the tool is supported, False otherwise."""
         pass
 
     @abstractmethod
@@ -91,8 +90,7 @@ class ToolServer(ABC):
     def new_session(
         self, tool_name: str, session_id: str, headers: dict[str, str] | None = None
     ) -> AbstractAsyncContextManager[Any]:
-        """Create a session for the tool.
-        """
+        """Create a session for the tool."""
         ...
 
 

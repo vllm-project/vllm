@@ -30,8 +30,7 @@ class KVConnectorStats:
         raise NotImplementedError
 
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
-        """Aggregate stats with another `KVConnectorStats` object.
-        """
+        """Aggregate stats with another `KVConnectorStats` object."""
         raise NotImplementedError
 
     def reduce(self) -> dict[str, int | float]:

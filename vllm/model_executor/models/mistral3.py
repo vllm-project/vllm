@@ -72,8 +72,7 @@ class Mistral3ImagePixelInputs(TensorSchema):
 
 
 class Mistral3PatchMerger(nn.Module):
-    """Learned merging of spatial_merge_size ** 2 patches
-    """
+    """Learned merging of spatial_merge_size ** 2 patches"""
 
     def __init__(
         self, vision_hidden_size: int, spatial_merge_size: int, patch_size: int
@@ -564,8 +563,7 @@ class Mistral3ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",

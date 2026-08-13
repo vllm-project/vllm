@@ -16,8 +16,7 @@ logger = init_logger(__name__)
 
 
 class MedusaProposer:
-    """Medusa proposer class for generating token sequences
-    """
+    """Medusa proposer class for generating token sequences"""
 
     def __init__(
         self,

@@ -74,8 +74,7 @@ DEFAULT_NUM_PROMPTS = 1000
 
 @dataclass
 class SampleRequest:
-    """Represents a single inference request for benchmarking.
-    """
+    """Represents a single inference request for benchmarking."""
 
     prompt: str | list[str] | list[dict]
     prompt_len: int
@@ -691,8 +690,7 @@ class RandomDataset(BenchmarkDataset):
         allowed_tokens: np.ndarray,
         prefix_len: int,
     ) -> list[int]:
-        """Get the prefix for the dataset.
-        """
+        """Get the prefix for the dataset."""
         if prefix_len <= 0:
             return []
 
@@ -1056,8 +1054,7 @@ class RandomMultiModalDataset(RandomDataset):
         limit_mm_per_prompt: dict[str, int],
         bucket_config: dict[tuple[int, int, int], float],
     ) -> tuple[int, int, dict[str, int], dict[tuple[int, int, int], float]]:
-        """Get the sampling parameters for the multimodal items.
-        """
+        """Get the sampling parameters for the multimodal items."""
         # Enforce num_mm_items_range_ratio <= 1
         if not (0.0 <= num_mm_items_range_ratio <= 1.0):
             raise ValueError("num_mm_items_range_ratio must be in [0, 1].")
@@ -3426,8 +3423,7 @@ class MultiModalConversationDataset(HuggingFaceDataset):
 
 
 class VisionArenaDataset(HuggingFaceDataset):
-    """Vision Arena Dataset.
-    """
+    """Vision Arena Dataset."""
 
     DEFAULT_OUTPUT_LEN = 128
     SUPPORTED_DATASET_PATHS = {
@@ -3904,8 +3900,7 @@ Please generate the new code file in the "New file" section below."""  # noqa: E
 
 
 class AIMODataset(HuggingFaceDataset):
-    """Dataset class for processing a AIMO dataset with reasoning questions.
-    """
+    """Dataset class for processing a AIMO dataset with reasoning questions."""
 
     SUPPORTED_DATASET_PATHS = {
         "AI-MO/aimo-validation-aime",
@@ -4014,8 +4009,7 @@ def _format_zeta_prompt(
 
 
 class NextEditPredictionDataset(HuggingFaceDataset):
-    """Dataset class for processing a Next Edit Prediction dataset.
-    """
+    """Dataset class for processing a Next Edit Prediction dataset."""
 
     SUPPORTED_DATASET_PATHS = {
         "zed-industries/zeta",

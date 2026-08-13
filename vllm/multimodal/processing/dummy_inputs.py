@@ -37,8 +37,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
 
     @abstractmethod
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        """Build the text input corresponding to `mm_counts`.
-        """
+        """Build the text input corresponding to `mm_counts`."""
         raise NotImplementedError
 
     @abstractmethod

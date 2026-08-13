@@ -100,8 +100,7 @@ def _adjust_kernel_inputs(
     sorted_token_ids: torch.Tensor | None,
     expert_ids: torch.Tensor,
 ):
-    """Helper function to adjust kernel inputs when sorted_token_ids is None
-    """
+    """Helper function to adjust kernel inputs when sorted_token_ids is None"""
     if sorted_token_ids is None:
         stride_tl = 0
         stride_el = 0

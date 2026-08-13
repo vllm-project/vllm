@@ -40,8 +40,7 @@ if current_platform.is_rocm():
 
 @pytest.mark.parametrize("device", devices)
 def test_mha_attn_platform(default_vllm_config, device: str):
-    """Test the attention selector between different platform and device.
-    """
+    """Test the attention selector between different platform and device."""
     torch.set_default_dtype(torch.float16)
 
     if device == "cpu":

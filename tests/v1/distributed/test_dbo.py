@@ -54,8 +54,7 @@ DEEPEP_BACKENDS = [
     ),
 )
 def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
-    """Test DBO with DP+EP using GSM8K evaluation.
-    """
+    """Test DBO with DP+EP using GSM8K evaluation."""
     required_gpus = DP_SIZE
 
     if num_gpus_available < required_gpus:

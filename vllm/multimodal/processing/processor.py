@@ -149,8 +149,7 @@ class PromptIndexTargets:
 
     @staticmethod
     def prefix(seq: PromptSeq) -> PromptIndex:
-        """Resolves to a location in the prompt after the given prefix.
-        """
+        """Resolves to a location in the prompt after the given prefix."""
 
         def get_match_index(
             tokenizer: TokenizerLike | None,
@@ -293,8 +292,7 @@ class UpdateMode(str, Enum):
 
 @dataclass
 class PromptUpdate(ABC):
-    """Defines how to update a prompt with placeholder tokens.
-    """
+    """Defines how to update a prompt with placeholder tokens."""
 
     modality: str
     """The modality for which the update is made."""

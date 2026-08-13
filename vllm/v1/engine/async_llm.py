@@ -1007,8 +1007,7 @@ class AsyncLLM(EngineClient):
         args: tuple = (),
         kwargs: dict | None = None,
     ):
-        """Perform a collective RPC call to the given path.
-        """
+        """Perform a collective RPC call to the given path."""
         return await self.engine_core.collective_rpc_async(
             method, timeout, args, kwargs
         )

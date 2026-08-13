@@ -26,8 +26,7 @@ class BlockStatus(ctypes.Structure):
 
     @property
     def is_ready(self) -> bool:
-        """Returns whether the block is ready to be read.
-        """
+        """Returns whether the block is ready to be read."""
         return self.ref_cnt >= 0
 
 

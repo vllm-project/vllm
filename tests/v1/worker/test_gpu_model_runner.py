@@ -65,8 +65,7 @@ DEVICE_TYPE = current_platform.device_type
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
-    """Only perform necessary steps in GPUModelRunner.initialize_kv_cache()
-    """
+    """Only perform necessary steps in GPUModelRunner.initialize_kv_cache()"""
     attn_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),

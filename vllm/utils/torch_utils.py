@@ -821,8 +821,7 @@ _aux_stream: torch.cuda.Stream | None = None
 
 
 def aux_stream() -> torch.cuda.Stream | None:
-    """Ensures aux_stream is initialized only once
-    """
+    """Ensures aux_stream is initialized only once"""
     global _aux_stream
 
     from vllm.platforms import current_platform
@@ -873,8 +872,7 @@ def weak_ref_tensors(
 
 
 def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
-    """Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
-    """
+    """Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA)."""
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():

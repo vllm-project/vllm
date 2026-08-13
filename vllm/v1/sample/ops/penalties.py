@@ -15,8 +15,7 @@ def apply_all_penalties(
     repetition_penalties: torch.Tensor,
     output_token_ids: list[list[int]],
 ) -> torch.Tensor:
-    """Applies presence, frequency and repetition penalties to the logits.
-    """
+    """Applies presence, frequency and repetition penalties to the logits."""
     _, vocab_size = logits.shape
     output_tokens_t = _convert_to_tensors(output_token_ids, vocab_size, logits.device)
 
@@ -40,8 +39,7 @@ def apply_all_penalties(
 def _convert_to_tensors(
     output_token_ids: list[list[int]], vocab_size: int, device: torch.device
 ) -> torch.Tensor:
-    """Convert the different list data structures to tensors.
-    """
+    """Convert the different list data structures to tensors."""
     output_tokens_tensor = make_tensor_with_pad(
         output_token_ids,
         # Use the value of vocab_size as a pad since we don't have a

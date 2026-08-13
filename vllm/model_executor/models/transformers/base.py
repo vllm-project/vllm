@@ -346,16 +346,14 @@ class Base(
         self._maybe_apply_model_mapping()
 
     def _get_tie_word_embeddings(self):
-        """Check if the model has tied word embeddings.
-        """
+        """Check if the model has tied word embeddings."""
         # Models created with Transformers v4 and v5 will store this in different places
         tie_word_embeddings_v4 = getattr(self.text_config, "tie_word_embeddings", False)
         tie_word_embeddings_v5 = getattr(self.config, "tie_word_embeddings", False)
         return tie_word_embeddings_v4 or tie_word_embeddings_v5
 
     def pipeline_parallel(self):
-        """Apply the model's pipeline parallelization plan.
-        """
+        """Apply the model's pipeline parallelization plan."""
         if self.pp_group.world_size <= 1:
             return
 
@@ -522,8 +520,7 @@ class Base(
         _recursive_replace(self.model, prefix="model")
 
     def create_attention_instances(self) -> dict[int, Attention]:
-        """Create `Attention` instances to inform KV cache allocation.
-        """
+        """Create `Attention` instances to inform KV cache allocation."""
         mla_fusers = {}
         attention_instances = {}
         text_config = self.text_config

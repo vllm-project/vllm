@@ -33,8 +33,7 @@ from vllm.multimodal.media.audio import load_audio
 
 
 def audio_to_pcm16_base64(audio_path: str) -> str:
-    """Load an audio file and convert it to base64-encoded PCM16 @ 16kHz.
-    """
+    """Load an audio file and convert it to base64-encoded PCM16 @ 16kHz."""
     # Load audio and resample to 16kHz mono
     audio, _ = load_audio(audio_path, sr=16000, mono=True)
     # Convert to PCM16
@@ -44,8 +43,7 @@ def audio_to_pcm16_base64(audio_path: str) -> str:
 
 
 async def realtime_transcribe(audio_path: str, host: str, port: int, model: str):
-    """Connect to the Realtime API and transcribe an audio file.
-    """
+    """Connect to the Realtime API and transcribe an audio file."""
     uri = f"ws://{host}:{port}/v1/realtime"
 
     async with websockets.connect(uri) as ws:

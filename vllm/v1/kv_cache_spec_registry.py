@@ -40,8 +40,7 @@ class KVCacheSpecRegistry:
 
     @classmethod
     def _ensure_registered(cls, vllm_config=None) -> None:
-        """Run full KVCacheSpec registration if the registration is not done.
-        """
+        """Run full KVCacheSpec registration if the registration is not done."""
         if _REGISTRY_KVCACHESPEC_LIST:
             return
 
@@ -151,8 +150,7 @@ class KVCacheSpecRegistry:
     def check_kv_cache_spec_registry(
         cls, kv_cache_spec: dict[str, "KVCacheSpec"]
     ) -> None:
-        """Check if the KVCacheSpecs of each layer are registered as expected.
-        """
+        """Check if the KVCacheSpecs of each layer are registered as expected."""
         cls._ensure_registered()
         for layer_name, spec in kv_cache_spec.items():
             # use raise instead of assert to make it effective in production environment

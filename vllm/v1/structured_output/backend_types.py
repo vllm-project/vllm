@@ -90,8 +90,7 @@ class StructuredOutputGrammar(ABC):
 
     @abstractmethod
     def reset(self):
-        """Resets the state of the structured output grammar.
-        """
+        """Resets the state of the structured output grammar."""
 
 
 @dataclass
@@ -136,5 +135,4 @@ class StructuredOutputBackend(ABC):
 
     @abstractmethod
     def destroy(self):
-        """Backend-specific cleanup.
-        """
+        """Backend-specific cleanup."""

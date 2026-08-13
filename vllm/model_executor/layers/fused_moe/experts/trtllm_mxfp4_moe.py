@@ -32,8 +32,7 @@ from vllm.utils.flashinfer import has_flashinfer
 
 
 class TrtLlmMxfp4ExpertsBase:
-    """MXFP4 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic.
-    """
+    """MXFP4 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic."""
 
     def __init__(
         self,

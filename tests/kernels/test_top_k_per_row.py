@@ -228,8 +228,7 @@ def test_top_k_per_row(
     top_k: int,
     clean_logits: bool,
 ) -> None:
-    """Test top_k_per_row.
-    """
+    """Test top_k_per_row."""
     set_random_seed(0)
     torch.set_default_device("cuda:0")
 
@@ -277,8 +276,7 @@ def _run_top_k_per_row_decode_test(
     clean_logits: bool,
     data_generation: str,
 ) -> None:
-    """Helper function to run top_k_per_row_decode test with given parameters.
-    """
+    """Helper function to run top_k_per_row_decode test with given parameters."""
     torch.set_default_device("cuda:0")
 
     # Create test data
@@ -343,8 +341,7 @@ def test_top_k_per_row_decode(
     clean_logits: bool,
     data_generation: str,
 ) -> None:
-    """Test top_k_per_row with seq_lens tensor.
-    """
+    """Test top_k_per_row with seq_lens tensor."""
     set_random_seed(0)
     vocab_size = 20000
     _run_top_k_per_row_decode_test(
@@ -356,8 +353,7 @@ def test_top_k_per_row_decode(
 @pytest.mark.parametrize("clean_logits", [True, False])
 @torch.inference_mode()
 def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
-    """Test top_k_per_row_decode with large vocabulary size.
-    """
+    """Test top_k_per_row_decode with large vocabulary size."""
     set_random_seed(0)
     top_k = 2048
     batch_size = 2

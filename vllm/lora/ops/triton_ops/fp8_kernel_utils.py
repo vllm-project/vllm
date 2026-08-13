@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Utilities for Punica kernel construction.
-"""
+"""Utilities for Punica kernel construction."""
 
 from vllm.triton_utils import tl, triton
 

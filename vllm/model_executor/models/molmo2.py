@@ -522,8 +522,7 @@ class Molmo2VisionTransformer(nn.Module):
         x: torch.Tensor,
         patch_num: int | None = None,
     ) -> list[torch.Tensor]:
-        """: param x: (batch_size, num_patch, n_pixels)
-        """
+        """: param x: (batch_size, num_patch, n_pixels)"""
         if patch_num is None:
             patch_num = self.patch_num
 
@@ -776,8 +775,7 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
         return self.image_vit.patch_embedding.weight.device
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
-        """: param images: (batch_size, num_crops, num_patch, n_pixels)
-        """
+        """: param images: (batch_size, num_crops, num_patch, n_pixels)"""
         B, T, N, D = images.shape
         images = images.view(B * T, N, D)
         image_features = self.image_vit(images)
@@ -1480,8 +1478,7 @@ def get_target_fps(
     frame_sample_mode: str,
     candidate_target_fps: list[float],
 ) -> float | None:
-    """Get the target fps that best spans the video and has the most frames sampled
-    """
+    """Get the target fps that best spans the video and has the most frames sampled"""
     num_frames_sampled = 0
     selected_target_fps = None
     for target_fps in candidate_target_fps:
@@ -2596,8 +2593,7 @@ class Molmo2ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="model",
             connector="vision_backbone.image_projector",

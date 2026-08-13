@@ -213,8 +213,7 @@ def _flashinfer_fp8_blockscale_gemm_fake(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> torch.Tensor:
-    """Required fake/meta implementation for torch.compile graph tracing.
-    """
+    """Required fake/meta implementation for torch.compile graph tracing."""
     return torch.empty(
         input.shape[0], weight.shape[0], dtype=torch.bfloat16, device=input.device
     )
@@ -321,8 +320,7 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_fake(
     group_size: int,
     use_deep_gemm_e8m0: bool,
 ) -> torch.Tensor:
-    """Required fake/meta implementation for torch.compile graph tracing.
-    """
+    """Required fake/meta implementation for torch.compile graph tracing."""
     return torch.empty(
         input.shape[0], weight.shape[0], dtype=torch.bfloat16, device=input.device
     )

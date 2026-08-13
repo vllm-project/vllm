@@ -225,8 +225,7 @@ class FireRedLIDFeatureExtractor(SequenceFeatureExtractor):
 
 
 class FireRedLIDProcessor(ProcessorMixin):
-    """Wraps FireRedLIDFeatureExtractor + a tokenizer.
-    """
+    """Wraps FireRedLIDFeatureExtractor + a tokenizer."""
 
     feature_extractor_class = "FireRedLIDFeatureExtractor"
     tokenizer_class = ("PythonBackend", "TokenizersBackend")

@@ -113,8 +113,7 @@ def slice_nvfp4_output(
     out: torch.Tensor,
     output_size: int,
 ) -> torch.Tensor:
-    """Slice the output tensor to remove padding in N dimension if weight was padded.
-    """
+    """Slice the output tensor to remove padding in N dimension if weight was padded."""
     if out.shape[-1] != output_size:
         return out[..., :output_size].contiguous()
     return out

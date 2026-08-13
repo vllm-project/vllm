@@ -88,8 +88,7 @@ def extract_world_size_and_kv_rank(
     rank: int,
     vllm_config: VllmConfig,
 ) -> tuple[int, int]:
-    """Convert the rank for the MLA.
-    """
+    """Convert the rank for the MLA."""
     use_mla = mla_enabled(vllm_config.model_config)
     if not use_mla:
         return world_size, rank
@@ -717,8 +716,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         return None
 
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":
-        """Get the KV connector stats collected during the last interval.
-        """
+        """Get the KV connector stats collected during the last interval."""
         return None
 
     # ==============================

@@ -168,8 +168,7 @@ class KVEventAggregator:
         return list(self._event_counter.elements())
 
     def clear_events(self) -> None:
-        """Clear all tracked events.
-        """
+        """Clear all tracked events."""
         self._event_counter.clear()
 
     def increment_workers(self, count: int = 1) -> None:
@@ -184,8 +183,7 @@ class KVEventAggregator:
         self._num_workers += count
 
     def reset_workers(self) -> None:
-        """Reset the number of workers to 1.
-        """
+        """Reset the number of workers to 1."""
         self._num_workers = 1
 
     def get_number_of_workers(self) -> int:

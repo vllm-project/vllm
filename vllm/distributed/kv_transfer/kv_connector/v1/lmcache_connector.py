@@ -32,8 +32,7 @@ logger = init_logger(__name__)
 
 
 class LMCacheKVEvents(KVConnectorKVEvents):
-    """Concrete implementation of KVConnectorKVEvents using KVEventAggregator.
-    """
+    """Concrete implementation of KVConnectorKVEvents using KVEventAggregator."""
 
     def __init__(self, num_workers: int) -> None:
         self._aggregator = KVEventAggregator(num_workers)
@@ -42,8 +41,7 @@ class LMCacheKVEvents(KVConnectorKVEvents):
         self._aggregator.add_events(events)
 
     def aggregate(self) -> "LMCacheKVEvents":
-        """Aggregate KV events and retain only common events.
-        """
+        """Aggregate KV events and retain only common events."""
         common_events = self._aggregator.get_common_events()
         self._aggregator.clear_events()
         self._aggregator.add_events(common_events)
@@ -223,8 +221,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         return set()
 
     def get_kv_connector_kv_cache_events(self) -> LMCacheKVEvents | None:
-        """Get the KV connector kv cache events collected during the last interval.
-        """
+        """Get the KV connector kv cache events collected during the last interval."""
         events = self._lmcache_engine.get_kv_events()  # type: ignore [attr-defined]
         if not events:
             return None
@@ -274,8 +271,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        """Update KVConnector state after block allocation.
-        """
+        """Update KVConnector state after block allocation."""
         self._lmcache_engine.update_state_after_alloc(request, num_external_tokens)
 
     def build_connector_meta(

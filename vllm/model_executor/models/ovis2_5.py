@@ -81,8 +81,7 @@ class Ovis2_5VideoPatchInputs(TensorSchema):
 
 
 class VisualTokenizer(torch.nn.Module):
-    """VIT
-    """
+    """VIT"""
 
     def __init__(
         self,

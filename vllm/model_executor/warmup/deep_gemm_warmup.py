@@ -104,8 +104,7 @@ def _extract_data_from_linear_base_module(
 def _extract_data_from_fused_moe_module(
     m_: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """Extract weights, weight scales and num_topk from MoERunner module.
-    """
+    """Extract weights, weight scales and num_topk from MoERunner module."""
     assert isinstance(m_, MoERunner)
     m = m_.routed_experts
     w13 = m.w13_weight
@@ -141,8 +140,7 @@ def _is_deep_gemm_backed_kernel(fp8_linear: object) -> bool:
 
 
 def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
-    """Return True if the input module/layer could be processed with DeepGEMM.
-    """
+    """Return True if the input module/layer could be processed with DeepGEMM."""
     if not (
         isinstance(module, LinearBase)
         and isinstance(module.quant_method, Fp8LinearMethod)

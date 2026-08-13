@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests compute_expert_num_tokens kernels
-"""
+"""Tests compute_expert_num_tokens kernels"""
 
 import dataclasses
 

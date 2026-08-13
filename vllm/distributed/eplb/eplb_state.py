@@ -70,8 +70,7 @@ def _compute_eplb_load_stats(
 
 @dataclass
 class EplbStats:
-    """Model stats used in EPLB rebalancing algorithm.
-    """
+    """Model stats used in EPLB rebalancing algorithm."""
 
     global_expert_load_window: torch.Tensor
     """
@@ -224,8 +223,7 @@ class EplbModelState:
 
 
 class EplbState:
-    """EplbState of each expert parallel model. Key is the model config hash.
-    """
+    """EplbState of each expert parallel model. Key is the model config hash."""
 
     def __init__(self, parallel_config: ParallelConfig, device: torch.device):
         self.parallel_config = parallel_config
@@ -358,8 +356,7 @@ class EplbState:
         model: MixtureOfExperts,
         model_config: ModelConfig,
     ):
-        """Build the initial EPLB state.
-        """
+        """Build the initial EPLB state."""
         self.validate_ep_configuration(model)
         self.is_async = self.parallel_config.eplb_config.use_async
 
@@ -1007,8 +1004,7 @@ class EplbState:
         return int(flag.item()) == device_group.size()
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
-        """All-reduce a list of tensors.
-        """
+        """All-reduce a list of tensors."""
         ep_group = get_ep_group().device_group
         if len(tensor_list) == 1:
             all_reduce(tensor_list[0], group=ep_group)

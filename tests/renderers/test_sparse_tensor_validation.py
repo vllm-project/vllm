@@ -354,8 +354,7 @@ class TestAudioEmbedsValidation:
 
 
 class TestSparseTensorValidationIntegration:
-    """These tests verify the complete attack chain is blocked at all entry points.
-    """
+    """These tests verify the complete attack chain is blocked at all entry points."""
 
     def test_attack_scenario_completions_api(self, model_config):
         """Simulate a complete attack through the Completions API.

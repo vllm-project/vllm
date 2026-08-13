@@ -98,8 +98,7 @@ def import_from_path(module_name: str, file_path: str | os.PathLike):
 
 
 def resolve_obj_by_qualname(qualname: str) -> Any:
-    """Resolve an object by its fully-qualified class name.
-    """
+    """Resolve an object by its fully-qualified class name."""
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)

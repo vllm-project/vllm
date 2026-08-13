@@ -120,8 +120,7 @@ class KVCacheSpecKind(str, Enum):
 
 @dataclass(frozen=True)
 class KVCacheSpec:
-    """A base class for specifying the KV cache format of one layer.
-    """
+    """A base class for specifying the KV cache format of one layer."""
 
     # number of tokens in a block
     block_size: int
@@ -162,14 +161,12 @@ class KVCacheSpec:
         return cdiv(max_len, self.block_size)
 
     def copy_with_new_block_size(self, block_size: int) -> Self:
-        """Create a new KVCacheSpec from self but replacing the block size.
-        """
+        """Create a new KVCacheSpec from self but replacing the block size."""
         return replace(self, block_size=block_size)
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        """Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
-        """
+        """Merge a list of KVCacheSpec objects into a single KVCacheSpec object."""
         assert all(spec == specs[0] for spec in specs[1:]), (
             "All layers in the same KV cache group must be the same."
         )
@@ -178,8 +175,7 @@ class KVCacheSpec:
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]
     ) -> bool:
-        """Whether this KVCacheSpec is uniform with all specs of all layers.
-        """
+        """Whether this KVCacheSpec is uniform with all specs of all layers."""
         uniform_type_base_spec = KVCacheSpecRegistry.get_uniform_type_base_spec(self)
         assert uniform_type_base_spec is not None, (
             f"Unsupported KV cache spec type: {type(self)}. "
@@ -776,8 +772,7 @@ class EncoderOnlyAttentionSpec(AttentionSpec):
 
 @dataclass(frozen=True)
 class CrossAttentionSpec(AttentionSpec):
-    """KV cache spec for cross-attention layers in encoder-decoder models.
-    """
+    """KV cache spec for cross-attention layers in encoder-decoder models."""
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # For cross-attention, we need to cache encoder states
@@ -970,8 +965,7 @@ def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
 
 @dataclass
 class KVCacheTensor:
-    """A class for specifying how the workers should initialize the KV cache.
-    """
+    """A class for specifying how the workers should initialize the KV cache."""
 
     size: int  # size of the KV cache tensor in bytes
     shared_by: list[str]  # layer names that share the same KV cache tensor
@@ -995,8 +989,7 @@ class KVCacheGroupSpec:
 
 @dataclass
 class KVCacheConfig:
-    """The KV cache configuration of a model.
-    """
+    """The KV cache configuration of a model."""
 
     num_blocks: int
     """The number of KV cache blocks"""

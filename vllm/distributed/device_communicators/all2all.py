@@ -76,8 +76,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """Gather hidden_states and router_logits from all dp ranks.
-        """
+        """Gather hidden_states and router_logits from all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
@@ -107,8 +106,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """Gather hidden_states and router_logits from all dp ranks.
-        """
+        """Gather hidden_states and router_logits from all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
@@ -135,8 +133,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """Reduce-scatter hidden_states across all dp ranks.
-        """
+        """Reduce-scatter hidden_states across all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(
             hidden_states.shape[0] // dist_group.world_size,
@@ -150,8 +147,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
 
 class DeepEPAll2AllManagerBase(All2AllManagerBase):
-    """All2All communication based on DeepEP High-Throughput kernels.
-    """
+    """All2All communication based on DeepEP High-Throughput kernels."""
 
     def __init__(self, cpu_group, tcp_store_group=None):
         assert has_deep_ep(), (
@@ -203,8 +199,7 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
 
 
 class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
-    """All2All communication based on DeepEP High-Throughput kernels.
-    """
+    """All2All communication based on DeepEP High-Throughput kernels."""
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
@@ -263,8 +258,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
 
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
-    """All2All communication based on DeepEP Low-Latency kernels.
-    """
+    """All2All communication based on DeepEP Low-Latency kernels."""
 
     _buffer: Any = None
     _mask: torch.Tensor | None = None
@@ -582,8 +576,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
-    """All2All communication based on flashinfer all2allv/two-sided NVLink kernels.
-    """
+    """All2All communication based on flashinfer all2allv/two-sided NVLink kernels."""
 
     # This type lint could be removed after all of the work in
     # https://github.com/vllm-project/vllm/issues/26533 done.

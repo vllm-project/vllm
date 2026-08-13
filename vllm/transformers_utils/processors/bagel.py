@@ -35,8 +35,7 @@ class BagelProcessor(ProcessorMixin):
         images: ImageInput = None,
         **kwargs: Unpack[BagelProcessorKwargs],
     ):
-        """Main method to prepare for the model one or several sequences(s) and image(s).
-        """
+        """Main method to prepare for the model one or several sequences(s) and image(s)."""
         output_kwargs = self._merge_kwargs(
             BagelProcessorKwargs,
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,
@@ -60,13 +59,11 @@ class BagelProcessor(ProcessorMixin):
         return BatchFeature(data={**pixel_values, **text_inputs})
 
     def batch_decode(self, *args, **kwargs):
-        """This method forwards all its arguments to Qwen2TokenizerFast's batch_decode.
-        """
+        """This method forwards all its arguments to Qwen2TokenizerFast's batch_decode."""
         return self.tokenizer.batch_decode(*args, **kwargs)
 
     def decode(self, *args, **kwargs):
-        """This method forwards all its arguments to Qwen2TokenizerFast's decode.
-        """
+        """This method forwards all its arguments to Qwen2TokenizerFast's decode."""
         return self.tokenizer.decode(*args, **kwargs)
 
     @property

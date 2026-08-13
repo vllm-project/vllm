@@ -14,8 +14,7 @@ logger = init_logger(__name__)
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelArchitectureConfig:
-    """Configuration for model architecture that required by vLLM runtime
-    """
+    """Configuration for model architecture that required by vLLM runtime"""
 
     architectures: list[str]
     """List of model architecture class names (e.g., ['LlamaForCausalLM']).

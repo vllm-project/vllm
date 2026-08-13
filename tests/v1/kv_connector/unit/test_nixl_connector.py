@@ -2036,8 +2036,7 @@ class FakePlatform(Platform):
 
     @classmethod
     def get_nixl_memory_type(cls) -> str | None:
-        """Returns the nixl memory type for the current platform.
-        """
+        """Returns the nixl memory type for the current platform."""
         return "VRAM"
 
 

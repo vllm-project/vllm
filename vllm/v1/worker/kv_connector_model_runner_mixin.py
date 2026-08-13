@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Define KV connector functionality mixin for model runners.
-"""
+"""Define KV connector functionality mixin for model runners."""
 
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext

@@ -123,8 +123,7 @@ class TrtLlmBf16ExpertsBase:
 
 
 class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular):
-    """BF16 unquantized TRTLLM-Gen MoE kernels. Supports modular interface.
-    """
+    """BF16 unquantized TRTLLM-Gen MoE kernels. Supports modular interface."""
 
     @staticmethod
     def _supports_parallel_config(
@@ -223,8 +222,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
 
 
 class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonolithic):
-    """BF16 unquantized TRTLLM-Gen MoE kernels. Supports monolithic interface.
-    """
+    """BF16 unquantized TRTLLM-Gen MoE kernels. Supports monolithic interface."""
 
     @staticmethod
     def _supports_parallel_config(

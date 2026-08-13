@@ -238,8 +238,7 @@ def test_cpu_offloading(
     cpu_block_size: int | None,
     uses_hma: bool,
 ) -> None:
-    """Tests OffloadingConnector with CPUOffloadingSpec.
-    """
+    """Tests OffloadingConnector with CPUOffloadingSpec."""
     # configure OffloadingConnector (spec_name=CPUOffloadingSpec by default)
     extra_config: dict = {"cpu_bytes_to_use": 500 << 20}
     if cpu_block_size is not None:

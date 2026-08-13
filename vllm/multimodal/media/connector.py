@@ -451,8 +451,7 @@ class MediaConnector:
         self,
         audio_url: str,
     ) -> tuple[np.ndarray, int | float]:
-        """Load audio from a URL.
-        """
+        """Load audio from a URL."""
         audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return self.load_from_url(
@@ -465,8 +464,7 @@ class MediaConnector:
         self,
         audio_url: str,
     ) -> tuple[np.ndarray, int | float]:
-        """Asynchronously fetch audio from a URL.
-        """
+        """Asynchronously fetch audio from a URL."""
         audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return await self.load_from_url_async(
@@ -534,8 +532,7 @@ class MediaConnector:
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
-        """Load video from an HTTP or base64 data URL.
-        """
+        """Load video from an HTTP or base64 data URL."""
         image_io = ImageMediaIO(
             **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
         )
@@ -585,8 +582,7 @@ class MediaConnector:
         self,
         data: str,
     ) -> torch.Tensor:
-        """Load image embedding from a URL.
-        """
+        """Load image embedding from a URL."""
         image_embedding_io = ImageEmbeddingMediaIO()
 
         return image_embedding_io.load_base64("", data)
@@ -595,8 +591,7 @@ class MediaConnector:
         self,
         data: str,
     ) -> torch.Tensor:
-        """Asynchronously load image embedding from a URL.
-        """
+        """Asynchronously load image embedding from a URL."""
         image_embedding_io = ImageEmbeddingMediaIO()
         loop = asyncio.get_running_loop()
 
@@ -608,8 +603,7 @@ class MediaConnector:
         self,
         data: str,
     ) -> torch.Tensor:
-        """Load audio embedding from a URL.
-        """
+        """Load audio embedding from a URL."""
         audio_embedding_io = AudioEmbeddingMediaIO()
 
         return audio_embedding_io.load_base64("", data)
@@ -618,8 +612,7 @@ class MediaConnector:
         self,
         data: str,
     ) -> torch.Tensor:
-        """Asynchronously load audio embedding from a URL.
-        """
+        """Asynchronously load audio embedding from a URL."""
         audio_embedding_io = AudioEmbeddingMediaIO()
         loop = asyncio.get_running_loop()
 

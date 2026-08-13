@@ -190,8 +190,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        """Get the placeholder text for the `i`th `modality` item in the prompt.
-        """
+        """Get the placeholder text for the `i`th `modality` item in the prompt."""
         ...
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
@@ -568,14 +567,12 @@ class SupportsScoreTemplate(Protocol):
 
     @classmethod
     def get_score_template(cls, query: str, document: str) -> str | None:
-        """Generate a full prompt by populating the score template with query and document content.
-        """  # noqa: E501
+        """Generate a full prompt by populating the score template with query and document content."""  # noqa: E501
         ...
 
     @classmethod
     def post_process_tokens(cls, prompt: "TokensPrompt") -> None:
-        """Perform architecture-specific manipulations on the input tokens.
-        """
+        """Perform architecture-specific manipulations on the input tokens."""
         ...
 
 
@@ -905,8 +902,7 @@ def is_hybrid(
 
 @runtime_checkable
 class MixtureOfExperts(Protocol):
-    """Check if the model is a mixture of experts (MoE) model.
-    """
+    """Check if the model is a mixture of experts (MoE) model."""
 
     expert_weights: MutableSequence[Sequence[Tensor]]
     """

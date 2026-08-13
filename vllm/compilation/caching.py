@@ -409,8 +409,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
     @property
     def co_name(self) -> Literal["VllmSerializableFunction"]:
-        """Used for depyf debugging.
-        """
+        """Used for depyf debugging."""
         return "VllmSerializableFunction"
 
 

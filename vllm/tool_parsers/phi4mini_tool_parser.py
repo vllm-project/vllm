@@ -54,8 +54,7 @@ class Phi4MiniJsonToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """Extract the tool calls from a complete model response.
-        """
+        """Extract the tool calls from a complete model response."""
         logger.debug("Model output: %s", model_output)
 
         pattern = r"functools\[(.*?)\]"

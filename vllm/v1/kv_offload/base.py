@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Core abstractions for KV cache offloading in vLLM v1.
-"""
+"""Core abstractions for KV cache offloading in vLLM v1."""
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Sequence
@@ -393,8 +392,7 @@ class OffloadingManager(ABC):
 
 
 class BlockIDsLoadStoreSpec(LoadStoreSpec, ABC):
-    """Spec for loading/storing KV blocks from given block numbers.
-    """
+    """Spec for loading/storing KV blocks from given block numbers."""
 
     def __init__(self, block_ids: list[int]):
         self.block_ids = np.array(block_ids, dtype=np.int64)

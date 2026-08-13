@@ -995,8 +995,7 @@ def convert_bf16_scales_to_fp8(
 
 
 def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tensor:
-    """Convert int4b8 (packed to int32) to signed int4
-    """
+    """Convert int4b8 (packed to int32) to signed int4"""
     assert t.is_cuda, "tensor must be on gpu"
     assert t.dtype == torch.int32, f"expected int32 packed weights but got {t.dtype}"
 

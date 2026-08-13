@@ -1272,8 +1272,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        """Qwen3-Omni reimplements this function to handle `use_audio_in_video`.
-        """
+        """Qwen3-Omni reimplements this function to handle `use_audio_in_video`."""
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
@@ -2106,8 +2105,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
-        """Construct a transcription/translation prompt for Qwen3-Omni.
-        """
+        """Construct a transcription/translation prompt for Qwen3-Omni."""
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         model_config = stt_params.model_config
@@ -2267,8 +2265,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         return torch.from_numpy(llm_positions), mrope_position_delta
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="visual.merger",

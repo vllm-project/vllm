@@ -66,8 +66,7 @@ def run_test(
 
 
 def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
-    """Form the prompt based on the text and image input, then llm generate output
-    """
+    """Form the prompt based on the text and image input, then llm generate output"""
     placeholders = [
         {
             "type": "image_url",

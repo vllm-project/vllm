@@ -98,8 +98,7 @@ logger = init_logger(__name__)
 
 
 class AsyncOperationManager:
-    """Manages async save/load operations with background threads.
-    """
+    """Manages async save/load operations with background threads."""
 
     def __init__(self, connector: "HF3FSKVConnector"):
         # Store connector reference and extract commonly used attributes
@@ -668,8 +667,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         return self._async_manager.get_finished_operations(finished_req_ids)
 
     def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
-        """Get the KV connector stats collected during the last interval.
-        """
+        """Get the KV connector stats collected during the last interval."""
         # Clear stats for next iteration
         if (
             hasattr(self, "_async_manager")

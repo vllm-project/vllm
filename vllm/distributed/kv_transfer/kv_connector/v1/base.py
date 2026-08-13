@@ -157,14 +157,12 @@ class KVConnectorWorkerMetadata(ABC):
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "KVConnectorWorkerMetadata":
-        """Aggregate metadata with another `KVConnectorWorkerMetadata` object.
-        """
+        """Aggregate metadata with another `KVConnectorWorkerMetadata` object."""
         pass
 
 
 class KVConnectorBase_V1(ABC):
-    """Base class for KV connectors.
-    """
+    """Base class for KV connectors."""
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -412,8 +410,7 @@ class KVConnectorBase_V1(ABC):
         return None
 
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":
-        """Get the KV connector stats collected during the last interval.
-        """
+        """Get the KV connector stats collected during the last interval."""
         return None
 
     def get_kv_connector_kv_cache_events(self) -> "KVConnectorKVEvents | None":

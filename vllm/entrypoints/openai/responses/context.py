@@ -143,8 +143,7 @@ class ConversationContext(ABC):
 def _create_json_parse_error_messages(
     last_msg: Message, e: json.JSONDecodeError
 ) -> list[Message]:
-    """Creates an error message when json parse failed.
-    """
+    """Creates an error message when json parse failed."""
     error_msg = (
         f"Error parsing tool arguments as JSON: {str(e)}. "
         "Please ensure the tool call arguments are valid JSON and try again."

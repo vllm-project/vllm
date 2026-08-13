@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Orchestration-level integration tests for RayExecutorV2.
-"""
+"""Orchestration-level integration tests for RayExecutorV2."""
 
 import gc
 import os

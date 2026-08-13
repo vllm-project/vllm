@@ -73,8 +73,7 @@ def _sync_engine_id_across_tp(vllm_config: "VllmConfig") -> None:
 def ensure_kv_transfer_initialized(
     vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"
 ) -> None:
-    """Initialize KV cache transfer parallel group.
-    """
+    """Initialize KV cache transfer parallel group."""
     global _KV_CONNECTOR_AGENT
 
     if vllm_config.kv_transfer_config is None:

@@ -94,8 +94,7 @@ def instrument(
     attributes: dict[str, str] | None = None,
     record_exception: bool = True,
 ):
-    """Generic decorator to instrument functions.
-    """
+    """Generic decorator to instrument functions."""
     if obj is None:
         return functools.partial(
             instrument,

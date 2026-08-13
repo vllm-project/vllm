@@ -89,8 +89,7 @@ def test_fused_add_rms_norm_batch_invariant_residual_path(
     n_extra: int,
     seed: int,
 ):
-    """Test the batch-invariant fused residual-add + RMSNorm helper directly.
-    """
+    """Test the batch-invariant fused residual-add + RMSNorm helper directly."""
     device = torch.device(DEVICE_TYPE)
 
     torch.manual_seed(seed)

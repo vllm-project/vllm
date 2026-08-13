@@ -58,8 +58,7 @@ class BlockHashToBlockMap:
         ] = {}
 
     def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
-        """Gets any block with the given block hash key.
-        """
+        """Gets any block with the given block hash key."""
         blocks = self._cache.get(key)
         if blocks is not None:
             if isinstance(blocks, KVCacheBlock):
@@ -70,8 +69,7 @@ class BlockHashToBlockMap:
         return None
 
     def contain(self, key: BlockHashWithGroupId, block_id: int) -> bool:
-        """Checks whether the key maps to the given block ID.
-        """
+        """Checks whether the key maps to the given block ID."""
         blocks = self._cache.get(key)
         if blocks is None:
             return False
@@ -83,8 +81,7 @@ class BlockHashToBlockMap:
         return False
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
-        """Inserts the KVCacheBlock to the cache
-        """
+        """Inserts the KVCacheBlock to the cache"""
         blocks = self._cache.get(key)
         if blocks is None:
             # When key is not found, attach a single block to the key
@@ -100,8 +97,7 @@ class BlockHashToBlockMap:
             self._unexpected_blocks_type(blocks)
 
     def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
-        """Checks if block_hash exists and pop block_id from the cache
-        """
+        """Checks if block_hash exists and pop block_id from the cache"""
         blocks = self._cache.pop(key, None)
         if blocks is None:
             # block_hash not found in the cache

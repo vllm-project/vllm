@@ -33,8 +33,7 @@ from ...registry import (
 
 
 def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """Add metadata to video mm_data
-    """
+    """Add metadata to video mm_data"""
 
     def create_metadata(frames: np.ndarray):
         num_frames = len(frames)

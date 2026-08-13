@@ -492,8 +492,7 @@ def add_decomposed_rel_pos(
 
 
 class PatchEmbed(nn.Module):
-    """Image to Patch Embedding.
-    """
+    """Image to Patch Embedding."""
 
     def __init__(
         self,

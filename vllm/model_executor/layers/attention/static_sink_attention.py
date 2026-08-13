@@ -114,8 +114,7 @@ def create_static_sink_attention_backend(
 
 @CustomOp.register("static_sink_attention")
 class StaticSinkAttention(Attention, CustomOp):
-    """Attention with static sink tokens
-    """
+    """Attention with static sink tokens"""
 
     def __init__(
         self,

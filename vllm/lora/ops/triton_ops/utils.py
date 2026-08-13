@@ -314,8 +314,7 @@ def get_lora_op_configs(
 
 @lru_cache
 def supports_pdl(device: torch.device | None = None) -> bool:
-    """Refer to: https://github.com/triton-lang/triton/blob/v3.5.0/python/tutorials/11-programmatic-dependent-launch.py
-    """
+    """Refer to: https://github.com/triton-lang/triton/blob/v3.5.0/python/tutorials/11-programmatic-dependent-launch.py"""
     # PDL requires compute capability SM90 or above
 
     return (

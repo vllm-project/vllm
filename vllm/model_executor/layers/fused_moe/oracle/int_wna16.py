@@ -106,8 +106,7 @@ def backend_to_kernel_cls(
 
 
 def _get_priority_backends() -> list[WNA16MoEBackend]:
-    """Get available backends in priority order based on platform and config.
-    """
+    """Get available backends in priority order based on platform and config."""
     if current_platform.is_cpu():
         return [WNA16MoEBackend.CPU]
     if current_platform.is_xpu():

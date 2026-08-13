@@ -247,8 +247,7 @@ def _run_rust_vllm_dp_server(child_args: argparse.Namespace) -> None:
 
 
 def _run_vllm_dp_server(child_args: argparse.Namespace) -> None:
-    """Entrypoint function for the vLLM DP Server.
-    """
+    """Entrypoint function for the vLLM DP Server."""
     # Create a fresh process group for the vLLM DP Server,
     # so that CTRL-C is propagated cleanly.
     os.setpgrp()
@@ -383,8 +382,7 @@ class DPSupervisor:
         self._is_ready = False
 
     def _start_children(self) -> None:
-        """Launch vLLM DP Servers on separate GPUs.
-        """
+        """Launch vLLM DP Servers on separate GPUs."""
         logger.info("Launching vLLM DP Servers")
         context = multiprocessing.get_context("spawn")
         for local_rank in range(self.args.data_parallel_size_local):

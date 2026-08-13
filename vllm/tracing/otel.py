@@ -107,8 +107,7 @@ def init_otel_worker_tracer(
     process_kind: str,
     process_name: str,
 ) -> Tracer:
-    """Backend-specific initialization for OpenTelemetry in a worker process.
-    """
+    """Backend-specific initialization for OpenTelemetry in a worker process."""
     # Initialize the tracer if an OTLP endpoint is configured.
     # The endpoint is propagated via environment variable from the main process.
     otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")

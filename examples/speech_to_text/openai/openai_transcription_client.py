@@ -67,8 +67,7 @@ async def stream_openai_response(
     hotwords: str = None,
     prompt: str | None = None,
 ):
-    """Perform asynchronous transcription using OpenAI-compatible API.
-    """
+    """Perform asynchronous transcription using OpenAI-compatible API."""
     print("\ntranscription result [stream]:", end=" ")
     with open(audio_path, "rb") as f:
         transcription = await client.audio.transcriptions.create(
@@ -95,8 +94,7 @@ async def stream_openai_response(
 
 
 def stream_api_response(audio_path: str, model: str, openai_api_base: str):
-    """Perform streaming transcription using raw HTTP requests to the vLLM API server.
-    """
+    """Perform streaming transcription using raw HTTP requests to the vLLM API server."""
     import json
     import os
 

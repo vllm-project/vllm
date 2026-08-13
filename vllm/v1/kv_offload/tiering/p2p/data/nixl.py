@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL.
-"""
+"""NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL."""
 
 from __future__ import annotations
 

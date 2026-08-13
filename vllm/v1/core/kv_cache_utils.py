@@ -784,8 +784,7 @@ def _check_enough_kv_cache_memory(
 def max_memory_usage_bytes(
     vllm_config: VllmConfig, kv_cache_specs: Iterable[KVCacheSpec]
 ) -> int:
-    """Get the maximum memory usage in bytes for the given KV cache specs.
-    """
+    """Get the maximum memory usage in bytes for the given KV cache specs."""
     return sum(spec.max_memory_usage_bytes(vllm_config) for spec in kv_cache_specs)
 
 
@@ -999,8 +998,7 @@ def get_num_blocks(
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
-    """Get the page size of the KV cache.
-    """
+    """Get the page size of the KV cache."""
     page_sizes = {layer.page_size_bytes for layer in kv_cache_specs}
     assert len(page_sizes) == 1
     return page_sizes.pop()
@@ -1623,8 +1621,7 @@ def _approximate_gcd(values: Sequence[int], *, lower_bound: int | None = None) -
 def _get_kv_cache_groups_uniform_groups(
     grouped_specs: list[UniformTypeKVCacheSpecs],
 ) -> list[KVCacheGroupSpec]:
-    """Generate the KV cache groups from the grouped specs.
-    """
+    """Generate the KV cache groups from the grouped specs."""
     assert len(grouped_specs) > 0 and all(
         isinstance(spec, UniformTypeKVCacheSpecs) for spec in grouped_specs
     )
@@ -1825,8 +1822,7 @@ def get_kv_cache_groups(
 def generate_scheduler_kv_cache_config(
     kv_cache_configs: list[KVCacheConfig],
 ) -> KVCacheConfig:
-    """Generate the KV cache configuration for the scheduler.
-    """
+    """Generate the KV cache configuration for the scheduler."""
     assert all(
         [cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs]
     )
@@ -1846,8 +1842,7 @@ def generate_scheduler_kv_cache_config(
 def get_kv_cache_capacity(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> tuple[int, float]:
-    """Get the group-aware KV cache token capacity and max concurrency.
-    """
+    """Get the group-aware KV cache token capacity and max concurrency."""
     max_model_len = vllm_config.model_config.max_model_len
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config

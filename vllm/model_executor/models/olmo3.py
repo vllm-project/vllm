@@ -339,8 +339,7 @@ class Olmo3Model(nn.Module):
 
 
 class Olmo3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
-    """Extremely barebones HF model wrapper.
-    """
+    """Extremely barebones HF model wrapper."""
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={

@@ -771,8 +771,7 @@ class ChameleonVQVAE(nn.Module):
 
 # Copied from transformers.models.chameleon.modeling_chameleon.ChameleonImageVocabularyMapping #noqa
 class ChameleonImageVocabularyMapping:
-    """A class for mapping discrete image tokens from VQGAN to BPE tokens.
-    """
+    """A class for mapping discrete image tokens from VQGAN to BPE tokens."""
 
     def __init__(self, vocab_map: dict[str, int]):
         self.vocab_map = vocab_map

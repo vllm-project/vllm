@@ -712,8 +712,7 @@ class LoRAModelManager:
         )
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
-        """Determine whether this module supports LoRA and which wrapper to use.
-        """
+        """Determine whether this module supports LoRA and which wrapper to use."""
         # For language model (early return)
         if not self.supports_mm:
             return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
@@ -1098,8 +1097,7 @@ class LoRAModelManager:
         return new_module_names[start:end]
 
     def _build_moe_ep_load_spec(self) -> MoEEPLoadSpec | None:
-        """Per-rank slicing metadata for 2D RoutedEXperts LoRA modules.
-        """
+        """Per-rank slicing metadata for 2D RoutedEXperts LoRA modules."""
         if not self._use_ep or not self._is_moe:
             return None
         module = next(

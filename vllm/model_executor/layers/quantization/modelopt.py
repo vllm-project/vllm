@@ -116,8 +116,7 @@ KV_CACHE_QUANT_ALGOS = ["FP8", "NVFP4"]
 
 
 class ModelOptKVCacheMethod(BaseKVCacheMethod):
-    """Supports loading kv-cache scaling factors from FP8 or NVFP4 checkpoints.
-    """
+    """Supports loading kv-cache scaling factors from FP8 or NVFP4 checkpoints."""
 
     def __init__(self, quant_config: "ModelOptQuantConfigBase"):
         super().__init__(quant_config)
@@ -1402,8 +1401,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
     def uses_weight_scale_2_pattern(self) -> bool:
-        """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales.
-        """
+        """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""
         return True
 
     def create_weights(
@@ -1523,8 +1521,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        """Convert NVFP4 MoE weights into kernel format and setup the kernel.
-        """
+        """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]

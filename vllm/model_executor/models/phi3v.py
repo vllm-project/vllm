@@ -240,8 +240,7 @@ class Phi3HDImageEmbedding(nn.Module):
         return image_features_proj
 
     def hd_feature_transform(self, image_features, image_sizes):
-        """image_features: (num_images, num_crops+1, 24*24, 1024)
-        """
+        """image_features: (num_images, num_crops+1, 24*24, 1024)"""
         assert self.hd_transform_order == "sub_glb", (
             f"hd_transform_order `{self.hd_transform_order}` not implemented"
         )

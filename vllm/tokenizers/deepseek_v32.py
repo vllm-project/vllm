@@ -13,8 +13,7 @@ from .protocol import TokenizerLike
 
 
 def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
-    """Wraps a tokenizer to use the custom DeepSeek V3.2 chat template encoding.
-    """
+    """Wraps a tokenizer to use the custom DeepSeek V3.2 chat template encoding."""
     dsv32_tokenizer = copy.copy(tokenizer)
 
     added_vocab = tokenizer.get_added_vocab()

@@ -362,8 +362,7 @@ class Executor(ABC):
 
     @classmethod
     def supports_async_scheduling(cls) -> bool:
-        """Whether the executor supports async scheduling.
-        """
+        """Whether the executor supports async scheduling."""
         return False
 
 

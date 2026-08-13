@@ -39,8 +39,7 @@ class PEFTHelper:
     vllm_max_position_embeddings: int | None = field(default=False)
 
     def _validate_features(self) -> list[str]:
-        """Check if there are any unsupported LoRA features.
-        """
+        """Check if there are any unsupported LoRA features."""
         error_msg = []
         if self.modules_to_save:
             error_msg.append("vLLM only supports modules_to_save being None.")

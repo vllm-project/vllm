@@ -489,8 +489,7 @@ def is_method(node: object, name: str) -> bool:
 
 
 def is_op(node: object, name: str) -> bool:
-    """Is node `torch.<name>()`, `F.<name>()`, `operator.<name>()`, or `Tensor.<name>()`.
-    """
+    """Is node `torch.<name>()`, `F.<name>()`, `operator.<name>()`, or `Tensor.<name>()`."""
     return any(
         is_fn(node, getattr(module, name, None)) for module in (torch, F, operator)
     ) or (hasattr(torch.Tensor, name) and is_method(node, name))

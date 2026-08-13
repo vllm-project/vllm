@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Abstract interfaces and data types for the secondary tiering layer.
-"""
+"""Abstract interfaces and data types for the secondary tiering layer."""
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable

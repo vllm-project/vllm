@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shape configurations for IR op benchmarks.
-"""
+"""Shape configurations for IR op benchmarks."""
 
 import torch
 

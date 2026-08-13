@@ -1506,6 +1506,5 @@ class Step3p5ToolParser(ToolParser):
         return result
 
     def parser_should_check_for_unstreamed_tool_arg_tokens(self) -> bool:
-        """Skip the remaining_call calculation in serving_chat
-        """
+        """Skip the remaining_call calculation in serving_chat"""
         return False

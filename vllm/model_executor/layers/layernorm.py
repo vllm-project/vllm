@@ -309,8 +309,7 @@ class RMSNormGated(CustomOp):
 
 
 class LayerNorm(nn.Module):
-    """Layer Normalization.
-    """
+    """Layer Normalization."""
 
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()

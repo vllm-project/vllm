@@ -245,8 +245,7 @@ class Platform:
 
     @classmethod
     def get_compile_backend(cls) -> str:
-        """Get the custom compile backend for current platform.
-        """
+        """Get the custom compile backend for current platform."""
         return cls.simple_compile_backend
 
     @classmethod
@@ -526,8 +525,7 @@ class Platform:
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         raise NotImplementedError
 
     @classmethod
@@ -929,8 +927,7 @@ class Platform:
 
     @classmethod
     def register_custom_kv_cache_specs(cls, vllm_config: "VllmConfig") -> None:
-        """Register custom KVCacheSpec class on current platform.
-        """
+        """Register custom KVCacheSpec class on current platform."""
         pass
 
     @classmethod
@@ -946,8 +943,7 @@ class Platform:
 
     @classmethod
     def verify_quantization(cls, quant: str) -> None:
-        """Verify whether the quantization is supported by the current platform.
-        """
+        """Verify whether the quantization is supported by the current platform."""
         if cls.supported_quantization and quant not in cls.supported_quantization:
             raise ValueError(
                 f"{quant} quantization is currently not supported in {cls.device_name}."
@@ -993,38 +989,32 @@ class Platform:
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
-        """Return the memory usage in bytes.
-        """
+        """Return the memory usage in bytes."""
         raise NotImplementedError
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        """Return the punica wrapper for current platform.
-        """
+        """Return the punica wrapper for current platform."""
         raise NotImplementedError
 
     @classmethod
     def get_infinity_values(cls, dtype: torch.dtype) -> tuple[float, float]:
-        """Return the platform specific values for (-inf, inf)
-        """
+        """Return the platform specific values for (-inf, inf)"""
         return float("-inf"), float("inf")
 
     @classmethod
     def can_update_inplace(cls) -> bool:
-        """Checks if the platform allows inplace memory updates
-        """
+        """Checks if the platform allows inplace memory updates"""
         return True
 
     @classmethod
     def get_lora_vocab_padding_size(cls) -> int:
-        """Returns how much padding the LoRA logits need for kernels
-        """
+        """Returns how much padding the LoRA logits need for kernels"""
         return 256
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        """Get device specific communicator class for distributed communication.
-        """
+        """Get device specific communicator class for distributed communication."""
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
@@ -1040,14 +1030,12 @@ class Platform:
 
     @classmethod
     def supports_mx(cls) -> bool:
-        """Returns whether the current platform supports MX types.
-        """
+        """Returns whether the current platform supports MX types."""
         return False
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        """Returns whether the current platform supports FP8 types.
-        """
+        """Returns whether the current platform supports FP8 types."""
         return False
 
     @classmethod
@@ -1073,14 +1061,12 @@ class Platform:
 
     @classmethod
     def use_all_gather(cls) -> bool:
-        """Whether to use allgather in LogitsProcessor to gather the logits.
-        """
+        """Whether to use allgather in LogitsProcessor to gather the logits."""
         return True
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
-        """Returns if custom allreduce is supported on the current platform
-        """
+        """Returns if custom allreduce is supported on the current platform"""
         return False
 
     @classmethod
@@ -1120,8 +1106,7 @@ class Platform:
         return None
 
     def get_global_graph_pool(self) -> Any:
-        """Return the global graph pool for this platform.
-        """
+        """Return the global graph pool for this platform."""
         cls = self.__class__
         if cls._global_graph_pool is None:
             cls._global_graph_pool = self.graph_pool_handle()
@@ -1129,8 +1114,7 @@ class Platform:
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
-        """Get static graph wrapper class for static graph.
-        """
+        """Get static graph wrapper class for static graph."""
         return "vllm.compilation.base_static_graph.AbstractStaticGraphWrapper"
 
     @classmethod
@@ -1142,32 +1126,27 @@ class Platform:
         group_size: int,
         timeout: timedelta,
     ) -> "ProcessGroup":
-        """Init platform-specific torch distributed process group.
-        """
+        """Init platform-specific torch distributed process group."""
         raise NotImplementedError
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
-        """Check if the dtype is supported by the current platform.
-        """
+        """Check if the dtype is supported by the current platform."""
         raise NotImplementedError
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
-        """Returns if the hybrid kv cache is supported by the current platform.
-        """
+        """Returns if the hybrid kv cache is supported by the current platform."""
         return False
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        """Returns if the graph mode is supported by the current platform.
-        """
+        """Returns if the graph mode is supported by the current platform."""
         return False
 
     @classmethod
     def support_deep_gemm(cls) -> bool:
-        """Returns if DeepGEMM is supported by the current platform.
-        """
+        """Returns if DeepGEMM is supported by the current platform."""
         return False
 
     @classmethod
@@ -1180,14 +1159,12 @@ class Platform:
 
     @classmethod
     def use_sync_weight_loader(cls) -> bool:
-        """Returns if the current platform needs to sync weight loader.
-        """
+        """Returns if the current platform needs to sync weight loader."""
         return False
 
     @classmethod
     def make_synced_weight_loader(cls, original_weight_loader):
-        """Wrap the original weight loader to make it synced.
-        """
+        """Wrap the original weight loader to make it synced."""
         if not cls.use_sync_weight_loader():
             return original_weight_loader
 
@@ -1208,20 +1185,17 @@ class Platform:
 
     @classmethod
     def get_nixl_memory_type(cls) -> str | None:
-        """Returns the nixl memory type for the current platform.
-        """
+        """Returns the nixl memory type for the current platform."""
         return None
 
     @classmethod
     def check_max_model_len(cls, max_model_len: int) -> int:
-        """Check max_model_len for the current platform.
-        """
+        """Check max_model_len for the current platform."""
         return max_model_len
 
     @classmethod
     def set_additional_forward_context(cls, *args, **kwargs) -> dict[str, Any]:
-        """Set some additional forward context for the current platform if needs.
-        """
+        """Set some additional forward context for the current platform if needs."""
         return {}
 
     @classmethod
@@ -1245,8 +1219,7 @@ class Platform:
 
     @classmethod
     def is_arch_support_pdl(cls) -> bool:
-        """Does the current platform support PDL (Programmatic Dependent Launch)?
-        """
+        """Does the current platform support PDL (Programmatic Dependent Launch)?"""
         return False
 
 

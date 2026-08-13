@@ -108,8 +108,7 @@ class KVCacheBlocks:
         ]
 
     def new_empty(self) -> "KVCacheBlocks":
-        """Creates a new KVCacheBlocks instance with no blocks.
-        """
+        """Creates a new KVCacheBlocks instance with no blocks."""
         return KVCacheBlocks(tuple(() for _ in range(len(self.blocks))))
 
 

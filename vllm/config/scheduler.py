@@ -158,8 +158,7 @@ class SchedulerConfig:
 
     @staticmethod
     def default_factory(**kwargs):
-        """Factory method to create `SchedulerConfig` with default values for `InitVar`s.
-        """
+        """Factory method to create `SchedulerConfig` with default values for `InitVar`s."""
         if "max_model_len" not in kwargs:
             kwargs["max_model_len"] = 8192
         if "is_encoder_decoder" not in kwargs:

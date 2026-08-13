@@ -240,8 +240,7 @@ class LatentMoERunner(MoERunner):
         shared_output: torch.Tensor,
         trunc_size: int | None,
     ) -> torch.Tensor:
-        """Tier 2: column-parallel up-projection folded into the final reduce.
-        """
+        """Tier 2: column-parallel up-projection folded into the final reduce."""
         transform = self.routed_output_transform
         assert transform is not None
 

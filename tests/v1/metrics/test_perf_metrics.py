@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the analytic estimators in metrics/flops.py.
-"""
+"""Tests for the analytic estimators in metrics/flops.py."""
 
 import types
 from types import SimpleNamespace
@@ -696,8 +695,7 @@ def test_ffn_per_gpu_with_pipeline_parallelism():
 
 
 def test_moe_per_gpu_with_expert_parallelism():
-    """Test MoE metrics with expert parallelism - verifies num_activated_experts bug fix.
-    """
+    """Test MoE metrics with expert parallelism - verifies num_activated_experts bug fix."""
     hf_config = Qwen3MoeConfig(
         hidden_size=2048,
         intermediate_size=8192,
@@ -753,8 +751,7 @@ def test_moe_per_gpu_with_expert_parallelism():
 
 
 def test_moe_per_gpu_expert_activation_accounting():
-    """Test that MoE correctly accounts for expert activations with small batch sizes.
-    """
+    """Test that MoE correctly accounts for expert activations with small batch sizes."""
     hf_config = Qwen3MoeConfig(
         hidden_size=2048,
         intermediate_size=8192,

@@ -288,8 +288,7 @@ class DecodeBenchConnectorScheduler:
         return meta
 
     def request_finished(self, request: "Request"):
-        """Called when a request has finished. Clean up any state.
-        """
+        """Called when a request has finished. Clean up any state."""
         self._filled_requests.discard(request.request_id)
 
 

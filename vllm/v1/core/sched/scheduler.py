@@ -2699,8 +2699,7 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
     def _try_promote_blocked_waiting_request(self, request: Request) -> bool:
-        """Try to promote a blocked waiting request back to schedulable states.
-        """
+        """Try to promote a blocked waiting request back to schedulable states."""
         if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
             # finished_recving_kv_req_ids is populated during
             # update_from_output(), based on worker-side connector signals

@@ -18,8 +18,7 @@ _CURRENT_CONTEXTS: list["UBatchContext | None"] = []
 
 
 class UBatchContext:
-    """Context manager for micro-batching synchronization using threading events.
-    """
+    """Context manager for micro-batching synchronization using threading events."""
 
     def __init__(
         self,

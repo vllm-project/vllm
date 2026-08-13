@@ -64,8 +64,7 @@ def lmcache_get_or_create_config() -> V1Config:
 
 
 def hex_hash_to_int16(s: str) -> int:
-    """Convert a hex hash string to a 16-bit integer.
-    """
+    """Convert a hex hash string to a 16-bit integer."""
     return int(s, 16) & 0xFFFF
 
 

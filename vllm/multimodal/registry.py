@@ -93,8 +93,7 @@ class _ProcessorFactories(Generic[_I]):
 
 
 class MultiModalRegistry:
-    """A registry that dispatches data processing according to the model.
-    """
+    """A registry that dispatches data processing according to the model."""
 
     def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
         """Checks if the model supports multimodal inputs.
@@ -216,8 +215,7 @@ class MultiModalRegistry:
         tokenizer: TokenizerLike | None = None,
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
-        """Create a multi-modal processor for a specific model and tokenizer.
-        """
+        """Create a multi-modal processor for a specific model and tokenizer."""
         if not model_config.is_multimodal_model:
             model_name = model_config.served_model_name or model_config.model
             raise ValueError(f"{model_name} is not a multimodal model")

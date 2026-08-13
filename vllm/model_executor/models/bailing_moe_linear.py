@@ -75,8 +75,7 @@ def is_linear_layer(layer_idx, layer_group_size):
 
 
 class BailingMoeV25MLAAttention(nn.Module):
-    """MLA Attention for BailingMoeV2.5 full attention layers.
-    """
+    """MLA Attention for BailingMoeV2.5 full attention layers."""
 
     def __init__(
         self,

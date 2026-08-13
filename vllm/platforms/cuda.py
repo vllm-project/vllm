@@ -244,8 +244,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.cuda.set_device(device)
         # With this trick we can force the device to be set eagerly
         # see https://github.com/pytorch/pytorch/issues/155668
@@ -779,8 +778,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @with_nvml_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
-        """Query if the set of gpus are fully connected by nvlink (1 hop)
-        """
+        """Query if the set of gpus are fully connected by nvlink (1 hop)"""
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_ids]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):

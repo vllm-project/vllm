@@ -82,8 +82,7 @@ logger = init_logger(__name__)
 
 
 class FusedMoEActivationFormat(Enum):
-    """The standard activation format (num_tokens, hidden dim).
-    """
+    """The standard activation format (num_tokens, hidden dim)."""
 
     Standard = ("standard",)
     """
@@ -94,8 +93,7 @@ class FusedMoEActivationFormat(Enum):
 
 @dataclass
 class ExpertTokensMetadata:
-    """Metadata regarding expert-token routing.
-    """
+    """Metadata regarding expert-token routing."""
 
     expert_num_tokens: torch.Tensor
     expert_num_tokens_cpu: torch.Tensor | None
@@ -114,8 +112,7 @@ class ExpertTokensMetadata:
 
 
 class TopKWeightAndReduce(ABC):
-    """An abstract base class for weight application and reduction implementations.
-    """
+    """An abstract base class for weight application and reduction implementations."""
 
     @abstractmethod
     def apply(
@@ -594,8 +591,7 @@ class FusedMoEExperts(ABC):
     @staticmethod
     @abstractmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Whether the kernel supports a particular act function.
-        """
+        """Whether the kernel supports a particular act function."""
         raise NotImplementedError
 
     @staticmethod
@@ -789,8 +785,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         return E, M, N, K, topk
 
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
-        """Workspace type: The dtype to use for the workspace tensors.
-        """
+        """Workspace type: The dtype to use for the workspace tensors."""
         return act_dtype
 
     @abstractmethod

@@ -380,8 +380,7 @@ class VisionTransformer(nn.Module):
     def forward(
         self, x: torch.Tensor, patch_num: int | None = None
     ) -> list[torch.Tensor]:
-        """: param x: (batch_size, num_patch, n_pixels)
-        """
+        """: param x: (batch_size, num_patch, n_pixels)"""
         if patch_num is None:
             patch_num = self.patch_num
         B, N, D = x.shape
@@ -722,8 +721,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         return self.image_vit.patch_embedding.weight.device
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
-        """: param images: (batch_size, num_crops, num_patch, n_pixels)
-        """
+        """: param images: (batch_size, num_crops, num_patch, n_pixels)"""
         B, T, N, D = images.shape
 
         mask = ~torch.all(images.view(B * T, N, D) == -1, dim=(1, 2), keepdim=True)
@@ -1444,8 +1442,7 @@ class MolmoForCausalLM(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="model",
             connector="vision_backbone.image_projector",

@@ -13,8 +13,7 @@ logger = init_logger(__name__)
 
 
 class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """Prepare/Finalize using MoRI kernels.
-    """
+    """Prepare/Finalize using MoRI kernels."""
 
     def __init__(
         self,

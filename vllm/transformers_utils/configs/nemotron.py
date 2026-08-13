@@ -194,8 +194,7 @@ class NemotronConfig(PretrainedConfig):
         )
 
     def _rope_parameters_validation(self):
-        """Validate the `rope_parameters` configuration.
-        """
+        """Validate the `rope_parameters` configuration."""
         if self.rope_parameters is None:
             return
 

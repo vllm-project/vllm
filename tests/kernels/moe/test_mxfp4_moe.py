@@ -204,8 +204,7 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
     reason="mxfp4_experts_quant requires CUDA SM100",
 )
 def test_mxfp4_experts_quant_basic():
-    """Basic smoke test for the MXFP4 experts quantization kernel.
-    """
+    """Basic smoke test for the MXFP4 experts quantization kernel."""
     device = "cuda"
     num_experts = 4
     k = 256

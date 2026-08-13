@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the CUTLASS-based W4A8 grouped GEMM kernel and the full MoE layer.
-"""
+"""Tests for the CUTLASS-based W4A8 grouped GEMM kernel and the full MoE layer."""
 
 import random
 from dataclasses import dataclass
@@ -273,8 +272,7 @@ def test_cutlass_w4a8_moe_mm_end_to_end(shape, random_zero):
 
 
 class W4A8MoELayer(torch.nn.Module):
-    """Minimal wrapper module to test cuda graphs
-    """
+    """Minimal wrapper module to test cuda graphs"""
 
     def __init__(self, setup: MoETestSetup):
         super().__init__()

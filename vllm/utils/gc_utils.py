@@ -57,8 +57,7 @@ class GCDebugger:
         self.gc_top_collected_objects: str = ""
 
     def handle(self, phase: str, info: dict[str, int]) -> None:
-        """Handles a GC event (e.g. GC start or GC finish)
-        """
+        """Handles a GC event (e.g. GC start or GC finish)"""
         generation = info.get("generation")
         if generation is None:
             return
@@ -105,8 +104,7 @@ def freeze_gc_heap() -> None:
 
 
 def maybe_attach_gc_debug_callback() -> None:
-    """Attached a callback for GC debug when VLLM_GC_DEBUG is enabled.
-    """
+    """Attached a callback for GC debug when VLLM_GC_DEBUG is enabled."""
     config = GCDebugConfig(envs.VLLM_GC_DEBUG)
     if config.enabled:
         debugger: GCDebugger = GCDebugger(config)
@@ -133,8 +131,7 @@ def _compute_detailed_type(o: Any) -> str:
 
 
 def _compute_top_gc_collected_objects(objects: list[Any], top: int) -> str:
-    """Group collected objects by types.
-    """
+    """Group collected objects by types."""
     if top <= 0:
         return ""
     object_types = [_compute_detailed_type(o) for o in objects]

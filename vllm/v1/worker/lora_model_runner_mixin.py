@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Define LoRA functionality mixin for model runners.
-"""
+"""Define LoRA functionality mixin for model runners."""
 
 from collections.abc import Callable
 from contextlib import contextmanager

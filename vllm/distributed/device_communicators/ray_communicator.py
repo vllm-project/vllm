@@ -126,8 +126,7 @@ class RayPPCommunicator(Communicator):
         return self._actor_handles
 
     def get_rank(self, actor: ray.actor.ActorHandle) -> int:
-        """Return the given actor's rank using device communicator collective ops.
-        """
+        """Return the given actor's rank using device communicator collective ops."""
         assert hasattr(self, "_actor_id_to_rank"), (
             "Actor rank mapping not built. "
             "This should have been done during initialization."
@@ -141,13 +140,11 @@ class RayPPCommunicator(Communicator):
             raise ValueError(f"Actor {actor} not found in communicator group")
 
     def get_self_rank(self) -> int | None:
-        """Return this actor's rank.
-        """
+        """Return this actor's rank."""
         return self._rank
 
     def get_world_size(self) -> int:
-        """Return the number of ranks in the RayPPCommunicator group.
-        """
+        """Return the number of ranks in the RayPPCommunicator group."""
         return self._world_size
 
     def send(self, buf: "torch.Tensor", peer_rank: int) -> None:

@@ -286,8 +286,7 @@ class RelPosEmbConformerBlock(nn.Module):
 
 
 class ConformerEncoder(nn.Module):
-    """Conformer encoder shared by FireRedASR2 and FireRedLID.
-    """
+    """Conformer encoder shared by FireRedASR2 and FireRedLID."""
 
     def __init__(
         self,

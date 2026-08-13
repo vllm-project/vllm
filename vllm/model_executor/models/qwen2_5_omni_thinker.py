@@ -646,8 +646,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        """Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
-        """
+        """Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`."""
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
         self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
@@ -884,8 +883,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         *,
         enable_hf_prompt_update: bool,
     ) -> tuple[list[int], BatchFeature, bool]:
-        """Qwen2.5-Omni reimplements this function to handle text only.
-        """
+        """Qwen2.5-Omni reimplements this function to handle text only."""
         if isinstance(prompt, str):
             if enable_hf_prompt_update:
                 return self._apply_hf_processor_text_mm(
@@ -913,8 +911,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        """Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
-        """
+        """Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`."""
         mm_counts = mm_items.get_all_counts()
 
         use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
@@ -1571,8 +1568,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="merger.",

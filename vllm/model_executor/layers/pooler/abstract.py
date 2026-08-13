@@ -22,8 +22,7 @@ class Pooler(nn.Module, ABC):
         raise NotImplementedError
 
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        """Construct the updated pooling parameters to use for a supported task.
-        """
+        """Construct the updated pooling parameters to use for a supported task."""
         return PoolingParamsUpdate()
 
     @abstractmethod

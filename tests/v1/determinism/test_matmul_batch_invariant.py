@@ -48,8 +48,7 @@ DEVICE_TYPE = current_platform.device_type
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_matmul_correctness(a_shape, b_shape, dtype):
-    """Compare matmul_batch_invariant against torch.matmul for various shapes.
-    """
+    """Compare matmul_batch_invariant against torch.matmul for various shapes."""
     device = torch.device(DEVICE_TYPE)
 
     torch.manual_seed(42)

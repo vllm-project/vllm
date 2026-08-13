@@ -19,8 +19,7 @@ if TYPE_CHECKING:
 
 
 class PunicaWrapperABC(ABC):
-    """PunicaWrapper ABC.
-    """
+    """PunicaWrapper ABC."""
 
     @abstractmethod
     def update_metadata(
@@ -31,8 +30,7 @@ class PunicaWrapperABC(ABC):
         vocab_size: int,
         **kwargs,
     ) -> None:
-        """Update the lora-related metadata
-        """
+        """Update the lora-related metadata"""
         raise NotImplementedError
 
     @abstractmethod
@@ -44,8 +42,7 @@ class PunicaWrapperABC(ABC):
         scale: float,
         **kwargs,
     ) -> torch.Tensor | None:
-        """Performs GEMM  for multiple slices of lora_a.
-        """
+        """Performs GEMM  for multiple slices of lora_a."""
         raise NotImplementedError
 
     @abstractmethod
@@ -59,8 +56,7 @@ class PunicaWrapperABC(ABC):
         add_inputs=True,
         **kwargs,
     ) -> torch.Tensor | None:
-        """Performs GEMM for multiple slices of lora_b.
-        """
+        """Performs GEMM for multiple slices of lora_b."""
         raise NotImplementedError
 
     @abstractmethod
@@ -90,8 +86,7 @@ class PunicaWrapperABC(ABC):
         buffer: tuple[torch.Tensor, ...] | None = None,
         **kwargs,
     ) -> torch.Tensor | None:
-        """Applicable to linear-related lora.
-        """
+        """Applicable to linear-related lora."""
         raise NotImplementedError
 
     @abstractmethod
@@ -106,8 +101,7 @@ class PunicaWrapperABC(ABC):
         buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | None:
-        """Applies lora  specifically for LogitsProcessorWithLoRA.
-        """
+        """Applies lora  specifically for LogitsProcessorWithLoRA."""
         raise NotImplementedError
 
 
@@ -252,8 +246,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
 
     @property
     def sampler_indices_padded(self) -> torch.Tensor:
-        """This property provides access to padded sampler indices.
-        """
+        """This property provides access to padded sampler indices."""
         indices_padded_len = self.indices_len[2]
         return self._sampler_indices_padded[:indices_padded_len]
 

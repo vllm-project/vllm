@@ -513,8 +513,7 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     from transformers.modeling_outputs import BaseModelOutputWithPast
 
     def compute_position_ids_input_ids(input_ids: torch.Tensor) -> torch.Tensor:
-        """Create 3D positional indices for token input.
-        """
+        """Create 3D positional indices for token input."""
         batch_size, seq_length = input_ids.shape
         position_ids = torch.arange(seq_length, device=input_ids.device)
         position_ids = position_ids.view(1, -1).expand(batch_size, -1)

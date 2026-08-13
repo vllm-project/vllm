@@ -35,8 +35,7 @@ assert isinstance(NIXL_EP_TOPK_INDICES_DTYPE, torch.dtype)
 def dequant_fp8(
     expert_x_fp8: torch.Tensor, expert_x_scales: torch.Tensor
 ) -> torch.Tensor:
-    """Return dequantized tensor in fp32
-    """
+    """Return dequantized tensor in fp32"""
     assert expert_x_fp8.is_contiguous()
     expert_x_scales = expert_x_scales.contiguous()
     num_experts = expert_x_fp8.size(0)
@@ -49,8 +48,7 @@ def dequant_fp8(
 
 
 class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """Prepare/Finalize using NIXL EP kernels.
-    """
+    """Prepare/Finalize using NIXL EP kernels."""
 
     # NIXL EP kernels are compiled only for certain specific hidden sizes.
     # NOTE: Keep this list sorted, maybe_roundup_layer_hidden_size depends

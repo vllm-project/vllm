@@ -396,8 +396,7 @@ def _aiter_w4a16_silu_via_a8w4(
     unpadded_N_w2,
     unpadded_K_w2,
 ) -> torch.Tensor:
-    """MXFP4 w4a16 MoE with a SILU (concatenated ``[gate | up]``) activation.
-    """
+    """MXFP4 w4a16 MoE with a SILU (concatenated ``[gate | up]``) activation."""
     from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
     from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
     from aiter.ops.triton.quant import dynamic_mxfp8_quant

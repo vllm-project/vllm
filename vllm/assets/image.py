@@ -34,8 +34,7 @@ class ImageAsset:
     name: ImageAssetName
 
     def get_path(self, ext: str) -> Path:
-        """Return s3 path for given image.
-        """
+        """Return s3 path for given image."""
         return get_vllm_public_assets(
             filename=f"{self.name}.{ext}", s3_prefix=VLM_IMAGES_DIR
         )
@@ -50,8 +49,7 @@ class ImageAsset:
 
     @property
     def image_embeds(self) -> torch.Tensor:
-        """Image embeddings, only used for testing purposes with llava 1.5.
-        """
+        """Image embeddings, only used for testing purposes with llava 1.5."""
         image_path = self.get_path("pt")
         return torch.load(image_path, map_location="cpu", weights_only=True)
 

@@ -1312,8 +1312,7 @@ class ModelMetrics:
     def get_step_perf_stats_per_gpu(
         self, scheduler_output: SchedulerOutput
     ) -> PerfStats:
-        """Calculate perf stats for the current step based on scheduled tokens.
-        """
+        """Calculate perf stats for the current step based on scheduled tokens."""
         t0 = time.monotonic()
 
         # Build a single batch context

@@ -2268,8 +2268,7 @@ class NixlBaseConnectorWorker:
         self.xfer_stats.record_failed_transfer()
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
-        """Send heartbeat notifications to remote engines, extending lease on KV blocks.
-        """
+        """Send heartbeat notifications to remote engines, extending lease on KV blocks."""
         for engine_id, hb_info in metadata.heartbeat_by_engine.items():
             # Proactive handshake (this request may still be in waiting queue) so
             # the **next** heartbeat for this remote can go through.
@@ -2486,8 +2485,7 @@ class NixlBaseConnectorWorker:
         return decode_block_ids, prefill_block_ids
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        """Get the KV transfer stats for the connector.
-        """
+        """Get the KV transfer stats for the connector."""
         # Clear stats for next iteration
         if not self.xfer_stats.is_empty():
             return self.xfer_stats.clone_and_reset()

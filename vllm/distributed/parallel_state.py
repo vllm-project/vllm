@@ -2295,8 +2295,7 @@ def is_global_first_rank() -> bool:
 
 
 def is_local_first_rank() -> bool:
-    """Check if the current process is the first local rank (rank 0 on its node).
-    """
+    """Check if the current process is the first local rank (rank 0 on its node)."""
     try:
         # prefer the initialized world group if available
         global _WORLD

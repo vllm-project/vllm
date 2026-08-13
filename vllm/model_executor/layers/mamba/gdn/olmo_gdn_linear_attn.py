@@ -293,8 +293,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
     ):
-        """Core attention computation (called by custom op).
-        """
+        """Core attention computation (called by custom op)."""
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
 

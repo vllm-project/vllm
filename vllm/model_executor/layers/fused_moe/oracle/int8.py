@@ -37,8 +37,7 @@ class Int8MoeBackend(Enum):
 def _get_priority_backends(
     moe_config: FusedMoEConfig,
 ) -> list[Int8MoeBackend]:
-    """Get available backends in priority order based on platform and config.
-    """
+    """Get available backends in priority order based on platform and config."""
     return [
         Int8MoeBackend.TRITON,
         Int8MoeBackend.HUMMING,

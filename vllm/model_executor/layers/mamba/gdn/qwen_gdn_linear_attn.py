@@ -573,8 +573,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkvz: torch.Tensor,
         mixed_ba: torch.Tensor,
     ):
-        """Derives `query`, `key` and `value` tensors from `mixed_qkvzba`.
-        """
+        """Derives `query`, `key` and `value` tensors from `mixed_qkvzba`."""
         new_tensor_shape_qkvz = mixed_qkvz.size()[:-1] + (
             self.num_k_heads // self.tp_size,
             (
@@ -1575,8 +1574,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out: torch.Tensor,
         attn_metadata: GDNAttentionMetadata,
     ):
-        """Core attention computation with a packed non-spec decode fast path.
-        """
+        """Core attention computation with a packed non-spec decode fast path."""
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.

@@ -2328,8 +2328,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
 
 class EngineCoreActorMixin:
-    """Ray actor for running EngineCore in a data parallel context
-    """
+    """Ray actor for running EngineCore in a data parallel context"""
 
     def __init__(
         self,
@@ -2441,8 +2440,7 @@ class EngineCoreActorMixin:
         pass
 
     def run(self):
-        """Run the engine core busy loop.
-        """
+        """Run the engine core busy loop."""
         try:
             self.run_busy_loop()  # type: ignore[attr-defined]
         except SystemExit:

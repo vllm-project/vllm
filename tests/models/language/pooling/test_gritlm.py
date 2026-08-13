@@ -16,8 +16,7 @@ ATOL = 2.3e-3
 
 
 def _arr(arr):
-    """Convert a list of integers to an array of integers.
-    """
+    """Convert a list of integers to an array of integers."""
     return np.array(arr)
 
 

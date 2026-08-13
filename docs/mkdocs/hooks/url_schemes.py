@@ -70,8 +70,7 @@ class UrlSchemesPreprocessor(Preprocessor):
             return lines
 
         def replace_relative_link(match: re.Match) -> str:
-            """Replace relative file links with URLs if they point outside the docs dir.
-            """
+            """Replace relative file links with URLs if they point outside the docs dir."""
             title = match.group("title")
             path = match.group("path")
             path = ((DOC_DIR / page.file.src_uri).parent / path).resolve()
@@ -89,8 +88,7 @@ class UrlSchemesPreprocessor(Preprocessor):
             return f"[{gh_icon} {title}]({url})"
 
         def replace_github_link(match: re.Match) -> str:
-            """Replace GitHub issue, PR, and project links with enhanced Markdown links.
-            """
+            """Replace GitHub issue, PR, and project links with enhanced Markdown links."""
             repo = match.group("repo")
             type = match.group("type")
             number = match.group("number")

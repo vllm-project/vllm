@@ -284,8 +284,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
 
     @property
     def sampler_indices_padded(self) -> torch.Tensor:
-        """This property provides access to padded sampler indices.
-        """
+        """This property provides access to padded sampler indices."""
         return self._sampler_indices_padded[:]
 
     def add_lora_logits(
@@ -441,8 +440,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         token_lora_mapping: torch.Tensor | None = None,
         add_inputs: bool = True,
     ):
-        """Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
-        """
+        """Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer."""
         (
             token_lora_mapping_meta,
             _,

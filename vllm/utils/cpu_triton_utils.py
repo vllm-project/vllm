@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Contains replacement functions to fallback Triton usages in CPU backend
-"""
+"""Contains replacement functions to fallback Triton usages in CPU backend"""
 
 import ctypes
 from collections.abc import Callable

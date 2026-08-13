@@ -314,8 +314,7 @@ def build_harmony_preamble(
     container_description: str | None = None,
     with_custom_tools: bool = False,
 ) -> list[Message]:
-    """Build the standard Harmony system/developer prefix for a request.
-    """
+    """Build the standard Harmony system/developer prefix for a request."""
     developer_instructions = system_instructions = None
     if envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
         system_instructions = instructions

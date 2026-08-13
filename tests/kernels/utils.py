@@ -269,7 +269,7 @@ def ref_masked_attention(
     q_seq_lens: list | None = None,
     kv_seq_lens: list | None = None,
 ) -> torch.Tensor:
-    """"Golden" masked attention reference. Supports two types of masking:
+    """ "Golden" masked attention reference. Supports two types of masking:
 
     * Basic attention mask, utilizing {q,kv}_seq_lens args to mask out
       padding elements
@@ -816,8 +816,7 @@ def fp8_allclose(
     atol: float = 1e-08,
     equal_nan: bool = False,
 ) -> bool:
-    """Reference implementation of torch.allclose
-    """
+    """Reference implementation of torch.allclose"""
     torch._refs._check_close_args(name="torch.allclose", a=a, b=b, rtol=rtol, atol=atol)
 
     return bool(

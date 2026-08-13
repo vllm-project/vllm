@@ -64,8 +64,7 @@ logger = init_logger(__name__)
 
 
 class FP32ReplicatedLinear(ReplicatedLinear):
-    """Use FP32 for higher precision.
-    """
+    """Use FP32 for higher precision."""
 
     def forward(
         self,

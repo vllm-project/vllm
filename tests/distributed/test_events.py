@@ -138,8 +138,7 @@ def test_buffer_limit(publisher, subscriber, publisher_config):
 
 
 def test_topic_filtering(publisher_config):
-    """Test that a subscriber only receives messages matching its topic filter
-    """
+    """Test that a subscriber only receives messages matching its topic filter"""
     publisher_config.replay_endpoint = None
 
     publisher_config.topic = "foo"

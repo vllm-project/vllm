@@ -25,8 +25,7 @@ logger = init_logger(__name__)
 
 
 class CompilerInterface:
-    """The interface for a compiler that can be used by vLLM.
-    """
+    """The interface for a compiler that can be used by vLLM."""
 
     # The name of the compiler, e.g. inductor.
     # This is a class-level attribute.
@@ -441,8 +440,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
 
 class InductorAdaptor(CompilerInterface):
-    """The adaptor for the Inductor compiler, version 2.5, 2.6, 2.7.
-    """
+    """The adaptor for the Inductor compiler, version 2.5, 2.6, 2.7."""
 
     name = "inductor"
 

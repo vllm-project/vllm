@@ -1137,8 +1137,7 @@ def subclass_attention_backend(
     attention_backend_cls: type[AttentionBackend],
     builder_cls: type[AttentionMetadataBuilder[M]],
 ) -> type[AttentionBackend]:
-    """Return a new subclass where `get_builder_cls` returns `builder_cls`.
-    """
+    """Return a new subclass where `get_builder_cls` returns `builder_cls`."""
     name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
 
     return type(

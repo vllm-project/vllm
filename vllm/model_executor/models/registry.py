@@ -875,8 +875,7 @@ class _BaseRegisteredModel(ABC):
 
 @dataclass(frozen=True)
 class _RegisteredModel(_BaseRegisteredModel):
-    """Represents a model that has already been imported in the main process.
-    """
+    """Represents a model that has already been imported in the main process."""
 
     interfaces: _ModelInfo
     model_cls: type[nn.Module]
@@ -897,8 +896,7 @@ class _RegisteredModel(_BaseRegisteredModel):
 
 @dataclass(frozen=True)
 class _LazyRegisteredModel(_BaseRegisteredModel):
-    """Represents a model that has not been imported in the main process.
-    """
+    """Represents a model that has not been imported in the main process."""
 
     module_name: str
     class_name: str

@@ -145,8 +145,7 @@ class InputProcessingContext:
         return hf_config
 
     def get_hf_image_processor_config(self) -> dict[str, Any]:
-        """Get the HuggingFace image processor configuration of the model.
-        """
+        """Get the HuggingFace image processor configuration of the model."""
         return self.model_config.hf_image_processor_config
 
     def get_mm_config(self):

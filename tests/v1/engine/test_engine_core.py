@@ -240,8 +240,7 @@ def test_engine_core_advanced_sampling():
 
 @create_new_process_for_each_test()
 def test_engine_core_concurrent_batches():
-    """Test that the engine can handle multiple concurrent batches.
-    """
+    """Test that the engine can handle multiple concurrent batches."""
 
     def make_request_with_max_tokens(req_id: str, max_tokens: int) -> EngineCoreRequest:
         request = make_request()
@@ -396,8 +395,7 @@ def test_engine_core_concurrent_batches():
 
 @multi_gpu_test(num_gpus=2)
 def test_engine_core_tp():
-    """Test engine can initialize worker in tp properly
-    """
+    """Test engine can initialize worker in tp properly"""
     """Setup the EngineCore."""
     engine_args = EngineArgs(
         model=MODEL_NAME,

@@ -1804,8 +1804,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
     dtype: torch.dtype,
     workspace_init,
 ):
-    """Test BF16 unquantized MoE with FlashInfer TRTLLM backend.
-    """
+    """Test BF16 unquantized MoE with FlashInfer TRTLLM backend."""
     set_random_seed(7)
 
     from vllm.model_executor.layers.fused_moe.config import (

@@ -428,8 +428,7 @@ def test_kernels(
     seed: int,
     op_type: str,
 ):
-    """Tests LoRA kernels.
-    """
+    """Tests LoRA kernels."""
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
     set_random_seed(seed)
@@ -480,8 +479,7 @@ def test_kernels_hidden_size(
     seed: int,
     op_type: str,
 ):
-    """Tests SGMV and LoRA kernels.
-    """
+    """Tests SGMV and LoRA kernels."""
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
     set_random_seed(seed)

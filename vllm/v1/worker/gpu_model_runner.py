@@ -3483,8 +3483,7 @@ class GPUModelRunner(
         )
 
     def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
-        """Step for the EPLB (Expert Parallelism Load Balancing) state.
-        """
+        """Step for the EPLB (Expert Parallelism Load Balancing) state."""
         if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
             return
 
@@ -7136,8 +7135,7 @@ class GPUModelRunner(
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
     ) -> None:
-        """Initialize the attention backends and attention metadata builders.
-        """
+        """Initialize the attention backends and attention metadata builders."""
         assert len(self.attn_groups) == 0, "Attention backends are already initialized"
 
         class AttentionGroupKey(NamedTuple):
@@ -7240,8 +7238,7 @@ class GPUModelRunner(
     def initialize_metadata_builders(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
     ) -> None:
-        """Create the metadata builders for all KV cache groups and attn groups.
-        """
+        """Create the metadata builders for all KV cache groups and attn groups."""
         for kv_cache_group_id in range(len(kv_cache_config.kv_cache_groups)):
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 attn_group.create_metadata_builders(
@@ -7845,8 +7842,7 @@ class GPUModelRunner(
         self.routed_experts_initialized = True
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
-        """Add encoder-only layers to the KV cache config.
-        """
+        """Add encoder-only layers to the KV cache config."""
         block_size = self.vllm_config.cache_config.block_size
         encoder_only_attn_specs: dict[AttentionSpec, list[str]] = defaultdict(list)
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)

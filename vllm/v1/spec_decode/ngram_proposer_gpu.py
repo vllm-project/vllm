@@ -650,8 +650,7 @@ def copy_num_valid_draft_tokens(
     num_valid_draft_tokens: torch.Tensor | None,
     batch_size: int,
 ) -> None:
-    """Async D2H copy of per-request valid draft counts.
-    """
+    """Async D2H copy of per-request valid draft counts."""
     if num_valid_draft_tokens is None:
         return
 

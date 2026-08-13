@@ -16,8 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def vllm_version_matches_substr(substr: str) -> bool:
-    """Check to see if the vLLM version matches a substring.
-    """
+    """Check to see if the vLLM version matches a substring."""
     from importlib.metadata import PackageNotFoundError, version
 
     try:

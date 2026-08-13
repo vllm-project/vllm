@@ -767,8 +767,7 @@ class LayerFn(Protocol):
 
 
 class PPMissingLayer(torch.nn.Identity):
-    """A placeholder layer for missing layers in a pipeline parallel model.
-    """
+    """A placeholder layer for missing layers in a pipeline parallel model."""
 
     def __init__(self, *args, **kwargs):
         super().__init__()

@@ -204,8 +204,7 @@ class ChatCompletionContentPartVideoParam(TypedDict, total=False):
 
 
 class PILImage(BaseModel):
-    """A PIL.Image.Image object.
-    """
+    """A PIL.Image.Image object."""
 
     image_pil: Image.Image
     model_config = ConfigDict(arbitrary_types_allowed=True)

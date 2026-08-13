@@ -136,8 +136,7 @@ def test_no_tuple_inputs_with_multiple_consumers():
 
 
 def test_consecutive_ops_in_split():
-    """Test that consecutive splitting operations are grouped into the same subgraph
-    """
+    """Test that consecutive splitting operations are grouped into the same subgraph"""
 
     def model_fn(x: torch.Tensor) -> torch.Tensor:
         """Define a simple model where consecutive operations create opportunities

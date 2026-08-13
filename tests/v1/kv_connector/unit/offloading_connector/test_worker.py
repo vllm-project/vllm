@@ -121,8 +121,7 @@ def _make_worker(
     replicated_layout: bool = False,
     rank: int = 0,
 ):
-    """Create an OffloadingConnectorWorker with mocked dependencies.
-    """
+    """Create an OffloadingConnectorWorker with mocked dependencies."""
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
         OffloadingConnectorWorker,
     )

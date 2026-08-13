@@ -2018,8 +2018,7 @@ def multi_gpu_marks(*, num_gpus: int):
 
 
 def multi_gpu_test(*, num_gpus: int):
-    """Decorate a test to be run only when multiple GPUs are available.
-    """
+    """Decorate a test to be run only when multiple GPUs are available."""
     marks = multi_gpu_marks(num_gpus=num_gpus)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
@@ -2166,8 +2165,7 @@ def get_client_text_logprob_generations(
 
 
 def has_module_attribute(module_name, attribute_name):
-    """Helper function to check if a module has a specific attribute.
-    """
+    """Helper function to check if a module has a specific attribute."""
     try:
         module = importlib.import_module(module_name)
         return hasattr(module, attribute_name)

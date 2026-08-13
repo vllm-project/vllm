@@ -365,8 +365,7 @@ def test_cpu_manager_clears_write_usage_after_failed_store():
 
 
 def test_cpu_manager():
-    """Tests CPUOffloadingManager with lru policy.
-    """
+    """Tests CPUOffloadingManager with lru policy."""
     # initialize a CPU manager with a capacity of 4 blocks
     cpu_manager = make_cpu_manager(num_blocks=4, cache_policy="lru", enable_events=True)
 
@@ -910,8 +909,7 @@ class TestARCPolicy:
 
 
 def test_filter_reused_manager():
-    """Tests CPUOffloadingManager reuse filtering (store_threshold=2).
-    """
+    """Tests CPUOffloadingManager reuse filtering (store_threshold=2)."""
     manager = make_cpu_manager(
         num_blocks=4,
         cache_policy="lru",

@@ -108,8 +108,7 @@ def test_eplb_spec_decode(
 
 @large_gpu_mark(min_gb=80)
 def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
-    """Ensure async EPLB works with MTP speculative decoding for Qwen3-Next.
-    """
+    """Ensure async EPLB works with MTP speculative decoding for Qwen3-Next."""
     TASK = "gsm8k"
     FILTER = "exact_match,strict-match"
     RTOL = 0.03

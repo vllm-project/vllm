@@ -195,8 +195,7 @@ class TestShapeValidationDoSPrevention:
         assert str(wrong_hidden_size) in error_msg  # Received
 
     def test_prevent_crash_from_wrong_shape_audio_embeds(self):
-        """Prevent crash scenario: wrong hidden size in audio embeddings.
-        """
+        """Prevent crash scenario: wrong hidden size in audio embeddings."""
         expected_hidden_size = 768
         wrong_hidden_size = 4096
 

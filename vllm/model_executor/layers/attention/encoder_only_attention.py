@@ -49,8 +49,7 @@ def create_encoder_only_attention_backend(
 
 
 class EncoderOnlyAttention(Attention):
-    """Encoder attention is a special case that doesn't need a KV Cache.
-    """
+    """Encoder attention is a special case that doesn't need a KV Cache."""
 
     def __init__(
         self,

@@ -23,8 +23,7 @@ REVISION_ROBERTA = os.environ.get("REVISION", "main")
     current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
 )
 def test_model_loading_with_params(vllm_runner, monkeypatch):
-    """Test parameter weight loading with tp>1.
-    """
+    """Test parameter weight loading with tp>1."""
     # to use apply_model
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
@@ -67,8 +66,7 @@ def test_model_loading_with_params(vllm_runner, monkeypatch):
     current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
 )
 def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
-    """Test parameter weight loading with tp>1.
-    """
+    """Test parameter weight loading with tp>1."""
     # to use apply_model
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
@@ -111,8 +109,7 @@ def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
     current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
 )
 def test_facebook_roberta_model_loading_with_params(vllm_runner, monkeypatch):
-    """Test loading roberta-base model with no lm_head.
-    """
+    """Test loading roberta-base model with no lm_head."""
     # to use apply_model
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     model_name = "FacebookAI/roberta-base"

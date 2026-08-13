@@ -290,8 +290,7 @@ class ReconfigureDistributedRequest(msgspec.Struct):
 
 
 class ReconfigureRankType(enum.IntEnum):
-    """Rank type for reconfiguring distributed request.
-    """
+    """Rank type for reconfiguring distributed request."""
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2

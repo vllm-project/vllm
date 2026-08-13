@@ -19,8 +19,7 @@ _CONFIG_FILENAME = "config.json"
 
 
 class FileMapper:
-    """FileMapper maps KV blocks (given by their hash) to file names.
-    """
+    """FileMapper maps KV blocks (given by their hash) to file names."""
 
     def __init__(
         self,

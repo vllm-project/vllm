@@ -750,8 +750,7 @@ def _stats(requests: int, queries: int, hits: int) -> PrefixCacheStats:
 
 
 def test_metrics():
-    """Test the prefix caching metrics.
-    """
+    """Test the prefix caching metrics."""
     metrics = CachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
@@ -781,8 +780,7 @@ def test_metrics():
 
 
 def test_metrics_empty_stats():
-    """Test the prefix caching metrics with empty stats.
-    """
+    """Test the prefix caching metrics with empty stats."""
     metrics = CachingMetrics(max_recent_requests=5)
     metrics.observe(_stats(0, 0, 0))
     metrics.observe(_stats(1, 20, 9))

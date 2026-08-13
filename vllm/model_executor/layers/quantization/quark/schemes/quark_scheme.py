@@ -16,15 +16,12 @@ class QuarkScheme(ABC):
     @classmethod
     @abstractmethod
     def get_min_capability(cls) -> int:
-        """Get minimum device capability.
-        """
+        """Get minimum device capability."""
         raise NotImplementedError
 
     @abstractmethod
     def create_weights(self, *args, **kwargs):
-        """Weight creation for the particular scheme. Inputs to this function
-
-        """
+        """Weight creation for the particular scheme. Inputs to this function"""
         raise NotImplementedError
 
     @abstractmethod

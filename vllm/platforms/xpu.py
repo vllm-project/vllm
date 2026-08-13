@@ -232,8 +232,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.xpu.set_device(device)
 
     @classmethod

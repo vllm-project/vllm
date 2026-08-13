@@ -30,8 +30,7 @@ def load_engine_model():
 
 
 class GPUTrace2Graph:
-    """Parses output of nsys report, generates csv and bar chart output
-    """
+    """Parses output of nsys report, generates csv and bar chart output"""
 
     def __init__(self):
         import pandas as pd  # avoid importing till needed

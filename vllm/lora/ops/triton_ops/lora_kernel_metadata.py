@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""LoRA kernels metadata preparation utilities.
-"""
+"""LoRA kernels metadata preparation utilities."""
 
 import bisect
 from dataclasses import dataclass, field

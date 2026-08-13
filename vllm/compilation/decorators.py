@@ -75,8 +75,7 @@ def ignore_torch_compile(cls: type[_T]) -> type[_T]:
 
 
 def _should_ignore_torch_compile(cls: type[_T]) -> bool:
-    """Check if the class should be ignored for torch.compile.
-    """
+    """Check if the class should be ignored for torch.compile."""
     return getattr(cls, IGNORE_COMPILE_KEY, False)
 
 

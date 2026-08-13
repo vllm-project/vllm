@@ -94,8 +94,7 @@ def _store_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """Store callback: Writes to a temp file then atomically replaces the destination.
-    """
+    """Store callback: Writes to a temp file then atomically replaces the destination."""
     # Check if block already exists to avoid redundant writes
     if os.path.exists(dest_path):
         return

@@ -140,8 +140,7 @@ class ECExampleConnector(ECConnectorBase):
         request: "Request",
         index: int,
     ) -> None:
-        """Update ECConnector state after encoder cache allocation.
-        """
+        """Update ECConnector state after encoder cache allocation."""
         mm_hash = request.mm_features[index].identifier
         # Only load cache if it is consumer and cache exists
         if not self.is_consumer or not self.has_cache_item(mm_hash):

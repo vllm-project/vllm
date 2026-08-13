@@ -216,8 +216,7 @@ def is_base_embedding_weights(name: str) -> bool:
 
 
 def get_supported_lora_modules(model: nn.Module) -> list[str]:
-    """In vLLM, all linear layers support LoRA.
-    """
+    """In vLLM, all linear layers support LoRA."""
     supported_lora_modules: set[str] = set()
     for name, module in model.named_modules():
         # get the embedding modules if the module's embedding_modules

@@ -509,8 +509,7 @@ class precompiled_wheel_utils:
     def fetch_metadata_for_variant(
         commit: str, variant: str | None
     ) -> tuple[list[dict], str]:
-        """Fetches metadata for a specific variant of the precompiled wheel.
-        """
+        """Fetches metadata for a specific variant of the precompiled wheel."""
         variant_dir = f"{variant}/" if variant is not None else ""
         repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
         meta_url = repo_url + "metadata.json"

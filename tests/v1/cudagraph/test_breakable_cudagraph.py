@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the breakable cudagraph primitives.
-"""
+"""Unit tests for the breakable cudagraph primitives."""
 
 from __future__ import annotations
 

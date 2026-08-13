@@ -52,8 +52,7 @@ _ENABLE_TORCH_WRAP: bool = True
 
 
 def set_default_torch_wrap(enable: bool = True) -> None:
-    """Permanently set the torch wrap flag.
-    """
+    """Permanently set the torch wrap flag."""
     global _ENABLE_TORCH_WRAP
     _ENABLE_TORCH_WRAP = enable
 
@@ -127,9 +126,7 @@ def register_op(
 
     @vllm.ir.register_op(name="custom_mul")
     def multiply(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        return x * y
-
-    """
+        return x * y"""
 
     def decorator(_f: Callable):
         op_name: str = _f.__name__ if name is None else name
@@ -419,8 +416,7 @@ class IrOp:
 
     @contextlib.contextmanager
     def set_priority(self, priority: list[str]):
-        """Context manager to set the dispatch priority for implementations for this op.
-        """
+        """Context manager to set the dispatch priority for implementations for this op."""
         old_priority_impls = self._priority_impls
         try:
             self._priority_impls = self._filter_priority_impls(priority)

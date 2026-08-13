@@ -249,8 +249,7 @@ def get_layer_partition_names(
         "gate_proj",
         "up_proj",
     ]
-    assert get_layer_partition_names("mlp.down_proj", mapping) == ["down_proj"]
-    """
+    assert get_layer_partition_names("mlp.down_proj", mapping) == ["down_proj"]"""
     for fused_suffix, part_suffixes in packed_modules_mapping.items():
         if layer_name.endswith(fused_suffix):
             return [

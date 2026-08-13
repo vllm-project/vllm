@@ -847,8 +847,7 @@ def subclass_attention_metadata(
     metadata_cls: Any,
     fields: list[tuple[str, Any, Any]],
 ) -> Any:
-    """Return a new subclass of `metadata_cls` with additional fields
-    """
+    """Return a new subclass of `metadata_cls` with additional fields"""
     name: str = name_prefix + metadata_cls.__name__  # type: ignore
     Wrapped = make_dataclass(name, fields, bases=(metadata_cls,))
     return Wrapped

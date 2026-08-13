@@ -683,8 +683,7 @@ class LMCacheMPWorkerAdapter:
         return self.blocks_in_chunk
 
     def shutdown(self):
-        """Shutdown the LMCache MP worker adapter
-        """
+        """Shutdown the LMCache MP worker adapter"""
         logger.info("Unregistering kv caches")
         send_lmcache_request(
             self.mq_client, RequestType.UNREGISTER_KV_CACHE, [self.instance_id]

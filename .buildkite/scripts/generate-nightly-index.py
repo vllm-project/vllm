@@ -111,8 +111,7 @@ def parse_from_filename(file: str) -> WheelFileInfo:
 
 
 def generate_project_list(subdir_names: list[str], comment: str = "") -> str:
-    """Generate project list HTML content linking to each project & variant subdirectory.
-    """
+    """Generate project list HTML content linking to each project & variant subdirectory."""
     href_tags = []
     for name in sorted(subdir_names):
         name = name.strip("/").strip(".")
@@ -126,8 +125,7 @@ def generate_package_index_and_metadata(
     index_base_dir: Path,
     comment: str = "",
 ) -> tuple[str, str]:
-    """Generate package index HTML content for a specific package, linking to actual wheel files.
-    """
+    """Generate package index HTML content for a specific package, linking to actual wheel files."""
     href_tags = []
     metadata = []
     for file in sorted(wheel_files, key=lambda x: x.filename):

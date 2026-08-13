@@ -779,8 +779,7 @@ class QuarkLinearMethod(LinearMethodBase):
 
 
 class QuarkKVCacheMethod(BaseKVCacheMethod):
-    """Supports loading kv-cache scaling factors from quark checkpoints.
-    """
+    """Supports loading kv-cache scaling factors from quark checkpoints."""
 
     def __init__(self, quant_config: QuarkConfig):
         self.validate_kv_cache_config(quant_config.kv_cache_config)

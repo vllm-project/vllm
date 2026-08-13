@@ -376,8 +376,7 @@ def prepare_fp8_moe_layer_for_marlin(
 def pack_fp8_to_int32(
     fp8_tensor: torch.Tensor, size_k_first: bool = True
 ) -> torch.Tensor:
-    """Repack FP8 weights to gptq format (packed int32 elements)
-    """
+    """Repack FP8 weights to gptq format (packed int32 elements)"""
     assert fp8_tensor.dtype == torch.float8_e4m3fn
     assert fp8_tensor.ndim == 2
 

@@ -71,8 +71,7 @@ def _quant_flags_to_group_shape(
     per_out_ch_quant: bool,
     block_shape: list[int] | None,
 ) -> tuple[GroupShape | None, GroupShape | None]:
-    """Convert MoE quantization flags into more generic GroupShapes.
-    """
+    """Convert MoE quantization flags into more generic GroupShapes."""
     a_shape: GroupShape | None
     w_shape: GroupShape | None
     if block_shape is not None:
@@ -599,8 +598,7 @@ def fp8_w8a8_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for fp8 activations and fp8 weights.
-    """
+    """Construct a quant config for fp8 activations and fp8 weights."""
     return FusedMoEQuantConfig.make(
         current_platform.fp8_dtype(),
         w1_scale=w1_scale,
@@ -631,8 +629,7 @@ def int8_w8a8_moe_quant_config(
     w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for int8 activations and int8 weights.
-    """
+    """Construct a quant config for int8 activations and int8 weights."""
     return FusedMoEQuantConfig.make(
         torch.int8,
         w1_scale=w1_scale,
@@ -657,8 +654,7 @@ def gptq_marlin_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
 ):
-    """Construct a quant config for gptq marlin quantization.
-    """
+    """Construct a quant config for gptq marlin quantization."""
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
     w_shape = None if group_size == -1 else GroupShape(row=1, col=group_size)
@@ -691,8 +687,7 @@ def mxfp4_w4a16_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for unquantized activations and mxfp4 weights.
-    """
+    """Construct a quant config for unquantized activations and mxfp4 weights."""
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
@@ -718,8 +713,7 @@ def mxfp4_mxfp8_moe_quant_config(
     mx_alignment: int = 0,
     is_scale_swizzled: bool = True,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for mxfp4 activations and mxfp4 weights.
-    """
+    """Construct a quant config for mxfp4 activations and mxfp4 weights."""
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc("mxfp8"),
         _a2=FusedMoEQuantDesc("mxfp8"),
@@ -743,8 +737,7 @@ def mxfp4_w4a8_moe_quant_config(
     block_shape: list[int] | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for fp8 activations and mxfp4 weights.
-    """
+    """Construct a quant config for fp8 activations and mxfp4 weights."""
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc("fp8", None, a1_scale, None, None, None),
         _a2=FusedMoEQuantDesc("fp8", None, a2_scale, None, None, None),
@@ -768,8 +761,7 @@ def ocp_mx_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for mxfp4 activations and mxfp4 weights.
-    """
+    """Construct a quant config for mxfp4 activations and mxfp4 weights."""
     assert quant_dtype in OCP_MX_DTYPES
     return FusedMoEQuantConfig.make(
         quant_dtype=quant_dtype,
@@ -803,8 +795,7 @@ def nvfp4_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for mxfp4 activations and nvp4 weights.
-    """
+    """Construct a quant config for mxfp4 activations and nvp4 weights."""
     return FusedMoEQuantConfig.make(
         "nvfp4",
         w1_scale=w1_scale,
@@ -850,8 +841,7 @@ def nvfp4_w4a16_moe_quant_config(
     w2_scale: torch.Tensor,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for 16-but activations and nvp4 weights.
-    """
+    """Construct a quant config for 16-but activations and nvp4 weights."""
     return FusedMoEQuantConfig.make(
         quant_dtype=None,
         w1_scale=w1_scale,
@@ -877,8 +867,7 @@ def int4_w4a16_moe_quant_config(
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for 16-bit float activations and int4 weights.
-    """
+    """Construct a quant config for 16-bit float activations and int4 weights."""
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a1_gscale),
@@ -901,8 +890,7 @@ def fp8_w8a16_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for 16-bit float activations and fp8 weights.
-    """
+    """Construct a quant config for 16-bit float activations and fp8 weights."""
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     fp8_dtype = current_platform.fp8_dtype()
     return FusedMoEQuantConfig(
@@ -944,8 +932,7 @@ def int8_w8a16_moe_quant_config(
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for 16-bit float activations and int8 weights.
-    """
+    """Construct a quant config for 16-bit float activations and int8 weights."""
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a1_gscale),
@@ -967,8 +954,7 @@ def int4_w4afp8_moe_quant_config(
     per_out_ch_quant: bool = False,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
-    """Construct a quant config for fp8 activations and int4 weights.
-    """
+    """Construct a quant config for fp8 activations and int4 weights."""
     return FusedMoEQuantConfig.make(
         torch.float8_e4m3fn,  # quant dtype for activations
         w1_scale=w1_scale,

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Isolated GSM8K evaluation script for vLLM serve endpoint.
-"""
+"""Isolated GSM8K evaluation script for vLLM serve endpoint."""
 
 import argparse
 import ast

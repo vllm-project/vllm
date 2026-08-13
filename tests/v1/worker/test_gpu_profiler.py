@@ -24,8 +24,7 @@ from vllm.v1.worker.gpu_worker import Worker
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
-    """A basic implementation of a worker profiler for testing purposes.
-    """
+    """A basic implementation of a worker profiler for testing purposes."""
 
     def __init__(self, profiler_config: ProfilerConfig):
         self.start_call_count = 0

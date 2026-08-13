@@ -91,8 +91,7 @@ def make_block_quant_fp8_weights(
     k: int,
     block_size: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return weights w1q, w2q, w1_scale, w2_scale
-    """
+    """Return weights w1q, w2q, w1_scale, w2_scale"""
     (_, w1q, w1_scale, _), (_, w2q, w2_scale, _) = make_test_weights(
         e, n, k, torch.bfloat16, torch.float8_e4m3fn, block_shape=block_size
     )
@@ -457,8 +456,7 @@ def test_ht_deepep_deepgemm_moe(
     disable_deepgemm_ue8m0,
     workspace_init,
 ):
-    """Tests for High-Throughput DeepEP + DeepGemm integration.
-    """
+    """Tests for High-Throughput DeepEP + DeepGemm integration."""
     m, n, k = mnk
     set_random_seed(7)
 
@@ -529,8 +527,7 @@ def test_ll_deepep_deepgemm_moe(
     disable_deepgemm_ue8m0,
     workspace_init,
 ):
-    """Tests for Low-Latency DeepEP + DeepGemm integration.
-    """
+    """Tests for Low-Latency DeepEP + DeepGemm integration."""
     assert not is_deep_gemm_e8m0_used()
 
     m, n, k = mnk

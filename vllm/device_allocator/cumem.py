@@ -368,8 +368,7 @@ class CuMemAllocator:
                 torch.cuda.memory._set_allocator_settings("expandable_segments:True")
 
     def get_current_usage(self) -> int:
-        """Get the total number of bytes allocated in the memory pool.
-        """
+        """Get the total number of bytes allocated in the memory pool."""
         sum_bytes: int = 0
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle

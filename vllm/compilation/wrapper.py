@@ -289,8 +289,7 @@ class TorchCompileWithNoGuardsWrapper:
 
 
 def reset_compile_wrapper(model: torch.nn.Module) -> None:
-    """Clean up compiled model and captured CUDA graphs for elastic EP.
-    """
+    """Clean up compiled model and captured CUDA graphs for elastic EP."""
     if not isinstance(model, TorchCompileWithNoGuardsWrapper) and hasattr(
         model, "model"
     ):

@@ -27,8 +27,7 @@ from vllm.v1.worker.ubatching import (
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """Prepare/Finalize using DeepEP High-Throughput kernels.
-    """
+    """Prepare/Finalize using DeepEP High-Throughput kernels."""
 
     @staticmethod
     def maybe_roundup_layer_hidden_size(hidden_size: int, dtype: torch.dtype) -> int:

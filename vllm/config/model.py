@@ -1610,8 +1610,7 @@ class ModelConfig:
             raise AssertionError(f"Unsupported block type: {block_type}")
 
     def get_mamba_chunk_size(self) -> int:
-        """Returns the mamba chunk size if it exists
-        """
+        """Returns the mamba chunk size if it exists"""
         # used by e.g. Bamba, FalconH1, Granite
         chunk_size = getattr(self.hf_text_config, "mamba_chunk_size", None)
         if chunk_size is None:
@@ -1904,7 +1903,7 @@ class ModelConfig:
 
     @property
     def head_dtype(self) -> torch.dtype:
-        """"head" refers to the last Linear layer(s) of an LLM,
+        """ "head" refers to the last Linear layer(s) of an LLM,
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 

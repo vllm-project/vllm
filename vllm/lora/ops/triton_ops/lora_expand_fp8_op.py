@@ -89,8 +89,7 @@ def _lora_expand_kernel_fp8(
     per_channel_quant: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
-    """FP8-compatible expand kernel wrapper.
-    """
+    """FP8-compatible expand kernel wrapper."""
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
 

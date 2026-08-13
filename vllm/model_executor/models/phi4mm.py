@@ -519,8 +519,7 @@ def stack_with_pad(
     tensors: torch.Tensor | list[torch.Tensor],
     padding_value: int | float = 0,
 ) -> torch.Tensor:
-    """Stack tensors, padding dimensions that differ across items.
-    """
+    """Stack tensors, padding dimensions that differ across items."""
     if isinstance(tensors, torch.Tensor):
         return tensors
 
@@ -979,8 +978,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
     dummy_inputs=Phi4MMDummyInputsBuilder,
 )
 class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
-    """Implements the Phi-4-multimodal-instruct model in vLLM.
-    """
+    """Implements the Phi-4-multimodal-instruct model in vLLM."""
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -1240,8 +1238,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="model.",
             connector=["audio_projection_for_vision", "audio_projection"],

@@ -23,8 +23,7 @@ logger = init_logger(__name__)
 
 
 class VllmIRLoweringPass(VllmInductorPass):
-    """This pass lowers vLLM IR ops to their implementations the priority list.
-    """
+    """This pass lowers vLLM IR ops to their implementations the priority list."""
 
     def __init__(self, vllm_config: VllmConfig) -> None:
         super().__init__(vllm_config)

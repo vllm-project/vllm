@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the UvicornAccessLogFilter class.
-"""
+"""Tests for the UvicornAccessLogFilter class."""
 
 import logging
 

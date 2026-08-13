@@ -2026,8 +2026,7 @@ class VllmConfig:
         self.compilation_config.post_init_cudagraph_sizes()
 
     def _set_compile_ranges(self):
-        """Set the compile ranges for the compilation config.
-        """
+        """Set the compile ranges for the compilation config."""
         compilation_config = self.compilation_config
         computed_compile_ranges_endpoints = []
 

@@ -17,8 +17,7 @@ SEED = 42
 
 @pytest.fixture
 def test_prompts():
-    """Adapted from tests/v1/e2e/spec_decode/utils.py
-    """
+    """Adapted from tests/v1/e2e/spec_decode/utils.py"""
     prompt_types = ["repeat", "sentence"]
     # Setting higher num prompts increases the chance of numerics mismatch
     # due to matrix multiplication numerics depending on batch dimension

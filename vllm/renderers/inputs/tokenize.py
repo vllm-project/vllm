@@ -1,5 +1,4 @@
-"""Schemas and utilities for tokenization inputs.
-"""
+"""Schemas and utilities for tokenization inputs."""
 
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project

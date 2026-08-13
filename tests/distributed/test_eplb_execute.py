@@ -184,8 +184,7 @@ def verify_redundant_experts_have_same_weights(
     world_size: int,
     num_local_experts: int,
 ) -> bool:
-    """Verify that all replicas of the same logical expert have the same weights.
-    """
+    """Verify that all replicas of the same logical expert have the same weights."""
     num_layers = len(expert_weights)
     total_physical_experts = world_size * num_local_experts
 

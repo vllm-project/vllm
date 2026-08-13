@@ -527,8 +527,7 @@ class GLM4VForCausalLM(
     }
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="transformer.encoder",
             connector="transformer.vision.linear_proj",

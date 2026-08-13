@@ -149,8 +149,7 @@ class TrtLlmFp8ExpertsBase:
 
 
 class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
-    """Fp8 TRTLLM-Gen MoE kernels. Supports modular interface.
-    """
+    """Fp8 TRTLLM-Gen MoE kernels. Supports modular interface."""
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -281,8 +280,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
 
 
 class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolithic):
-    """Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
-    """
+    """Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface."""
 
     def supports_routing_replay_capture(self) -> bool:
         return True

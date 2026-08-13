@@ -608,8 +608,7 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
 
 
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
-    """Update kwargs for AutoConfig initialization based on model_type
-    """
+    """Update kwargs for AutoConfig initialization based on model_type"""
     if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
         kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
     return kwargs
@@ -1182,8 +1181,7 @@ def get_safetensors_params_metadata(
     *,
     revision: str | None = None,
 ) -> dict[str, Any]:
-    """Get the safetensors parameters metadata for remote/local model repository.
-    """
+    """Get the safetensors parameters metadata for remote/local model repository."""
     if (model_path := Path(model)).exists():
         return _read_safetensors_metadata_in_dir(model_path)
 

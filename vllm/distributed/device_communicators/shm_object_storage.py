@@ -543,13 +543,11 @@ class SingleWriterShmObjectStorage:
             del self.writer_flag[freed_id]
 
     def is_cached(self, key: str) -> bool:
-        """Check if the object with the given key is cached.
-        """
+        """Check if the object with the given key is cached."""
         return key in self.key_index
 
     def get_cached(self, key: str) -> tuple[int, int]:
-        """Get the cached object by key if it exists.
-        """
+        """Get the cached object by key if it exists."""
         address, monotonic_id = self.key_index[key]
         self.increment_writer_flag(monotonic_id)
         return address, monotonic_id

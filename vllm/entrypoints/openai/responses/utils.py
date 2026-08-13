@@ -349,8 +349,7 @@ def extract_function_tool_names(tools: list[Tool]) -> frozenset[str]:
 
 
 def extract_tool_types(tools: list[Tool]) -> set[str]:
-    """Extracts the tool types from the given tools.
-    """
+    """Extracts the tool types from the given tools."""
     tool_types: set[str] = set()
     for tool in tools:
         if tool.type == "mcp":

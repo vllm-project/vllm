@@ -70,8 +70,7 @@ class Olmo3PythonicToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """Extract the tool calls from a complete model response.
-        """
+        """Extract the tool calls from a complete model response."""
         original_model_output = model_output
         # Remove xml tags.
         match = re.search(

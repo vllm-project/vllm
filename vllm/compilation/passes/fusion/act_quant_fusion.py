@@ -78,8 +78,7 @@ class ActivationQuantPattern(VllmPatternReplacement):
 
 
 class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
-    """Fusion for SiluMul+Fp8StaticQuant Pattern
-    """
+    """Fusion for SiluMul+Fp8StaticQuant Pattern"""
 
     def __init__(self) -> None:
         super().__init__(kFp8StaticTensorSym)
@@ -124,8 +123,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
 
 
 class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
-    """Fusion for SiluMul+Nvfp4Quant Pattern
-    """
+    """Fusion for SiluMul+Nvfp4Quant Pattern"""
 
     def __init__(self) -> None:
         super().__init__(kNvfp4Dynamic)

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared utilities for benchmark dataset sampling.
-"""
+"""Shared utilities for benchmark dataset sampling."""
 
 import logging
 import math

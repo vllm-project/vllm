@@ -61,8 +61,7 @@ def _validate_prefix_cache_retention_interval(
 
 
 class KVCacheCoordinator(ABC):
-    """Coordinate the KV cache of different KV cache groups.
-    """
+    """Coordinate the KV cache of different KV cache groups."""
 
     enable_partial_hash_hits = False
 
@@ -361,8 +360,7 @@ class KVCacheCoordinator(ABC):
             )
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
-        """Get the blocks for the request.
-        """
+        """Get the blocks for the request."""
         return tuple(
             manager.req_to_blocks.get(request_id) or []
             for manager in self.single_type_managers

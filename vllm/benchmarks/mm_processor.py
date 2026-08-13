@@ -146,8 +146,7 @@ def calculate_mm_processor_metrics(
     *,
     unit: Literal["us", "ms", "s"] = "ms",
 ) -> dict[str, dict[str, float]]:
-    """Calculate aggregate metrics from stats by stage.
-    """
+    """Calculate aggregate metrics from stats by stage."""
     unit2mult = {"us": 1000000, "ms": 1000, "s": 1}
     unit_mult = unit2mult[unit]
 
@@ -179,8 +178,7 @@ def calculate_mm_processor_metrics(
 
 
 def validate_args(args):
-    """Validate command-line arguments for mm_processor benchmark.
-    """
+    """Validate command-line arguments for mm_processor benchmark."""
     if not getattr(args, "tokenizer", None):
         args.tokenizer = args.model
     if not hasattr(args, "dataset_path"):
@@ -211,8 +209,7 @@ def validate_args(args):
 def benchmark_multimodal_processor(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    """Run the multimodal processor benchmark.
-    """
+    """Run the multimodal processor benchmark."""
     from vllm import LLM, SamplingParams
 
     validate_args(args)

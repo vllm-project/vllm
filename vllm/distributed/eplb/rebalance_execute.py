@@ -39,8 +39,7 @@ class TransferMetadata:
 
 @dataclass
 class AsyncEplbLayerResult:
-    """The result of one completed async EPLB layer transfer.
-    """
+    """The result of one completed async EPLB layer transfer."""
 
     layer_idx: int
     """Index of the MoE layer that was transferred."""

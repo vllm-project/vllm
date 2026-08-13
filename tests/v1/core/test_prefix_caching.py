@@ -1485,8 +1485,7 @@ def test_computed_blocks_not_evicted():
 
 
 def test_basic_prefix_caching_disabled():
-    """This tests that the prefix caching is disabled.
-    """
+    """This tests that the prefix caching is disabled."""
     block_size = 4
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, 5),
@@ -1580,8 +1579,7 @@ def test_cache_blocks(hash_fn):
 
 
 def test_cache_blocks_multi_group():
-    """This tests that blocks are cached correctly for different kv cache groups.
-    """
+    """This tests that blocks are cached correctly for different kv cache groups."""
     block_size = 4
     block_pool = BlockPool(
         num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
@@ -1664,8 +1662,7 @@ def test_cache_blocks_multi_group():
 
 
 def test_mm_prefix_caching():
-    """This tests that the multi-modal prefix caching is correct.
-    """
+    """This tests that the multi-modal prefix caching is correct."""
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, 11),

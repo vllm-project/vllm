@@ -39,8 +39,7 @@ _EXPERTS_SEPARATOR = ".experts."
 
 
 def _is_remote_expert_key(raw_name: str, spec: "MoEEPLoadSpec") -> bool:
-    """Decide whether a checkpoint key belongs to a non-local expert.
-    """
+    """Decide whether a checkpoint key belongs to a non-local expert."""
     pos = raw_name.find(_EXPERTS_SEPARATOR)
     if pos < 0:
         return False

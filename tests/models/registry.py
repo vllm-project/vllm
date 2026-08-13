@@ -184,8 +184,7 @@ class _HfExamplesInfo:
         *,
         on_fail: Literal["error", "skip"],
     ) -> None:
-        """If the model is not available online, perform the given action.
-        """
+        """If the model is not available online, perform the given action."""
         if not self.is_available_online:
             msg = "Model is not available online"
 

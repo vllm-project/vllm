@@ -68,8 +68,7 @@ class PythonicToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """Extract the tool calls from a complete model response.
-        """
+        """Extract the tool calls from a complete model response."""
         is_tool_call_pattern = False
         try:
             is_tool_call_pattern = (

@@ -631,8 +631,7 @@ class DeepseekOCRForCausalLM(
         return autoloaded_weights
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="projector",

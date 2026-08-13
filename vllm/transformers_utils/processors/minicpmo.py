@@ -14,8 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Processor class for MiniCPMO.
-"""
+"""Processor class for MiniCPMO."""
 
 import math
 from typing import Literal, TypeAlias
@@ -548,13 +547,11 @@ class MelSpectrogramFeatures(torch.nn.Module):
         )
 
     def __call__(self, audio: torch.Tensor) -> torch.Tensor:
-        """audio: Tensor([num_channels, num_samples])
-        """
+        """audio: Tensor([num_channels, num_samples])"""
         return super().__call__(audio)
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        """audio: Tensor([num_channels, num_samples])
-        """
+        """audio: Tensor([num_channels, num_samples])"""
         mel: torch.Tensor = self.mel_spec(audio)
         features = torch.log(torch.clip(mel, min=1e-5))
         return features

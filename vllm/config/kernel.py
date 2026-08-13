@@ -83,8 +83,7 @@ class IrOpPriorityConfig:
             yield IrOp.registry[field.name], op_priority
 
     def set_default(self) -> None:
-        """Permanently set the IR op priority for all op members.
-        """
+        """Permanently set the IR op priority for all op members."""
         for ir_op, op_priority in self._iter_op_priorities():
             ir_op.set_default(op_priority)
 

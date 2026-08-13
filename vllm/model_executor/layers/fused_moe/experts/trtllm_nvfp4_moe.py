@@ -43,8 +43,7 @@ _PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
 
 
 class TrtLlmNvFp4ExpertsBase:
-    """NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface.
-    """
+    """NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface."""
 
     def __init__(
         self,
@@ -297,8 +296,7 @@ class TrtLlmNvFp4ExpertsBase:
 
 
 class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModular):
-    """Modular version of the implementation (just the experts).
-    """
+    """Modular version of the implementation (just the experts)."""
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -463,8 +461,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
 class TrtLlmNvFp4ExpertsMonolithic(
     TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsMonolithic
 ):
-    """Monolithic version of the kernel (router + experts).
-    """
+    """Monolithic version of the kernel (router + experts)."""
 
     def supports_routing_replay_capture(self) -> bool:
         return True

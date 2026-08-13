@@ -617,8 +617,7 @@ def assign_loras(requests, args):
 
 
 def validate_args(args):
-    """Validate command-line arguments.
-    """
+    """Validate command-line arguments."""
     # === Deprecation and Defaulting ===
     if args.dataset is not None:
         warnings.warn(

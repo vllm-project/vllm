@@ -985,8 +985,7 @@ class VisionLanguageAdapter(nn.Module):
 
 
 class PatchMerger(nn.Module):
-    """Learned merging of spatial_merge_size ** 2 patches
-    """
+    """Learned merging of spatial_merge_size ** 2 patches"""
 
     def __init__(
         self,

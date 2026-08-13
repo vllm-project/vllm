@@ -645,8 +645,7 @@ class QuickGELU(CustomOp):
 # --8<-- [start:relu2]
 @CustomOp.register("relu2")
 class ReLUSquaredActivation(CustomOp):
-    """Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
-    """
+    """Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2"""
 
     # --8<-- [end:relu2]
 

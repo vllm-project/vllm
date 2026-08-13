@@ -245,8 +245,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         self.nodes_to_remove.clear()
 
     def _remove(self, node_or_nodes: torch.fx.Node | Iterable[torch.fx.Node]) -> None:
-        """Stage a node (or nodes) for removal at the end of the pass.
-        """
+        """Stage a node (or nodes) for removal at the end of the pass."""
         if isinstance(node_or_nodes, torch.fx.Node):
             self.nodes_to_remove.append(node_or_nodes)
         else:

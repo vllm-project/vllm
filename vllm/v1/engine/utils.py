@@ -513,8 +513,7 @@ class CoreEngineActorManager:
     def create_dp_placement_groups(
         vllm_config: VllmConfig,
     ) -> tuple[list["PlacementGroup"], list[int]]:
-        """Create placement groups for data parallel.
-        """
+        """Create placement groups for data parallel."""
         import ray
         from ray._private.state import available_resources_per_node
 
@@ -728,8 +727,7 @@ class CoreEngineActorManager:
     def add_dp_placement_groups(
         old_vllm_config: VllmConfig, new_data_parallel_size: int
     ) -> tuple[list["PlacementGroup"], list[int]]:
-        """Add placement groups for new data parallel size.
-        """
+        """Add placement groups for new data parallel size."""
         import ray
         from ray._private.state import (
             available_resources_per_node,
