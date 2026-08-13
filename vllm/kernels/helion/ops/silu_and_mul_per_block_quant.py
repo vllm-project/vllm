@@ -135,6 +135,21 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     if cached is not None:
         return cached
 
+    if all(set(key) == {"config_id"} for key in config_keys):
+        if num_tokens <= 1:
+            config_id = 0
+        elif num_tokens <= 8:
+            config_id = 1
+        elif num_tokens <= 16 or num_tokens > 32:
+            config_id = 2
+        else:
+            config_id = 3
+        result = next(
+            (key for key in config_keys if key["config_id"] == config_id), None
+        )
+        _pick_cache[cache_key] = result
+        return result
+
     configs: dict[int, dict[int, list[int]]] = {}
     for key in config_keys:
         if key.is_default():
