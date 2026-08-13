@@ -54,10 +54,8 @@ async def process_fault_tolerance_instruction(
         raise HTTPException(400, "Invalid JSON format") from e
 
     instruction, params, request_id = _validate_payload(body)
-    # All engines in one recovery round must share the same request_id, which
-    # namespaces that round's coordination keys. It is either supplied by the
-    # external orchestrator or, when empty, derived from the engine's local
-    # epoch.
+    # One recovery round shares one request_id, which namespaces that round's
+    # coordination keys; empty falls back to the engine's local epoch.
     ft_request = FaultToleranceRequest(
         instruction=instruction,
         params=params,
