@@ -6,12 +6,14 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import patch_gating_output
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
+    patch_gating_output,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -27,7 +29,11 @@ __all__ = [
 def _aiter_raw(t):
     if t is None or isinstance(t, torch.Tensor):
         return t
-    return t.storage.data if hasattr(t, "storage") else t
+    assert hasattr(t, "storage"), (
+        f"expected a triton_kernels wrapped tensor with a .storage attribute, "
+        f"got {type(t)}"
+    )
+    return t.storage.data
 
 
 def _aiter_w4a16_silu_via_a8w4(
@@ -141,9 +147,11 @@ def aiter_triton_kernel_w4a16_moe_forward(
 
     try:
         from aiter.ops.triton.moe.moe_op_gemm_a16w4 import moe_gemm_a16w4
+    except ImportError:
+        from aiter.ops.triton.moe_op_gemm_a16w4 import moe_gemm_a16w4
+    try:
         from aiter.ops.triton.moe.moe_routing import routing as _routing_mod
     except ImportError:
-        from aiter.ops.triton.moe.moe_op_gemm_a16w4 import moe_gemm_a16w4
         from aiter.ops.triton.moe_routing import routing as _routing_mod
 
     if on_gfx1250():
@@ -193,11 +201,14 @@ def aiter_triton_kernel_w4a16_moe_forward(
     swiglu_alpha = (
         quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
     )
-    swiglu_limit = (
-        quant_config.gemm1_clamp_limit
-        if quant_config.gemm1_clamp_limit is not None
-        else 7.0
-    )
+    # 7.0 is the SwigluOAI clamp, so only default to it for that activation;
+    # a plain-SILU model that configures no limit must not be clamped.
+    if quant_config.gemm1_clamp_limit is not None:
+        swiglu_limit = quant_config.gemm1_clamp_limit
+    elif activation == MoEActivation.SWIGLUOAI:
+        swiglu_limit = 7.0
+    else:
+        swiglu_limit = None
 
     # SILU on gfx1250: use the verified a8w4 kernel (dynamic MXFP8); a16w4 faults.
     if activation == MoEActivation.SILU and on_gfx1250():
@@ -214,7 +225,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
             scatter_idx,
             gammas,
             apply_router_weight_on_input,
-            swiglu_limit,
+            # fused_clamp_act_mul encodes "no clamp" as 0, not None.
+            swiglu_limit if swiglu_limit is not None else 0.0,
             unpadded_N_w1,
             unpadded_K_w1,
             unpadded_N_w2,
@@ -372,10 +384,10 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             expert_map=expert_map,
             quant_config=self.quant_config,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            unpadded_N_w1=self.moe_config.intermediate_size_per_partition_unpadded * 2,
-            unpadded_K_w1=self.moe_config.hidden_dim_unpadded,
-            unpadded_N_w2=self.moe_config.hidden_dim_unpadded,
-            unpadded_K_w2=self.moe_config.intermediate_size_per_partition_unpadded,
+            unpadded_N_w1=None,
+            unpadded_K_w1=None,
+            unpadded_N_w2=None,
+            unpadded_K_w2=None,
             num_expert_group=num_expert_group,
             topk_group=topk_group,
             e_score_correction_bias=e_score_correction_bias,

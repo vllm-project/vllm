@@ -1291,14 +1291,13 @@ ROCM_BACKEND_CONFIGS = {
     },
     "AITER_TRITON_MXFP4_BF16": {
         "activation": "SILU",
-        "rtol": 1.0,
-        "percent": 0.7,
+        "rtol": 0.3,
+        "percent": 0.95,
         "requires_aiter": True,
         "requires_gfx950": False,
-        # moe_gemm_a16w4 clamps SwiGLU at 7.0 and reads gate/up as
-        # interleaved columns (see aiter_triton_kernel_w4a16_moe_forward);
-        # the reference must match both or its output diverges.
-        "swiglu_limit": 7.0,
+        # moe_gemm_a16w4's fused SwiGLU reads gate/up as interleaved columns
+        # (see aiter_triton_kernel_w4a16_moe_forward), which is the layout
+        # gpt-oss checkpoints already ship, so the reference must match.
         "interleaved_layout": True,
     },
     "AITER_MXFP4_FP8": {

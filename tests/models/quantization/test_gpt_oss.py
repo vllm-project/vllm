@@ -31,6 +31,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
     aiter_triton_kernel_w4a8_moe_forward,
+)
+from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
     aiter_triton_kernel_w4a16_moe_forward,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (

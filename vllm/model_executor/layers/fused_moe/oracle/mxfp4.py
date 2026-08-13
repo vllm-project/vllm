@@ -113,7 +113,8 @@ class Mxfp4MoeBackend(Enum):
     MARLIN = "MARLIN"
     # ROCm AITER backends
     AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel (gfx950)
-    # Keep the legacy name as an alias while the ROCm split backend rename settles.
+    # Legacy alias, resolves to the CK kernel. New code should name either
+    # AITER_MXFP4_BF16 (CK) or AITER_TRITON_MXFP4_BF16 (Triton) explicitly.
     AITER = "AITER_MXFP4_BF16"
     # W4A16: aiter Triton moe_gemm_a16w4 kernel (gfx942/gfx950/gfx1250)
     AITER_TRITON_MXFP4_BF16 = "AITER_TRITON_MXFP4_BF16"
@@ -132,7 +133,8 @@ class Mxfp4MoeBackend(Enum):
     HUMMING = "HUMMING"
 
 
-# AITER backends group
+# AITER backends group. This is a vendor grouping, not a weight-format one:
+# members may also appear in TRITON_BACKENDS.
 AITER_BACKENDS = (
     Mxfp4MoeBackend.AITER_MXFP4_BF16,
     Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
@@ -1546,8 +1548,25 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     ):
         from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
-        if mxfp4_backend == Mxfp4MoeBackend.TRITON:
+        if mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
+            # AITER's moe_gemm_a16w4 fuses SwiGLU into GEMM1 and reads gate/up
+            # as interleaved columns (`tl.split` over adjacent pairs), while
+            # standard loading gives contiguous [w1/gate, w3/up]. Interleave
+            # along the 2*intermediate axis (dim 1) for weights, scales and
+            # bias alike.
+            def interleave_gate_up(w: torch.Tensor) -> torch.Tensor:
+                gate, up = w.chunk(2, dim=1)
+                return torch.stack((gate, up), dim=2).reshape(w.shape)
 
+            w13_weight = interleave_gate_up(w13_weight)
+            w13_weight_scale = interleave_gate_up(w13_weight_scale)
+
+            if w13_bias is not None:
+                w13_bias = interleave_gate_up(w13_bias.to(torch.float32))
+        elif mxfp4_backend == Mxfp4MoeBackend.TRITON:
+            # NOTE: this splits shape[-1], which is the K axis for the 3D
+            # weight/scale and the gate/up axis only for the 2D bias. See
+            # AITER_TRITON_MXFP4_BF16 above for the gate/up interleave.
             def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
                 shape = w.shape
                 n = shape[-1]
