@@ -71,8 +71,7 @@ def cp_local_slot(
     CP_INTERLEAVE: tl.constexpr,
     PAD_ID: tl.constexpr,
 ):
-    """Return rank-local KV slots, or PAD_ID for positions not owned by this rank.
-     """
+    """Return rank-local KV slots, or PAD_ID for positions not owned by this rank."""
     block_offsets = positions % (block_size * CP_SIZE)
     if CP_SIZE == 1:
         return block_numbers * block_size + block_offsets
