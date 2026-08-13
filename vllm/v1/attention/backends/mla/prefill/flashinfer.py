@@ -228,11 +228,13 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         attn_out, lse = self._prefill_chunks[chunk.index].run(
             q=q,
             k=k,
             v=v,
+            out=out,
             return_lse=True,
         )
 

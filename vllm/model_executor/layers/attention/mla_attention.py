@@ -2414,6 +2414,22 @@ def reorg_kvcache(
     return reorganized_kv_c_normed, reorganized_k_pe
 
 
+def neutralize_empty_context_partials(
+    chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata",
+    output: torch.Tensor,
+    output_lse: torch.Tensor,
+) -> None:
+    """Neutralize the partial of every prefill that no chunk covers.
+
+    A prefill without context is never gathered, so nothing would write its rows;
+    a zero output with an ``-inf`` lse carries no weight into the final merge
+    against the suffix partial.
+    """
+    for token_slice in chunked_context.empty_token_slices:
+        output[token_slice].zero_()
+        output_lse[:, token_slice].fill_(float("-inf"))
+
+
 def init_mla_context_partial(
     chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata",
     attn_output: torch.Tensor,
@@ -2423,7 +2439,9 @@ def init_mla_context_partial(
     """Allocate the running context partial over all prefill tokens.
 
     Laid out like the chunk partials so the final whole-batch merge against the
-    suffix partial sees matching head strides.
+    suffix partial sees matching head strides. Callers whose backend honors an
+    ``out`` tensor already know that layout and can allocate directly, pairing it
+    with ``neutralize_empty_context_partials``.
     """
     output = torch.empty(
         (num_tokens, *attn_output.shape[1:]),
@@ -2435,10 +2453,7 @@ def init_mla_context_partial(
         dtype=attn_softmax_lse.dtype,
         device=attn_softmax_lse.device,
     )
-    # No chunk covers a prefill without context, so neutralize its partial.
-    for token_slice in chunked_context.empty_token_slices:
-        output[token_slice].zero_()
-        output_lse[:, token_slice].fill_(float("-inf"))
+    neutralize_empty_context_partials(chunked_context, output, output_lse)
     return output, output_lse
 
 
@@ -2448,16 +2463,26 @@ def accumulate_mla_context_chunk(
     attn_softmax_lse: torch.Tensor,
     output: torch.Tensor,
     output_lse: torch.Tensor,
+    output_written: bool = False,
 ) -> None:
     """Fold one chunk's partial into the running context partial.
 
     Only the first request may be a continuation; its tokens are merged and the
     remaining token range is initialized.
+
+    Args:
+        output_written: The chunk's attention output already landed in
+            ``output[chunk.token_slice]`` because the backend was handed it as
+            ``out``, leaving only the lse to fold. Invalid for a continuation
+            chunk, whose leading tokens must be merged rather than overwritten.
     """
     token_start = chunk.token_slice.start
     token_end = chunk.token_slice.stop
     init_start = token_start
     if chunk.is_continuation:
+        assert not output_written, (
+            "a continuation chunk must not write over the partial it merges with"
+        )
         init_start = chunk.continuation_token_end
         num_merged = init_start - token_start
         merge_attn_states(
@@ -2470,7 +2495,8 @@ def accumulate_mla_context_chunk(
         )
     if init_start < token_end:
         written = init_start - token_start
-        output[init_start:token_end].copy_(attn_output[written:])
+        if not output_written:
+            output[init_start:token_end].copy_(attn_output[written:])
         output_lse[:, init_start:token_end].copy_(attn_softmax_lse[:, written:])
 
 

@@ -25,6 +25,14 @@
  *     matching MLA's _q_scale / _k_scale / _v_scale (the cache latent uses a
  *     separate cache scale). Per-tensor E4M3.
  *
+ *   K/V pack (fused_kimi_k3_mla_kv_concat{,_quant_fp8}):
+ *     - k_out[t, h] = [k_nope[t, h] | k_pe[t]], cast to fp8 by the _quant_fp8
+ *       variant, which also writes v_fp8[t, h] = cast(v[t, h])
+ *     The chunked-context epilogue: no cache insert, no q, no RoPE (the cached
+ *     k_pe is already rotated) and no scaling. `k_nope`/`v` are strided views
+ * of one kv_b_proj output and `k_pe` may already be fp8 (a plain fp8 cache is
+ *     gathered without dequantizing); the outputs are contiguous.
+ *
  *   fp8_ds_mla (fused_kimi_k3_mla_key_concat_ds_mla_insert):
  *     - full key concat (bf16), and cache insert in DeepSeek's 656-byte
  *       block-scaled layout (NoPE fp8 in 4 tiles of 128 with per-tile dynamic
@@ -183,6 +191,36 @@ __device__ __forceinline__ void copyChunk8(void* dst, const scalar_t* src,
   }
 }
 
+// Cast 8 source elements (one uint4 of bf16/fp16) to E4M3 with no scaling,
+// using the native pairwise converters so the result is bit-identical to
+// `src.to(torch.float8_e4m3fn)`.
+template <typename scalar_t>
+__device__ __forceinline__ void copyChunk8UnitFp8(uint8_t* dst,
+                                                  const scalar_t* src) {
+#ifndef USE_ROCM
+  uint4 const input = *reinterpret_cast<const uint4*>(src);
+  using Converter = vllm::_typeConvert<scalar_t>;
+  auto const* input2 =
+      reinterpret_cast<typename Converter::packed_hip_type const*>(&input);
+  uint2 output;
+  auto* output2 = reinterpret_cast<__nv_fp8x2_storage_t*>(&output);
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {
+      output2[i] = __nv_cvt_bfloat16raw2_to_fp8x2(
+          static_cast<__nv_bfloat162_raw>(input2[i]), __NV_SATFINITE,
+          __NV_E4M3);
+    } else {
+      output2[i] = __nv_cvt_halfraw2_to_fp8x2(
+          static_cast<__half2_raw>(input2[i]), __NV_SATFINITE, __NV_E4M3);
+    }
+  }
+  *reinterpret_cast<uint2*>(dst) = output;
+#else
+  copyChunk8<scalar_t, true>(dst, src, 1.0f);
+#endif
+}
+
 // Concat + store one head's full key: dst[e] = [k_nope | k_pe], e in [0, 192).
 // FP8 dst is byte-addressed; bf16 dst is scalar_t-addressed (dst_elem_size).
 template <typename scalar_t, bool FP8, bool APPLY_ROPE = false>
@@ -198,6 +236,38 @@ __device__ __forceinline__ void writeFullKey(void* dst, const scalar_t* k_nope,
       int const rope_e = e - kQkNopeHeadDim;
       copyChunk8<scalar_t, FP8, APPLY_ROPE>(
           d + e * dst_elem_size, k_pe + rope_e, scale_inv, cos_sin, rope_e);
+    }
+  }
+}
+
+// Unscaled full-key writer for the chunked-context pack, driven by a half warp
+// (16 lanes x 8 elems covers NoPE 128; 8 of them cover RoPE 64). Unlike
+// `writeFullKey` there is no scale and no RoPE (a gathered k_pe is already
+// rotated), and KPE_FP8 handles a k_pe that the gather left in the fp8 cache
+// layout -- so neither dtype needs an intermediate cast or a broadcast copy.
+template <typename scalar_t, bool FP8, bool KPE_FP8>
+__device__ __forceinline__ void writeFullKeyPack(void* dst,
+                                                 const scalar_t* k_nope,
+                                                 const void* k_pe, int laneId) {
+  static_assert(!KPE_FP8 || FP8, "an fp8 k_pe requires an fp8 key output");
+  constexpr int kElemSize = FP8 ? 1 : sizeof(scalar_t);
+  auto* d = reinterpret_cast<uint8_t*>(dst);
+  for (int e = laneId * kVecElems; e < kQkHeadDim; e += 16 * kVecElems) {
+    void* out = d + e * kElemSize;
+    const scalar_t* src = k_nope + e;
+    if (e >= kQkNopeHeadDim) {
+      int const rope_e = e - kQkNopeHeadDim;
+      if constexpr (KPE_FP8) {
+        *reinterpret_cast<uint2*>(out) = *reinterpret_cast<const uint2*>(
+            reinterpret_cast<const uint8_t*>(k_pe) + rope_e);
+        continue;
+      }
+      src = reinterpret_cast<const scalar_t*>(k_pe) + rope_e;
+    }
+    if constexpr (FP8) {
+      copyChunk8UnitFp8(reinterpret_cast<uint8_t*>(out), src);
+    } else {
+      *reinterpret_cast<uint4*>(out) = *reinterpret_cast<const uint4*>(src);
     }
   }
 }
@@ -458,6 +528,72 @@ __global__ void fusedKimiK3MLAQKVQuantKVCacheFp8Kernel(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// K/V pack variant (chunked context): concatenate the strided kv_b_proj output
+// with k_pe into a contiguous row-major key, casting to E4M3 (and casting V
+// into its own contiguous output) when FP8. Unlike the other kernels this one
+// has no per-token cache slot, so a warp handles two (token, head) rows -- 16
+// lanes each -- and the grid is capped so a long context becomes a grid-stride
+// loop instead of a huge launch.
+// ────────────────────────────────────────────────────────────────────────────
+template <typename scalar_t, bool FP8, bool KPE_FP8>
+__global__ void fusedKimiK3MLAKVConcatPackKernel(
+    const scalar_t* __restrict__ k_nope, int64_t const kn_tok_stride,
+    int64_t const kn_head_stride, const void* __restrict__ k_pe,
+    int64_t const k_pe_tok_stride, const scalar_t* __restrict__ v,
+    int64_t const v_tok_stride, int64_t const v_head_stride,
+    void* __restrict__ k_out, int64_t const ko_tok_stride,
+    int64_t const ko_head_stride, uint8_t* __restrict__ v_fp8,
+    int64_t const vo_tok_stride, int64_t const vo_head_stride,
+    int const num_tokens, int const num_heads) {
+  int const warpsPerBlock = blockDim.x / 32;
+  int const laneId = threadIdx.x % 16;
+  int const rowInWarp = (threadIdx.x % 32) / 16;
+  int64_t const globalWarpIdx =
+      static_cast<int64_t>(blockIdx.x) * warpsPerBlock + threadIdx.x / 32;
+  int64_t const totalRows = static_cast<int64_t>(num_tokens) * num_heads;
+  if (globalWarpIdx * 2 >= totalRows) return;
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaGridDependencySynchronize();
+#endif
+
+  constexpr int kOutElemSize = FP8 ? 1 : sizeof(scalar_t);
+  int64_t const gridStride =
+      static_cast<int64_t>(gridDim.x) * warpsPerBlock * 2;
+  for (int64_t row = globalWarpIdx * 2 + rowInWarp; row < totalRows;
+       row += gridStride) {
+    int const tokenIdx = static_cast<int>(row / num_heads);
+    int const headIdx = static_cast<int>(row % num_heads);
+    const void* pe;
+    if constexpr (KPE_FP8) {
+      pe = reinterpret_cast<const uint8_t*>(k_pe) + tokenIdx * k_pe_tok_stride;
+    } else {
+      pe = reinterpret_cast<const scalar_t*>(k_pe) + tokenIdx * k_pe_tok_stride;
+    }
+    writeFullKeyPack<scalar_t, FP8, KPE_FP8>(
+        reinterpret_cast<uint8_t*>(k_out) +
+            (tokenIdx * ko_tok_stride + headIdx * ko_head_stride) *
+                kOutElemSize,
+        k_nope + tokenIdx * kn_tok_stride + headIdx * kn_head_stride, pe,
+        laneId);
+
+    // bf16 V needs no cast, so it stays a strided view of the kv_b_proj output.
+    if constexpr (FP8) {
+      const scalar_t* vh =
+          v + tokenIdx * v_tok_stride + headIdx * v_head_stride;
+      uint8_t* vo = v_fp8 + tokenIdx * vo_tok_stride + headIdx * vo_head_stride;
+      for (int e = laneId * kVecElems; e < kVHeadDim; e += 16 * kVecElems) {
+        copyChunk8UnitFp8(vo + e, vh + e);
+      }
+    }
+  }
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaTriggerProgrammaticLaunchCompletion();
+#endif
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // ds_mla variant: concat full key (bf16) + fp8_ds_mla latent cache insert
 //
 // Cache entry (656 bytes), matching concat_and_cache_ds_mla_kernel:
@@ -648,16 +784,20 @@ __global__ void fusedKimiK3MLADecodeQConcatDsMlaKernel(
 #endif
 }
 
-// PDL-aware launch of a (token, num_heads + 1)-warp grid.
+// PDL-aware launch of a (token, slots_per_token)-row grid, `rows_per_warp` rows
+// to a warp. `max_blocks > 0` caps the grid, leaving the kernel's grid-stride
+// loop to cover the remaining rows.
 template <typename KernelT, typename... Args>
-static void launchPdl(KernelT kernel, int num_tokens, int num_heads,
-                      cudaStream_t stream, Args... args) {
+static void launchPdlSlots(KernelT kernel, int num_tokens, int slots_per_token,
+                           int rows_per_warp, int max_blocks,
+                           cudaStream_t stream, Args... args) {
   constexpr int kBlockSize = 256;
   constexpr int kWarpsPerBlock = kBlockSize / 32;
-  int64_t const total_warps =
-      static_cast<int64_t>(num_tokens) * (num_heads + 1);
-  int const grid =
+  int64_t const total_rows = static_cast<int64_t>(num_tokens) * slots_per_token;
+  int64_t const total_warps = (total_rows + rows_per_warp - 1) / rows_per_warp;
+  int grid =
       static_cast<int>((total_warps + kWarpsPerBlock - 1) / kWarpsPerBlock);
+  if (max_blocks > 0 && grid > max_blocks) grid = max_blocks;
 #ifndef USE_ROCM
   static int const sm_version = getSMVersion();
   cudaLaunchConfig_t config;
@@ -679,6 +819,13 @@ static void launchPdl(KernelT kernel, int num_tokens, int num_heads,
   kernel<<<grid, kBlockSize, 0, stream>>>(args...);
   // clang-format on
 #endif
+}
+
+// Cache-inserting kernels use one extra warp per token for the cache slot.
+template <typename KernelT, typename... Args>
+static void launchPdl(KernelT kernel, int num_tokens, int num_heads,
+                      cudaStream_t stream, Args... args) {
+  launchPdlSlots(kernel, num_tokens, num_heads + 1, 1, 0, stream, args...);
 }
 
 void checkBfloat16Support(torch::headeronly::ScalarType dtype) {
@@ -909,6 +1056,128 @@ void fused_kimi_k3_mla_key_concat_ds_mla_insert(
         } else {
           launch(
               kk3::fusedKimiK3MLAKeyConcatDsMlaInsertKernel<scalar_t, false>);
+        }
+      });
+}
+
+namespace {
+// Shared checks for the chunked-context K/V pack ops. `k_nope` / `v` are
+// strided views of one kv_b_proj output and `k_pe` is a strided view of the
+// gathered context workspace, so only a unit last-dim stride (not full
+// contiguity) is required of the inputs. Returns true when `k_pe` is still in
+// the fp8 cache layout.
+bool check_kv_concat_inputs(torch::stable::Tensor const& k_nope,
+                            torch::stable::Tensor const& k_pe,
+                            torch::stable::Tensor const& k_out,
+                            torch::headeronly::ScalarType out_dtype) {
+  using torch::headeronly::ScalarType;
+  ScalarType const dt = k_nope.scalar_type();
+  STD_TORCH_CHECK(k_nope.device().is_cuda() && k_nope.dim() == 3 &&
+                      k_nope.size(2) == 128 && k_nope.stride(2) == 1,
+                  "k_nope must be CUDA [T, H, 128] with unit last stride");
+  bool const k_pe_is_fp8 = k_pe.scalar_type() == ScalarType::Float8_e4m3fn;
+  STD_TORCH_CHECK(
+      k_pe.device() == k_nope.device() && k_pe.dim() == 2 &&
+          k_pe.size(1) == 64 && k_pe.stride(1) == 1 &&
+          (k_pe.scalar_type() == dt ||
+           (k_pe_is_fp8 && out_dtype == ScalarType::Float8_e4m3fn)),
+      "k_pe must be CUDA [T, 64] with unit last-dim stride and use the input "
+      "dtype, or float8_e4m3fn when the key output is fp8");
+  STD_TORCH_CHECK(k_out.device() == k_nope.device() && k_out.is_contiguous() &&
+                      k_out.scalar_type() == out_dtype && k_out.dim() == 3 &&
+                      k_out.size(2) == 192 && k_out.size(0) == k_nope.size(0) &&
+                      k_out.size(1) == k_nope.size(1) &&
+                      k_pe.size(0) == k_nope.size(0),
+                  "k_out must be a contiguous CUDA [T, H, 192] tensor of the "
+                  "output dtype matching k_nope's token and head dimensions");
+  vllm::kimi_k3_fused_ops::checkBfloat16Support(dt);
+  return k_pe_is_fp8;
+}
+}  // namespace
+
+void fused_kimi_k3_mla_kv_concat(
+    torch::stable::Tensor const& k_nope,  // [T, H, 128] bf16/fp16
+    torch::stable::Tensor const& k_pe,    // [T, 64] same dtype as k_nope
+    torch::stable::Tensor& k_out) {       // [T, H, 192] same dtype, written
+  namespace kk3 = vllm::kimi_k3_fused_ops;
+  torch::headeronly::ScalarType const dt = k_nope.scalar_type();
+  check_kv_concat_inputs(k_nope, k_pe, k_out, dt);
+
+  int const num_tokens = static_cast<int>(k_nope.size(0));
+  int const num_heads = static_cast<int>(k_nope.size(1));
+  if (num_tokens == 0) return;
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      k_nope.get_device_index());
+  const cudaStream_t stream =
+      get_current_cuda_stream(k_nope.get_device_index());
+
+  VLLM_STABLE_DISPATCH_HALF_TYPES(dt, "fused_kimi_k3_mla_kv_concat", [&] {
+    kk3::launchPdlSlots(
+        kk3::fusedKimiK3MLAKVConcatPackKernel<scalar_t, false, false>,
+        num_tokens, num_heads, 2, get_device_prop()->multiProcessorCount * 8,
+        stream, reinterpret_cast<scalar_t const*>(k_nope.const_data_ptr()),
+        k_nope.stride(0), k_nope.stride(1), k_pe.const_data_ptr(),
+        k_pe.stride(0), static_cast<scalar_t const*>(nullptr), int64_t{0},
+        int64_t{0}, k_out.mutable_data_ptr(), k_out.stride(0), k_out.stride(1),
+        static_cast<uint8_t*>(nullptr), int64_t{0}, int64_t{0}, num_tokens,
+        num_heads);
+  });
+}
+
+void fused_kimi_k3_mla_kv_concat_quant_fp8(
+    torch::stable::Tensor const& k_nope,  // [T, H, 128] bf16/fp16
+    torch::stable::Tensor const& k_pe,    // [T, 64] bf16/fp16/fp8
+    torch::stable::Tensor const& v,       // [T, H, 128] bf16/fp16
+    torch::stable::Tensor& k_fp8,         // [T, H, 192] fp8, written
+    torch::stable::Tensor& v_fp8) {       // [T, H, 128] fp8, written
+  using torch::headeronly::ScalarType;
+  namespace kk3 = vllm::kimi_k3_fused_ops;
+  ScalarType const dt = k_nope.scalar_type();
+  bool const k_pe_is_fp8 =
+      check_kv_concat_inputs(k_nope, k_pe, k_fp8, ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(v.device() == k_nope.device() && v.scalar_type() == dt &&
+                      v.dim() == 3 && v.size(2) == 128 && v.stride(2) == 1 &&
+                      v.size(0) == k_nope.size(0) &&
+                      v.size(1) == k_nope.size(1),
+                  "v must match k_nope's dtype and token/head dimensions and "
+                  "have shape [T, H, 128] with unit last stride");
+  STD_TORCH_CHECK(v_fp8.device() == k_nope.device() && v_fp8.is_contiguous() &&
+                      v_fp8.scalar_type() == ScalarType::Float8_e4m3fn &&
+                      v_fp8.dim() == 3 && v_fp8.size(2) == 128 &&
+                      v_fp8.size(0) == k_nope.size(0) &&
+                      v_fp8.size(1) == k_nope.size(1),
+                  "v_fp8 must be a contiguous CUDA [T, H, 128] fp8 tensor "
+                  "matching k_nope's token and head dimensions");
+
+  int const num_tokens = static_cast<int>(k_nope.size(0));
+  int const num_heads = static_cast<int>(k_nope.size(1));
+  if (num_tokens == 0) return;
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      k_nope.get_device_index());
+  const cudaStream_t stream =
+      get_current_cuda_stream(k_nope.get_device_index());
+
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
+      dt, "fused_kimi_k3_mla_kv_concat_quant_fp8", [&] {
+        auto launch = [&](auto kernel) {
+          kk3::launchPdlSlots(
+              kernel, num_tokens, num_heads, 2,
+              get_device_prop()->multiProcessorCount * 8, stream,
+              reinterpret_cast<scalar_t const*>(k_nope.const_data_ptr()),
+              k_nope.stride(0), k_nope.stride(1), k_pe.const_data_ptr(),
+              k_pe.stride(0),
+              reinterpret_cast<scalar_t const*>(v.const_data_ptr()),
+              v.stride(0), v.stride(1), k_fp8.mutable_data_ptr(),
+              k_fp8.stride(0), k_fp8.stride(1),
+              reinterpret_cast<uint8_t*>(v_fp8.mutable_data_ptr()),
+              v_fp8.stride(0), v_fp8.stride(1), num_tokens, num_heads);
+        };
+        if (k_pe_is_fp8) {
+          launch(kk3::fusedKimiK3MLAKVConcatPackKernel<scalar_t, true, true>);
+        } else {
+          launch(kk3::fusedKimiK3MLAKVConcatPackKernel<scalar_t, true, false>);
         }
       });
 }
