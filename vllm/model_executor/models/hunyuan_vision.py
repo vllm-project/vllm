@@ -86,6 +86,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -543,6 +544,59 @@ class HunYuanVisionTransformer(nn.Module):
             "max_seqlen": max_seqlen,
         }
 
+    def embed(
+        self,
+        x: torch.Tensor,
+        grid_thw: list[list[int]],
+    ) -> torch.Tensor:
+        """Patch-embed pixel values and add interpolated positional
+        embeddings. Runs eagerly: the positional-embedding interpolation is
+        per-image (needs each image's real (h, w)), so this step is not
+        CUDA-graph capturable.
+        """
+        seq_len = x.size(0)
+        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        # embeddings = patch_embeds + patch_pos_embed
+        hidden_states = self.embeddings(hidden_states, grid_thw)
+        return hidden_states.reshape(seq_len, -1)
+
+    def run_layers(
+        self,
+        embeddings: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: torch.Tensor,
+    ) -> torch.Tensor:
+        """Packed cu_seqlens-scoped transformer stack. Output shape is a
+        pure function of the total packed token count (no per-image Python
+        control flow), so this is the CUDA-graph-capturable portion.
+        """
+        # hidden_states: (1, T_total, D), packed across all images in the
+        # batch. cu_seqlens keeps attention scoped to each image.
+        hidden_states = embeddings.unsqueeze(0)
+        for layer in self.layers:
+            hidden_states = layer(
+                hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
+            )
+        return hidden_states.squeeze(0)
+
+    def merge(
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: list[list[int]],
+    ) -> list[torch.Tensor]:
+        """Per-image conv-based merge with newline/begin/end tokens. Needs
+        each image's real (h, w) spatial layout, so this always runs
+        eagerly outside the CUDA graph.
+        """
+        split_lengths = [int(h) * int(w) for (_, h, w) in grid_thw]
+        split_items = hidden_states.split(split_lengths, dim=0)
+        return [
+            self.perceive(split_item.unsqueeze(0).contiguous(), size=grid[1:]).squeeze(
+                0
+            )
+            for grid, split_item in zip(grid_thw, split_items)
+        ]
+
     def forward(
         self,
         x: torch.Tensor,
@@ -550,42 +604,19 @@ class HunYuanVisionTransformer(nn.Module):
         *,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        # patchify
-        seq_len = x.size(0)
-
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
-        # embeddings = patch_embeds + patch_pos_embed
         assert grid_thw is not None, (
             "grid_thw is required to compute patch position embeddings"
         )
-        hidden_states = self.embeddings(hidden_states, grid_thw)
+        embeddings = self.embed(x, grid_thw)
 
         if encoder_metadata is None:
             encoder_metadata = self.prepare_encoder_metadata(grid_thw)
         cu_seqlens = encoder_metadata["cu_seqlens"]
         max_seqlen = encoder_metadata["max_seqlen"]
 
-        hidden_states = hidden_states.reshape(seq_len, -1)
-        hidden_states = hidden_states.unsqueeze(0)
+        hidden_states = self.run_layers(embeddings, cu_seqlens, max_seqlen)
 
-        # hidden_states: (1, T_total, D), packed across all images in the
-        # batch. cu_seqlens keeps attention scoped to each image.
-        for layer in self.layers:
-            hidden_states = layer(
-                hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
-            )
-
-        # adapter: the conv-based merger still operates per-image, since it
-        # needs each image's (h, w) spatial layout to insert newline tokens.
-        split_lengths = [int(h) * int(w) for (_, h, w) in grid_thw]
-        split_items = hidden_states.split(split_lengths, dim=1)
-        image_embeds_list = []
-        for grid, split_item in zip(grid_thw, split_items):
-            image_embeds_list.append(
-                self.perceive(split_item.contiguous(), size=grid[1:]).squeeze(0)
-            )
-
-        return image_embeds_list
+        return self.merge(hidden_states, grid_thw)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -868,6 +899,7 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
 class HunYuanVLForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsPP,
     SupportsQuant,
@@ -977,6 +1009,182 @@ class HunYuanVLForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+    #
+    # Only HunYuanVisionTransformer.run_layers (the packed cu_seqlens
+    # transformer stack) is CUDA-graph-capturable. Patch-embed positional
+    # interpolation (embed) and the conv-based merger (merge) both need
+    # each image's real (h, w) and stay eager, per-item — see `merge` in
+    # postprocess_encoder_output below. Both are O(num_images), not
+    # O(num_layers * num_images), so they were never what the graph needs
+    # to eliminate.
+
+    def _get_grid_thw_list(self, mm_kwargs: dict[str, Any]) -> list[list[int]]:
+        grid_thw = mm_kwargs["image_grid_thw"]
+        if not isinstance(grid_thw, list):
+            grid_thw = grid_thw.tolist()
+        return grid_thw
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["embeddings", "cu_seqlens", "max_seqlen"],
+            out_hidden_size=self.config.vision_config.out_hidden_size,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        min_budget = 64
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        grid_thw = self._get_grid_thw_list(mm_kwargs)
+        return [
+            # The graph only runs the transformer layers, which don't
+            # change token count, so input_size == output_tokens here.
+            EncoderItemSpec(input_size=h * w, output_tokens=h * w)
+            for _, h, w in grid_thw
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        grid_thw = self._get_grid_thw_list(mm_kwargs)
+        pixel_values = mm_kwargs["pixel_values"]
+
+        if len(indices) == 0:
+            return {"pixel_values": pixel_values[:0], "image_grid_thw": []}
+
+        patches_per_item = [t * h * w for t, h, w in grid_thw]
+        cum_patches = [0]
+        for p in patches_per_item:
+            cum_patches.append(cum_patches[-1] + p)
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        selected_grid = [grid_thw[i] for i in indices]
+        return {"pixel_values": selected_pv, "image_grid_thw": selected_grid}
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        # Aspect ratio is irrelevant here: embed/merge never run inside the
+        # graph, so a dummy 1xN grid per item is enough to size the buffers.
+        per_item_patches = (token_budget + max_batch_size - 1) // max_batch_size
+        grid_config = [[1, 1, per_item_patches] for _ in range(max_batch_size)]
+        total_patches = sum(t * h * w for t, h, w in grid_config)
+
+        dummy_embeddings = torch.randn(
+            total_patches,
+            self.visual.hidden_size,
+            device=device,
+            dtype=dtype,
+        )
+
+        metadata = self.visual.prepare_encoder_metadata(
+            grid_config,
+            max_batch_size=max_batch_size,
+            max_seqlen_override=token_budget,
+            device=device,
+        )
+
+        values = {"embeddings": dummy_embeddings, **metadata}
+        return EncoderCudaGraphCaptureInputs(values=values)
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        grid_thw = self._get_grid_thw_list(mm_kwargs)
+        embeddings = self.visual.embed(mm_kwargs["pixel_values"], grid_thw)
+        metadata = self.visual.prepare_encoder_metadata(
+            grid_thw, max_batch_size=max_batch_size
+        )
+
+        values = {"embeddings": embeddings, **metadata}
+        return EncoderCudaGraphReplayBuffers(values=values)
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        return self.visual.run_layers(
+            values["embeddings"], values["cu_seqlens"], values["max_seqlen"]
+        )
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        grid_thw = self._get_grid_thw_list(mm_kwargs)
+        embeddings = self.visual.embed(mm_kwargs["pixel_values"], grid_thw)
+        metadata = self.visual.prepare_encoder_metadata(grid_thw)
+        return self.visual.run_layers(
+            embeddings, metadata["cu_seqlens"], metadata["max_seqlen"]
+        )
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """CPU-side per-item merge after graph replay.
+
+        ``outputs["default"]`` holds raw, pre-merge hidden states (the
+        transformer layers don't change token count). The conv-based
+        merger needs each image's real (h, w), so it runs here, eagerly,
+        per item — mirrors Step3-VL's dynamic-patch-count merge.
+        """
+        assert batch_mm_kwargs is not None
+        grid_thw = self._get_grid_thw_list(batch_mm_kwargs)
+        total_patches = sum(h * w for _, h, w in grid_thw)
+
+        # outputs["default"] is the full captured-buffer capacity (real data
+        # packed at the front, padding at the tail); trim to the real total
+        # before splitting per-item, since Tensor.split requires split sizes
+        # to sum exactly to the input length.
+        hidden_states = outputs["default"][:total_patches]
+
+        merged = self.visual.merge(hidden_states, grid_thw)
+        for idx, item in zip(indices, merged):
+            dest[idx] = item.clone() if clone else item
 
     def _parse_and_validate_image_input(
         self, **kwargs: object

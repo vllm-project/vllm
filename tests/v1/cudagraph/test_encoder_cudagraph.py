@@ -521,6 +521,49 @@ class TestEncoderCudaGraphCaptureReplay:
         assert result[0].shape == (4, _HIDDEN)
         assert result[1].shape == (16, _HIDDEN)
 
+    # --- correctness vs eager ---
+
+    def test_cudagraph_matches_eager_single_image(self):
+        grid_thw = [[1, 4, 4]]
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        graph_out = self.mgr.execute(mm_kwargs)
+        eager_out = self.model.encoder_eager_forward(mm_kwargs)
+        torch.testing.assert_close(graph_out[0], eager_out, atol=1e-2, rtol=1e-2)
+
+    def test_cudagraph_matches_eager_multiple_images_different_resolutions(self):
+        # Different resolutions packed into one graph replay — verifies the
+        # cu_seqlens-scoped attention doesn't leak across image boundaries.
+        grid_thw = [[1, 4, 4], [1, 8, 8]]
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        graph_out = self.mgr.execute(mm_kwargs)
+
+        for i, g in enumerate(grid_thw):
+            single_mm_kwargs = _make_mm_kwargs([g], self.device, self.dtype)
+            single_mm_kwargs["pixel_values"] = (
+                self.model.select_encoder_cudagraph_items(mm_kwargs, [i])[
+                    "pixel_values"
+                ]
+            )
+            eager_out = self.model.encoder_eager_forward(single_mm_kwargs)
+            torch.testing.assert_close(graph_out[i], eager_out, atol=1e-2, rtol=1e-2)
+
+    def test_cudagraph_matches_eager_at_budget_boundary(self):
+        # [1,8,8] -> 1*(8//2)*(8//2) = 16 output tokens == smallest
+        # captured budget exactly.
+        grid_thw = [[1, 8, 8]]
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        graph_out = self.mgr.execute(mm_kwargs)
+        eager_out = self.model.encoder_eager_forward(mm_kwargs)
+        torch.testing.assert_close(graph_out[0], eager_out, atol=1e-2, rtol=1e-2)
+
+    def test_eager_fallback_matches_eager_forward(self):
+        # 81 tokens exceeds every captured budget -> genuine eager fallback.
+        grid_thw = [[1, 18, 18]]
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        graph_out = self.mgr.execute(mm_kwargs)
+        eager_out = self.model.encoder_eager_forward(mm_kwargs)
+        torch.testing.assert_close(graph_out[0], eager_out, atol=1e-2, rtol=1e-2)
+
     # --- budget fallback ---
 
     def test_eager_fallback_when_tokens_exceed_all_budgets(self):
