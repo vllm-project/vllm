@@ -102,7 +102,8 @@ async def serve_http(
 
     loop = asyncio.get_running_loop()
 
-    watchdog_task = loop.create_task(watchdog_loop(server, app.state.engine_client))
+    engine_client = app.state.engine_client
+    watchdog_task = loop.create_task(watchdog_loop(server, engine_client))
     server_task = loop.create_task(server.serve(sockets=[sock] if sock else None))
 
     ssl_cert_refresher = (
@@ -126,6 +127,9 @@ async def serve_http(
 
     async def dummy_shutdown() -> None:
         pass
+
+    async def failed_shutdown(error: BaseException) -> None:
+        raise error
 
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     loop.add_signal_handler(signal.SIGTERM, signal_handler)
@@ -159,6 +163,12 @@ async def serve_http(
 
     try:
         await server_task
+        if (
+            not shutdown_event.is_set()
+            and engine_client.errored
+            and not engine_client.is_running
+        ):
+            return failed_shutdown(engine_client.dead_error)
         return dummy_shutdown()
     except asyncio.CancelledError:
         port = uvicorn_kwargs["port"]
