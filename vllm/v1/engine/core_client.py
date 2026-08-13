@@ -771,6 +771,12 @@ class MPClient(EngineCoreClient):
             else response.kv_cache_max_concurrency
         )
 
+        if (response.kv_connector_compatibility_hash is not None
+                and vllm_config.kv_transfer_config is not None):
+            vllm_config.kv_transfer_config.compatibility_hash = (
+                response.kv_connector_compatibility_hash
+            )
+
         # In external DP LB mode, the coordinator address that the
         # front-end procs connect to is obtained by each engine via it's
         # initial handshake with the rank 0 front-end.

@@ -98,6 +98,7 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    kv_connector_compatibility_hash: str | None = None
 
 
 class EngineCoreRequest(

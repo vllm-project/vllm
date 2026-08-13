@@ -646,6 +646,11 @@ class Worker(WorkerBase):
         tp_rank = get_tp_group().rank_in_group
         return {(pp_rank, tp_rank): metadata}
 
+    def get_kv_connector_compatibility_hash(self) -> str | None:
+        if self.vllm_config.kv_transfer_config is None:
+            return None
+        return self.vllm_config.kv_transfer_config.compatibility_hash
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
