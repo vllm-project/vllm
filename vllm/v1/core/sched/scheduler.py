@@ -344,6 +344,8 @@ class Scheduler(SchedulerInterface):
             self.prefill_alignment_schedule_sequence = 0
             self.last_prefill_candidate_deferred = False
             self.prefill_alignment_max_batch = 0
+            self.last_prefill_requests_scheduled = 0
+            self.last_prefill_tokens_scheduled = 0
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -1524,22 +1526,30 @@ class Scheduler(SchedulerInterface):
             self.sched_step_seq += 1
 
         if self.adaptive_prefill_alignment:
-            scheduled_prefill_count = sum(
-                request.is_prefill_chunk for request in scheduled_running_reqs
-            ) + sum(
-                num_scheduled_tokens[request.request_id] > 0
-                and request.num_computed_tokens < request.num_tokens - 1
+            scheduled_prefill_ids = [
+                request.request_id
+                for request in scheduled_running_reqs
+                if request.is_prefill_chunk
+            ] + [
+                request.request_id
                 for request in itertools.chain(
                     scheduled_new_reqs, scheduled_resumed_reqs
                 )
-            )
+                if num_scheduled_tokens[request.request_id] > 0
+                and request.num_computed_tokens < request.num_tokens - 1
+            ]
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         if self.adaptive_prefill_alignment:
+            actual_prefill_requests = len(scheduled_prefill_ids)
             self.last_prefill_candidate_deferred = prefill_candidate_deferred
             self.prefill_alignment_max_batch = max(
-                self.prefill_alignment_max_batch, scheduled_prefill_count
+                self.prefill_alignment_max_batch, actual_prefill_requests
+            )
+            self.last_prefill_requests_scheduled = actual_prefill_requests
+            self.last_prefill_tokens_scheduled = sum(
+                num_scheduled_tokens[request_id] for request_id in scheduled_prefill_ids
             )
         return scheduler_output
 
@@ -2521,6 +2531,8 @@ class Scheduler(SchedulerInterface):
             running_batch=len(self.running),
             max_prefill_batch=self.prefill_alignment_max_batch,
             max_running_requests=self.max_num_running_reqs,
+            actual_prefill_requests=self.last_prefill_requests_scheduled,
+            actual_prefill_tokens=self.last_prefill_tokens_scheduled,
         )
 
     def add_request(self, request: Request) -> None:

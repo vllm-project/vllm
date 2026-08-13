@@ -41,6 +41,9 @@ def observation(
     force_allow: bool = False,
     wave: int = 0,
     ack_release_id: int = -1,
+    ack_target_step: int = -1,
+    actual_requests: int = 0,
+    actual_tokens: int = 0,
     ack_only: bool = False,
 ) -> PrefillAlignmentObservation:
     max_prefill = int(deferred) if max_prefill is None else max_prefill
@@ -54,6 +57,9 @@ def observation(
         max_prefill_batch=max_prefill,
         max_running_requests=max_running_requests,
         ack_release_id=ack_release_id,
+        ack_target_step=ack_target_step,
+        actual_prefill_requests=actual_requests,
+        actual_prefill_tokens=actual_tokens,
         ack_only=ack_only,
     )
 
@@ -78,6 +84,8 @@ def ack(
     release: PrefillAlignmentRelease,
     *,
     step: int,
+    requests: int = 1,
+    tokens: int = 1024,
 ) -> PrefillAlignmentObservation:
     return observation(
         step,
@@ -85,6 +93,9 @@ def ack(
         release_id=release.release_id + 1,
         wave=release.wave,
         ack_release_id=release.release_id,
+        ack_target_step=release.target_step,
+        actual_requests=requests,
+        actual_tokens=tokens,
     )
 
 
@@ -259,26 +270,31 @@ def test_wave_reset_clears_incomplete_wait() -> None:
     assert not coordinator.incomplete_started_at
 
 
-def test_one_lease_remains_until_all_ranks_ack() -> None:
+def test_one_lease_remains_until_all_ranks_ack_actual_work() -> None:
     coordinator = PrefillAlignmentCoordinator(2)
     release = update_step(coordinator, 4, [True, True])
     assert release is not None
 
-    coordinator.update(0, ack(release, step=7))
+    coordinator.update(0, ack(release, step=7, requests=2, tokens=2048))
     assert coordinator.pending_release == release
-    coordinator.update(1, ack(release, step=7))
+    coordinator.update(1, ack(release, step=7, requests=1, tokens=1024))
 
     assert coordinator.pending_release is None
     assert coordinator.current_release_id == 1
+    assert coordinator.last_actual_prefill == {0: (2, 2048), 1: (1, 1024)}
 
 
-def test_all_engines_apply_once_and_ack_after_scheduler_walk() -> None:
+def test_all_engines_apply_once_and_ack_their_real_scheduler_walk() -> None:
     coordinator = PrefillAlignmentCoordinator(2)
     release = update_step(coordinator, 4, [True, True])
     assert release is not None
 
-    for rank in range(2):
-        telemetry = PrefillAlignmentTelemetry(schedule_sequence=1)
+    for rank, requests in enumerate((2, 1)):
+        telemetry = PrefillAlignmentTelemetry(
+            schedule_sequence=1,
+            actual_prefill_requests=requests,
+            actual_prefill_tokens=requests * 1024,
+        )
         engine = make_engine(
             step=release.target_step,
             telemetry=telemetry,
@@ -301,6 +317,7 @@ def test_all_engines_apply_once_and_ack_after_scheduler_walk() -> None:
 
     assert coordinator.pending_release is None
     assert coordinator.current_release_id == 1
+    assert coordinator.last_actual_prefill == {0: (2, 2048), 1: (1, 1024)}
 
 
 def test_dropped_release_is_retried_idempotently() -> None:
@@ -318,12 +335,12 @@ def test_dropped_release_is_retried_idempotently() -> None:
     engine.prefill_alignment.enqueue((retry.wave, retry.release_id, retry.target_step))
     engine._prepare_prefill_alignment_step()
     assert engine.prefill_alignment.allows_prefill
-    assert engine.prefill_alignment.applied_release == (0, 2)
+    assert engine.prefill_alignment.applied_release == (0, 2, True, 0)
 
 
 def test_duplicate_release_republishes_previous_ack() -> None:
     engine = make_engine(step=5, release_id=1)
-    engine.prefill_alignment.last_ack = 0
+    engine.prefill_alignment.last_ack = (0, 2, False, 1, 512)
     engine.prefill_alignment.enqueue((2, 0, 2))
 
     engine._prepare_prefill_alignment_step()
@@ -332,6 +349,7 @@ def test_duplicate_release_republishes_previous_ack() -> None:
     result = outputs.prefill_alignment_observation
     assert result is not None and result.ack_only
     assert result.ack_release_id == 0
+    assert result.actual_prefill_tokens == 512
 
 
 def test_release_is_retained_across_batch_queue_pass() -> None:
@@ -341,7 +359,7 @@ def test_release_is_retained_across_batch_queue_pass() -> None:
         release_id=1,
         telemetry=telemetry,
     )
-    engine.prefill_alignment.applied_release = (0, 9)
+    engine.prefill_alignment.applied_release = (0, 9, False, 8)
     engine.prefill_alignment.last_schedule_sequence = 8
 
     engine._publish_prefill_alignment_observation()
@@ -352,7 +370,7 @@ def test_release_is_retained_across_batch_queue_pass() -> None:
     assert not result.candidate_deferred
     assert result.ack_release_id == -1
     assert engine.prefill_alignment.allows_prefill
-    assert engine.prefill_alignment.applied_release == (0, 9)
+    assert engine.prefill_alignment.applied_release == (0, 9, False, 8)
 
 
 def test_idle_rank_observes_every_step_and_acks_dummy_spent_release() -> None:
@@ -364,13 +382,14 @@ def test_idle_rank_observes_every_step_and_acks_dummy_spent_release() -> None:
         has_requests=False,
     )
     engine.prefill_alignment.last_schedule_sequence = 8
-    engine.prefill_alignment.applied_release = (0, 9)
+    engine.prefill_alignment.applied_release = (0, 9, False, 8)
 
     engine._publish_prefill_alignment_observation()
     _, first = engine.output_queue.get_nowait()
     first_observation = first.prefill_alignment_observation
     assert first_observation is not None
     assert first_observation.ack_release_id == 0
+    assert first_observation.actual_prefill_requests == 0
 
     engine.step_counter = 10
     engine._publish_prefill_alignment_observation()
@@ -381,8 +400,12 @@ def test_idle_rank_observes_every_step_and_acks_dummy_spent_release() -> None:
     assert not second_observation.candidate_deferred
 
 
-def test_idle_wave_end_acks_applied_release() -> None:
-    telemetry = PrefillAlignmentTelemetry(schedule_sequence=8)
+def test_idle_wave_end_ack_does_not_reuse_stale_actual_counters() -> None:
+    telemetry = PrefillAlignmentTelemetry(
+        schedule_sequence=8,
+        actual_prefill_requests=3,
+        actual_prefill_tokens=3072,
+    )
     engine = make_engine(
         step=9,
         release_id=1,
@@ -390,14 +413,15 @@ def test_idle_wave_end_acks_applied_release() -> None:
         has_requests=False,
     )
     engine.prefill_alignment.last_schedule_sequence = 8
-    engine.prefill_alignment.applied_release = (0, 9)
+    engine.prefill_alignment.applied_release = (0, 9, False, 8)
 
     engine._publish_prefill_alignment_final_ack()
 
     _, outputs = engine.output_queue.get_nowait()
     result = outputs.prefill_alignment_observation
     assert result is not None and result.ack_only
-    assert result.ack_release_id == 0
+    assert result.actual_prefill_requests == 0
+    assert result.actual_prefill_tokens == 0
 
 
 def test_wave_reset_baselines_lifetime_scheduler_sequence() -> None:
@@ -420,10 +444,14 @@ def test_wave_reset_baselines_lifetime_scheduler_sequence() -> None:
     assert not result.force_allow
 
 
-def test_fresh_walk_consumes_release_and_acks() -> None:
-    telemetry = PrefillAlignmentTelemetry(schedule_sequence=9)
+def test_fresh_walk_consumes_release_and_acks_actual_work() -> None:
+    telemetry = PrefillAlignmentTelemetry(
+        schedule_sequence=9,
+        actual_prefill_requests=2,
+        actual_prefill_tokens=2048,
+    )
     engine = make_engine(step=10, release_id=1, telemetry=telemetry)
-    engine.prefill_alignment.applied_release = (0, 9)
+    engine.prefill_alignment.applied_release = (0, 9, True, 8)
     engine.prefill_alignment.last_schedule_sequence = 8
 
     engine._publish_prefill_alignment_observation()
@@ -432,6 +460,9 @@ def test_fresh_walk_consumes_release_and_acks() -> None:
     result = outputs.prefill_alignment_observation
     assert result is not None
     assert result.ack_release_id == 0
+    assert result.ack_target_step == 9
+    assert result.release_late
+    assert result.actual_prefill_requests == 2
     assert not engine.prefill_alignment.allows_prefill
 
 

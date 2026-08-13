@@ -269,6 +269,10 @@ class PrefillAlignmentObservation(
     max_prefill_batch: int
     max_running_requests: int
     ack_release_id: int = -1
+    ack_target_step: int = -1
+    release_late: bool = False
+    actual_prefill_requests: int = 0
+    actual_prefill_tokens: int = 0
     ack_only: bool = False
 
 

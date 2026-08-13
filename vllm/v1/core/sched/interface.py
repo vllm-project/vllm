@@ -46,6 +46,8 @@ class PrefillAlignmentTelemetry:
     running_batch: int = 0
     max_prefill_batch: int = 0
     max_running_requests: int = 0
+    actual_prefill_requests: int = 0
+    actual_prefill_tokens: int = 0
 
 
 class SchedulerInterface(ABC):

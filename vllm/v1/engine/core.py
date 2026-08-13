@@ -2292,7 +2292,9 @@ class DPEngineCoreProc(EngineCoreProc):
         if not self.enable_adaptive_prefill_alignment or not self.has_coordinator:
             return
         observation = self.prefill_alignment.finish(
-            self.current_wave, self.step_counter
+            self.current_wave,
+            self.step_counter,
+            self.scheduler.get_prefill_alignment_telemetry(),
         )
         if observation is not None:
             self.output_queue.put_nowait(

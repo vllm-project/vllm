@@ -48,9 +48,11 @@ class PrefillAlignmentCoordinator:
         self.last_resend_step = -1
         self.snapshots: dict[int, dict[int, PrefillAlignmentObservation]] = {}
         self.incomplete_started_at: dict[int, float] = {}
+        self.last_actual_prefill: dict[int, tuple[int, int]] = {}
         # This is intentionally server-lifetime state. A new request wave must
         # not restore the warmup exception.
         self.skip_first_delay = True
+        self.first_completion_logged = False
 
     def reset_wave(self, wave: int) -> None:
         self.current_wave = wave
@@ -64,6 +66,7 @@ class PrefillAlignmentCoordinator:
         self.last_resend_step = -1
         self.snapshots.clear()
         self.incomplete_started_at.clear()
+        self.last_actual_prefill.clear()
 
     def resize(self, engine_count: int) -> None:
         self.engine_count = engine_count
@@ -77,7 +80,7 @@ class PrefillAlignmentCoordinator:
         if observation.wave > self.current_wave:
             self.reset_wave(observation.wave)
 
-        self._acknowledge(engine_index, observation.ack_release_id)
+        self._acknowledge(engine_index, observation)
         if self.pending_release is not None:
             return self.retry_due(observation.step)
         if observation.ack_only or observation.release_id != self.current_release_id:
@@ -174,6 +177,7 @@ class PrefillAlignmentCoordinator:
         )
         self.pending_release = release
         self.pending_acks.clear()
+        self.last_actual_prefill.clear()
         self.delayed_passes = 0
         self.delay_started_at = None
         self.incomplete_started_at.clear()
@@ -231,12 +235,45 @@ class PrefillAlignmentCoordinator:
         )
         return release
 
-    def _acknowledge(self, engine_index: int, release_id: int) -> None:
+    def _acknowledge(
+        self, engine_index: int, observation: PrefillAlignmentObservation
+    ) -> None:
         release = self.pending_release
-        if release is None or release_id != release.release_id:
+        if (
+            release is None
+            or observation.ack_release_id != release.release_id
+            or observation.ack_target_step != release.target_step
+        ):
             return
         self.pending_acks.add(engine_index)
+        self.last_actual_prefill[engine_index] = (
+            observation.actual_prefill_requests,
+            observation.actual_prefill_tokens,
+        )
+        if observation.release_late:
+            logger.warning(
+                "Prefill alignment late release application: "
+                "engine=%d release_id=%d target_step=%d current_step=%d",
+                engine_index,
+                release.release_id,
+                release.target_step,
+                observation.step,
+            )
         if len(self.pending_acks) == self.engine_count:
+            if not self.first_completion_logged:
+                logger.info(
+                    "Prefill alignment first release completed across all "
+                    "%d engines: release_id=%d actual=%s",
+                    self.engine_count,
+                    release.release_id,
+                    self.last_actual_prefill,
+                )
+                self.first_completion_logged = True
+            logger.debug(
+                "Prefill alignment release %d completed: %s",
+                release.release_id,
+                self.last_actual_prefill,
+            )
             self.current_release_id += 1
             self.pending_release = None
             self.pending_acks.clear()
@@ -253,8 +290,8 @@ class EnginePrefillAlignment:
         self.release_queue = queue.Queue[ReleasePayload]()
         self.generation = 0
         self.release: ReleasePayload | None = None
-        self.applied_release: tuple[int, int] | None = None
-        self.last_ack: int | None = None
+        self.applied_release: tuple[int, int, bool, int] | None = None
+        self.last_ack: tuple[int, int, bool, int, int] | None = None
         self.last_schedule_sequence = 0
 
     @property
@@ -287,7 +324,10 @@ class EnginePrefillAlignment:
             if release_wave != wave:
                 continue
             if release_id < self.generation:
-                resend_ack |= release_id == self.last_ack
+                resend_ack |= (
+                    self.last_ack is not None
+                    and (release_id, target_step) == self.last_ack[:2]
+                )
                 continue
             if release_id > self.generation:
                 logger.warning(
@@ -306,17 +346,24 @@ class EnginePrefillAlignment:
         if step < target_step:
             return resend_ack
 
-        self.applied_release = release_id, target_step
+        release_late = step > target_step
+        self.applied_release = (
+            release_id,
+            target_step,
+            release_late,
+            self.last_schedule_sequence,
+        )
         self.generation = release_id + 1
         self.release = None
         logger.debug(
             "DP%d applying prefill release wave=%d release_id=%d "
-            "target_step=%d current_step=%d.",
+            "target_step=%d current_step=%d late=%s.",
             rank,
             wave,
             release_id,
             target_step,
             step,
+            release_late,
         )
         return resend_ack
 
@@ -335,7 +382,10 @@ class EnginePrefillAlignment:
             assert telemetry is not None
             self.last_schedule_sequence = telemetry.schedule_sequence
             if self.applied_release is not None:
-                self._consume_release()
+                self._consume_release(
+                    telemetry.actual_prefill_requests,
+                    telemetry.actual_prefill_tokens,
+                )
             candidate_deferred = telemetry.candidate_deferred
             force_allow = telemetry.force_allow
             running_batch = telemetry.running_batch
@@ -343,10 +393,18 @@ class EnginePrefillAlignment:
             max_running_requests = telemetry.max_running_requests
         else:
             if self.applied_release is not None and not has_requests:
-                self._consume_release()
+                self._consume_release(0, 0)
             candidate_deferred = force_allow = False
             running_batch = max_prefill_batch = max_running_requests = 0
 
+        ack = self.last_ack
+        (
+            ack_release_id,
+            ack_target_step,
+            release_late,
+            actual_requests,
+            actual_tokens,
+        ) = ack if ack is not None else (-1, -1, False, 0, 0)
         return PrefillAlignmentObservation(
             wave=wave,
             step=step,
@@ -356,12 +414,30 @@ class EnginePrefillAlignment:
             running_batch=running_batch,
             max_prefill_batch=max_prefill_batch,
             max_running_requests=max_running_requests,
-            ack_release_id=self.last_ack if self.last_ack is not None else -1,
+            ack_release_id=ack_release_id,
+            ack_target_step=ack_target_step,
+            release_late=release_late,
+            actual_prefill_requests=actual_requests,
+            actual_prefill_tokens=actual_tokens,
         )
 
-    def finish(self, wave: int, step: int) -> PrefillAlignmentObservation | None:
+    def finish(
+        self,
+        wave: int,
+        step: int,
+        telemetry: PrefillAlignmentTelemetry | None,
+    ) -> PrefillAlignmentObservation | None:
         if self.applied_release is not None:
-            self._consume_release()
+            applied_sequence = self.applied_release[3]
+            if (
+                telemetry is not None
+                and telemetry.schedule_sequence != applied_sequence
+            ):
+                actual_requests = telemetry.actual_prefill_requests
+                actual_tokens = telemetry.actual_prefill_tokens
+            else:
+                actual_requests = actual_tokens = 0
+            self._consume_release(actual_requests, actual_tokens)
         return self.ack_observation(wave, step)
 
     def ack_observation(
@@ -369,6 +445,9 @@ class EnginePrefillAlignment:
     ) -> PrefillAlignmentObservation | None:
         if self.last_ack is None:
             return None
+        release_id, target_step, release_late, actual_requests, actual_tokens = (
+            self.last_ack
+        )
         return PrefillAlignmentObservation(
             wave=wave,
             step=step,
@@ -378,15 +457,25 @@ class EnginePrefillAlignment:
             running_batch=0,
             max_prefill_batch=0,
             max_running_requests=0,
-            ack_release_id=self.last_ack,
+            ack_release_id=release_id,
+            ack_target_step=target_step,
+            release_late=release_late,
+            actual_prefill_requests=actual_requests,
+            actual_prefill_tokens=actual_tokens,
             ack_only=True,
         )
 
     def consume_idle_release(self) -> None:
         if self.applied_release is not None:
-            self._consume_release()
+            self._consume_release(0, 0)
 
-    def _consume_release(self) -> None:
+    def _consume_release(
+        self, actual_prefill_requests: int, actual_prefill_tokens: int
+    ) -> None:
         assert self.applied_release is not None
-        self.last_ack = self.applied_release[0]
+        self.last_ack = (
+            *self.applied_release[:3],
+            actual_prefill_requests,
+            actual_prefill_tokens,
+        )
         self.applied_release = None
