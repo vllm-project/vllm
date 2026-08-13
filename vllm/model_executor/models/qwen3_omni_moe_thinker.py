@@ -437,7 +437,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         # Compute chunk information
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
-        chunk_lengths = torch.tensor(
+        chunk_lengths = async_tensor_h2d(
             [self.n_window * 2] * chunk_num.sum(),
             dtype=torch.long,
             device=feature_lens.device,
@@ -1111,7 +1111,7 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
             config.vocab_size, config.hidden_size, quant_config=quant_config
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

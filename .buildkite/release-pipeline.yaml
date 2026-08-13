@@ -164,6 +164,14 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+  - label: "Publish XPU Triton shim index"
+    key: publish-xpu-triton-shim
+    depends_on: ~
+    agents:
+      queue: cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/xpu/publish-triton-shim.sh"
+
   - label: "Generate and upload wheel indices"
     key: generate-wheel-indices
     depends_on: "build-wheels"
@@ -959,14 +967,22 @@ steps:
       - step: build-cpu-release-image-arm64
         allow_failure: true
 
-  - label: "Publish release images to DockerHub"
+  - label: "Publish {{matrix}} release images to DockerHub"
     depends_on:
       - block-publish-release-images
     key: publish-release-images-dockerhub
     agents:
       queue: small_cpu_queue_release
     commands:
-      - "bash .buildkite/scripts/publish-release-images.sh"
+      - "bash .buildkite/scripts/publish-release-images.sh {{matrix}}"
+    matrix:
+      - "cuda-13-0"
+      - "cuda-12-9"
+      - "cuda-13-0-ubuntu-24-04"
+      - "cuda-12-9-ubuntu-24-04"
+      - "rocm"
+      - "xpu"
+      - "cpu"
     plugins:
       - docker-login#v3.0.0:
           username: vllmbot
