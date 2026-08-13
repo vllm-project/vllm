@@ -57,6 +57,7 @@ from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -83,6 +84,22 @@ if GDN_AITER_TRITON_AVAILABLE:
     )
 
 logger = init_logger(__name__)
+
+_GDN_DECODE_PREFILL_OVERLAP_MIN_PREFILL_TOKENS = 4096
+_gdn_overlap_stream: torch.cuda.Stream | None = None
+
+
+def _gdn_overlap_supported_for_cache_mode(cache_mode: str) -> bool:
+    # Prefix-cache modes may read shared state slots. Keep concurrent state
+    # updates restricted to the one-private-slot-per-request cache contract.
+    return cache_mode == "none"
+
+
+def _get_gdn_overlap_stream() -> torch.cuda.Stream:
+    global _gdn_overlap_stream
+    if _gdn_overlap_stream is None:
+        _gdn_overlap_stream = torch.cuda.Stream()
+    return _gdn_overlap_stream
 
 
 def _resolve_gdn_prefill_backend(
@@ -161,6 +178,59 @@ def _log_gdn_backend_decision(
             "FlashInfer GDN prefill is JIT-compiled; first run may take a "
             "while. Set --gdn-prefill-backend triton to skip JIT.",
         )
+
+
+def _prepare_fi_chunk_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    q = q.squeeze(0).contiguous()
+    k = k.squeeze(0).contiguous()
+    v = v.squeeze(0).contiguous()
+    g = g.squeeze(0).contiguous()
+    beta = beta.squeeze(0).contiguous()
+    fi_state = initial_state.to(torch.float32)
+    fi_g = g.to(torch.float32)
+    fi_beta = beta.to(torch.float32)
+    return q, k, v, torch.exp(fi_g), fi_beta, fi_state
+
+
+def _run_prepared_fi_chunk_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from flashinfer.gdn_prefill import (
+        chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
+    )
+
+    result = chunk_gated_delta_rule_fi(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+    )
+    output, final_state = result
+    return output.unsqueeze(0), final_state
 
 
 def fi_chunk_gated_delta_rule(
@@ -480,6 +550,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
+        self.gdn_decode_prefill_overlap = (
+            envs.VLLM_GDN_DECODE_PREFILL_OVERLAP
+            and current_platform.is_cuda_alike()
+            and self.gdn_prefill_backend == "flashinfer"
+            and _gdn_overlap_supported_for_cache_mode(
+                vllm_config.cache_config.mamba_cache_mode
+            )
+        )
+        self.gdn_overlap_stream = (
+            _get_gdn_overlap_stream() if self.gdn_decode_prefill_overlap else None
+        )
+        self.gdn_overlap_start_event = (
+            torch.cuda.Event() if self.gdn_decode_prefill_overlap else None
+        )
+        self.gdn_overlap_done_event = (
+            torch.cuda.Event() if self.gdn_decode_prefill_overlap else None
+        )
         self._prefill_kernels_warmed_up = False
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
@@ -1403,8 +1490,74 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
+        use_decode_prefill_overlap = (
+            split_non_spec
+            and self.gdn_decode_prefill_overlap
+            and self.gdn_prefill_backend == "flashinfer"
+            and attn_metadata.num_prefill_tokens
+            >= _GDN_DECODE_PREFILL_OVERLAP_MIN_PREFILL_TOKENS
+        )
+
         # 2.2: Process non-spec-decode part
-        if split_non_spec:
+        if use_decode_prefill_overlap:
+            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+                mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
+            )
+            prefill_state_indices = attn_metadata.prefill_state_indices
+            prefill_has_initial_state = attn_metadata.prefill_has_initial_state
+            assert prefill_state_indices is not None
+            assert prefill_has_initial_state is not None
+            initial_state = ssm_state[prefill_state_indices]
+            initial_state[~prefill_has_initial_state, ...] = 0
+            prepared_prefill_inputs = _prepare_fi_chunk_gated_delta_rule(
+                query_non_spec,
+                key_non_spec,
+                value_non_spec,
+                g_non_spec,
+                beta_non_spec,
+                initial_state,
+            )
+            assert self.gdn_overlap_stream is not None
+            assert self.gdn_overlap_start_event is not None
+            assert self.gdn_overlap_done_event is not None
+
+            def run_prefill():
+                output, final_state = _run_prepared_fi_chunk_gated_delta_rule(
+                    *prepared_prefill_inputs,
+                    attn_metadata.prefill_query_start_loc,
+                )
+                ssm_state[prefill_state_indices] = final_state.to(ssm_state.dtype)
+                return output, final_state
+
+            def run_decode():
+                return fused_sigmoid_gating_delta_rule_update(
+                    A_log=self.A_log,
+                    a=a[:num_decode_tokens],
+                    b=b[:num_decode_tokens],
+                    dt_bias=self.dt_bias,
+                    q=query_decode,
+                    k=key_decode,
+                    v=value_decode,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                        : attn_metadata.num_decodes + 1
+                    ],
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                    use_qk_l2norm_in_kernel=True,
+                )
+
+            decode_result, prefill_results = execute_in_parallel(
+                default_fn=run_decode,
+                aux_fns=[run_prefill],
+                start_event=self.gdn_overlap_start_event,
+                done_events=[self.gdn_overlap_done_event],
+                aux_streams=[self.gdn_overlap_stream],
+                enable=True,
+            )
+            core_attn_out_non_spec, last_recurrent_state = prefill_results[0]
+            core_attn_out_decode, _ = decode_result
+        elif split_non_spec:
             query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
@@ -1429,34 +1582,37 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.3: Process the remaining part (prefill chunk, or non-spec decode-only)
         if attn_metadata.num_prefills > 0:
-            # State indices, initial-state mask and cu_seqlens for the chunk
-            # kernel are precomputed by the metadata builder (the prefill tail
-            # when decodes are peeled off, else the full non-spec batch), so they
-            # don't need to be re-derived per layer.
-            prefill_state_indices = attn_metadata.prefill_state_indices
-            prefill_has_initial_state = attn_metadata.prefill_has_initial_state
-            assert prefill_state_indices is not None
-            assert prefill_has_initial_state is not None
-            initial_state = ssm_state[prefill_state_indices]
-            initial_state[~prefill_has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=attn_metadata.prefill_query_start_loc,
-                chunk_indices=attn_metadata.chunk_indices,
-                chunk_offsets=attn_metadata.chunk_offsets,
-                use_qk_l2norm_in_kernel=False,
-            )
-            # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            if not use_decode_prefill_overlap:
+                # State indices, initial-state mask and cu_seqlens for the chunk
+                # kernel are precomputed by the metadata builder (the prefill tail
+                # when decodes are peeled off, else the full non-spec batch), so they
+                # don't need to be re-derived per layer.
+                prefill_state_indices = attn_metadata.prefill_state_indices
+                prefill_has_initial_state = attn_metadata.prefill_has_initial_state
+                assert prefill_state_indices is not None
+                assert prefill_has_initial_state is not None
+                initial_state = ssm_state[prefill_state_indices]
+                initial_state[~prefill_has_initial_state, ...] = 0
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = self.chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=attn_metadata.prefill_query_start_loc,
+                    chunk_indices=attn_metadata.chunk_indices,
+                    chunk_offsets=attn_metadata.chunk_offsets,
+                    use_qk_l2norm_in_kernel=False,
+                )
+                # Init cache
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
 
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
