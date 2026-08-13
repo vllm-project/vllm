@@ -217,6 +217,7 @@ def _make_vllm_config(
     extra_config: dict[str, object] | None = None,
     rank: int = 0,
     decode_context_parallel_size: int = 1,
+    prefix_cache_retention_interval: int | None = 0,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=_FakeModelConfig(),
@@ -228,7 +229,11 @@ def _make_vllm_config(
             prefill_context_parallel_size=1,
         ),
         kv_transfer_config=_FakeKVTransferConfig(extra_config=extra_config),
-        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=10),
+        cache_config=SimpleNamespace(
+            block_size=16,
+            num_gpu_blocks=10,
+            prefix_cache_retention_interval=prefix_cache_retention_interval,
+        ),
         kv_events_config=SimpleNamespace(enable_kv_cache_events=False),
         speculative_config=None,
     )
@@ -1575,6 +1580,7 @@ def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
         "mlx5_0",
         "10.0.0.7:50051",
     )
+    assert w.coord.retention_interval == 0
 
 
 def test_requester_worker_init_prefers_local_hostname_override(

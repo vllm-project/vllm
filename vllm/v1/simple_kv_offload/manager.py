@@ -137,6 +137,9 @@ class SimpleCPUOffloadScheduler:
             pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
+            retention_interval=(
+                vllm_config.cache_config.prefix_cache_retention_interval
+            ),
         )
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
         # GPU block pool reference - bound after scheduler builds kv_cache_manager

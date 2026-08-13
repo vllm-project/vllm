@@ -131,6 +131,7 @@ class KVCacheManager:
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
+        retention_interval: int | None = None,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -160,6 +161,7 @@ class KVCacheManager:
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            retention_interval=retention_interval,
             metrics_collector=self.metrics_collector,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
@@ -241,7 +243,7 @@ class KVCacheManager:
                 - ``shared_prefix_boundary``: the block-aligned token position of
                   a shared prefix that a sparse-retention group (Mamba / sliding
                   window) has not cached yet (Marconi-style APC), or 0 if none.
-                  Pinned so ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL`` does not drop
+                  Pinned so sparse prefix-cache retention does not drop
                   the junction and defeat cross-request reuse.
         """
         # We skip finding the prefix cache hit when prefix caching is

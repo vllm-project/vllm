@@ -111,6 +111,13 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional ``xxhash`` package."""
+    prefix_cache_retention_interval: int | None = Field(default=0, ge=0)
+    """Token interval between retained sliding-window and Mamba prefix-cache
+    checkpoints. ``0`` retains only semantic checkpoints, including the latest
+    replay boundary and shared-prefix junctions. Positive values additionally
+    retain periodic checkpoints at the specified interval, which must be a
+    multiple of the scheduler block size. ``None`` retains checkpoints densely.
+    Applies only to sliding-window and Mamba cache groups."""
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
     (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
@@ -217,6 +224,7 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
+            "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
             "mamba_page_size_padded",

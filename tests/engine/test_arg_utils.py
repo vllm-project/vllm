@@ -476,6 +476,7 @@ def test_prefix_cache_default():
     # should be None by default (depends on model).
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.enable_prefix_caching is None
+    assert engine_args.prefix_cache_retention_interval == 0
 
     # with flag to turn it on.
     args = parser.parse_args(["--enable-prefix-caching"])
@@ -486,6 +487,10 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--no-enable-prefix-caching"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert not engine_args.enable_prefix_caching
+
+    args = parser.parse_args(["--prefix-cache-retention-interval", "64"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.prefix_cache_retention_interval == 64
 
 
 @pytest.mark.parametrize(
