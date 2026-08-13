@@ -14,12 +14,14 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         self,
         finished_sending: set[str] | None = None,
         finished_recving: set[str] | None = None,
+        failed_recving: set[str] | None = None,
         invalid_block_ids: set[int] | None = None,
         expected_finished_count: int = 0,
     ):
         self.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
+            failed_recving=failed_recving or set(),
             invalid_block_ids=invalid_block_ids or set(),
             expected_finished_count=expected_finished_count,
         )
@@ -120,3 +122,21 @@ def test_aggregate_workers_output_with_expected_finished_count():
     # NOTE: This is to showcase dynamic update. Workers are responsible for
     # ensuring "req1" termination in this case
     assert aggregator._send_remaining_count["req1"] == 2
+
+
+def test_failed_receive_waits_for_all_workers():
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+
+    output1 = DummyModelRunnerOutput(finished_recving={"req"}, failed_recving={"req"})
+    output2 = DummyModelRunnerOutput()
+    aggregated = aggregator.aggregate([output1, output2]).kv_connector_output
+
+    assert not aggregated.finished_recving
+    assert not aggregated.failed_recving
+
+    output1 = DummyModelRunnerOutput()
+    output2 = DummyModelRunnerOutput(finished_recving={"req"})
+    aggregated = aggregator.aggregate([output1, output2]).kv_connector_output
+
+    assert aggregated.finished_recving == {"req"}
+    assert aggregated.failed_recving == {"req"}

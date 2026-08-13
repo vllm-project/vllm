@@ -251,6 +251,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
 
+    def get_failed_recving(self) -> set[str]:
+        """Get HMA requests whose KV receive failed via NIXL."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_failed_recving()
+
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:
             return None

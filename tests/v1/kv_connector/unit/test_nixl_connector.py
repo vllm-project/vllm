@@ -2575,8 +2575,11 @@ def test_transfer_failure_logging(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FailingNixlWrapper,
 )
-def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
-    """Test that handshake failures mark blocks invalid and return via get_finished."""
+@pytest.mark.parametrize("hma_required", [False, True])
+def test_handshake_failure_returns_finished(
+    default_vllm_config, dist_init, hma_required
+):
+    """Handshake failures report block or request errors before completion."""
     vllm_config = create_vllm_config()
 
     connector = NixlConnector(
@@ -2585,6 +2588,7 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config, connector.engine_id, hand_shake_latency=0.1
     )
+    connector.connector_worker._is_hma_required = hma_required
     connector.connector_worker.nixl_wrapper.fail_handshake = True
 
     request_id = "test_handshake_fail"
@@ -2615,7 +2619,9 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
 
     # Check that blocks were marked invalid
     invalid_blocks = connector.get_block_ids_with_load_errors()
-    assert invalid_blocks == {1, 2, 3}
+    assert invalid_blocks == (set() if hma_required else {1, 2, 3})
+    failed_recving = connector.get_failed_recving()
+    assert failed_recving == ({request_id} if hma_required else set())
 
     # Check that request appears in get_finished
     _, done_recving = connector.get_finished(finished_req_ids=set())

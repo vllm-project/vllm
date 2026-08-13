@@ -263,6 +263,9 @@ class KVConnectorOutput:
     # [req_ids]
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
+    # Requests whose KV receive failed without a safe recovery path.
+    # These requests must be failed without consuming sampled tokens.
+    failed_recving: set[str] = field(default_factory=set)
     kv_connector_stats: KVConnectorStats | None = None
     kv_cache_events: KVConnectorKVEvents | None = None
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None
@@ -280,6 +283,7 @@ class KVConnectorOutput:
         return (
             not self.finished_sending
             and not self.finished_recving
+            and not self.failed_recving
             and not self.kv_connector_stats
             and not self.kv_cache_events
             and not self.invalid_block_ids

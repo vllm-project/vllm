@@ -481,6 +481,7 @@ class NixlBaseConnectorWorker:
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
+        self._failed_recving: queue.Queue[ReqId] = queue.Queue()
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -2264,8 +2265,11 @@ class NixlBaseConnectorWorker:
             handle: The transfer handle.
         """
         # Use .get() here as the metadata cleanup is handled by get_finished()
-        # TODO (NickLucche) handle failed transfer for HMA.
-        if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
+        if self._is_hma_required:
+            # Invalid block IDs are not group-qualified, so they cannot safely
+            # identify failures across HMA pools. Fail the request directly.
+            self._failed_recving.put(req_id)
+        elif meta := self._recving_metadata.get(req_id):
             self._invalid_block_ids.put(set(meta.local_block_ids[0]))
         self._failed_recv_reqs.put(req_id)
         if handle is not None:
@@ -2514,6 +2518,16 @@ class NixlBaseConnectorWorker:
         while not self._invalid_block_ids.empty():
             try:
                 result.update(self._invalid_block_ids.get_nowait())
+            except queue.Empty:
+                break
+        return result
+
+    def get_failed_recving(self) -> set[str]:
+        """Return and clear HMA requests whose KV receive failed."""
+        result: set[str] = set()
+        while not self._failed_recving.empty():
+            try:
+                result.add(self._failed_recving.get_nowait())
             except queue.Empty:
                 break
         return result

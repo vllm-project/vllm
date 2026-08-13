@@ -413,6 +413,14 @@ class KVConnectorBase_V1(ABC):
         """
         return set()
 
+    def get_failed_recving(self) -> set[str]:
+        """Get requests whose KV receive failed without a recovery path.
+
+        Failed requests must also be reported by ``get_finished()`` no later
+        than the same forward pass.
+        """
+        return set()
+
     def shutdown(self):
         """
         Shutdown the connector. This is called when the worker process

@@ -3,7 +3,8 @@
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
 import gc
-from unittest.mock import patch
+import queue
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -22,6 +23,27 @@ from .utils import (
     make_kv_cache_config,
     make_nixl_scheduler,
 )
+
+
+@pytest.mark.cpu_test
+def test_hma_failed_transfer_reports_request_error():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._is_hma_required = True
+    worker._failed_recving = queue.Queue()
+    worker._failed_recv_reqs = queue.Queue()
+    worker._invalid_block_ids = queue.Queue()
+    worker.nixl_wrapper = MagicMock()
+    worker.xfer_stats = MagicMock()
+
+    worker._handle_failed_transfer("req", None)
+
+    assert worker.get_failed_recving() == {"req"}
+    assert worker.get_block_ids_with_load_errors() == set()
+    assert worker._failed_recv_reqs.get_nowait() == "req"
 
 
 @pytest.mark.cpu_test

@@ -1708,7 +1708,10 @@ class Scheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
 
-        failed_kv_load_req_ids = None
+        failed_kv_load_req_ids: set[str] = set()
+        unrecoverable_kv_load_req_ids = (
+            set(kv_connector_output.failed_recving) if kv_connector_output else set()
+        )
         if kv_connector_output and kv_connector_output.invalid_block_ids:
             # These blocks contain externally computed tokens that failed to
             # load. Identify affected requests and adjust their computed token
@@ -1755,7 +1758,10 @@ class Scheduler(SchedulerInterface):
                     output_is_stale = True
                     request.num_stale_output_tokens -= num_tokens_scheduled
                     assert request.num_stale_output_tokens >= 0
-            if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
+            if (
+                req_id in failed_kv_load_req_ids
+                or req_id in unrecoverable_kv_load_req_ids
+            ):
                 # skip failed or rescheduled requests from KV load failure
                 continue
             if request is None or request.is_finished():
@@ -1989,6 +1995,13 @@ class Scheduler(SchedulerInterface):
         self.grammar_compile_error_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
+        if unrecoverable_kv_load_req_ids:
+            logger.error(
+                "Failing %d request(s) due to unrecoverable KV receive failure: %s",
+                len(unrecoverable_kv_load_req_ids),
+                unrecoverable_kv_load_req_ids,
+            )
+            error_req_ids.update(unrecoverable_kv_load_req_ids)
 
         if error_req_ids:
             error_reqs = self.finish_requests(
@@ -2766,7 +2779,9 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
+            if req_id not in self.requests:
+                assert req_id in kv_connector_output.failed_recving
+                continue
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)

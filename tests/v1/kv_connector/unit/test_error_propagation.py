@@ -146,3 +146,70 @@ def test_error_propagation_async_load(fail_scheduler: Scheduler):
 
     assert len(fail_scheduler.waiting) == 0
     assert len(fail_scheduler.skipped_waiting) == 0
+
+
+@pytest.mark.parametrize("failure_policy", ["fail", "recompute"])
+def test_failed_receive_discards_sampled_tokens(failure_policy: str):
+    """An unrecoverable receive failure must fail closed for every policy."""
+    vllm_config = create_vllm_config()
+    vllm_config.kv_transfer_config.kv_load_failure_policy = failure_policy
+    scheduler = create_scheduler(vllm_config)
+
+    request = create_request(num_tokens=2 * scheduler.block_size)
+    scheduler.add_request(request=request)
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {request.request_id: scheduler.block_size}, False
+        )
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(
+        [request],
+        finished_recving={request.request_id},
+        failed_recving={request.request_id},
+        token_id=123,
+    )
+
+    outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert not request.output_token_ids
+    engine_outputs = next(iter(outputs.values()))
+    assert len(engine_outputs.outputs) == 1
+    assert engine_outputs.outputs[0].new_token_ids == []
+    assert engine_outputs.outputs[0].finish_reason == FinishReason.ERROR
+
+
+def test_failed_receive_finishes_async_load(fail_scheduler: Scheduler):
+    """A failed handshake must terminate a request waiting for remote KV."""
+    request = create_request(num_tokens=2 * fail_scheduler.block_size)
+    fail_scheduler.add_request(request=request)
+    fail_scheduler.connector = Mock()
+    fail_scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {request.request_id: fail_scheduler.block_size}, True
+        )
+    )
+    fail_scheduler.connector.request_finished.return_value = (False, None)
+    fail_scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = fail_scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    model_runner_output = create_model_runner_output(
+        [],
+        finished_recving={request.request_id},
+        failed_recving={request.request_id},
+    )
+    outputs = fail_scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert not request.output_token_ids
+    engine_outputs = next(iter(outputs.values()))
+    assert engine_outputs.outputs[0].new_token_ids == []
+    assert len(fail_scheduler.skipped_waiting) == 0
+    assert request.request_id not in fail_scheduler.requests
