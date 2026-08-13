@@ -88,6 +88,7 @@ def _make_groups(n_c4, n_c128, n_swa):
 def _mock_vllm_config(kv_connector_extra_config: dict[str, str] | None = None):
     config = MagicMock()
     config.cache_config.num_gpu_blocks_override = None
+    config.cache_config.prefix_cache_retention_interval = 0
     config.kv_transfer_config = None
     if kv_connector_extra_config is not None:
         config.kv_transfer_config = MagicMock()
@@ -322,6 +323,7 @@ class TestInterleavedPacking:
         )
 
         assert config.num_blocks == 32
+        assert config.prefix_cache_retention_interval == 0
         assert sum(t.size for t in config.kv_cache_tensors) == page_size * 2 * 32
         assert config.kv_cache_tensors == [
             KVCacheTensor(size=page_size * 32, shared_by=["full.0", "sw.0", "sw.1"]),

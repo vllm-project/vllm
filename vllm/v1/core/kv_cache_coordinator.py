@@ -81,7 +81,6 @@ class KVCacheCoordinator(ABC):
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
-        retention_interval: int | None = None,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
@@ -129,7 +128,7 @@ class KVCacheCoordinator(ABC):
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
-        self.retention_interval = retention_interval
+        self.retention_interval = kv_cache_config.prefix_cache_retention_interval
         _validate_prefix_cache_retention_interval(
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
@@ -409,7 +408,6 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
-        retention_interval: int | None = None,
     ):
         super().__init__(
             kv_cache_config,
@@ -422,7 +420,6 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
-            retention_interval=retention_interval,
             metrics_collector=metrics_collector,
         )
         self.num_single_type_manager = len(self.single_type_managers)
@@ -461,7 +458,6 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
-        retention_interval: int | None = None,
     ):
         super().__init__(
             kv_cache_config,
@@ -474,7 +470,6 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
-            retention_interval=retention_interval,
             metrics_collector=metrics_collector,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
@@ -548,7 +543,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
-        retention_interval: int | None = None,
     ):
         super().__init__(
             kv_cache_config,
@@ -561,7 +555,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
-            retention_interval=retention_interval,
             metrics_collector=metrics_collector,
         )
         # hash_block_size: the block size used to compute block hashes.
@@ -888,7 +881,6 @@ def get_kv_cache_coordinator(
     scheduler_block_size: int,
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
-    retention_interval: int | None = None,
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
@@ -901,7 +893,6 @@ def get_kv_cache_coordinator(
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
-            retention_interval=retention_interval,
             metrics_collector=metrics_collector,
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
@@ -916,7 +907,6 @@ def get_kv_cache_coordinator(
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
-            retention_interval=retention_interval,
             metrics_collector=metrics_collector,
         )
     return HybridKVCacheCoordinator(
@@ -930,6 +920,5 @@ def get_kv_cache_coordinator(
         pcp_world_size=pcp_world_size,
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
-        retention_interval=retention_interval,
         metrics_collector=metrics_collector,
     )

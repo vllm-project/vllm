@@ -273,7 +273,6 @@ class Scheduler(SchedulerInterface):
             pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=hash_block_size,
-            retention_interval=self.cache_config.prefix_cache_retention_interval,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
         )

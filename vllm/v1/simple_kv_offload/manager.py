@@ -4,7 +4,7 @@
 
 import contextlib
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
@@ -137,9 +137,6 @@ class SimpleCPUOffloadScheduler:
             pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
-            retention_interval=(
-                vllm_config.cache_config.prefix_cache_retention_interval
-            ),
         )
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
         # GPU block pool reference - bound after scheduler builds kv_cache_manager
@@ -193,7 +190,6 @@ class SimpleCPUOffloadScheduler:
         """Derive a CPU KVCacheConfig from the GPU config.
         Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio."""
         # Import here to avoid potential circular imports
-        from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
         assert len(gpu_config.kv_cache_tensors) > 0
@@ -218,10 +214,10 @@ class SimpleCPUOffloadScheduler:
             for t in gpu_config.kv_cache_tensors
         ]
 
-        return KVCacheConfigCls(
+        return replace(
+            gpu_config,
             num_blocks=num_cpu_blocks,
             kv_cache_tensors=cpu_tensors,
-            kv_cache_groups=gpu_config.kv_cache_groups,
         )
 
     @staticmethod

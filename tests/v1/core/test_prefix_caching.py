@@ -4,6 +4,7 @@
 
 import copy
 from collections.abc import Callable
+from dataclasses import replace
 from math import lcm
 from types import SimpleNamespace
 
@@ -110,6 +111,11 @@ def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheMa
         "scheduler_block_size",
         lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
     )
+    if "retention_interval" in kwargs:
+        kv_cache_config = replace(
+            kv_cache_config,
+            prefix_cache_retention_interval=kwargs.pop("retention_interval"),
+        )
     return KVCacheManager(kv_cache_config, **kwargs)
 
 

@@ -217,7 +217,6 @@ def _make_vllm_config(
     extra_config: dict[str, object] | None = None,
     rank: int = 0,
     decode_context_parallel_size: int = 1,
-    prefix_cache_retention_interval: int | None = 0,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=_FakeModelConfig(),
@@ -229,17 +228,15 @@ def _make_vllm_config(
             prefill_context_parallel_size=1,
         ),
         kv_transfer_config=_FakeKVTransferConfig(extra_config=extra_config),
-        cache_config=SimpleNamespace(
-            block_size=16,
-            num_gpu_blocks=10,
-            prefix_cache_retention_interval=prefix_cache_retention_interval,
-        ),
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=10),
         kv_events_config=SimpleNamespace(enable_kv_cache_events=False),
         speculative_config=None,
     )
 
 
-def _make_kv_cache_config(*, block_size: int = 16) -> object:
+def _make_kv_cache_config(
+    *, block_size: int = 16, prefix_cache_retention_interval: int | None = 0
+) -> object:
     """Minimal single-group KVCacheConfig for topology tests."""
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
@@ -254,6 +251,7 @@ def _make_kv_cache_config(*, block_size: int = 16) -> object:
         num_blocks=10,
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
+        prefix_cache_retention_interval=prefix_cache_retention_interval,
     )
 
 
