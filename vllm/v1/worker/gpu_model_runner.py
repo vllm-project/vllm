@@ -7522,8 +7522,11 @@ class GPUModelRunner(
                     _, blk_stride = packing
                     num_blocks = raw_tensor.numel() // blk_stride
                 else:
-                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                    spec_page = kv_cache_spec.page_size_bytes
+                    if raw_tensor.numel() % spec_page == 0:
+                        num_blocks = raw_tensor.numel() // spec_page
+                    else:
+                        num_blocks = self.kv_cache_config.num_blocks
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     num_blocks_per_kv_block = (
@@ -7562,6 +7565,9 @@ class GPUModelRunner(
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
                     raw_tensor = kv_cache_raw_tensors[layer_name]
+                    needed = num_blocks * kv_cache_spec.page_size_bytes
+                    if raw_tensor.numel() > needed:
+                        raw_tensor = raw_tensor[:needed]
                     kv_caches[layer_name] = _reshape_attention_kv_cache(
                         raw_tensor,
                         kv_cache_spec,

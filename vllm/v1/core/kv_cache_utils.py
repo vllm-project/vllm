@@ -992,11 +992,14 @@ def get_num_blocks(
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
     """
-    Get the page size of the KV cache.
+    Get the page size of the KV cache. When specs have non-uniform page
+    sizes (e.g. hidden-state cache specs that exceed the KV cache page),
+    return the maximum page size so allocations are large enough for all
+    groups.
     """
     page_sizes = {layer.page_size_bytes for layer in kv_cache_specs}
-    assert len(page_sizes) == 1
-    return page_sizes.pop()
+    assert len(page_sizes) >= 1
+    return max(page_sizes)
 
 
 def _get_kv_cache_groups_uniform_spec(
@@ -1385,9 +1388,10 @@ def get_kv_cache_config_from_groups(
         # full.1, sw.2: share another Tensor with size=available_memory//2
         group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
-        page_size = get_uniform_page_size(
-            [group.kv_cache_spec for group in kv_cache_groups]
-        )
+        page_sizes = {
+            group.kv_cache_spec.page_size_bytes for group in kv_cache_groups
+        }
+        page_size = max(page_sizes)
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(
             vllm_config, group_size, available_memory, page_size
@@ -1805,16 +1809,18 @@ def get_kv_cache_groups(
             per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
             max_block_size = max(common_page // per_token, 1)
             new_bs = _largest_divisor_at_most(group_block_size, max_block_size)
-            wasted_bytes = common_page - new_bs * per_token
+            actual_page = per_token * new_bs
+            padded = max(common_page, actual_page)
+            wasted_bytes = padded - actual_page
             logger.info(
                 "Using block size %d for hidden-state cache layer %s; "
                 "page alignment wastes %d bytes (%.2f%%) per block",
                 new_bs,
                 name,
                 wasted_bytes,
-                wasted_bytes / common_page * 100,
+                wasted_bytes / padded * 100 if padded else 0,
             )
-            aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
+            aligned = replace(spec, block_size=new_bs, page_size_padded=padded)
             groups.append(KVCacheGroupSpec([name], aligned))
 
     return groups
