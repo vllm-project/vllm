@@ -57,6 +57,36 @@ def test_language_model_only_affects_model_hash():
     assert base_hash != lm_only_hash
 
 
+def test_zero_mm_limits_affect_model_hash():
+    """Zero per-modality limits disable the MM input path (the model is
+    called with input_ids instead of inputs_embeds), so they must change
+    the model config hash to avoid reusing incompatible compiled artifacts."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    base_hash = ModelConfig(model).compute_hash()
+    disabled_hash = ModelConfig(model, limit_mm_per_prompt={"image": 0}).compute_hash()
+    assert base_hash != disabled_hash
+
+
+def test_nonzero_mm_limits_do_not_affect_model_hash():
+    """Nonzero limits only cap the number of items per prompt; they do not
+    change the computation graph, so they should not invalidate caches."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    base_hash = ModelConfig(model).compute_hash()
+    capped_hash = ModelConfig(model, limit_mm_per_prompt={"image": 5}).compute_hash()
+    assert base_hash == capped_hash
+
+
+def test_enable_mm_embeds_affects_model_hash():
+    """enable_mm_embeds keeps the inputs_embeds path alive even when all
+    modality limits are zero, so it is part of the same graph predicate."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    base_hash = ModelConfig(model, limit_mm_per_prompt={"image": 0}).compute_hash()
+    embeds_hash = ModelConfig(
+        model, limit_mm_per_prompt={"image": 0}, enable_mm_embeds=True
+    ).compute_hash()
+    assert base_hash != embeds_hash
+
+
 @pytest.mark.parametrize("backend_arg", ["video_backend", "backend"])
 def test_use_gpu_video_backend_from_media_io_kwargs(backend_arg: str):
     config = MultiModalConfig(

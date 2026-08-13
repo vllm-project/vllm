@@ -456,6 +456,22 @@ class ModelConfig:
         # here early.
         if self.multimodal_config:
             factors["language_model_only"] = self.multimodal_config.language_model_only
+            # Setting a modality's limit to 0 disables MM inputs for that
+            # modality; when all supported modalities are disabled, the model
+            # runner calls the model with `input_ids` instead of
+            # `inputs_embeds`, which changes the calling convention of the
+            # compiled graph just like `language_model_only` does. Only the
+            # zero-vs-nonzero distinction affects the graph, so hash the set
+            # of disabled modalities rather than the raw limits to avoid
+            # needlessly invalidating compilation caches. `enable_mm_embeds`
+            # keeps the `inputs_embeds` path alive even when all limits are
+            # zero, so it is part of the same predicate.
+            factors["mm_disabled_modalities"] = sorted(
+                modality
+                for modality, options in self.multimodal_config.limit_per_prompt.items()
+                if options.count == 0
+            )
+            factors["enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
         return hash_factors(factors)
 
     def _update_nested(
