@@ -176,6 +176,50 @@ def test_build_multi_port_external_lb_child_args_sets_external_rank_server():
     assert child_args.api_server_count == 1
 
 
+def test_run_vllm_dp_server_uses_python_server_by_default(monkeypatch):
+    calls: list[str] = []
+
+    monkeypatch.setattr(dp_sup.os, "setpgrp", lambda: None)
+    monkeypatch.setattr(dp_sup, "set_process_title", lambda *_args: None)
+    monkeypatch.setattr(dp_sup, "decorate_logs", lambda *_args: None)
+    monkeypatch.setattr(dp_sup.envs, "VLLM_RUST_FRONTEND_PATH", None, raising=False)
+    monkeypatch.setattr(
+        dp_sup, "_run_python_vllm_dp_server", lambda _args: calls.append("python")
+    )
+    monkeypatch.setattr(
+        dp_sup, "_run_rust_vllm_dp_server", lambda _args: calls.append("rust")
+    )
+
+    dp_sup._run_vllm_dp_server(_make_unit_args(data_parallel_rank=4))
+
+    assert calls == ["python"]
+
+
+def test_run_vllm_dp_server_uses_rust_frontend_when_enabled(monkeypatch):
+    calls: list[str] = []
+
+    monkeypatch.setattr(dp_sup.os, "setpgrp", lambda: None)
+    monkeypatch.setattr(dp_sup, "set_process_title", lambda *_args: None)
+    monkeypatch.setattr(dp_sup, "decorate_logs", lambda *_args: None)
+    monkeypatch.setattr(dp_sup.envs, "VLLM_USE_RUST_FRONTEND", True, raising=False)
+    monkeypatch.setattr(
+        dp_sup.envs,
+        "VLLM_RUST_FRONTEND_PATH",
+        "/tmp/vllm-rs",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dp_sup, "_run_python_vllm_dp_server", lambda _args: calls.append("python")
+    )
+    monkeypatch.setattr(
+        dp_sup, "_run_rust_vllm_dp_server", lambda _args: calls.append("rust")
+    )
+
+    dp_sup._run_vllm_dp_server(_make_unit_args(data_parallel_rank=4))
+
+    assert calls == ["rust"]
+
+
 def test_validate_multi_port_external_lb_args_allows_ssl():
     args = _make_unit_args(
         ssl_keyfile="/tmp/server.key",
@@ -258,9 +302,20 @@ async def test_shutdown_if_supervisor_server_error_on_startup(
     async def fake_shutdown_children(self):
         return None
 
+    def fake_start_children(self):
+        return None
+
+    async def fake_monitor_children(self):
+        # Mark ready so the supervisor server is started, then block until
+        # shutdown (triggered when the failing server task exits).
+        self._is_ready = True
+        await self._shutdown_event.wait()
+
     monkeypatch.setattr(dp_sup.asyncio, "get_running_loop", lambda: FakeLoop())
-    monkeypatch.setattr(dp_sup.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(dp_sup, "NoSignalServer", FakeServer)
     monkeypatch.setattr(DPSupervisor, "_shutdown_children", fake_shutdown_children)
+    monkeypatch.setattr(DPSupervisor, "_start_children", fake_start_children)
+    monkeypatch.setattr(DPSupervisor, "_monitor_children", fake_monitor_children)
 
     supervisor = DPSupervisor(_make_unit_args())
 
@@ -394,8 +449,11 @@ def launch_mock_vllm_with_drain(
 
 async def _poll_supervisor_health(expected_status: int, use_ssl: bool = False) -> bool:
     """
-    Poll GET /health on the supervisor until expected_status is seen.
-    A connection error is treated as 503-equivalent when expected_status != 200.
+    GET /health on the supervisor once and check for expected_status.
+
+    Pass expected_status=-1 to assert the supervisor is not listening yet
+    (a connection error is expected). The supervisor only starts its HTTP
+    server once every child is ready, so /health is refused until then.
     """
     scheme = "https" if use_ssl else "http"
     url = f"{scheme}://127.0.0.1:{_SUPERVISOR_PORT}/health"
@@ -413,21 +471,44 @@ async def _poll_supervisor_health(expected_status: int, use_ssl: bool = False) -
             return True
 
 
+async def _await_supervisor_health(
+    expected_status: int, use_ssl: bool = False, retries: int = 20
+) -> bool:
+    """Retry _poll_supervisor_health, tolerating supervisor server startup."""
+    for _ in range(retries):
+        if await _poll_supervisor_health(expected_status, use_ssl=use_ssl):
+            return True
+        await asyncio.sleep(0.5)
+    return False
+
+
 async def _poll_until_api_server_running(
-    port: int, retries: int = 10, use_ssl: bool = False
+    port: int, timeout_s: float = 30.0, use_ssl: bool = False
 ) -> None:
+    """Return once the child accepts a request; it reports 503 until healthy."""
     scheme = "https" if use_ssl else "http"
     url = f"{scheme}://127.0.0.1:{port}/health"
+    deadline = time.monotonic() + timeout_s
+    last_exc: Exception | None = None
     async with aiohttp.ClientSession() as session:
-        for _ in range(retries):
+        while (remaining_s := deadline - time.monotonic()) > 0:
             try:
-                async with session.get(url, ssl=False if use_ssl else None) as resp:
-                    if resp.status != 200:
-                        return
-                await asyncio.sleep(1.0)
-            except aiohttp.ClientError:
+                request_timeout = aiohttp.ClientTimeout(total=min(2.0, remaining_s))
+                async with session.get(
+                    url,
+                    ssl=False if use_ssl else None,
+                    timeout=request_timeout,
+                ):
+                    return
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                last_exc = exc
                 print("Test detected not started yet, sleeping for 1s")
-                await asyncio.sleep(1.0)
+                remaining_s = deadline - time.monotonic()
+                if remaining_s > 0:
+                    await asyncio.sleep(min(1.0, remaining_s))
+    raise TimeoutError(
+        f"API server on port {port} did not start within {timeout_s}s"
+    ) from last_exc
 
 
 async def _set_healthy(port: int, use_ssl: bool = False) -> None:
@@ -459,8 +540,8 @@ async def _kill_server(port: int, use_ssl: bool = False) -> None:
             session.get(url, ssl=False if use_ssl else None) as resp,
         ):
             assert resp.status != 200
-    except Exception as e:
-        assert isinstance(e, aiohttp.ClientConnectorError)
+    except aiohttp.ClientConnectionError:
+        return
 
 
 @contextlib.asynccontextmanager
@@ -491,7 +572,7 @@ async def _run_supervisor(
 @pytest.mark.asyncio
 async def test_basic_lifecycle(monkeypatch):
     """
-    A) Supervisor /health returns 503 while children are unhealthy.
+    A) Supervisor is not listening while children are unhealthy.
     B) /health returns 200 once every child reports healthy.
     C) SIGTERM and shutdown
     """
@@ -500,24 +581,23 @@ async def test_basic_lifecycle(monkeypatch):
     vllm_server_ports = [_CHILD_PORT_BASE + i for i in range(_N_CHILDREN)]
 
     async with _run_supervisor(args, monkeypatch) as (supervisor, _task):
-        assert await _poll_supervisor_health(503)
+        assert await _poll_supervisor_health(-1)
         assert not supervisor.is_ready
 
         for port in vllm_server_ports:
-            assert await _poll_supervisor_health(503)
+            assert await _poll_supervisor_health(-1)
             assert not supervisor.is_ready
             await _poll_until_api_server_running(port)
 
         await _set_healthy(vllm_server_ports[0])
         await asyncio.sleep(1.0)
-        assert await _poll_supervisor_health(503)
+        assert await _poll_supervisor_health(-1)
         assert not supervisor.is_ready
-        print("/health is 503 --- expected!")
+        print("supervisor not listening --- expected!")
 
         for port in vllm_server_ports:
             await _set_healthy(port)
-        await asyncio.sleep(1.0)
-        assert await _poll_supervisor_health(200)
+        assert await _await_supervisor_health(200)
         assert supervisor.is_ready
         print("/health is 200 --- expected!")
 
@@ -546,19 +626,18 @@ async def test_basic_lifecycle_with_ssl(monkeypatch):
         vllm_server_ports = [_CHILD_PORT_BASE + i for i in range(_N_CHILDREN)]
 
         async with _run_supervisor(args, monkeypatch) as (supervisor, _task):
-            assert await _poll_supervisor_health(503, use_ssl=True)
+            assert await _poll_supervisor_health(-1, use_ssl=True)
             assert not supervisor.is_ready
 
             for port in vllm_server_ports:
-                assert await _poll_supervisor_health(503, use_ssl=True)
+                assert await _poll_supervisor_health(-1, use_ssl=True)
                 assert not supervisor.is_ready
                 await _poll_until_api_server_running(port, use_ssl=True)
 
             for port in vllm_server_ports:
                 await _set_healthy(port, use_ssl=True)
-            await asyncio.sleep(1.0)
 
-            assert await _poll_supervisor_health(200, use_ssl=True)
+            assert await _await_supervisor_health(200, use_ssl=True)
             assert supervisor.is_ready
 
 
@@ -573,7 +652,7 @@ async def test_failed_startup(monkeypatch):
     vllm_server_ports = [_CHILD_PORT_BASE + i for i in range(_N_CHILDREN)]
 
     async with _run_supervisor(args, monkeypatch) as (supervisor, _task):
-        assert await _poll_supervisor_health(503)
+        assert await _poll_supervisor_health(-1)
         assert not supervisor.is_ready
 
         for port in vllm_server_ports:
@@ -589,7 +668,7 @@ async def test_failed_startup(monkeypatch):
 @pytest.mark.asyncio
 async def test_becomes_unhealthy(monkeypatch):
     """
-    A) Supervisor /health returns 503 while children are unhealthy.
+    A) Supervisor is not listening while children are unhealthy.
     B) /health returns 200 once every child reports healthy.
     C) Child process becomes unhealthy.
     D) Detected and shutdown.
@@ -599,24 +678,23 @@ async def test_becomes_unhealthy(monkeypatch):
     vllm_server_ports = [_CHILD_PORT_BASE + i for i in range(_N_CHILDREN)]
 
     async with _run_supervisor(args, monkeypatch) as (supervisor, _task):
-        assert await _poll_supervisor_health(503)
+        assert await _poll_supervisor_health(-1)
         assert not supervisor.is_ready
 
         for port in vllm_server_ports:
-            assert await _poll_supervisor_health(503)
+            assert await _poll_supervisor_health(-1)
             assert not supervisor.is_ready
             await _poll_until_api_server_running(port)
 
         await _set_healthy(vllm_server_ports[0])
         await asyncio.sleep(1.0)
-        assert await _poll_supervisor_health(503)
+        assert await _poll_supervisor_health(-1)
         assert not supervisor.is_ready
-        print("/health is 503 --- expected!")
+        print("supervisor not listening --- expected!")
 
         for port in vllm_server_ports:
             await _set_healthy(port)
-        await asyncio.sleep(1.0)
-        assert await _poll_supervisor_health(200)
+        assert await _await_supervisor_health(200)
         assert supervisor.is_ready
         print("/health is 200 --- expected!")
 
@@ -631,7 +709,7 @@ async def test_becomes_unhealthy(monkeypatch):
 @pytest.mark.asyncio
 async def test_dp_server_fails(monkeypatch):
     """
-    A) Supervisor /health returns 503 while children are unhealthy.
+    A) Supervisor is not listening while children are unhealthy.
     B) /health returns 200 once every child reports healthy.
     C) Child process fails.
     D) Detected and shutdown.
@@ -641,24 +719,23 @@ async def test_dp_server_fails(monkeypatch):
     vllm_server_ports = [_CHILD_PORT_BASE + i for i in range(_N_CHILDREN)]
 
     async with _run_supervisor(args, monkeypatch) as (supervisor, _task):
-        assert await _poll_supervisor_health(503)
+        assert await _poll_supervisor_health(-1)
         assert not supervisor.is_ready
 
         for port in vllm_server_ports:
-            assert await _poll_supervisor_health(503)
+            assert await _poll_supervisor_health(-1)
             assert not supervisor.is_ready
             await _poll_until_api_server_running(port)
 
         await _set_healthy(vllm_server_ports[0])
         await asyncio.sleep(1.0)
-        assert await _poll_supervisor_health(503)
+        assert await _poll_supervisor_health(-1)
         assert not supervisor.is_ready
-        print("/health is 503 --- expected!")
+        print("supervisor not listening --- expected!")
 
         for port in vllm_server_ports:
             await _set_healthy(port)
-        await asyncio.sleep(1.0)
-        assert await _poll_supervisor_health(200)
+        assert await _await_supervisor_health(200)
         assert supervisor.is_ready
         print("/health is 200 --- expected!")
 
@@ -696,8 +773,7 @@ async def test_shutdown_timeout(monkeypatch: pytest.MonkeyPatch):
 
         for port in vllm_server_ports:
             await _set_healthy(port)
-        await asyncio.sleep(1.0)
-        assert await _poll_supervisor_health(200)
+        assert await _await_supervisor_health(200)
         assert supervisor.is_ready
 
         start_t = time.perf_counter()

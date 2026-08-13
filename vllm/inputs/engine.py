@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from typing_extensions import NotRequired, TypedDict, assert_never
 
+from vllm.exceptions import VLLMValidationError
+
 if TYPE_CHECKING:
     import torch
 
@@ -37,6 +39,15 @@ class TokensInput(_InputOptions):
 
     prompt: NotRequired[str]
     """The prompt text corresponding to the token IDs, if available."""
+
+    prompt_token_offsets: NotRequired[list[tuple[int, int]] | None]
+    """Char-level (start, end) offsets per token, propagated from the
+    renderer's TokensPrompt when offsets were computed."""
+
+    assistant_tokens_mask: NotRequired[list[int] | None]
+    """Per-token 0/1 mask marking assistant-generated tokens.
+    Populated when ``return_assistant_tokens_mask=True`` is set on the
+    render request and the chat template supports ``{% generation %}``."""
 
 
 def tokens_input(
@@ -146,6 +157,11 @@ class MultiModalInput(_InputOptions):
     For each modality, information about the placeholder tokens in
     `prompt_token_ids`.
     """
+
+    assistant_tokens_mask: NotRequired[list[int] | None]
+    """Per-token 0/1 mask marking assistant-generated tokens.
+    Populated when ``return_assistant_tokens_mask=True`` is set on the
+    render request and the chat template supports ``{% generation %}``."""
 
 
 def mm_input(
@@ -270,7 +286,7 @@ which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
 
 def _validate_enc_input(enc_input: SingletonInput) -> EncoderInput:
     if enc_input["type"] == "embeds":
-        raise ValueError(
+        raise VLLMValidationError(
             "Embedding inputs are not supported for encoder-decoder models"
         )
 
@@ -288,7 +304,7 @@ def _validate_enc_input(enc_input: SingletonInput) -> EncoderInput:
 
 def _validate_dec_input(dec_input: SingletonInput) -> DecoderEngineInput:
     if dec_input["type"] == "embeds":
-        raise ValueError(
+        raise VLLMValidationError(
             "Embedding inputs are not supported for encoder-decoder models"
         )
 

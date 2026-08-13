@@ -6,6 +6,7 @@ pynvml. However, it should not initialize cuda context.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 from collections.abc import Callable
@@ -20,6 +21,9 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C_stable_libtorch  # noqa
+
+with contextlib.suppress(ImportError):
+    import vllm._qutlass_C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
@@ -38,11 +42,6 @@ else:
     CacheDType = None
 
 logger = init_logger(__name__)
-
-try:
-    import vllm._qutlass_C  # noqa: F401
-except ImportError as e:
-    logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -86,6 +85,7 @@ def _get_backend_priorities(
     device_capability: DeviceCapability,
     num_heads: int | None = None,
     kv_cache_dtype: CacheDType | None = None,
+    use_non_causal: bool = False,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -138,10 +138,14 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.FLASHINFER_MLA,
                 AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
     else:
-        if device_capability.major == 10:
+        # SM100f defaults to FlashInfer for TRTLLM causal attention, but its non-causal
+        # cutlass path (used for dflash attention) is known to have problems.
+        # So prefer FlashAttention when non-causal on SM100f.
+        if device_capability.major == 10 and not use_non_causal:
             return [
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.FLASH_ATTN,
@@ -219,15 +223,15 @@ class CudaPlatformBase(Platform):
         try:
             import vllm._C_stable_libtorch  # noqa: F401
         except ImportError as e:
-            logger.warning("Failed to import from vllm._C_stable_libtorch: %r", e)
-        try:
+            logger.warning_once("Failed to import from vllm._C_stable_libtorch: %r", e)
+        with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
-        except ImportError as e:
-            logger.warning("Failed to import from vllm._moe_C_stable_libtorch: %r", e)
-        try:
+        with contextlib.suppress(ImportError):
             import vllm._qutlass_C  # noqa: F401
-        except ImportError as e:
-            logger.warning("Failed to import from vllm._qutlass_C: %r", e)
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -290,6 +294,7 @@ class CudaPlatformBase(Platform):
             # kernel with limited pinned memory support for CUDA.
             version = _get_wsl_kernel_version()
             if version is None or version < (4, 19, 121):
+                # warning_once() causes a circular import on WSL, see #48397.
                 logger.warning(
                     "Using 'pin_memory=False' as WSL is detected and the "
                     "WSL2 kernel version is below 4.19.121. This may slow "
@@ -319,7 +324,7 @@ class CudaPlatformBase(Platform):
             and scheduler_config.is_multimodal_model
             and not scheduler_config.disable_chunked_mm_input
         ):
-            logger.warning(
+            logger.warning_once(
                 "Forcing --disable_chunked_mm_input for models "
                 "with multimodal-bidirectional attention."
             )
@@ -330,7 +335,7 @@ class CudaPlatformBase(Platform):
             and vllm_config.offload_config.uva.cpu_offload_gb > 0
             and bool(vllm_config.compilation_config.cudagraph_mode)
         ):
-            logger.warning(
+            logger.warning_once(
                 "--cpu-offload-gb is enabled with CUDA graphs on WSL2. "
                 "This combination requires pinned (page-locked) memory "
                 "allocations. WARNING: Windows (WDDM) enforces a hard "
@@ -372,6 +377,7 @@ class CudaPlatformBase(Platform):
             device_capability,
             num_heads,
             attn_selector_config.kv_cache_dtype,
+            attn_selector_config.use_non_causal,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
@@ -731,7 +737,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         try:
-            physical_device_id = cls.device_id_to_physical_device_id(device_id)
+            physical_device_id = cls.visible_device_id_to_physical_device_id(device_id)
             handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
             major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
             return DeviceCapability(major=major, minor=minor)
@@ -739,12 +745,16 @@ class NvmlCudaPlatform(CudaPlatformBase):
             return None
 
     @classmethod
-    @with_nvml_context
     def has_device_capability(
         cls,
         capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
+        # No @with_nvml_context here: the base implementation only reads
+        # get_device_capability(), which is cached and brings its own NVML
+        # context. Wrapping this method as well cost an nvmlInit()/
+        # nvmlShutdown() pair on every call, including calls made per attention
+        # layer per step from the Triton reshape-and-cache path.
         try:
             return super().has_device_capability(capability, device_id)
         except RuntimeError:

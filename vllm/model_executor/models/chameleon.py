@@ -37,10 +37,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    row_parallel_weight_loader,
-)
+from vllm.model_executor.model_loader.weight_utils import row_parallel_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -58,6 +55,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -66,7 +64,8 @@ from .interfaces import (
     SupportsQuant,
 )
 from .utils import (
-    is_pp_missing_parameter,
+    AutoWeightsLoader,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -821,8 +820,20 @@ class ChameleonImageVocabularyMapping:
 
     def convert_img2bpe(self, img_batch: torch.Tensor) -> torch.Tensor:
         device = img_batch.device
-        img_tokens = self.img2bpe_mapping_tensor[img_batch.to("cpu")]
-        return img_tokens.to(device)
+        # Cache a per-device copy of the (small, static) mapping tensor so we
+        # can index entirely on `device` instead of forcing a D2H on
+        # `img_batch` and an H2D on the result.
+        cache = getattr(self, "_img2bpe_mapping_cache", None)
+        if cache is None:
+            cache = {}
+            self._img2bpe_mapping_cache = cache
+        mapping_on_device = cache.get(device)
+        if mapping_on_device is None:
+            mapping_on_device = async_tensor_h2d(
+                self.img2bpe_mapping_tensor, device=device
+            )
+            cache[device] = mapping_on_device
+        return mapping_on_device[img_batch]
 
 
 class ChameleonModel(nn.Module):
@@ -922,6 +933,16 @@ class ChameleonForConditionalGeneration(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
+    )
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -956,7 +977,7 @@ class ChameleonForConditionalGeneration(
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
@@ -1017,87 +1038,27 @@ class ChameleonForConditionalGeneration(
         # Disallow image tokens which does not include special
         # begin-image and end-image tokens
         if logits is not None:
-            image_tokens = self.model.vocabulary_mapping.image_tokens
-            logits[:, image_tokens] = torch.finfo(logits.dtype).min
+            # Cache a per-device index tensor for the (static) image-token
+            # set, and use `index_fill_` instead of advanced-index assign
+            # so the scatter runs entirely on device (no host roundtrip
+            # for the scalar fill value or for the Python-list indices).
+            cache = getattr(self, "_image_tokens_index_cache", None)
+            if cache is None:
+                cache = {}
+                self._image_tokens_index_cache = cache
+            image_tokens_idx = cache.get(logits.device)
+            if image_tokens_idx is None:
+                image_tokens_idx = async_tensor_h2d(
+                    self.model.vocabulary_mapping.image_tokens,
+                    dtype=torch.long,
+                    device=logits.device,
+                )
+                cache[logits.device] = image_tokens_idx
+            logits.index_fill_(1, image_tokens_idx, torch.finfo(logits.dtype).min)
 
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-
-            # With tie_word_embeddings, we can skip lm_head.weight
-            # The weight might appear unnecessarily in the files if the model is
-            # processed with quantization, LoRA, fine-tuning, etc.
-            if self.config.tie_word_embeddings and "lm_head.weight" in name:
-                continue
-
-            use_default_weight_loading = False
-            if "vqmodel" in name:
-                if self.model.vqmodel is not None:
-                    # We only do sharding for language model and
-                    # not vqvae for now.
-                    use_default_weight_loading = True
-            else:
-                for param_name, weight_name, shard_id in stacked_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                    break
-                else:
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    # Remapping the name of FP8 kv-scale.
-                    if name.endswith("kv_scale"):
-                        remapped_kv_scale_name = name.replace(
-                            ".kv_scale", ".attn.kv_scale"
-                        )
-                        if remapped_kv_scale_name not in params_dict:
-                            logger.warning_once(
-                                "Found kv scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv-scale is not loaded.",  # noqa: E501
-                                name,
-                                remapped_kv_scale_name,
-                            )
-                            continue
-                        else:
-                            name = remapped_kv_scale_name
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            if use_default_weight_loading and name in params_dict:
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

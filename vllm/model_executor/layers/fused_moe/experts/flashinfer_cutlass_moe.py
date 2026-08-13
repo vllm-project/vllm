@@ -13,6 +13,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_type,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -93,30 +96,30 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
-        self.max_capture_size = moe_config.max_capture_size
-        self.gemm1_clamp_limit: torch.Tensor | None = None
-        if quant_config.gemm1_clamp_limit is not None:
-            self.gemm1_clamp_limit = torch.tensor(
-                [quant_config.gemm1_clamp_limit] * self.num_experts,
+
+        def _per_expert(value: float | None) -> torch.Tensor | None:
+            if value is None:
+                return None
+            return torch.full(
+                (self.num_experts,),
+                float(value),
                 dtype=torch.float32,
                 device=self.device,
             )
 
+        self.gemm1_clamp_limit = _per_expert(quant_config.gemm1_clamp_limit)
+        self.gemm1_alpha = _per_expert(quant_config.gemm1_alpha)
+        self.gemm1_beta = _per_expert(quant_config.gemm1_beta)
+
         if quant_config.weight_quant_dtype == "mxfp4":
             # This value is used specifically for gpt-oss,
             # Need to revisit this for other models
-            self.gemm1_alpha = torch.tensor(
-                [1.702] * self.num_experts, dtype=torch.float32, device=self.device
-            )
-            self.gemm1_beta = torch.tensor(
-                [1.0] * self.num_experts, dtype=torch.float32, device=self.device
-            )
+            if self.gemm1_alpha is None:
+                self.gemm1_alpha = _per_expert(1.702)
+            if self.gemm1_beta is None:
+                self.gemm1_beta = _per_expert(1.0)
             if self.gemm1_clamp_limit is None:
-                self.gemm1_clamp_limit = torch.tensor(
-                    [7.0] * self.num_experts,
-                    dtype=torch.float32,
-                    device=self.device,
-                )
+                self.gemm1_clamp_limit = _per_expert(7.0)
             if quant_config.quant_dtype == "mxfp8":
                 self.fake_input_scale = torch.ones(
                     self.num_experts,
@@ -191,6 +194,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             MoEActivation.GELU_TANH,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -264,18 +268,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
     ):
-        from flashinfer.fused_moe.core import ActivationType
-
-        activation_str_to_value_map = {
-            MoEActivation.SILU: ActivationType.Swiglu,  # This is the default
-            MoEActivation.GELU_TANH: ActivationType.Geglu,
-            MoEActivation.SWIGLUOAI: ActivationType.Swiglu,  # gpt-oss alias
-            MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
-        }
-        assert activation in activation_str_to_value_map, (
-            f"{activation=} missing from {activation_str_to_value_map.keys()=}"
-        )
-
         quant_scales = None
         fc1_expert_weights = None
         fc2_expert_weights = None
@@ -283,9 +275,16 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         fc2_expert_biases = None
         swiglu_alpha = None
         swiglu_beta = None
-        swiglu_limit = (
-            self.gemm1_clamp_limit if activation == MoEActivation.SILU else None
-        )
+        swiglu_limit = None
+        if activation == MoEActivation.SILU:
+            swiglu_limit = self.gemm1_clamp_limit
+        elif activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ):
+            swiglu_alpha = self.gemm1_alpha
+            swiglu_beta = self.gemm1_beta
+            swiglu_limit = self.gemm1_clamp_limit
         use_mxfp8_act_scaling = False
         use_w4_group_scaling = False
         # Select quantization metadata based on FP8 format/path
@@ -393,12 +392,11 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             tp_rank=self.tp_rank,
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
-            activation_type=activation_str_to_value_map[activation],
+            activation_type=activation_to_flashinfer_type(activation),
             # Informs FlashInfer to use the block-scale decoding path when True
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
             use_w4_group_scaling=use_w4_group_scaling,
-            tune_max_num_tokens=max(self.max_capture_size, 1),
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:

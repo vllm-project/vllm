@@ -12,10 +12,13 @@ latencies by ~7% (see qwen2_5_vl for example usage)
 To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 """
 
+from typing import Any
+
 import einops
 import torch
 import torch.nn.functional as F
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -31,9 +34,11 @@ def flash_attn_maxseqlen_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
+
+        kwargs["window_size"] = (-1, -1)
     else:
         from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
@@ -104,6 +109,34 @@ def vit_flash_attn_wrapper(
         batch_size,
         is_rocm_aiter,
         fa_version,
+        scale,
+        cu_seqlens,
+        max_seqlen,
+    )
+
+
+def vit_aiter_fp8_attn_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
+    batch_size: int,
+    output_dtype: torch.dtype,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return rocm_aiter_ops.fp8_attn_wrapper(
+        q,
+        k,
+        v,
+        q_descale,
+        k_descale,
+        v_descale,
+        batch_size,
+        output_dtype,
         scale,
         cu_seqlens,
         max_seqlen,

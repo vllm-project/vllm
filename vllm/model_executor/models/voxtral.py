@@ -10,11 +10,12 @@ import numpy as np
 import regex as re
 import torch
 import torch.nn as nn
-from mistral_common.audio import Audio, mel_filter_bank
-from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
+from mistral_common.audio import mel_filter_bank
+from mistral_common.protocol.instruct.chunk import AudioChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.protocol.transcription.request import TranscriptionRequest
+from mistral_common.tokens.tokenizers.audio import Audio
 from transformers import BatchFeature, WhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -182,7 +183,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
                 sampling_rate=feature_extractor.sampling_rate,
                 format=format,
             )
-            chunk = AudioChunk(input_audio=RawAudio.from_audio(audio_item))
+            chunk = AudioChunk.from_audio(audio_item)
             audio_chunks.append(chunk)
 
         request = ChatCompletionRequest(
@@ -462,7 +463,7 @@ class VoxtralForConditionalGeneration(
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
         req = TranscriptionRequest(
             model=model_config.model,
-            audio=RawAudio.from_audio(audio),
+            audio=audio.to_base64(audio.format),
             language=language,
         )
 
@@ -772,15 +773,11 @@ class VoxtralEncoderModel(nn.Module):
         if global_log_mel_max := self.config.global_log_mel_max:
             if not isinstance(global_log_mel_max, float):
                 raise TypeError(f"{global_log_mel_max=} needs to be of type float.")
-            log_spec_max = torch.tensor(
-                global_log_mel_max,
-                device=log_spec.device,
-                dtype=log_spec.dtype,
-            )
+            # Use `clamp` to avoid gpu<->cpu sync.
+            log_spec = torch.clamp(log_spec, min=global_log_mel_max - 8.0)
         else:
             log_spec_max = log_spec.max()
-
-        log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
+            log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
         log_spec = (log_spec + 4.0) / 4.0
         return log_spec.to(input_dtype)
 

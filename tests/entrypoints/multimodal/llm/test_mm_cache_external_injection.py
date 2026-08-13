@@ -69,6 +69,7 @@ def test_inject_into_mm_cache(
     image_urls,
     mm_processor_cache_type,
     caplog_vllm,
+    vllm_runner,
 ):
     """Test that inject_into_mm_cache() injects pre-processed mm_kwargs into
     the processor cache and MM cache hit metrics are updated correctly.
@@ -78,116 +79,115 @@ def test_inject_into_mm_cache(
     2. Extract cached kwargs, call inject_into_mm_cache with a new hash,
        then generate with a pre-rendered input -> verifies injection works
     """
-    llm = LLM(
-        model="llava-hf/llava-1.5-7b-hf",
+    with vllm_runner(
+        "llava-hf/llava-1.5-7b-hf",
         max_model_len=4096,
         max_num_seqs=5,
         enforce_eager=True,
         disable_log_stats=False,
         limit_mm_per_prompt={"image": 2},
         mm_processor_cache_type=mm_processor_cache_type,
-    )
+    ) as runner:
+        # Step 1: Normal requests to populate the cache
+        runner.llm.chat(_make_messages(image_urls[0]))
+        assert _get_mm_cache_stats(runner.llm.get_metrics()) == (1, 0)
 
-    # Step 1: Normal requests to populate the cache
-    llm.chat(_make_messages(image_urls[0]))
-    assert _get_mm_cache_stats(llm.get_metrics()) == (1, 0)
+        runner.llm.chat(_make_messages(image_urls[0]))
+        assert _get_mm_cache_stats(runner.llm.get_metrics()) == (2, 1)
+        assert _get_mm_cache_log(runner.llm, caplog_vllm) == pytest.approx(50.0)
 
-    llm.chat(_make_messages(image_urls[0]))
-    assert _get_mm_cache_stats(llm.get_metrics()) == (2, 1)
-    assert _get_mm_cache_log(llm, caplog_vllm) == pytest.approx(50.0)
+        # Step 2: Use a second image to get valid expanded tokens and
+        # placeholder positions via the renderer.
+        runner.llm.chat(_make_messages(image_urls[1]))
+        queries_before = _get_mm_cache_stats(runner.llm.get_metrics())[0]  # 3
 
-    # Step 2: Use a second image to get valid expanded tokens and
-    # placeholder positions via the renderer.
-    llm.chat(_make_messages(image_urls[1]))
-    queries_before = _get_mm_cache_stats(llm.get_metrics())[0]  # 3
+        renderer = runner.llm.llm_engine.renderer
+        cache = renderer.mm_processor_cache
+        assert cache is not None, "Processor cache should be enabled"
 
-    renderer = llm.llm_engine.renderer
-    cache = renderer.mm_processor_cache
-    assert cache is not None, "Processor cache should be enabled"
+        _, eng_prompts = renderer.render_chat(
+            [_make_messages(image_urls[1])],
+            ChatParams(),
+        )
+        eng_input = eng_prompts[0]
 
-    _, eng_prompts = renderer.render_chat(
-        [_make_messages(image_urls[1])],
-        ChatParams(),
-    )
-    eng_input = eng_prompts[0]
+        # Inject pre-processed mm_kwargs with a NEW hash via public API
+        new_mm_hash = "deadbeef" * 8
+        mm_hashes = {"image": [new_mm_hash]}
+        mm_kwargs = eng_input["mm_kwargs"]
 
-    # Inject pre-processed mm_kwargs with a NEW hash via public API
-    new_mm_hash = "deadbeef" * 8
-    mm_hashes = {"image": [new_mm_hash]}
-    mm_kwargs = eng_input["mm_kwargs"]
+        runner.llm.llm_engine.input_processor.inject_into_mm_cache(mm_hashes, mm_kwargs)
 
-    llm.llm_engine.input_processor.inject_into_mm_cache(mm_hashes, mm_kwargs)
+        # Build pre-rendered input (no externally_processed flag needed)
+        pre_rendered_input = {
+            "type": "multimodal",
+            "prompt_token_ids": eng_input["prompt_token_ids"],
+            "mm_kwargs": mm_kwargs,
+            "mm_hashes": mm_hashes,
+            "mm_placeholders": eng_input["mm_placeholders"],
+        }
 
-    # Build pre-rendered input (no externally_processed flag needed)
-    pre_rendered_input = {
-        "type": "multimodal",
-        "prompt_token_ids": eng_input["prompt_token_ids"],
-        "mm_kwargs": mm_kwargs,
-        "mm_hashes": mm_hashes,
-        "mm_placeholders": eng_input["mm_placeholders"],
-    }
+        runner.llm.generate(
+            pre_rendered_input,
+            sampling_params=SamplingParams(max_tokens=1),
+        )
 
-    llm.generate(
-        pre_rendered_input,
-        sampling_params=SamplingParams(max_tokens=1),
-    )
-
-    # Verify cache was queried and injection happened
-    queries_after = _get_mm_cache_stats(llm.get_metrics())[0]
-    assert queries_after > queries_before, (
-        "Cache should have been queried for the injected item"
-    )
-    mm_rate = _get_mm_cache_log(llm, caplog_vllm)
-    assert mm_rate >= 0.0, "MM cache hit rate should be reported"
+        # Verify cache was queried and injection happened
+        queries_after = _get_mm_cache_stats(runner.llm.get_metrics())[0]
+        assert queries_after > queries_before, (
+            "Cache should have been queried for the injected item"
+        )
+        mm_rate = _get_mm_cache_log(runner.llm, caplog_vllm)
+        assert mm_rate >= 0.0, "MM cache hit rate should be reported"
 
 
 @pytest.mark.parametrize("image_urls", [TEST_IMAGE_ASSETS[:1]], indirect=True)
 def test_inject_into_mm_cache_without_cache(
     num_gpus_available,
     image_urls,
+    vllm_runner,
 ):
     """Test that inject_into_mm_cache works gracefully when processor cache
     is disabled (mm_processor_cache_gb=0). Should not crash.
     """
-    llm = LLM(
-        model="llava-hf/llava-1.5-7b-hf",
+    with vllm_runner(
+        "llava-hf/llava-1.5-7b-hf",
         max_model_len=4096,
         max_num_seqs=5,
         enforce_eager=True,
         disable_log_stats=False,
         limit_mm_per_prompt={"image": 2},
         mm_processor_cache_gb=0,
-    )
+    ) as runner:
+        # Run a normal chat request first to warm up the model.
+        runner.llm.chat(_make_messages(image_urls[0]))
 
-    # Run a normal chat request first to warm up the model.
-    llm.chat(_make_messages(image_urls[0]))
+        # Use the renderer to get a proper EngineInput with expanded tokens
+        renderer = runner.llm.llm_engine.renderer
+        _, eng_prompts = renderer.render_chat(
+            [_make_messages(image_urls[0])],
+            ChatParams(),
+        )
+        eng_input = eng_prompts[0]
 
-    # Use the renderer to get a proper EngineInput with expanded tokens
-    renderer = llm.llm_engine.renderer
-    _, eng_prompts = renderer.render_chat(
-        [_make_messages(image_urls[0])],
-        ChatParams(),
-    )
-    eng_input = eng_prompts[0]
+        mm_hashes = {"image": ["abcd1234" * 8]}
+        mm_kwargs = eng_input["mm_kwargs"]
 
-    mm_hashes = {"image": ["abcd1234" * 8]}
-    mm_kwargs = eng_input["mm_kwargs"]
+        # inject_into_mm_cache should not crash even without cache
+        runner.llm.llm_engine.input_processor.inject_into_mm_cache(mm_hashes, mm_kwargs)
 
-    # inject_into_mm_cache should not crash even without cache
-    llm.llm_engine.input_processor.inject_into_mm_cache(mm_hashes, mm_kwargs)
+        # Build and generate with pre-rendered input
+        pre_rendered_input = {
+            "type": "multimodal",
+            "prompt_token_ids": eng_input["prompt_token_ids"],
+            "mm_kwargs": mm_kwargs,
+            "mm_hashes": mm_hashes,
+            "mm_placeholders": eng_input["mm_placeholders"],
+        }
 
-    # Build and generate with pre-rendered input
-    pre_rendered_input = {
-        "type": "multimodal",
-        "prompt_token_ids": eng_input["prompt_token_ids"],
-        "mm_kwargs": mm_kwargs,
-        "mm_hashes": mm_hashes,
-        "mm_placeholders": eng_input["mm_placeholders"],
-    }
-
-    result = llm.generate(
-        pre_rendered_input,
-        sampling_params=SamplingParams(max_tokens=1),
-    )
-    assert len(result) == 1, "Should produce one output"
-    assert len(result[0].outputs) >= 1, "Should have at least one output sequence"
+        result = runner.llm.generate(
+            pre_rendered_input,
+            sampling_params=SamplingParams(max_tokens=1),
+        )
+        assert len(result) == 1, "Should produce one output"
+        assert len(result[0].outputs) >= 1, "Should have at least one output sequence"

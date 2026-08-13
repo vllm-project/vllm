@@ -16,7 +16,7 @@ from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 def compute_varlen_chunk_metadata(
@@ -118,7 +118,7 @@ class Mamba2AttentionMetadataBuilder(
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: MambaSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -150,11 +150,15 @@ class Mamba2AttentionMetadataBuilder(
 
         # Compute seq_idx for prefill only
         if common.num_prefills > 0:
-            prep_initial_states = (
-                torch.any(common.has_initial_states_p).item()
-                if common.has_initial_states_p is not None
-                else False
-            )
+            prep_initial_states = False
+            if common.has_initial_states_p is not None:
+                # Same condition as `has_initial_states_p`, but derived from CPU
+                # data so it needs no D2H. `seq_lens_cpu_upper_bound` is precise
+                # for prefill rows, which is all this slice covers.
+                num_computed_tokens_p_cpu, _ = self._prefill_cpu_metadata(
+                    common, common_attn_metadata
+                )
+                prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
 
             cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
                 self._build_chunk_metadata_tensors(

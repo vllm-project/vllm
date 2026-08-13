@@ -30,7 +30,7 @@ import ssl
 import time
 import uuid
 import warnings
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Iterable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
@@ -52,6 +52,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
@@ -129,6 +130,7 @@ async def _align_prompts_to_server_tokenizer(
         )
 
         async def _fix_one(req: SampleRequest) -> SampleRequest:
+            assert isinstance(req.prompt, str)
             tokens = await _tokenize(req.prompt)
             if len(tokens) <= req.prompt_len:
                 return req
@@ -360,7 +362,7 @@ class EmbedBenchmarkMetrics:
     mean_e2el_ms: float
     std_e2el_ms: float
     median_e2el_ms: float
-    percentiles_e2el_ms: float
+    percentiles_e2el_ms: list[tuple[float, float]]
 
 
 def _get_current_request_rate(
@@ -433,8 +435,8 @@ async def get_request(
     assert total_requests > 0, "No requests provided."
 
     # Precompute delays among requests to minimize request send laggings
-    request_rates = []
-    delay_ts = []
+    request_rates: list[float] = []
+    delay_ts: list[float] = []
 
     # if the traces have timing info then:
     if not self_timed:
@@ -484,7 +486,10 @@ async def get_request(
     else:
         for request_index, request in enumerate(input_requests):
             # this is cumulative running ts, from which sleep is calculated later
-            delay_ts.append(request.timestamp)
+            if request.timestamp is not None:
+                delay_ts.append(request.timestamp)
+            else:
+                delay_ts.append(0.0)
             # TODO: there is no notion of RPS here, may be we can calculate
             # from the trace.
             request_rates.append(0.0)
@@ -552,7 +557,7 @@ def calculate_metrics(
     input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
-    tokenizer: TokenizerLike,
+    tokenizer: TokenizerLike | None,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
 ) -> tuple[BenchmarkMetrics, list[int]]:
@@ -599,7 +604,7 @@ def calculate_metrics(
                     )
             actual_output_lens.append(output_len)
             total_input += outputs[i].prompt_len
-            tpot = 0
+            tpot = 0.0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
                 tpot = latency_minus_ttft / (output_len - 1)
@@ -767,7 +772,7 @@ async def benchmark(
     base_url: str,
     model_id: str,
     model_name: str,
-    tokenizer: TokenizerLike,
+    tokenizer: TokenizerLike | None,
     input_requests: list[SampleRequest],
     logprobs: int | None,
     request_rate: float,
@@ -790,6 +795,7 @@ async def benchmark(
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
+    probe_request_rate: float = 0.0,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -894,11 +900,12 @@ async def benchmark(
 
     print("Starting main benchmark run...")
 
+    lora_modules_iter: Iterator[str] | None = None
     if lora_modules:
         lora_modules_list = list(lora_modules)
         if lora_assignment == "round-robin":
             # Deterministic round-robin assignment across requests.
-            lora_modules = iter(
+            lora_modules_iter = iter(
                 [
                     lora_modules_list[i % len(lora_modules_list)]
                     for i in range(len(input_requests))
@@ -906,7 +913,7 @@ async def benchmark(
             )
         else:
             # For each input request, choose a LoRA module at random.
-            lora_modules = iter(
+            lora_modules_iter = iter(
                 [random.choice(lora_modules_list) for _ in range(len(input_requests))]
             )
 
@@ -965,6 +972,30 @@ async def benchmark(
                 request_func_input=request_func_input, session=session, pbar=pbar
             )
 
+    probe_outputs: list[RequestFuncOutput] = []
+    probe_stop = asyncio.Event()
+
+    async def probe_loop():
+        probe_input = replace(
+            test_input,
+            prompt="Hi",
+            prompt_len=1,
+            output_len=1,
+            multi_modal_content=None,
+            chat_messages=None,
+        )
+        interval = 1 / probe_request_rate
+        while not probe_stop.is_set():
+            probe_outputs.append(
+                await request_func(request_func_input=probe_input, session=session)
+            )
+            await asyncio.sleep(interval)
+
+    probe_task: asyncio.Task | None = None
+    if probe_request_rate > 0:
+        print(f"Probe request rate: {probe_request_rate} req/s")
+        probe_task = asyncio.create_task(probe_loop())
+
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
 
@@ -1004,9 +1035,13 @@ async def benchmark(
         )
         per_request_extra_body = _merge_overrides(extra_body, request.request_overrides)
         req_model_id, req_model_name = model_id, model_name
-        if lora_modules:
-            req_lora_module = next(lora_modules)
+        if lora_modules_iter:
+            req_lora_module = next(lora_modules_iter)
             req_model_id, req_model_name = req_lora_module, req_lora_module
+
+        mm_content_typed: dict[str, Any] | list[dict[str, Any]] | None = None
+        if isinstance(mm_content, (dict, list)):
+            mm_content_typed = mm_content
 
         request_func_input = RequestFuncInput(
             model=req_model_id,
@@ -1014,9 +1049,9 @@ async def benchmark(
             prompt=prompt,
             api_url=api_url,
             prompt_len=prompt_len,
-            output_len=output_len,
+            output_len=output_len or 0,
             logprobs=logprobs,
-            multi_modal_content=mm_content,
+            multi_modal_content=mm_content_typed,
             ignore_eos=ignore_eos,
             extra_headers=extra_headers,
             extra_body=per_request_extra_body,
@@ -1031,6 +1066,10 @@ async def benchmark(
             )
         )
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
+
+    if probe_task is not None:
+        probe_stop.set()
+        await probe_task
 
     if pbar is not None:
         pbar.close()
@@ -1107,6 +1146,8 @@ async def benchmark(
                 "committed_per_step": delta_committed / denoising_steps,
             }
 
+    metrics: BenchmarkMetrics | EmbedBenchmarkMetrics
+    actual_output_lens: list[int] | int
     if task_type == TaskType.GENERATION:
         metrics, actual_output_lens = calculate_metrics(
             input_requests=input_requests,
@@ -1140,7 +1181,7 @@ async def benchmark(
             "Request throughput (req/s):", metrics.request_throughput
         )
     )
-    if goodput_config_dict:
+    if goodput_config_dict and isinstance(metrics, BenchmarkMetrics):
         print(
             "{:<40} {:<10.2f}".format(
                 "Request goodput (req/s):", metrics.request_goodput
@@ -1177,6 +1218,45 @@ async def benchmark(
             )
         )
 
+    probe_stats: dict[str, Any] | None = None
+    if probe_task is not None:
+        probe_lats = [o.latency for o in probe_outputs if o.success]
+        if probe_lats:
+            probe_stats = {
+                "probe_completed": len(probe_lats),
+                "probe_failed": len(probe_outputs) - len(probe_lats),
+                "probe_median_e2el_ms": float(np.median(probe_lats)) * 1000,
+                "probe_p99_e2el_ms": float(np.percentile(probe_lats, 99)) * 1000,
+                "probe_max_e2el_ms": float(max(probe_lats)) * 1000,
+            }
+            print("{s:{c}^{n}}".format(s="Probe Requests", n=50, c="-"))
+            print(
+                "{:<40} {:<10}".format(
+                    "Probe requests completed:", probe_stats["probe_completed"]
+                )
+            )
+            print(
+                "{:<40} {:<10}".format(
+                    "Probe requests failed:", probe_stats["probe_failed"]
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "Median probe E2EL (ms):", probe_stats["probe_median_e2el_ms"]
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "P99 probe E2EL (ms):", probe_stats["probe_p99_e2el_ms"]
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "Max probe E2EL (ms):", probe_stats["probe_max_e2el_ms"]
+                )
+            )
+
+    result: dict[str, Any]
     if isinstance(metrics, BenchmarkMetrics):
         result = {
             "duration": benchmark_duration,
@@ -1209,6 +1289,9 @@ async def benchmark(
             "input_lens": [output.prompt_len for output in outputs],
             "errors": [output.error for output in outputs],
         }
+
+    if probe_stats is not None:
+        result.update(probe_stats)
 
     if rps_change_events:
         result["rps_change_events"] = rps_change_events
@@ -1462,7 +1545,7 @@ def compute_result_filename(
     return file_name
 
 
-def add_cli_args(parser: argparse.ArgumentParser):
+def add_cli_args(parser: FlexibleArgumentParser):
     add_dataset_parser(parser)
     parser.add_argument(
         "--label",
@@ -1591,6 +1674,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "A lower burstiness value (0 < burstiness < 1) results in more "
         "bursty requests. A higher burstiness value (burstiness > 1) "
         "results in a more uniform arrival of requests.",
+    )
+    parser.add_argument(
+        "--probe-request-rate",
+        type=float,
+        default=0.0,
+        help="If positive, send single-token text-only probe requests at "
+        "this rate (req/s) alongside the main workload, bypassing "
+        "--max-concurrency, and report their latency separately. Useful "
+        "for measuring how the main workload stalls unrelated requests.",
     )
     parser.add_argument(
         "--disable-tqdm",
@@ -2005,6 +2097,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.ignore_eos = True
 
     if args.dataset_name == "timed_trace":
+        if args.backend not in ("vllm", "openai"):
+            raise ValueError(
+                "timed_trace dataset passes pre-tokenized prompts (list[int])"
+                " and requires a completions backend ('vllm' or 'openai')."
+            )
         # timed_trace carries per-request timestamps;
         # ignore EOS so generation runs to the trace's specified output length,
         # and default to using those timestamps for scheduling unless the user
@@ -2108,6 +2205,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
         self_timed=args.self_timed,
+        probe_request_rate=args.probe_request_rate,
     )
 
     # Save config and results to json
@@ -2154,6 +2252,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Generate timeline plot if requested
     if args.plot_timeline:
+        assert file_name is not None, (
+            "file_name must be set when plot_timeline is enabled"
+        )
         try:
             from vllm.benchmarks.plot import generate_timeline_plot
 
@@ -2200,6 +2301,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Generate dataset statistics plot if requested
     if args.plot_dataset_stats:
+        assert file_name is not None, (
+            "file_name must be set when plot_dataset_stats is enabled"
+        )
         try:
             from vllm.benchmarks.plot import generate_dataset_stats_plot
 
@@ -2249,6 +2353,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Save to file
     if args.save_result or args.append_result:
+        assert file_name is not None, (
+            "file_name must be set when save_result or append_result is enabled"
+        )
         with open(
             file_name, mode="a+" if args.append_result else "w", encoding="utf-8"
         ) as outfile:

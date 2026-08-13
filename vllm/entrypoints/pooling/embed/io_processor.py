@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 import torch
@@ -16,7 +17,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     CustomChatCompletionMessageParam,
 )
-from vllm.inputs import EngineInput, tokens_input
+from vllm.inputs import tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.renderers import merge_kwargs
@@ -27,10 +28,16 @@ from vllm.utils.mistral import is_mistral_tokenizer
 from ..base.io_processor import PoolingIOProcessor
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
 from ..typing import (
-    OfflineInputsContext,
+    AnyOfflineInputsContext,
+    AnyRenderParam,
+    ChunkedEmbeddingMetadata,
+    EncodeChatRenderParams,
+    OfflineEncodeInputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
+    PoolingEngineInput,
     PoolingServeContext,
+    RequestFactory,
 )
 from .protocol import (
     CohereEmbedContent,
@@ -44,6 +51,12 @@ from .protocol import (
 )
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _ChunkedPromptAggregator:
+    weighted_sum: torch.Tensor | None = None
+    total_weight: int = 0
 
 
 class EmbedIOProcessor(PoolingIOProcessor):
@@ -66,9 +79,11 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 list(self.task_instructions.keys()),
             )
 
-    def pre_process_online(self, ctx: PoolingServeContext):
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
         if isinstance(ctx.request, CohereEmbedRequest):
-            self._pre_process_cohere_online(ctx)
+            requests = self._get_request_factory_cohere_online(ctx)
         elif isinstance(
             ctx.request,
             (
@@ -78,12 +93,11 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 EmbeddingBatchChatInputRequest,
             ),
         ):
-            self._pre_process_openai_chat_online(ctx)
+            requests = self._get_request_factory_chat_input_online(ctx)
         else:
-            super().pre_process_online(ctx)
+            requests = super().get_request_factory_online(ctx)
 
-        if self.enable_chunked_processing:
-            self._pre_process_chunked(ctx)
+        return requests
 
     def post_process_online(
         self,
@@ -104,17 +118,21 @@ class EmbedIOProcessor(PoolingIOProcessor):
     # PTAL: examples/pooling/embed/openai_embedding_long_text
     #################################################################
 
-    def _pre_process_chunked(self, ctx: PoolingServeContext) -> None:
+    def maybe_pre_process_chunked(self, ctx: PoolingServeContext) -> None:
+        if not self.enable_chunked_processing:
+            return None
+
         if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
         ctx.original_engine_inputs = ctx.engine_inputs
         request_id = ctx.request_id
         max_model_len = self.model_config.max_model_len
-        chunked_engine_inputs: list[EngineInput] = []
+        chunked_engine_inputs: list[PoolingEngineInput] = []
         prompt_request_ids: list[str] = []
+        chunked_embedding_metadata: list[ChunkedEmbeddingMetadata] = []
         for prompt_idx, engine_input in enumerate(ctx.engine_inputs):
-            token_ids = engine_input.get("prompt_token_ids", None)
+            token_ids = engine_input["prompts"].get("prompt_token_ids", None)
             if token_ids is None:
                 raise NotImplementedError(
                     "Long Text Embedding with Chunked Processing does "
@@ -127,14 +145,26 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 chunk_list(prompt_token_ids, max_model_len)
             ):
                 chunked_engine_inputs.append(
-                    tokens_input(prompt_token_ids=chunk_tokens)
+                    PoolingEngineInput(
+                        prompts=tokens_input(prompt_token_ids=chunk_tokens),
+                        params=engine_input["params"],
+                        lora_requests=engine_input["lora_requests"],
+                        priorities=engine_input["priorities"],
+                    )
                 )
                 prompt_request_ids.append(
                     f"{request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}"
                 )
+                chunked_embedding_metadata.append(
+                    ChunkedEmbeddingMetadata(
+                        prompt_index=prompt_idx,
+                        chunk_index=chunk_idx,
+                    )
+                )
 
         ctx.engine_inputs = chunked_engine_inputs
         ctx.prompt_request_ids = prompt_request_ids
+        ctx.chunked_embedding_metadata = chunked_embedding_metadata
 
         return None
 
@@ -142,66 +172,48 @@ class EmbedIOProcessor(PoolingIOProcessor):
         # Online aggregation for chunked requests to
         # minimize memory usage
         # Track aggregation state for each prompt
-        prompt_aggregators: dict[int, dict[str, Any]] = {}
-        short_prompts_results: dict[int, PoolingRequestOutput] = {}
-        for result_idx, result in enumerate(ctx.final_res_batch):
-            if "-chunk-" not in result.request_id:
-                # Non-chunked result - extract prompt_idx from request_id
-                parts = result.request_id.split("-")
-                try:
-                    # Last part should be prompt index
-                    prompt_idx = int(parts[-1])
-                except (ValueError, IndexError):
-                    prompt_idx = result_idx  # Fallback to result_idx
+        if ctx.chunked_embedding_metadata is None:
+            raise ValueError("Chunked embedding metadata not available")
+        if len(ctx.chunked_embedding_metadata) != len(ctx.final_res_batch):
+            raise ValueError(
+                "Chunked embedding metadata count does not match result count"
+            )
 
-                short_prompts_results[prompt_idx] = result
+        prompt_aggregators: dict[int, _ChunkedPromptAggregator] = {}
+        for result, chunk_metadata in zip(
+            ctx.final_res_batch, ctx.chunked_embedding_metadata
+        ):
+            prompt_idx = chunk_metadata.prompt_index
+            aggregator = prompt_aggregators.setdefault(
+                prompt_idx, _ChunkedPromptAggregator()
+            )
+
+            # MEAN pooling with online weighted averaging
+            # Ensure result is PoolingRequestOutput
+            # for embedding processing
+            if not isinstance(result, PoolingRequestOutput):
+                raise ValueError(
+                    f"Expected PoolingRequestOutput for "
+                    f"chunked embedding, got "
+                    f"{type(result).__name__}"
+                )
+            if result.prompt_token_ids is None:
+                raise ValueError(
+                    "prompt_token_ids cannot be None for chunked processing"
+                )
+
+            weight = len(result.prompt_token_ids)
+            embedding_data = result.outputs.data
+            weighted_embedding = embedding_data.to(dtype=torch.float32) * weight
+
+            if aggregator.weighted_sum is None:
+                # First chunk
+                aggregator.weighted_sum = weighted_embedding
             else:
-                # Extract prompt_idx from chunked request_id
-                parts = result.request_id.split("-")
-                try:
-                    prompt_idx = int(parts[parts.index("prompt") + 1])
-                except (ValueError, IndexError):
-                    # Fallback: extract from result_idx if parsing fails
-                    prompt_idx = result_idx
+                # Accumulate
+                aggregator.weighted_sum += weighted_embedding
 
-                # Initialize aggregator for this prompt if needed
-                if prompt_idx not in prompt_aggregators:
-                    prompt_aggregators[prompt_idx] = {
-                        "weighted_sum": None,
-                        "total_weight": 0,
-                        "chunk_count": 0,
-                        "request_id": result.request_id.split("-chunk-")[0],
-                    }
-
-                aggregator = prompt_aggregators[prompt_idx]
-
-                # MEAN pooling with online weighted averaging
-                # Ensure result is PoolingRequestOutput
-                # for embedding processing
-                if not isinstance(result, PoolingRequestOutput):
-                    raise ValueError(
-                        f"Expected PoolingRequestOutput for "
-                        f"chunked embedding, got "
-                        f"{type(result).__name__}"
-                    )
-                if result.prompt_token_ids is None:
-                    raise ValueError(
-                        "prompt_token_ids cannot be None for chunked processing"
-                    )
-
-                weight = len(result.prompt_token_ids)
-                embedding_data = result.outputs.data
-                weighted_embedding = embedding_data.to(dtype=torch.float32) * weight
-
-                if aggregator["weighted_sum"] is None:
-                    # First chunk
-                    aggregator["weighted_sum"] = weighted_embedding
-                else:
-                    # Accumulate
-                    aggregator["weighted_sum"] += weighted_embedding
-
-                aggregator["total_weight"] += weight
-                aggregator["chunk_count"] += 1
+            aggregator.total_weight += weight
 
         if ctx.original_engine_inputs is None:
             raise ValueError("Original engine inputs not available")
@@ -216,8 +228,8 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 # Finalize MEAN aggregation for this chunked prompt
                 aggregator = prompt_aggregators[prompt_idx]
 
-                weighted_sum = aggregator["weighted_sum"]
-                total_weight = aggregator["total_weight"]
+                weighted_sum = aggregator.weighted_sum
+                total_weight = aggregator.total_weight
 
                 if (
                     weighted_sum is not None
@@ -234,7 +246,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
                     # Get original prompt token IDs for this prompt
                     original_prompt = original_engine_inputs[prompt_idx]
-                    token_ids = original_prompt.get("prompt_token_ids", None)
+                    token_ids = original_prompt["prompts"].get("prompt_token_ids", None)
                     if token_ids is None:
                         raise NotImplementedError(
                             "Long Text Embedding with Chunked Processing does "
@@ -243,7 +255,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
                     original_token_ids = cast(list[int], token_ids)
                     pooling_request_output = PoolingRequestOutput(
-                        request_id=aggregator["request_id"],
+                        request_id=f"{ctx.request_id}-prompt-{prompt_idx}",
                         prompt_token_ids=original_token_ids,
                         outputs=pooling_output_data,
                         num_cached_tokens=0,
@@ -255,14 +267,74 @@ class EmbedIOProcessor(PoolingIOProcessor):
                     raise ValueError(
                         f"Failed to aggregate chunks for prompt {prompt_idx}"
                     )
-            elif prompt_idx in short_prompts_results:
-                final_res_batch.append(short_prompts_results[prompt_idx])
             else:
                 raise ValueError(f"Result not found for prompt {prompt_idx}")
 
         ctx.final_res_batch = final_res_batch
 
         return None
+
+    #################################################################
+    # Chat input Request Preprocessing & Postprocessing
+    #################################################################
+
+    def _get_request_factory_chat_input_online(
+        self,
+        ctx: PoolingServeContext,
+    ) -> Sequence[AnyRenderParam]:
+        request = ctx.request
+        renderer = self.renderer
+
+        self._validate_chat_template(
+            request_chat_template=request.chat_template,
+            chat_template_kwargs=request.chat_template_kwargs,
+            trust_request_chat_template=self.trust_request_chat_template,
+        )
+
+        if isinstance(
+            request, (EmbeddingBatchChatRequest, EmbeddingBatchChatInputRequest)
+        ):
+            all_messages = request.messages
+        else:
+            all_messages = [request.messages]
+        num_requests = len(all_messages)
+
+        default_template_kwargs = merge_kwargs(
+            self.template_kwargs,
+            dict(
+                tools=self.tool_dicts,
+                tokenize=is_mistral_tokenizer(renderer.tokenizer),
+            ),
+        )
+
+        mm_config = self.model_config.multimodal_config
+        tok_params = request.build_tok_params(self.model_config)
+        chat_params = request.build_chat_params(
+            self.chat_template, self.chat_template_content_format
+        ).with_defaults(
+            default_template_kwargs,
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+        )
+
+        params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
+        seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
+        seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
+
+        requests = [
+            EncodeChatRenderParams(
+                conversations=all_messages[i],
+                chat_params=chat_params,
+                tok_params=tok_params,
+                prompt_extras=ctx.prompt_extras,
+                skip_mm_cache=False,
+                params=params_seq[i],
+                lora_requests=seq_lora_requests[i],
+                priorities=seq_priority[i],
+            )
+            for i in range(num_requests)
+        ]
+
+        return requests
 
     #################################################################
     # Cohere Request Preprocessing & Postprocessing
@@ -380,71 +452,9 @@ class EmbedIOProcessor(PoolingIOProcessor):
             )
         return super().create_pooling_params(request)
 
-    def _pre_process_openai_chat_online(
-        self,
-        ctx: PoolingServeContext[
-            EmbeddingChatRequest
-            | EmbeddingBatchChatRequest
-            | EmbeddingChatInputRequest
-            | EmbeddingBatchChatInputRequest
-        ],
-    ) -> None:
-        request = ctx.request
-        self._validate_chat_template(
-            request_chat_template=request.chat_template,
-            chat_template_kwargs=request.chat_template_kwargs,
-            trust_request_chat_template=self.trust_request_chat_template,
-        )
-
-        if isinstance(
-            request, (EmbeddingBatchChatRequest, EmbeddingBatchChatInputRequest)
-        ):
-            all_messages = request.messages
-        else:
-            all_messages = [request.messages]
-        ctx.engine_inputs = self._batch_render_openai_chat(request, all_messages)
-
-    def _batch_render_openai_chat(
-        self,
-        request: (
-            EmbeddingChatRequest
-            | EmbeddingBatchChatRequest
-            | EmbeddingChatInputRequest
-            | EmbeddingBatchChatInputRequest
-        ),
-        all_messages: Sequence[list[ChatCompletionMessageParam]],
-    ) -> list[EngineInput]:
-        renderer = self.renderer
-        mm_config = self.model_config.multimodal_config
-
-        tok_params = request.build_tok_params(self.model_config)
-        chat_params = request.build_chat_params(
-            self.chat_template,
-            self.chat_template_content_format,
-        ).with_defaults(
-            merge_kwargs(
-                None,
-                dict(
-                    tools=None,
-                    tokenize=is_mistral_tokenizer(renderer.tokenizer),
-                ),
-            ),
-            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
-        )
-
-        _, engine_inputs = renderer.render_chat(
-            all_messages,
-            chat_params,
-            tok_params,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := getattr(request, k, None)) is not None
-            },
-        )
-        return engine_inputs
-
-    def _pre_process_cohere_online(self, ctx: PoolingServeContext) -> None:
+    def _get_request_factory_cohere_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
         """Convert a ``CohereEmbedRequest`` into engine prompts.
 
         If a model has a chat template the task instruction are rendered
@@ -481,13 +491,12 @@ class EmbedIOProcessor(PoolingIOProcessor):
             task_prefix = self._get_task_instruction_prefix(input_type)
 
             if task_prefix is None:
-                ctx.engine_inputs = self._preprocess_cohere_text_completion(
-                    request,
+                return self._get_request_factory_cohere_text_completion(
+                    ctx,
                     texts,
                     truncate_prompt_tokens,
                     truncation_side,
                 )
-                return
 
             all_messages = [
                 self._mixed_input_to_messages(
@@ -499,27 +508,30 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 for text in texts
             ]
             if self._has_chat_template():
-                ctx.engine_inputs = self._batch_render_chat(
-                    request,
+                return self._batch_render_chat(
+                    ctx,
                     all_messages,
                     truncate_prompt_tokens,
                     truncation_side,
                 )
             else:
-                ctx.engine_inputs = self._preprocess_cohere_text_completion(
-                    request,
+                return self._get_request_factory_cohere_text_completion(
+                    ctx,
                     self._apply_task_instruction(texts, input_type),
                     truncate_prompt_tokens,
                     truncation_side,
                 )
-            return
 
         task_prefix = self._get_task_instruction_prefix(input_type)
         all_messages = [
             self._mixed_input_to_messages(inp, task_prefix=task_prefix) for inp in input
         ]
-        ctx.engine_inputs = self._batch_render_chat(
-            request, all_messages, truncate_prompt_tokens, truncation_side
+
+        return self._batch_render_chat(
+            ctx,
+            all_messages,
+            truncate_prompt_tokens,
+            truncation_side,
         )
 
     def _has_chat_template(self) -> bool:
@@ -533,13 +545,14 @@ class EmbedIOProcessor(PoolingIOProcessor):
             is not None
         )
 
-    def _preprocess_cohere_text_completion(
+    def _get_request_factory_cohere_text_completion(
         self,
-        request: CohereEmbedRequest,
+        ctx: PoolingServeContext,
         texts: list[str],
         truncate_prompt_tokens: int | None,
         truncation_side: Literal["left", "right"] | None,
-    ) -> list[EngineInput]:
+    ) -> Sequence[AnyRenderParam]:
+        request = ctx.request
         proxy = EmbeddingCompletionRequest(
             model=request.model,
             input=texts,
@@ -548,50 +561,32 @@ class EmbedIOProcessor(PoolingIOProcessor):
             truncate_prompt_tokens=truncate_prompt_tokens,
             truncation_side=truncation_side,
         )
-        return self._preprocess_cmpl_online(
-            proxy, prompt_input=proxy.input, prompt_embeds=None
-        )
+        ctx.request = proxy
+        requests = super().get_request_factory_online(ctx)
+        ctx.request = request
+        return requests
 
     def _batch_render_chat(
         self,
-        request: CohereEmbedRequest,
+        ctx: PoolingServeContext,
         all_messages: Sequence[list[ChatCompletionMessageParam]],
         truncate_prompt_tokens: int | None,
         truncation_side: Literal["left", "right"] | None,
-    ) -> list[EngineInput]:
+    ) -> Sequence[AnyRenderParam]:
         """Batch-render multiple conversations through the chat template."""
-        if not all_messages:
-            return []
-
-        proxy = EmbeddingChatRequest(
+        request = ctx.request
+        proxy = EmbeddingBatchChatRequest(
             model=request.model,
-            messages=list(all_messages[0]),
+            messages=all_messages,
             dimensions=request.output_dimension,
             encoding_format="float",
             truncate_prompt_tokens=truncate_prompt_tokens,
             truncation_side=truncation_side,
         )
-
-        renderer = self.renderer
-        mm_config = self.model_config.multimodal_config
-
-        tok_params = proxy.build_tok_params(self.model_config)
-        chat_params = proxy.build_chat_params(
-            self.chat_template,
-            self.chat_template_content_format,
-        ).with_defaults(
-            merge_kwargs(
-                None,
-                dict(
-                    tools=None,
-                    tokenize=is_mistral_tokenizer(renderer.tokenizer),
-                ),
-            ),
-            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
-        )
-
-        _, engine_inputs = renderer.render_chat(all_messages, chat_params, tok_params)
-        return engine_inputs
+        ctx.request = proxy
+        requests = self._get_request_factory_chat_input_online(ctx)
+        ctx.request = request
+        return requests
 
     def _validate_input_type(self, input_type: str | None) -> None:
         """Raise if *input_type* is not supported by this model."""
@@ -642,7 +637,9 @@ class TokenEmbedIOProcessor(PoolingIOProcessor):
 class JinaRankingTokenEmbedIOProcessor(
     TokenEmbedIOProcessor, JinaRankingIOProcessorMixin
 ):
-    def pre_process_online(self, ctx: PoolingServeContext):
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
         request = ctx.request
         if isinstance(request, PoolingCompletionLikeRequest):
             prompts = request.input
@@ -657,19 +654,17 @@ class JinaRankingTokenEmbedIOProcessor(
                 query=text_prompts[-1], docs=text_prompts[:-1]
             )
 
-            engine_inputs = self._preprocess_cmpl_online(
-                request,
-                prompt_input=prompt_input,
-                prompt_embeds=None,
-            )
+            request.input = prompt_input
+            return super().get_request_factory_online(ctx)
         elif isinstance(request, PoolingChatLikeRequest):
             raise ValueError("The JinaForRanking does not support chat Request.")
         else:
             raise ValueError(f"Invalid {self.name} request type")
 
-        ctx.engine_inputs = engine_inputs
-
-    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
+    def get_request_factory_offline(
+        self, ctx: AnyOfflineInputsContext
+    ) -> tuple[RequestFactory, int]:
+        assert isinstance(ctx, OfflineEncodeInputsContext)
         if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
             raise ValueError("The JinaForRanking model requires at least 2 inputs.")
 
@@ -681,4 +676,4 @@ class JinaRankingTokenEmbedIOProcessor(
             query=text_prompts[-1], docs=text_prompts[:-1]
         )
 
-        return super().pre_process_offline(ctx)
+        return super().get_request_factory_offline(ctx)
