@@ -155,6 +155,88 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
 
 
+def test_mla_aiter_fp8_post_load_keeps_k_side_dense(monkeypatch):
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.kv_lora_rank = 2
+    layer.num_heads = 2
+    layer.qk_nope_head_dim = 3
+    layer.v_head_dim = 4
+    layer.kv_b_proj = torch.nn.Module()
+    layer.kv_b_proj.weight = torch.nn.Parameter(
+        torch.arange(28.0, dtype=torch.float16).reshape(14, 2)
+    )
+    layer.kv_b_proj.quant_method = None
+    layer.is_aiter_triton_fp4_bmm_enabled = False
+    layer.is_aiter_triton_fp8_bmm_enabled = True
+    layer.dcp_q_replicate = False
+    layer.quant_config = None
+    layer.layer_name = "test"
+
+    precompile_weights = []
+
+    def fake_dynamic_per_batched_tensor_quant(weight, dtype):
+        return weight.contiguous(), torch.ones((), device=weight.device)
+
+    def fake_triton_fp8_bmm(x, weight, scale, **kwargs):
+        precompile_weights.append(weight)
+        return torch.empty(
+            (x.shape[0], x.shape[1], weight.shape[1]),
+            dtype=x.dtype,
+            device=x.device,
+        )
+
+    monkeypatch.setattr(
+        mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
+    )
+    monkeypatch.setattr(
+        mla_attention_module,
+        "dynamic_per_batched_tensor_quant",
+        fake_dynamic_per_batched_tensor_quant,
+    )
+    monkeypatch.setattr(mla_attention_module, "is_global_first_rank", lambda: False)
+    monkeypatch.setattr(
+        mla_attention_module.current_platform,
+        "fp8_dtype",
+        lambda: torch.float8_e4m3fn,
+    )
+    monkeypatch.setattr(
+        mla_attention_module.rocm_aiter_ops,
+        "triton_fp8_bmm",
+        fake_triton_fp8_bmm,
+        raising=False,
+    )
+
+    layer.process_weights_after_loading(torch.float32)
+
+    kv_b_proj_weight = layer.kv_b_proj.weight.T.float().view(
+        layer.kv_lora_rank,
+        layer.num_heads,
+        layer.qk_nope_head_dim + layer.v_head_dim,
+    )
+    expected_w_uk_t = kv_b_proj_weight[:, :, : layer.qk_nope_head_dim].permute(1, 2, 0)
+    expected_w_v = kv_b_proj_weight[:, :, layer.qk_nope_head_dim :].permute(1, 2, 0)
+
+    torch.testing.assert_close(layer.W_UK_T, expected_w_uk_t)
+    torch.testing.assert_close(layer.W_V, expected_w_v)
+
+    q_nope = torch.arange(
+        layer.num_heads * 5 * layer.qk_nope_head_dim, dtype=torch.float32
+    ).view(layer.num_heads, 5, layer.qk_nope_head_dim)
+    actual_k_proj = torch.bmm(q_nope, layer.W_UK_T)
+    expected_k_proj = torch.einsum(
+        "nbp,lnp->nbl",
+        q_nope,
+        kv_b_proj_weight[:, :, : layer.qk_nope_head_dim],
+    )
+    torch.testing.assert_close(actual_k_proj, expected_k_proj)
+
+    assert not hasattr(layer, "W_K")
+    assert not hasattr(layer, "W_K_scale")
+    assert precompile_weights
+    assert all(weight is layer.W_V for weight in precompile_weights)
+
+
 # Validate parameter combinations during collection, before GPU fixtures run.
 PREFILL_BACKENDS_TO_TEST = [
     MLAPrefillBackendEnum.ROCM_AITER_FA,

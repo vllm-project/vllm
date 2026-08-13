@@ -893,15 +893,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     prequant=True,
                     y_scale=self._q_scale if fp8_attention else None,
                 )
-            elif self.is_aiter_triton_fp8_bmm_enabled:
-                # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-                mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                    mqa_q_nope,
-                    self.W_K,
-                    self.W_K_scale,
-                    group_size=128,
-                    transpose_bm=True,
-                )
             else:
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = mqa_q_nope.shape
@@ -1020,9 +1011,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        # we currently do not have quantized bmm's which are needed for
-        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
-        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
+        # Decode uses transformed K/V projection weights. Backends that do not
+        # support quantized BMMs keep these weights dense; AITER paths quantize
+        # the pieces they can run through their BMM kernels below.
         kv_b_proj_weight = get_and_maybe_dequant_weights(
             self.kv_b_proj, out_dtype=act_dtype
         ).T
@@ -1077,11 +1068,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 W_UV.permute(1, 2, 0)
             )
         elif self.is_aiter_triton_fp8_bmm_enabled:
-            W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
-            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
-                W_K, dtype=current_platform.fp8_dtype()
-            )
+            # Keep the transformed K-side weight dense after dequant+transpose;
+            # the V-side up-projection still uses the AITER FP8 BMM.
+            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
             self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
                 W_V, dtype=current_platform.fp8_dtype()
             )
@@ -1100,15 +1090,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
 
             for m in pre_compilation_list:
-                x = torch.empty(
-                    (self.W_K.shape[0], m, self.W_K.shape[2]),
-                    dtype=torch.bfloat16,
-                    device=self.W_K.device,
-                )
-                rocm_aiter_ops.triton_fp8_bmm(
-                    x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
-                )
-
                 x = torch.empty(
                     (self.W_V.shape[0], m, self.W_V.shape[2]),
                     dtype=torch.bfloat16,
