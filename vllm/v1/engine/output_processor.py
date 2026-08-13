@@ -387,6 +387,8 @@ class RequestState:
             ec_transfer_params=ec_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
+            num_local_cached_tokens=self.num_local_cached_tokens,
+            num_external_cached_tokens=self.num_external_cached_tokens,
             metrics=self.stats,
         )
 
