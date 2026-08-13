@@ -72,10 +72,19 @@ def fused_grouped_topk(
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
-@torch.compile(
-    dynamic=True,
-    backend=current_platform.simple_compile_backend,
-    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
+# On the affected XPU stack, compiling this Python router produced invalid
+# expert ids during NemotronH MTP draft warmup. Keep it eager on XPU pending
+# an XPU-safe compiled implementation, while leaving other platforms unchanged.
+@(
+    torch.compiler.disable
+    if current_platform.is_xpu()
+    else torch.compile(
+        dynamic=True,
+        backend=current_platform.simple_compile_backend,
+        options=maybe_disable_graph_partition(
+            current_platform.simple_compile_backend
+        ),
+    )
 )
 def grouped_topk(
     hidden_states: torch.Tensor,
