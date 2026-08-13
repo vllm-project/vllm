@@ -1,0 +1,120 @@
+[
+  {
+    "key": {
+      "hidden_size": 4096,
+      "group_size": 128,
+      "num_tokens": 1
+    },
+    "config": {
+      "block_sizes": [
+        2
+      ],
+      "load_cache_modifiers": [
+        ".cg",
+        ".cg",
+        "",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 1,
+      "reduction_loops": [
+        null
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        "",
+        ""
+      ],
+      "store_cache_modifiers": [
+        ".wt",
+        ".cs",
+        ""
+      ],
+      "indexing": [
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "waves_per_eu": 0,
+      "matrix_instr_nonkdim": 0,
+      "pid_type": "flat",
+      "xcd_remap": false,
+      "range_warp_specializes": [],
+      "range_num_stages": []
+    }
+  },
+  {
+    "key": {
+      "hidden_size": 4096,
+      "group_size": 128,
+      "num_tokens": 128
+    },
+    "config": {
+      "block_sizes": [
+        1
+      ],
+      "load_cache_modifiers": [
+        ".cg",
+        ".cg",
+        "",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 1,
+      "reduction_loops": [
+        null
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        "",
+        ""
+      ],
+      "store_cache_modifiers": [
+        ".wt",
+        ".cs",
+        ""
+      ],
+      "indexing": [
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "waves_per_eu": 0,
+      "matrix_instr_nonkdim": 0,
+      "pid_type": "flat",
+      "xcd_remap": false,
+      "range_warp_specializes": [],
+      "range_num_stages": []
+    }
+  }
+]

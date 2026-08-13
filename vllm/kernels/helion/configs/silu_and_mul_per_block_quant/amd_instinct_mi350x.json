@@ -1,0 +1,55 @@
+[
+  {
+    "key": {
+      "intermediate_size": 12288,
+      "group_size": 128,
+      "num_tokens": 128
+    },
+    "config": {
+      "block_sizes": [
+        1
+      ],
+      "loop_orders": [
+        [
+          0,
+          1,
+          2
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        0
+      ],
+      "range_multi_buffers": [
+        null
+      ],
+      "range_flattens": [
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        ""
+      ],
+      "load_cache_modifiers": [
+        "",
+        ""
+      ],
+      "store_cache_modifiers": [
+        "",
+        ""
+      ],
+      "num_warps": 1,
+      "num_stages": 1,
+      "indexing": "pointer",
+      "pid_type": "flat",
+      "xcd_remap": false,
+      "waves_per_eu": 0,
+      "matrix_instr_nonkdim": 32,
+      "atomic_indexing": [],
+      "range_warp_specializes": [],
+      "range_num_stages": []
+    }
+  }
+]

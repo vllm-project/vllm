@@ -160,13 +160,41 @@ class QuantFP8(CustomOp):
         scale_ub: torch.Tensor | None = None,
         use_triton: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Prefer the CUDA-graph-aware Helion route for dynamic group quant even
+        # when AITER remains enabled for FP8 GEMM. During compilation the native
+        # op is emitted and retargeted by HelionFusionRoutingPass instead.
+        if (
+            envs.VLLM_USE_HELION_KERNELS
+            and self.is_group_quant
+            and not self.static
+            and not torch.compiler.is_compiling()
+            and x.is_contiguous()
+            and torch.cuda.is_current_stream_capturing()
+        ):
+            from vllm.kernels.helion.ops import import_all_kernels
+            from vllm.kernels.helion.register import get_kernel_by_name
+
+            import_all_kernels()
+            kernel = get_kernel_by_name("per_token_group_fp8_quant")
+            if kernel is not None and kernel.is_enabled:
+                return self.forward_cuda(x, scale, scale_ub)
+
         use_aiter_quant = self.use_aiter and scale_ub is None and x.is_contiguous()
         use_aiter_per_tensor_quant = (
             use_aiter_quant and self.group_shape.is_per_tensor()
         )
         use_aiter_per_token_quant = use_aiter_quant and self.group_shape.is_per_token()
 
-        use_aiter_per_group_quant = use_aiter_quant and self.group_shape.is_per_group()
+        use_aiter_per_group_quant = (
+            use_aiter_quant
+            and self.group_shape.is_per_group()
+            # Preserve the native group-quant target while compiling so the
+            # post-grad Helion routing pass can retarget it. Outside compile
+            # and CUDA-graph capture, keep the normal AITER eager path.
+            and not (
+                envs.VLLM_USE_HELION_KERNELS and torch.compiler.is_compiling()
+            )
+        )
 
         if use_aiter_per_group_quant:
             return rocm_aiter_ops.group_fp8_quant(x, self.group_size)

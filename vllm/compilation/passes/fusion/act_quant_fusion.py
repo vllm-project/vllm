@@ -8,6 +8,7 @@ import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._ops import OpOverload
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -318,5 +319,11 @@ class ActivationQuantFusionPass(VllmFusionPatternMatcherPass):
                         is_tma_aligned=is_tma_aligned,
                     )
                 )
+        elif current_platform.is_rocm() and envs.VLLM_USE_HELION_KERNELS:
+            # ROCm's Helion route currently supports the serving layout used
+            # by block-scaled FP8 linear: group size 128, ordinary FP32 scales.
+            # Register that native fusion before the AITER-specific pass so
+            # Helion can take precedence while AITER remains enabled for GEMM.
+            self.register(SiluMulBlockQuantPattern(kFp8Dynamic128Sym))
 
         self.dump_patterns(config, self.pm_pass)

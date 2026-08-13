@@ -161,6 +161,26 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
+            self.helion_routing = None
+            # Build the routing map before choosing ROCm fusion pass order.
+            # When both AITER and Helion are enabled, native fusions supported
+            # by Helion must run before their AITER-specific counterparts so
+            # the final target-only routing pass can still recognize them.
+            if envs.VLLM_USE_HELION_KERNELS and bool(
+                config.compilation_config.cudagraph_mode
+            ):
+                from .fusion.helion_routing import HelionFusionRoutingPass
+
+                self.helion_routing = HelionFusionRoutingPass(config)
+
+            helion_native_ops = (
+                set(self.helion_routing.op_map) if self.helion_routing else set()
+            )
+            prefer_helion_rms_quant = any(
+                op._schema.name == "_C::rms_norm_per_block_quant"
+                for op in helion_native_ops
+            )
+
             if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
 
@@ -189,11 +209,14 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [RMSNormReshapeFusionPass(config)]
 
             if self.pass_config.fuse_norm_quant:
+                if prefer_helion_rms_quant:
+                    self.passes += [RMSNormQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [
                         RocmAiterRMSNormQuantFusionPass(config),
                     ]
-                self.passes += [RMSNormQuantFusionPass(config)]
+                if not prefer_helion_rms_quant:
+                    self.passes += [RMSNormQuantFusionPass(config)]
 
             if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]
@@ -228,16 +251,6 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             self.clone_elimination = UnsafeCloneEliminationPass(config)
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
-            self.helion_routing = None
-            # The routed op only wins inside CUDA-graph capture; outside capture
-            # it just adds a dispatch + native fallback. Skip routing entirely
-            # when cudagraphs are disabled so eager execution is unchanged.
-            if envs.VLLM_USE_HELION_KERNELS and bool(
-                config.compilation_config.cudagraph_mode
-            ):
-                from .fusion.helion_routing import HelionFusionRoutingPass
-
-                self.helion_routing = HelionFusionRoutingPass(config)
 
     def add(self, pass_: InductorPass) -> None:
         assert isinstance(pass_, InductorPass)

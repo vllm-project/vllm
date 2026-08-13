@@ -28,6 +28,10 @@ if not has_helion():
 import helion
 import helion.language as hl
 
+from vllm.kernels.helion.ops.rocm.rms_norm_per_block_quant import (
+    rms_norm_per_block_quant_baseline_rocm,
+    rms_norm_per_block_quant_rocm,
+)
 from vllm.kernels.helion.register import register_kernel
 
 logger = init_logger(__name__)
@@ -94,16 +98,15 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
             device=input.device,
         )
         epsilon = 1e-6
-        # scale_ub clamps the per-group amax of the RMS-normed, weighted output.
-        # Use a non-degenerate upper bound (midway between the mean and max of
-        # that magnitude) so clamping is partially active and the baseline
-        # comparison is meaningful. torch.mean(input) ~= 0 for the zero-mean
-        # input would collapse every scale to the floor and saturate the output.
-        # Mirrors the reference normalization in baseline() below.
-        x = input.to(torch.float32) + residual.to(torch.float32)
-        rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + epsilon)
-        x_norm_abs = ((x * rms).to(input.dtype) * weight).abs().to(torch.float32)
-        scale_ub = (0.5 * (x_norm_abs.mean() + x_norm_abs.amax())).to(scale_dtype)
+        if current_platform.is_rocm():
+            # AITER's fused RMSNorm/group-quant ops do not support scale_ub.
+            scale_ub = None
+        else:
+            # Use a non-degenerate upper bound so clamping is partially active.
+            x = input.to(torch.float32) + residual.to(torch.float32)
+            rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + epsilon)
+            x_norm_abs = ((x * rms).to(input.dtype) * weight).abs().to(torch.float32)
+            scale_ub = (0.5 * (x_norm_abs.mean() + x_norm_abs.amax())).to(scale_dtype)
 
         config_key = CaseKey(
             {
@@ -262,13 +265,21 @@ def baseline(
     )
 
 
+autotune_baseline = (
+    rms_norm_per_block_quant_baseline_rocm
+    if current_platform.is_rocm()
+    else baseline
+)
+
+
 @register_kernel(
     mutates_args=["result", "scale", "residual"],
     config_picker=pick_config,
+    rocm_kernel_func=rms_norm_per_block_quant_rocm,
     input_generator=generate_inputs,
     fake_impl=fake_impl,
     helion_settings=helion.Settings(
-        autotune_baseline_fn=baseline,
+        autotune_baseline_fn=autotune_baseline,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
     ),
     single_configs=_SINGLE_CONFIGS,

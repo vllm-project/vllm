@@ -12,6 +12,9 @@ from vllm.compilation.passes.inductor_pass import InductorPass
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.kernels.helion.routing import build_compiled_helion_op_map
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def route_helion_fusion_ops(
@@ -44,7 +47,18 @@ class HelionFusionRoutingPass(VllmInductorPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        route_helion_fusion_ops(graph, self.op_map)
+        self.matched_count = route_helion_fusion_ops(graph, self.op_map)
+        routed_targets = set(self.op_map.values())
+        routed_names = sorted(
+            node.target._schema.name
+            for node in graph.nodes
+            if node.op == "call_function" and node.target in routed_targets
+        )
+        logger.debug(
+            "HelionFusionRoutingPass routed %d ops: %s",
+            self.matched_count,
+            routed_names,
+        )
 
     def uuid(self) -> str:
         return InductorPass.hash_dict(
