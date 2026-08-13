@@ -1468,6 +1468,9 @@ def _promote_local_kv_cache_specs(
             promoted_specs[layer_name] = replace_as(
                 spec,
                 target_cls,
+                # Promoted specs allocate blocks for all tokens and never free
+                # below the window, so the trailing-edge extension is moot.
+                drop=("extra_retained_tokens",),
                 block_size=block_size,
                 page_size_padded=promoted_page_size_padded(spec, block_size),
             )
@@ -2128,6 +2131,21 @@ def get_kv_cache_configs(
     # Check if the KV cache specs are registered correctly.
     # This is to prevent that some layers are initialized with unregistered specs.
     KVCacheSpecRegistry.check_kv_cache_spec_registry(merged_kv_cache_specs)
+
+    # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
+    # tag every SlidingWindowSpec with how many extra tokens to retain in the window.
+    extra_retained_tokens = (
+        vllm_config.speculative_config.num_speculative_tokens - 1
+        if vllm_config.speculative_config is not None
+        and vllm_config.speculative_config.use_multi_module_mtp()
+        else 0
+    )
+    for layer_name, layer_spec in merged_kv_cache_specs.items():
+        if isinstance(layer_spec, SlidingWindowSpec):
+            merged_kv_cache_specs[layer_name] = replace(
+                layer_spec, extra_retained_tokens=extra_retained_tokens
+            )
+
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
     # After this call, merged_kv_cache_specs may be modified in-place.
