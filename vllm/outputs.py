@@ -227,7 +227,7 @@ class PoolingRequestOutput(Generic[_O]):
         self.finished = finished
         self.outputs = outputs
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"{type(self).__name__}(request_id={self.request_id!r}, "
             f"outputs={self.outputs!r}, "
@@ -249,7 +249,7 @@ class EmbeddingOutput:
     embedding: list[float]
 
     @staticmethod
-    def from_base(pooling_output: PoolingOutput):
+    def from_base(pooling_output: PoolingOutput) -> "EmbeddingOutput":
         pooled_data = pooling_output.data
         if pooled_data.ndim != 1:
             raise ValueError("pooled_data should be a 1-D embedding vector")
@@ -266,7 +266,9 @@ class EmbeddingOutput:
 
 class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
     @staticmethod
-    def from_base(request_output: PoolingRequestOutput):
+    def from_base(
+        request_output: PoolingRequestOutput,
+    ) -> "EmbeddingRequestOutput":
         return EmbeddingRequestOutput(
             request_id=request_output.request_id,
             outputs=EmbeddingOutput.from_base(request_output.outputs),
@@ -288,7 +290,7 @@ class ClassificationOutput:
     probs: list[float]
 
     @staticmethod
-    def from_base(pooling_output: PoolingOutput):
+    def from_base(pooling_output: PoolingOutput) -> "ClassificationOutput":
         # pooling_output shape: (num_classes)
         pooled_data = pooling_output.data
         if pooled_data.ndim != 1:
@@ -306,7 +308,9 @@ class ClassificationOutput:
 
 class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
     @staticmethod
-    def from_base(request_output: PoolingRequestOutput):
+    def from_base(
+        request_output: PoolingRequestOutput,
+    ) -> "ClassificationRequestOutput":
         return ClassificationRequestOutput(
             request_id=request_output.request_id,
             outputs=ClassificationOutput.from_base(request_output.outputs),
@@ -327,7 +331,7 @@ class ScoringOutput:
     score: float
 
     @staticmethod
-    def from_base(pooling_output: PoolingOutput):
+    def from_base(pooling_output: PoolingOutput) -> "ScoringOutput":
         # pooling_output shape:
         #   classify task: (num_classes) num_classes == 1
         #   embed task: a scalar value
@@ -343,7 +347,9 @@ class ScoringOutput:
 
 class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
     @staticmethod
-    def from_base(request_output: PoolingRequestOutput):
+    def from_base(
+        request_output: PoolingRequestOutput,
+    ) -> "ScoringRequestOutput":
         return ScoringRequestOutput(
             request_id=request_output.request_id,
             outputs=ScoringOutput.from_base(request_output.outputs),
