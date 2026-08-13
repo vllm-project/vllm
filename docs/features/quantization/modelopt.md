@@ -33,6 +33,12 @@ following `quantization.quant_algo` values:
     [Engine Arguments](../../configuration/engine_args.md) page and shown by
     `vllm serve --help=KernelConfig`.
 
+!!! note
+    For MXFP8 checkpoints on SM100, SM103, and SM107 GPUs, BF16 models can
+    select FlashInfer's TRTLLM dense GEMM explicitly with
+    `--linear-backend flashinfer_trtllm`. Automatic MXFP8 kernel selection is
+    unchanged.
+
 ## Quantizing HuggingFace Models with PTQ
 
 You can quantize HuggingFace models using the example scripts provided in the Model Optimizer repository. The primary script for LLM PTQ is typically found within the `examples/llm_ptq` directory.
