@@ -28,6 +28,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import (
     OpenAIServingChat,
     _get_mm_token_counts,
+    _make_completion_tokens_details,
     _make_prompt_tokens_details,
 )
 from vllm.entrypoints.openai.engine.protocol import (
@@ -848,6 +849,10 @@ def test_mm_prompt_tokens_details():
     assert details.cached_tokens == 3
     assert details.created_cache_tokens == 0
     assert details.multimodal_tokens == {"image": 600, "video": 1200}
+
+
+def test_completion_tokens_details():
+    assert _make_completion_tokens_details(7).reasoning_tokens == 7
 
 
 @pytest.mark.asyncio
