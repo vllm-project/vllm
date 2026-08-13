@@ -159,15 +159,7 @@ class ModelState(ABC):
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor | None:
-        """Prepare the ``inputs_embeds`` tensor for the current forward pass.
-
-        Despite its location next to ``encoder_runner``, this hook covers all
-        sources of ``inputs_embeds``: multimodal embeddings (via the encoder
-        runner), user-supplied ``prompt_embeds`` overlays, and any future
-        embedding sources. Returns the buffer to feed into ``model.forward``,
-        or ``None`` for ranks/configurations that do not consume embeddings
-        directly.
-        """
+        """Prepare the ``inputs_embeds`` tensor for the current forward pass."""
         raise NotImplementedError
 
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
@@ -184,6 +176,9 @@ class ModelState(ABC):
         """
         mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
             scheduled_encoder_inputs
+        )
+        mm_hashes, mm_kwargs = self.encoder_cache.cache_passthrough_embeds(
+            mm_hashes, mm_kwargs, self.device
         )
         if mm_kwargs:
             with self.encoder_runner.timed_encoder_operation(

@@ -46,6 +46,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -223,6 +224,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             self.model_config
+        )
+        self.uses_inputs_embeds = (
+            self.supports_mm_inputs or self.model_config.enable_prompt_embeds
         )
         self.encoder_cache = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
@@ -945,7 +949,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
 
             # Streaming input update: request already exists from a prior
@@ -953,16 +956,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # with the updated prompt_token_ids and mm_features.
             self._remove_request(req_id)
 
-            if new_req_data.prompt_token_ids is not None:
-                prompt_len = len(new_req_data.prompt_token_ids)
-            else:
-                assert new_req_data.prompt_embeds is not None
-                prompt_len = len(new_req_data.prompt_embeds)
+            prompt_len = new_req_data.prompt_len
+            all_token_ids = new_req_data.all_token_ids
+            assert all_token_ids is not None
             sampling_params = new_req_data.sampling_params
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,
-                all_token_ids=new_req_data.prefill_token_ids,
+                all_token_ids=all_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
             )
@@ -972,6 +973,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
+                assert new_req_data.prompt_token_ids is not None
                 self.pooling_runner.add_request(
                     req_id,
                     req_index,
@@ -994,12 +996,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_index, prompt_len, new_req_data.sampling_params
                 )
                 assert self.prompt_logprobs_worker is not None
-                # Pure prompt_embeds requests have no real prompt token ids,
-                # so prompt logprobs cannot be computed against them.
-                if new_req_data.prompt_token_ids is not None:
-                    self.prompt_logprobs_worker.add_request(
-                        req_id, req_index, new_req_data.sampling_params
-                    )
+                self.prompt_logprobs_worker.add_request(
+                    req_id, req_index, new_req_data.sampling_params
+                )
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
@@ -1534,9 +1533,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_ids = input_batch.input_ids
         inputs_embeds = None
         ec_connector_output = None
-        if (
-            self.supports_mm_inputs or self.model_config.enable_prompt_embeds
-        ) and self.is_first_pp_rank:
+        if self.uses_inputs_embeds and self.is_first_pp_rank:
             # Prepare inputs_embeds (MM encoder outputs and/or prompt_embeds
             # overlay). Only first PP rank prepares them.
             if dummy_run:
@@ -1560,17 +1557,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ) as ec_connector_output:
                     if self.is_encoder_only:
                         # Encode and publish, nothing else: this instance runs no
-                        # language model, so the gather inside
-                        # prepare_inputs_embeds would build an inputs_embeds
-                        # nobody reads -- and it raises "Encoder cache miss" for
-                        # any scheduled item this instance did not encode, taking
-                        # the engine down with it.
+                        # language model, so the gather inside prepare_inputs_embeds
+                        # would build an inputs_embeds nobody reads -- and it
+                        # raises "Encoder cache miss" for any scheduled item this
+                        # instance did not encode, taking the engine down with it.
                         self.model_state.execute_mm_encoder(scheduled_encoder_inputs)
                     else:
                         inputs_embeds = self.model_state.prepare_inputs_embeds(
                             scheduled_encoder_inputs, input_batch, self.req_states
                         )
-            if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
+            if inputs_embeds is not None and not requires_raw_input_tokens(self.model):
                 input_ids = None
 
         if self.is_encoder_only:

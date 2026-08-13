@@ -54,6 +54,10 @@ class EncoderDecoderModelState(ModelState):
         device: torch.device,
     ) -> None:
         assert encoder_cache is not None
+        if vllm_config.model_config.enable_prompt_embeds:
+            raise ValueError(
+                "--enable-prompt-embeds is not supported with encoder-decoder models."
+            )
         super().__init__(vllm_config, model, encoder_cache, device)
 
         self.max_encoder_len = getattr(

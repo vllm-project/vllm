@@ -15,7 +15,13 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalSharedField,
+    PlaceholderRange,
+)
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -23,6 +29,25 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 pytestmark = pytest.mark.cpu_test
 
 HIDDEN = 4
+
+
+def _model_state(cache: EncoderCache) -> MagicMock:
+    """A mock ModelState backed by a real EncoderCache."""
+    state = MagicMock()
+    state.encoder_cache = cache
+    state.device = torch.device("cpu")
+    return state
+
+
+def _embeds_item(embeds: torch.Tensor) -> MultiModalKwargsItem:
+    """A `prompt_embeds` kwargs item, as the HF renderer builds it."""
+    return MultiModalKwargsItem(
+        {
+            "embedding": MultiModalFieldElem(
+                data=embeds, field=MultiModalSharedField(batch_size=1)
+            )
+        }
+    )
 
 
 def _feature(identifier: str, offset: int, length: int) -> MultiModalFeatureSpec:
@@ -197,8 +222,7 @@ def test_execute_mm_encoder_caches_outputs_without_gathering():
     items the connector already holds, and a producer has no load path).
     """
     cache = EncoderCache()
-    state = MagicMock()
-    state.encoder_cache = cache
+    state = _model_state(cache)
     embedding = torch.ones(2, HIDDEN)
     # (mm_hashes, [(modality, kwargs item), ...]), as prepare_mm_inputs returns.
     state.encoder_runner.prepare_mm_inputs.return_value = (
@@ -216,14 +240,57 @@ def test_execute_mm_encoder_caches_outputs_without_gathering():
 def test_execute_mm_encoder_is_a_noop_without_scheduled_items():
     """A step that schedules no encoder input must not touch the encoder."""
     cache = EncoderCache()
-    state = MagicMock()
-    state.encoder_cache = cache
+    state = _model_state(cache)
     state.encoder_runner.prepare_mm_inputs.return_value = ([], [])
 
     ModelState.execute_mm_encoder(state, {})
 
     assert not cache.encoder_outputs
     state.encoder_runner.execute_mm_encoder.assert_not_called()
+
+
+def test_execute_mm_encoder_passes_prompt_embeds_through():
+    """`prompt_embeds` is already in embedding space, so no encoder may run.
+
+    The renderer delivers prompt_embeds mixed with real media as an ordinary MM
+    modality. The tensor must land in the encoder cache directly -- the vision
+    encoder cannot consume it, and a missing cache entry makes the subsequent
+    gather raise "Encoder cache miss".
+    """
+    cache = EncoderCache()
+    state = _model_state(cache)
+    prompt_embeds = torch.arange(2 * HIDDEN, dtype=torch.float32).view(2, HIDDEN)
+    image_embeds = torch.ones(2, HIDDEN)
+    state.encoder_runner.prepare_mm_inputs.return_value = (
+        ["hash_pe", "hash_img"],
+        [("prompt_embeds", _embeds_item(prompt_embeds)), ("image", MagicMock())],
+    )
+    state.encoder_runner.execute_mm_encoder.return_value = [image_embeds]
+
+    ModelState.execute_mm_encoder(state, {"req0": [0, 1]})
+
+    # The encoder saw only the image, but both items are cached and correctly
+    # paired with their hashes.
+    (encoded,) = state.encoder_runner.execute_mm_encoder.call_args.args
+    assert [modality for modality, _ in encoded] == ["image"]
+    assert torch.equal(cache.encoder_outputs["hash_pe"], prompt_embeds)
+    assert torch.equal(cache.encoder_outputs["hash_img"], image_embeds)
+
+
+def test_execute_mm_encoder_skips_encoder_for_prompt_embeds_only():
+    """A batch of nothing but prompt_embeds must not invoke the encoder."""
+    cache = EncoderCache()
+    state = _model_state(cache)
+    prompt_embeds = torch.ones(3, HIDDEN)
+    state.encoder_runner.prepare_mm_inputs.return_value = (
+        ["hash_pe"],
+        [("prompt_embeds", _embeds_item(prompt_embeds))],
+    )
+
+    ModelState.execute_mm_encoder(state, {"req0": [0]})
+
+    state.encoder_runner.execute_mm_encoder.assert_not_called()
+    assert torch.equal(cache.encoder_outputs["hash_pe"], prompt_embeds)
 
 
 def test_encoder_timing_stats_registry():

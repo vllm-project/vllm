@@ -68,6 +68,31 @@ class NewRequestData:
             prefill_token_ids=prefill_token_ids,
         )
 
+    @property
+    def prompt_len(self) -> int:
+        if self.prompt_token_ids is not None:
+            return len(self.prompt_token_ids)
+        if self.prompt_embeds is not None:
+            return self.prompt_embeds.shape[0]
+        return 0
+
+    @property
+    def all_token_ids(self) -> list[int] | None:
+        """Used only by v2 model runner."""
+
+        all_token_ids = self.prefill_token_ids
+        if all_token_ids is None:
+            return None
+        if self.prompt_embeds is None or self.prompt_is_token_ids is None:
+            return all_token_ids
+        # Positions covered by prompt_embeds hold a sentinel token id that may lie
+        # outside the embedding table (an added special token). Zero them so the base
+        # embedding gather stays in bounds; rows are overwritten by the overlay kernel.
+        is_token_ids = self.prompt_is_token_ids
+        return [
+            t if is_tok else 0 for t, is_tok in zip(all_token_ids, is_token_ids)
+        ] + all_token_ids[len(is_token_ids) :]
+
     def __repr__(self) -> str:
         prompt_embeds_shape = (
             self.prompt_embeds.shape if self.prompt_embeds is not None else None

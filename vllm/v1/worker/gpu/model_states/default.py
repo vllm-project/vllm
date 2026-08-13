@@ -18,6 +18,7 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import get_rope_state
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
+from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -32,17 +33,17 @@ class DefaultModelState(ModelState):
     ):
         super().__init__(vllm_config, model, encoder_cache, device)
 
-        self.supports_prompt_embeds = self.model_config.enable_prompt_embeds
-        if self.supports_prompt_embeds:
+        self.prompt_embeds_state: PromptEmbedsState | None = None
+        if self.model_config.enable_prompt_embeds:
+            self.prompt_embeds_state = PromptEmbedsState(
+                self.max_num_reqs, self.inputs_embeds_size, self.dtype, self.device
+            )
             if not self.supports_mm_inputs:
+                # Persistent buffer analogous to encoder_runner.inputs_embeds.
+                embeds_buffer_size = (self.max_num_tokens, self.inputs_embeds_size)
                 self.inputs_embeds = torch.zeros(
-                    self.max_num_tokens,
-                    self.inputs_embeds_size,
-                    dtype=self.dtype,
-                    device=self.device,
+                    embeds_buffer_size, dtype=self.dtype, device=self.device
                 )
-            self.prompt_embeds: dict[str, torch.Tensor] = {}
-            self.prompt_is_token_ids: dict[str, torch.Tensor | None] = {}
 
         self.rope_state = get_rope_state(
             self.model_config,
@@ -61,35 +62,29 @@ class DefaultModelState(ModelState):
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
+            # `prompt_embeds` is a passthrough modality with no grid info, but
+            # M-RoPE assumes per-feature grids. Filter it out.
+            mm_features = [
+                f for f in new_req_data.mm_features if f.modality != "prompt_embeds"
+            ]
             self.rope_state.init_prefill_positions(
                 req_index,
                 self.model,
                 new_req_data.prefill_token_ids,
-                mm_features=new_req_data.mm_features,
+                mm_features=mm_features,
             )
-        if self.supports_prompt_embeds:
-            req_id = new_req_data.req_id
-            if new_req_data.prompt_embeds is None:
-                self.prompt_embeds.pop(req_id, None)
-                self.prompt_is_token_ids.pop(req_id, None)
-            else:
-                self.prompt_embeds[req_id] = new_req_data.prompt_embeds
-                prompt_is_token_ids = new_req_data.prompt_is_token_ids
-                self.prompt_is_token_ids[req_id] = (
-                    None
-                    if prompt_is_token_ids is None
-                    else torch.tensor(prompt_is_token_ids, dtype=torch.bool)
-                )
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.add_request(req_index, new_req_data)
 
     def remove_request(self, req_id: str) -> None:
-        super().remove_request(req_id)
-        if self.supports_prompt_embeds:
-            self.prompt_embeds.pop(req_id, None)
-            self.prompt_is_token_ids.pop(req_id, None)
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.remove_request(req_id)
 
     def apply_staged_writes(self) -> None:
         if self.rope_state is not None:
             self.rope_state.apply_staged_writes()
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.apply_staged_writes()
 
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
         """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
@@ -114,8 +109,7 @@ class DefaultModelState(ModelState):
             if self.mm_pruner is not None and mm_embeds:
                 # EVS: recompute mrope positions for pruned media.
                 mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)
-                # We must flush the staged rope updates for prepare_inputs() to
-                # pick up.
+                # We must flush the staged rope updates for prepare_inputs() to pick up.
                 self.apply_staged_writes()
 
             inputs_embeds = self.encoder_runner.get_inputs_embeds(
@@ -126,8 +120,10 @@ class DefaultModelState(ModelState):
             self.inputs_embeds[: input_embeddings.shape[0]] = input_embeddings
             inputs_embeds = self.inputs_embeds
 
-        if self.supports_prompt_embeds:
-            self._apply_prompt_embeds(input_batch, req_states, inputs_embeds)
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.apply(
+                input_batch, req_states.num_computed_tokens.gpu, inputs_embeds
+            )
 
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 
@@ -141,55 +137,6 @@ class DefaultModelState(ModelState):
             # EVS: strip the appended mrope-position channels.
             mm_embeds = self.mm_pruner.strip(mm_embeds)
         return mm_embeds, is_mm_embed
-
-    def _apply_prompt_embeds(
-        self,
-        input_batch: InputBatch,
-        req_states: RequestState,
-        inputs_embeds: torch.Tensor,
-    ) -> None:
-        prefill_lens = req_states.prefill_len.np[input_batch.idx_mapping_np]
-        computed_lens = req_states.num_computed_prefill_tokens[
-            input_batch.idx_mapping_np
-        ]
-
-        for batch_idx, req_id in enumerate(input_batch.req_ids):
-            prompt_embeds = self.prompt_embeds.get(req_id)
-            if prompt_embeds is None:
-                continue
-
-            query_start = int(computed_lens[batch_idx])
-            query_end = min(
-                query_start + int(input_batch.num_scheduled_tokens[batch_idx]),
-                int(prefill_lens[batch_idx]),
-                prompt_embeds.shape[0],
-            )
-            if query_start >= query_end:
-                continue
-
-            out_start = int(input_batch.query_start_loc_np[batch_idx])
-            out_end = out_start + query_end - query_start
-            src = prompt_embeds[query_start:query_end].to(
-                device=self.device,
-                dtype=self.dtype,
-                non_blocking=True,
-            )
-
-            prompt_is_token_ids = self.prompt_is_token_ids.get(req_id)
-            if prompt_is_token_ids is None:
-                inputs_embeds[out_start:out_end].copy_(src)
-                continue
-
-            token_mask = prompt_is_token_ids[query_start:query_end]
-            embed_positions = torch.nonzero(~token_mask, as_tuple=False).flatten()
-            if embed_positions.numel() == 0:
-                continue
-            embed_positions = embed_positions.to(device=self.device, non_blocking=True)
-            inputs_embeds[out_start:out_end].index_copy_(
-                0,
-                embed_positions,
-                src.index_select(0, embed_positions),
-            )
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
@@ -208,7 +155,7 @@ class DefaultModelState(ModelState):
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
-        if self.supports_mm_inputs or self.supports_prompt_embeds:
+        if self.supports_mm_inputs or self.prompt_embeds_state is not None:
             model_inputs["inputs_embeds"] = self.dummy_inputs_embeds(num_tokens)
         if self.rope_state is not None:
             model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
