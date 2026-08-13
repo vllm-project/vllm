@@ -961,6 +961,47 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.parametrize(
+    ("num_rows", "seq_len"),
+    [
+        pytest.param(33, 16384, id="filtered_short"),
+        pytest.param(8, 8192, id="persistent_decode"),
+        pytest.param(8, 12288, id="persistent_medium"),
+        pytest.param(33, 32769, id="filtered_large"),
+    ],
+)
+@torch.inference_mode()
+def test_persistent_topk_candidate_buffer_overflow(
+    top_k: int, num_rows: int, seq_len: int
+) -> None:
+    """Narrow score distributions must not truncate threshold candidates."""
+    generator = torch.Generator(device="cpu").manual_seed(0)
+    logits = (
+        1.0 + torch.rand(num_rows, seq_len, generator=generator) * 0.01
+    ).cuda()
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    _run_topk_backend(
+        "persistent_topk", logits, lengths, indices, top_k, seq_len
+    )
+    torch.accelerator.synchronize()
+
+    assert torch.all((indices >= 0) & (indices < seq_len))
+    sorted_indices = indices.sort(dim=1).values
+    assert torch.all(sorted_indices[:, 1:] != sorted_indices[:, :-1])
+
+    selected = torch.gather(logits, 1, indices.long()).sort(
+        dim=1, descending=True
+    ).values
+    expected = torch.topk(logits, top_k, dim=1).values.sort(
+        dim=1, descending=True
+    ).values
+    torch.testing.assert_close(selected, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @torch.inference_mode()

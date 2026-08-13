@@ -73,6 +73,85 @@ __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
   return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
+// Exact, bounded-memory fallback for candidate-buffer overflow. Each radix
+// round rescans the full row, so correctness does not depend on how many
+// values share a coarse histogram bin. This is intentionally slower than the
+// buffered paths and is entered only after an overflow is detected.
+template <uint32_t TopK, uint32_t BlockSize>
+__device__ void exact_topk_rescan(const float* __restrict__ scores,
+                                  int32_t* __restrict__ output,
+                                  uint32_t length, void* _smem) {
+  static_assert(BlockSize >= RADIX);
+  struct ExactSmem {
+    uint32_t histogram[RADIX];
+    uint32_t prefix;
+    uint32_t remaining;
+    uint32_t output_counter;
+  };
+
+  auto* smem = static_cast<ExactSmem*>(_smem);
+  const uint32_t tx = threadIdx.x;
+
+  if (tx == 0) {
+    smem->prefix = 0;
+    smem->remaining = TopK;
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (uint32_t round = 0; round < 4; ++round) {
+    if (tx < RADIX) smem->histogram[tx] = 0;
+    __syncthreads();
+
+    const uint32_t shift = 24 - round * 8;
+    const uint32_t mask =
+        (round == 0) ? 0u : (~0u << (32 - round * 8));
+    const uint32_t prefix = smem->prefix;
+
+    for (uint32_t idx = tx; idx < length; idx += BlockSize) {
+      const uint32_t ordered = convert_to_uint32_v2(scores[idx]);
+      if ((ordered & mask) == prefix) {
+        atomicAdd(&smem->histogram[(ordered >> shift) & 0xFF], 1);
+      }
+    }
+    __syncthreads();
+
+    if (tx == 0) {
+      uint32_t count_above = 0;
+      for (int bin = RADIX - 1; bin >= 0; --bin) {
+        const uint32_t count = smem->histogram[bin];
+        if (count_above + count >= smem->remaining) {
+          smem->remaining -= count_above;
+          smem->prefix |= static_cast<uint32_t>(bin) << shift;
+          break;
+        }
+        count_above += count;
+      }
+    }
+    __syncthreads();
+  }
+
+  if (tx == 0) smem->output_counter = 0;
+  __syncthreads();
+
+  const uint32_t pivot = smem->prefix;
+  for (uint32_t idx = tx; idx < length; idx += BlockSize) {
+    if (convert_to_uint32_v2(scores[idx]) > pivot) {
+      const uint32_t pos = atomicAdd(&smem->output_counter, 1);
+      if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
+    }
+  }
+  __syncthreads();
+
+  for (uint32_t idx = tx; idx < length; idx += BlockSize) {
+    if (convert_to_uint32_v2(scores[idx]) == pivot) {
+      const uint32_t pos = atomicAdd(&smem->output_counter, 1);
+      if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
+    }
+  }
+  __syncthreads();
+}
+
 // Converts each score to a 12-bit bin (FP16 sign-magnitude -> top 12 bits ->
 // bin 0-4095)
 template <uint32_t kBits>
@@ -445,6 +524,13 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
   // Phase 3: Scatter from registers
   const auto [thr_bin, num_above, num_equal] = smem->match;
   const bool need_tie = (num_equal + num_above > TopK);
+
+  // The scatter below intentionally stores at most TopK candidates even when
+  // the union is larger (kMaxTies for small K), so TopK is the real capacity.
+  if (need_tie && num_equal > TopK) {
+    exact_topk_rescan<TopK, kBlockSize>(scores, output, length, _smem);
+    return;
+  }
 
   done = false;
 #pragma unroll

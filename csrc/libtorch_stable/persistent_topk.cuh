@@ -305,6 +305,11 @@ __device__ __noinline__ void histogram_2048_topk(
 
   // If all buffered elements fit, output them all (common for short seqs)
   const int raw_buf0 = decode_smem[SBASE + sBUF0];
+  if (raw_buf0 > DBUF) {
+    topk_histogram_4096::exact_topk_rescan<TopK, kThreadsPerBlock>(
+        logits, output_indices, static_cast<uint32_t>(seq_len), decode_smem);
+    return;
+  }
   if (raw_buf0 <= remaining_k) {
     const int nb = (raw_buf0 < DBUF) ? raw_buf0 : DBUF;
     const int base = decode_smem[SBASE + sOUT];
@@ -351,6 +356,11 @@ __device__ __noinline__ void histogram_2048_topk(
     const int dst = src ^ 1;
 
     const int raw_buf = decode_smem[SBASE + sBUF0 + src];
+    if (raw_buf > DBUF) {
+      topk_histogram_4096::exact_topk_rescan<TopK, kThreadsPerBlock>(
+          logits, output_indices, static_cast<uint32_t>(seq_len), decode_smem);
+      return;
+    }
     const int num_buffered = (raw_buf < DBUF) ? raw_buf : DBUF;
 
     compute_suffix_sum();
@@ -524,6 +534,12 @@ __device__ __noinline__ void histogram_256_topk(
     const int src_buffer = pass % 2;
     const int dst_buffer = src_buffer ^ 1;
     const int raw_buffered = shared_buffered_count[src_buffer];
+    if (raw_buffered > MAX_BUFFERED_ITEMS) {
+      topk_histogram_4096::exact_topk_rescan<TopK, kThreadsPerBlock>(
+          logits + logits_offset, output_indices,
+          static_cast<uint32_t>(seq_len), medium_smem);
+      return;
+    }
     const int num_buffered =
         (raw_buffered < MAX_BUFFERED_ITEMS) ? raw_buffered : MAX_BUFFERED_ITEMS;
 
@@ -1198,6 +1214,11 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
       const auto r_idx = round % 2;
 
       const auto _raw_num_input = s_num_input[r_idx];
+      if (_raw_num_input > SMEM_INPUT_SIZE) {
+        hist4096::exact_topk_rescan<MAX_K, BLOCK_SIZE>(score, dst, length,
+                                                       s_input_idx);
+        return;
+      }
       const auto num_input =
           (_raw_num_input < SMEM_INPUT_SIZE) ? _raw_num_input : SMEM_INPUT_SIZE;
 
