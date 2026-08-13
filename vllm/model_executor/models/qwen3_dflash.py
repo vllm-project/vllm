@@ -56,19 +56,12 @@ _SLIDING_ATTENTION = "sliding_attention"
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
-    """``dflash_config.causal`` overrides all layers; else only SWA layers of a
-    *mixed* ``layer_types`` are causal."""
+    """``dflash_config.causal`` overrides all layers; else only SWA layers causal."""
     override = (getattr(config, "dflash_config", None) or {}).get("causal")
     if override is not None:
         return override
     layer_types = getattr(config, "layer_types", None)
-    if not layer_types:
-        return False
-    num_sliding = sum(t == _SLIDING_ATTENTION for t in layer_types)
-    if not 0 < num_sliding < len(layer_types):
-        # Uniform config (all sliding or all full): nothing to infer, non-causal.
-        return False
-    return layer_types[layer_idx] == _SLIDING_ATTENTION
+    return bool(layer_types) and layer_types[layer_idx] == _SLIDING_ATTENTION
 
 
 def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
