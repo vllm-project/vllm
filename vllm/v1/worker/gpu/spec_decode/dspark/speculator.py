@@ -79,13 +79,6 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_model_config.hf_config, "dspark_draft_topk", None
         )
 
-        self.draft_token_confidence_probs = torch.empty_like(
-            self.draft_tokens, dtype=torch.float32
-        )
-        self.enable_adaptive_verification = (
-            self.speculative_config.enable_adaptive_verification
-        )
-
     def load_draft_model(
         self,
         target_model: torch.nn.Module,

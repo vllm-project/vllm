@@ -137,16 +137,15 @@ class DraftModelSpeculator(BaseSpeculator):
             self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
         )
 
-        # Adaptive verification needs a per-position acceptance probability.
-        # DSpark supplies one from a trained confidence head and overrides this
-        # machinery; every other speculator estimates it from the draft logits
-        # and calibrates online against observed acceptance.
+        self.draft_token_confidence_probs = torch.empty_like(
+            self.draft_tokens, dtype=torch.float32
+        )
         self.enable_adaptive_verification = (
             self.speculative_config.enable_adaptive_verification
         )
         self.acceptance_estimator: OnlineAcceptanceEstimator | None = None
-        if self.enable_adaptive_verification and self.method != "dspark":
-            if self.use_local_argmax_reduction:
+        if self.enable_adaptive_verification:
+            if self.method != "dspark" and self.use_local_argmax_reduction:
                 raise ValueError(
                     "Adaptive verification estimates acceptance from the draft "
                     "logits, which use_local_argmax_reduction never "
@@ -154,11 +153,6 @@ class DraftModelSpeculator(BaseSpeculator):
                 )
             self.acceptance_estimator = OnlineAcceptanceEstimator(
                 self.max_num_reqs, self.num_speculative_steps, device
-            )
-            # Same buffer the DSpark confidence head fills, so adaptive
-            # verification reads one name whatever produced the estimate.
-            self.draft_token_confidence_probs = torch.empty_like(
-                self.draft_tokens, dtype=torch.float32
             )
 
         self.draft_logits: torch.Tensor | None = None
@@ -361,7 +355,7 @@ class DraftModelSpeculator(BaseSpeculator):
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
         logits = self.model.compute_logits(hidden_states)
-        self._score_acceptance(logits, idx_mapping, draft_step)
+        self._maybe_score_confidence(logits, idx_mapping, draft_step)
         return logits.argmax(dim=-1)
 
     def sample_draft(
@@ -376,7 +370,7 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            self._score_acceptance(logits, idx_mapping, draft_step)
+            self._maybe_score_confidence(logits, idx_mapping, draft_step)
             # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
             # used for draft and target sampling.
             return gumbel_sample(
@@ -392,14 +386,19 @@ class DraftModelSpeculator(BaseSpeculator):
             )
         return self._greedy_sample(hidden_states, idx_mapping, draft_step)
 
-    def _score_acceptance(
+    def _maybe_score_confidence(
         self,
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
         draft_step: torch.Tensor,
     ) -> None:
         if self.acceptance_estimator is not None:
-            self.acceptance_estimator.predict(logits, idx_mapping, draft_step)
+            self.acceptance_estimator.predict(
+                logits,
+                idx_mapping,
+                draft_step,
+                self.draft_token_confidence_probs,
+            )
 
     @final
     def propose(
@@ -430,7 +429,9 @@ class DraftModelSpeculator(BaseSpeculator):
                 num_rejected,
             )
 
-        draft_tokens = self._propose(
+        # _propose fills draft_token_confidence_probs on the way through, via
+        # _score_acceptance.
+        return self._propose(
             input_batch,
             attn_metadata,
             slot_mappings,
@@ -448,13 +449,6 @@ class DraftModelSpeculator(BaseSpeculator):
             mm_inputs=mm_inputs,
             is_profile=is_profile,
         )
-
-        if not dummy_run and not is_profile and self.acceptance_estimator is not None:
-            self.acceptance_estimator.gather_acceptance_probs(
-                input_batch.idx_mapping,
-                self.draft_token_confidence_probs,
-            )
-        return draft_tokens
 
     @abstractmethod
     def _propose(

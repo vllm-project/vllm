@@ -938,7 +938,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
-        for req_id in finished_req_ids:
+        # Sorted so every TP rank frees request slots in the same order.
+        # Features like batch-sharded sampling derive rank request ownership
+        # from the slot index.
+        for req_id in sorted(finished_req_ids):
             self._remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:

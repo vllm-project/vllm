@@ -21,8 +21,8 @@ A per-position logistic maps margin to acceptance probability::
 
 Two parameters per draft position, fit by Newton-IRLS from sufficient statistics
 accumulated on device. Observations are never stored: each is folded straight
-into a 2x2 information matrix and a 2-vector gradient per position, so the
-entire learning state is a few dozen floats regardless of traffic.
+into a symmetric 2x2 information matrix and a 2-vector gradient per position, so
+the entire learning state is a few dozen floats regardless of traffic.
 """
 
 import os
@@ -39,171 +39,209 @@ from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
-# Logits are floored here rather than at -inf: a vocab shard that is entirely
-# padding would otherwise make the running-max rescale compute (-inf) - (-inf).
-_NEG = -1.0e30
+# Stands in for "no logit here": the running-max initializer, the fill for
+# out-of-range vocab lanes, and the floor for genuine -inf entries. Finite rather
+# than -inf so an all-padding block yields 0 rather than (-inf) - (-inf) = NaN,
+# far below any real logit, and well inside fp32 and bf16 range so subtracting it
+# cannot overflow. The other Triton top-k kernels use the same value.
+_MIN_LOGIT = -1.0e30
 # A row with a single finite entry would emit an unbounded margin.
 _MAX_MARGIN = 40.0
 
 
 @triton.jit
-def _top2_margin_kernel(
-    logits_ptr,
-    logits_row_stride,
-    slot_ptr,
-    step_ptr,
-    out_ptr,
-    out_row_stride,
-    num_tokens,
-    vocab_size,
-    per_token_step: tl.constexpr,
-    NEG: tl.constexpr,
-    MAX_MARGIN: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    """Top-2 logit margin per token, one streaming pass over the vocab.
-
-    Scatters into ``out[slot, step]`` so the result is keyed by persistent
-    request-state index, matching how draft state is carried across steps.
-    """
-    token = tl.program_id(0).to(tl.int64)
-    if token >= num_tokens:
-        return
-    row = logits_ptr + token * logits_row_stride
-
-    m1 = NEG
-    m2 = NEG
-    for start in tl.range(0, vocab_size, BLOCK_SIZE):
-        block = start + tl.arange(0, BLOCK_SIZE)
-        mask = block < vocab_size
-        logits = tl.load(row + block, mask=mask, other=NEG).to(tl.float32)
-        logits = tl.where(mask, tl.maximum(logits, NEG), NEG)
-
-        b1 = tl.max(logits, axis=0)
-        # A tied maximum means the margin is genuinely zero, so count duplicates
-        # rather than masking one out by index.
-        num_at_max = tl.sum((logits == b1).to(tl.int32), axis=0)
-        b2_below = tl.max(tl.where(logits < b1, logits, NEG), axis=0)
-        b2 = tl.where(num_at_max > 1, b1, b2_below)
-
-        m2 = tl.where(b1 > m1, tl.maximum(m1, b2), tl.maximum(m2, b1))
-        m1 = tl.maximum(m1, b1)
-
-    slot = tl.maximum(tl.load(slot_ptr + token).to(tl.int64), 0)
-    if per_token_step:
-        step = tl.load(step_ptr + token).to(tl.int64)
-    else:
-        step = tl.load(step_ptr).to(tl.int64)
-    tl.store(out_ptr + slot * out_row_stride + step, tl.minimum(m1 - m2, MAX_MARGIN))
-
-
-@triton.jit
-def _observe_kernel(
-    idx_ptr,
-    num_sampled_ptr,
-    num_rejected_ptr,
-    margin_ptr,
-    pred_ptr,
-    slot_row_stride,
+def _accumulate_kernel(
     info_ptr,
     grad_ptr,
+    idx_mapping_ptr,
+    num_sampled_ptr,
+    num_rejected_ptr,
+    margins_ptr,
+    margins_stride,
+    pred_ptr,
+    pred_stride,
     counts_ptr,
     num_reqs,
     BLOCK_R: tl.constexpr,
 ):
-    """Fold one step's graded drafts into the per-position IRLS statistics.
-
-    One program per draft position, so each owns its accumulator slots outright
-    and needs no atomics. Written as a single kernel because the elementwise
-    formulation costs ~36 launches per step, which at these tensor sizes is all
-    dispatch overhead and no arithmetic.
-    """
     step = tl.program_id(0).to(tl.int64)
-    r = tl.arange(0, BLOCK_R)
-    active = r < num_reqs
+    req_block = tl.arange(0, BLOCK_R)
+    req_mask = req_block < num_reqs
+    req_state_block = tl.load(idx_mapping_ptr + req_block, mask=req_mask, other=0).to(
+        tl.int64
+    )
+    req_state_block = tl.maximum(req_state_block, 0)
 
-    slot = tl.load(idx_ptr + r, mask=active, other=0).to(tl.int64)
-    slot = tl.maximum(slot, 0)
-    # num_sampled is accepted + 1 bonus; num_rejected is admitted - accepted.
-    num_accepted = tl.load(num_sampled_ptr + r, mask=active, other=0).to(tl.int64) - 1
-    num_accepted = tl.maximum(num_accepted, 0)
-    num_admitted = num_accepted + tl.load(
-        num_rejected_ptr + r, mask=active, other=0
-    ).to(tl.int64)
+    # num_sampled is accepted + 1 bonus.
+    num_sampled = tl.load(num_sampled_ptr + req_block, mask=req_mask, other=0).to(
+        tl.int64
+    )
+    num_accepted = tl.maximum(num_sampled - 1, 0)
+    num_rejected = tl.load(num_rejected_ptr + req_block, mask=req_mask, other=0).to(
+        tl.int64
+    )
+    num_admitted = num_accepted + num_rejected
 
-    off = slot * slot_row_stride + step
-    margin = tl.load(margin_ptr + off, mask=active, other=0.0).to(tl.float32)
-    pred = tl.load(pred_ptr + off, mask=active, other=0.0).to(tl.float32)
+    margin = tl.load(
+        margins_ptr + req_state_block * margins_stride + step, mask=req_mask, other=0.0
+    ).to(tl.float32)
+    pred = tl.load(
+        pred_ptr + req_state_block * pred_stride + step,
+        mask=req_mask,
+        other=0.0,
+    ).to(tl.float32)
 
-    # Observed only while the chain reached this position and the position was
-    # actually verified; that conditioning is what the survival product wants.
-    #
-    # num_admitted also covers slot recycling, so no separate validity bit is
-    # needed: a newly admitted request has nothing to verify yet, because drafts
-    # must be proposed before they can be graded, and by the time it does the
-    # draft step has already overwritten the slot's margins with its own.
-    observed = active & (step <= num_accepted) & (step < num_admitted)
-    m = tl.where(observed, 1.0, 0.0)
+    observed = req_mask & (step <= num_accepted) & (step < num_admitted)
+    mask = tl.where(observed, 1.0, 0.0)
     label = tl.where(step < num_accepted, 1.0, 0.0)
-    w = pred * (1.0 - pred) * m
-    resid = (label - pred) * m
+    w = pred * (1.0 - pred) * mask
+    resid = (label - pred) * mask
 
-    tl.store(
-        info_ptr + step * 4 + 0,
-        tl.load(info_ptr + step * 4 + 0) + tl.sum(w * margin * margin, axis=0),
-    )
-    cross = tl.sum(w * margin, axis=0)
-    tl.store(info_ptr + step * 4 + 1, tl.load(info_ptr + step * 4 + 1) + cross)
-    tl.store(info_ptr + step * 4 + 2, tl.load(info_ptr + step * 4 + 2) + cross)
-    tl.store(
-        info_ptr + step * 4 + 3, tl.load(info_ptr + step * 4 + 3) + tl.sum(w, axis=0)
-    )
-    tl.store(
-        grad_ptr + step * 2 + 0,
-        tl.load(grad_ptr + step * 2 + 0) + tl.sum(resid * margin, axis=0),
-    )
-    tl.store(
-        grad_ptr + step * 2 + 1,
-        tl.load(grad_ptr + step * 2 + 1) + tl.sum(resid, axis=0),
-    )
-    tl.store(counts_ptr + step, tl.load(counts_ptr + step) + tl.sum(m, axis=0))
+    # Weighted normal-equation pieces for this round, subscripted by position in
+    # the design row x = [margin, 1]: the information matrix XtWX, which being
+    # symmetric is kept as its upper triangle, and the score Xt(y - p).
+    xtwx_00 = tl.sum(w * margin * margin, axis=0)
+    xtwx_01 = tl.sum(w * margin, axis=0)
+    xtwx_11 = tl.sum(w, axis=0)
+    xtr_0 = tl.sum(resid * margin, axis=0)
+    xtr_1 = tl.sum(resid, axis=0)
+    count = tl.sum(mask, axis=0)
+    tl.store(info_ptr + step * 3 + 0, tl.load(info_ptr + step * 3 + 0) + xtwx_00)
+    tl.store(info_ptr + step * 3 + 1, tl.load(info_ptr + step * 3 + 1) + xtwx_01)
+    tl.store(info_ptr + step * 3 + 2, tl.load(info_ptr + step * 3 + 2) + xtwx_11)
+    tl.store(grad_ptr + step * 2 + 0, tl.load(grad_ptr + step * 2 + 0) + xtr_0)
+    tl.store(grad_ptr + step * 2 + 1, tl.load(grad_ptr + step * 2 + 1) + xtr_1)
+    tl.store(counts_ptr + step, tl.load(counts_ptr + step) + count)
 
 
-def compute_top2_margin(
-    logits: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    draft_step: torch.Tensor,
-    out: torch.Tensor,
-) -> None:
-    """Scatter per-token top-2 logit margins into ``out[slot, step]``.
+@triton.jit
+def _refit_kernel(
+    coef_ptr,
+    coef_stride,
+    info_ptr,
+    info_row_stride,
+    grad_ptr,
+    grad_row_stride,
+    counts_ptr,
+    NUM_SPECULATIVE_STEPS: tl.constexpr,
+    L2: tl.constexpr,
+    MIN_ROUND: tl.constexpr,
+    INV_TP: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    k = tl.arange(0, BLOCK)
+    mask = k < NUM_SPECULATIVE_STEPS
 
-    Args:
-        logits: [num_tokens, vocab] draft logits for this call. Autoregressive
-            speculators pass one position for every request; block speculators
-            pass every (request, position) pair flattened.
-        idx_mapping: [num_tokens] persistent request-state index per token.
-        draft_step: scalar or [num_tokens] draft position per token, exactly as
-            handed to ``gumbel_sample`` as ``logits_cache_col``.
-        out: [max_num_reqs, num_steps] float32 destination.
-    """
-    num_tokens, vocab_size = logits.shape
-    _top2_margin_kernel[(num_tokens,)](
-        logits,
-        logits.stride(0),
-        idx_mapping,
-        draft_step,
-        out,
-        out.stride(0),
-        num_tokens,
-        vocab_size,
-        per_token_step=draft_step.dim() > 0,
-        NEG=_NEG,
-        MAX_MARGIN=_MAX_MARGIN,
-        # Tuned on GB200 at [448, 129280] fp32: 51us / 4570 GB/s, i.e. bandwidth
-        # bound, versus 61us at 4096 and 55us at 16384.
-        BLOCK_SIZE=8192,
-        num_warps=8,
-    )
+    # Upper triangle of XtWX as packed by _accumulate_kernel: with design row
+    # x = [margin, 1] and IRLS weight w = p(1-p), that is
+    # [[sum w*margin*margin, sum w*margin], [sum w*margin, sum w]].
+    a = tl.load(info_ptr + k * info_row_stride + 0, mask=mask, other=0.0) + L2
+    b = tl.load(info_ptr + k * info_row_stride + 1, mask=mask, other=0.0)
+    c = tl.load(info_ptr + k * info_row_stride + 2, mask=mask, other=0.0) + L2
+    g0 = tl.load(grad_ptr + k * grad_row_stride + 0, mask=mask, other=0.0)
+    g1 = tl.load(grad_ptr + k * grad_row_stride + 1, mask=mask, other=0.0)
+    n = tl.load(counts_ptr + k, mask=mask, other=0.0)
+    w = tl.load(coef_ptr + k, mask=mask, other=0.0)
+    bias = tl.load(coef_ptr + coef_stride + k, mask=mask, other=0.0)
+
+    # Closed-form 2x2 inverse: A^-1 = 1/det * [[c, -b], [-b, a]].
+    det = a * c - b * b
+    step_w = (c * g0 - b * g1) / det
+    step_b = (a * g1 - b * g0) / det
+
+    ok = (tl.abs(det) > 1e-12) & (n >= MIN_ROUND)
+    # Mask out NaNs and steps that would drive the weight negative.
+    ok &= (step_w == step_w) & (step_b == step_b) & (w + step_w >= 0.0)
+    new_w = tl.where(ok, w + step_w, w)
+    new_b = tl.where(ok, bias + step_b, bias)
+
+    tl.store(coef_ptr + k, new_w * INV_TP, mask=mask)
+    tl.store(coef_ptr + coef_stride + k, new_b * INV_TP, mask=mask)
+
+    # Start the next round clean: each refit fits its own window, which is also
+    # what lets the estimator track workload drift.
+    tl.store(info_ptr + k * info_row_stride + 0, 0.0, mask=mask)
+    tl.store(info_ptr + k * info_row_stride + 1, 0.0, mask=mask)
+    tl.store(info_ptr + k * info_row_stride + 2, 0.0, mask=mask)
+    tl.store(grad_ptr + k * grad_row_stride + 0, 0.0, mask=mask)
+    tl.store(grad_ptr + k * grad_row_stride + 1, 0.0, mask=mask)
+    tl.store(counts_ptr + k, 0.0, mask=mask)
+
+
+@triton.jit
+def _predict_kernel(
+    margins_ptr,
+    margins_stride,
+    pred_ptr,
+    pred_stride,
+    conf_ptr,
+    conf_stride,
+    coef_ptr,
+    coef_stride,
+    logits_ptr,
+    logits_stride,
+    idx_mapping_ptr,
+    step_ptr,
+    num_tokens,
+    vocab_size,
+    per_token_step: tl.constexpr,
+    NUM_SPECULATIVE_STEPS: tl.constexpr,
+    MIN_LOGIT: tl.constexpr,
+    MAX_MARGIN: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    if token_idx >= num_tokens:
+        return
+
+    req_state_idx = tl.load(idx_mapping_ptr + token_idx).to(tl.int64)
+    if req_state_idx < 0:
+        # Cudagraph-padded requests carry -1. Skip them so that they don't
+        # scatter garbage over a live request's margins.
+        return
+
+    # Get the top-2 logits for this token.
+    logits_row = logits_ptr + token_idx * logits_stride
+    # Each lane keeps its own top two and the lanes are combined once at the
+    # end, rather than reducing the block to a scalar pair every iteration.
+    lane = tl.arange(0, BLOCK_SIZE)
+    lane_max1 = tl.full((BLOCK_SIZE,), MIN_LOGIT, tl.float32)
+    lane_max2 = tl.full((BLOCK_SIZE,), MIN_LOGIT, tl.float32)
+    for start in tl.range(0, vocab_size, BLOCK_SIZE):
+        block = start + lane
+        mask = block < vocab_size
+        block_logits = tl.load(logits_row + block, mask=mask, other=MIN_LOGIT).to(
+            tl.float32
+        )
+        block_logits = tl.maximum(block_logits, MIN_LOGIT)
+        lane_max2 = tl.maximum(lane_max2, tl.minimum(lane_max1, block_logits))
+        lane_max1 = tl.maximum(lane_max1, block_logits)
+    max1 = tl.max(lane_max1, axis=0)
+    tie_indices = tl.argmax(lane_max1, axis=0, tie_break_left=True)
+    max2 = tl.max(tl.where(lane == tie_indices, lane_max2, lane_max1), axis=0)
+
+    # A per-row step means the speculator sampled the whole block in one pass, so
+    # each request owns NUM_SPECULATIVE_STEPS consecutive rows; a step shared by
+    # every row means one row per request. Batch position, unlike req_state_idx,
+    # is only meaningful for the step that computed it, and is what adaptive
+    # verification indexes by.
+    if per_token_step:
+        step = tl.load(step_ptr + token_idx).to(tl.int64)
+        batch_idx = token_idx // NUM_SPECULATIVE_STEPS
+    else:
+        step = tl.load(step_ptr).to(tl.int64)
+        batch_idx = token_idx
+
+    # Compute the top-2 margin: max1 - max2.
+    margin = tl.minimum(max1 - max2, MAX_MARGIN)
+    tl.store(margins_ptr + req_state_idx * margins_stride + step, margin)
+
+    # Predict the acceptance probability from the margin and current coefficients.
+    weight = tl.load(coef_ptr + step)
+    bias = tl.load(coef_ptr + coef_stride + step)
+    prob = tl.sigmoid(weight * margin + bias)
+    tl.store(pred_ptr + req_state_idx * pred_stride + step, prob)
+    tl.store(conf_ptr + batch_idx * conf_stride + step, prob)
 
 
 class OnlineAcceptanceEstimator:
@@ -215,23 +253,22 @@ class OnlineAcceptanceEstimator:
        into the IRLS accumulators, and periodically solves for new coefficients,
        independently but identically on every rank.
     2. ``predict`` runs inside the captured draft graph, turning this step's
-       margins into acceptance probabilities for adaptive verification.
+       draft logits into acceptance probabilities for adaptive verification.
 
     For the first few refits the estimator reports ``needs_full_verification``;
     callers verify whole draft blocks during that window so the labels it learns
     from are not censored by its own trimming.
     """
 
+    # Adaptive verification is skipped for this many refits before the estimator
+    # is considered trained enough to trim drafts.
+    NUM_WARMUP_REFITS = int(
+        os.getenv("VLLM_ACCEPTANCE_ESTIMATOR_NUM_WARMUP_REFITS", "3")
+    )
+    # After warmup, refit every this many steps, accumulating samples in between.
     REFIT_INTERVAL = 100
-    # Full blocks are verified for this many refits before trimming starts.
-    # Gating on a step count rather than an observation count keeps the decision
-    # host-side: reading accumulated counts would need a sync on the serving
-    # path. Held-out AUC saturates around 250 observations per position, which
-    # even the rarest position clears well inside this window at any useful
-    # concurrency.
-    WARMUP_REFITS = int(os.getenv("VLLM_AE_WARMUP_REFITS", "3"))
-    # A position with fewer observations than this in a round is left alone
-    # rather than fit from noise.
+    # A draft position with fewer collected samples than this skips fitting to avoid
+    # fitting to noise.
     MIN_ROUND_OBSERVATIONS = 50
     # Ridge on the 2x2 solve.
     L2 = 1e-3
@@ -239,10 +276,10 @@ class OnlineAcceptanceEstimator:
     def __init__(
         self,
         max_num_reqs: int,
-        num_steps: int,
+        num_speculative_steps: int,
         device: torch.device,
     ):
-        self.num_steps = num_steps
+        self.num_speculative_steps = num_speculative_steps
         self.device = device
         self._steps_since_refit = 0
         self._refits = 0
@@ -254,33 +291,45 @@ class OnlineAcceptanceEstimator:
         # reallocate. A zero slope with a bias matching a plausible acceptance
         # rate makes the initial estimate uniform, which still lets the cost
         # model size the budget.
-        self.weight = torch.zeros(num_steps, dtype=torch.float32, device=device)
-        self.bias = torch.full((num_steps,), 1.5, dtype=torch.float32, device=device)
-
-        # Per-slot state carried from the draft step to the verify step.
-        self.slot_margin = torch.zeros(
-            max_num_reqs, num_steps, dtype=torch.float32, device=device
+        # Packed as [weight, bias] rows so the cross-rank all-reduce is a single
+        # collective, and predict() a single pointer.
+        self.coefficients = torch.zeros(
+            2, num_speculative_steps, dtype=torch.float32, device=device
         )
-        # Prediction made at draft time: gathered into batch order for the
-        # verification manager, and reused as the IRLS weight when the label
-        # arrives on the next step.
-        self.slot_pred = torch.zeros(
-            max_num_reqs, num_steps, dtype=torch.float32, device=device
+        self.coefficients[1].fill_(1.5)
+
+        # Difference between the top two logits, which is used as the feature for
+        # the logistic. Stored in stable slots keyed by persistent request-state index.
+        self.margins = torch.zeros(
+            max_num_reqs, num_speculative_steps, dtype=torch.float32, device=device
+        )
+        # Predictions made at draft time, in the same stable slots as the margins
+        # they came from, because the label that grades them only arrives on the
+        # next step, by which point the batch has been reordered. Reused as the
+        # IRLS weight then.
+        self.predictions = torch.zeros(
+            max_num_reqs, num_speculative_steps, dtype=torch.float32, device=device
         )
 
-        # Sufficient statistics. Design row is [margin, 1].
-        self.info = torch.zeros(num_steps, 2, 2, dtype=torch.float32, device=device)
-        self.grad = torch.zeros(num_steps, 2, dtype=torch.float32, device=device)
-        # Per-round observation counts, zeroed at each refit; the cumulative
+        # Per-round Newton-IRLS statistics, cleared after each refit. With design
+        # row x = [margin, 1], info accumulates w*x*x^T and grad (y - p)*x. The
+        # former is symmetric, so only its upper triangle [00, 01, 11] is kept.
+        self.info = torch.zeros(
+            num_speculative_steps, 3, dtype=torch.float32, device=device
+        )
+        self.grad = torch.zeros(
+            num_speculative_steps, 2, dtype=torch.float32, device=device
+        )
+        # Per-round observation counts, zeroed after each refit. the cumulative
         # tally decides when the estimate is trustworthy enough to trim on.
-        self.counts = torch.zeros(num_steps, dtype=torch.float32, device=device)
-
-        self._steps = torch.arange(num_steps, device=device)
+        self.counts = torch.zeros(
+            num_speculative_steps, dtype=torch.float32, device=device
+        )
 
     @property
     def needs_full_verification(self) -> bool:
         """Whether callers must still verify whole draft blocks."""
-        return self._refits < self.WARMUP_REFITS
+        return self._refits < self.NUM_WARMUP_REFITS
 
     def step(
         self,
@@ -288,16 +337,18 @@ class OnlineAcceptanceEstimator:
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
     ) -> None:
+        # Accumulate the previous step's graded drafts into the IRLS statistics.
         num_reqs = idx_mapping.shape[0]
-        _observe_kernel[(self.num_steps,)](
+        _accumulate_kernel[(self.num_speculative_steps,)](
+            self.info,
+            self.grad,
             idx_mapping,
             num_sampled,
             num_rejected,
-            self.slot_margin,
-            self.slot_pred,
-            self.slot_margin.stride(0),
-            self.info,
-            self.grad,
+            self.margins,
+            self.margins.stride(0),
+            self.predictions,
+            self.predictions.stride(0),
             self.counts,
             num_reqs,
             BLOCK_R=triton.next_power_of_2(max(num_reqs, 1)),
@@ -308,61 +359,32 @@ class OnlineAcceptanceEstimator:
             return
         self._steps_since_refit = 0
 
-        # One Newton step per position from this round alone. Curvature and
-        # gradient must describe the same data at the same coefficients: a
-        # gradient carried across a step points where we have already gone, and
-        # stepping on it again overshoots.
-        a = self.info[:, 0, 0] + self.L2
-        b = self.info[:, 0, 1]
-        c = self.info[:, 1, 1] + self.L2
-        det = a * c - b * b
-        g0, g1 = self.grad[:, 0], self.grad[:, 1]
-        step_w = (c * g0 - b * g1) / det
-        step_b = (a * g1 - b * g0) / det
-        ok = torch.isfinite(det) & (det.abs() > 1e-12)
-        ok &= torch.isfinite(step_w) & torch.isfinite(step_b)
-        # A round too thin to fit -- a rare deep position at low concurrency --
-        # keeps the coefficients it has rather than lurching on noise.
-        ok &= self.counts >= self.MIN_ROUND_OBSERVATIONS
-        new_w = torch.where(ok, self.weight + step_w, self.weight)
-        new_b = torch.where(ok, self.bias + step_b, self.bias)
-        # A negative slope would say a more decisive draft is less likely to be
-        # accepted; treat it as a bad fit rather than trusting it.
-        keep = new_w >= 0.0
-        new_w = torch.where(keep, new_w, self.weight)
-        new_b = torch.where(keep, new_b, self.bias)
-
+        # Fit the coefficients to the accumulated statistics gathered over the
+        # course of the last REFIT_INTERVAL steps.
+        _refit_kernel[(1,)](
+            self.coefficients,
+            self.coefficients.stride(0),
+            self.info,
+            self.info.stride(0),
+            self.grad,
+            self.grad.stride(0),
+            self.counts,
+            NUM_SPECULATIVE_STEPS=self.num_speculative_steps,
+            L2=self.L2,
+            MIN_ROUND=self.MIN_ROUND_OBSERVATIONS,
+            INV_TP=1.0 / self._tp_size,
+            BLOCK=triton.next_power_of_2(self.num_speculative_steps),
+        )
         if self._tp_size > 1:
-            # Ranks must hold identical coefficients: they set the budget, hence
-            # the token count, hence the cudagraph shape and which collectives
-            # every rank issues. Disagreement is not a slightly worse estimate,
-            # it is a hang, and the accumulators are observed to drift apart
-            # even though the draft logits feeding them are bit-identical.
-            #
-            # A device all-reduce in stream order, unconditional and at the same
-            # point on every rank -- unlike broadcast_object, which travels the
-            # message queue the executor uses for its own RPCs and deadlocks it.
-            averaged = (
-                tensor_model_parallel_all_reduce(
-                    torch.stack((new_w, new_b)).contiguous()
-                )
-                / self._tp_size
-            )
-            new_w, new_b = averaged[0], averaged[1]
-
-        self.weight.copy_(new_w)
-        self.bias.copy_(new_b)
-        # Start the next round clean: each refit is a fit over its own window,
-        # which is also what makes the estimator track workload drift.
-        self.info.zero_()
-        self.grad.zero_()
-        self.counts.zero_()
+            # All-reduce so that all ranks hold identical coefficients. _refit_kernel
+            # already scaled them by 1/tp_size, so this sum is the mean.
+            self.coefficients.copy_(tensor_model_parallel_all_reduce(self.coefficients))
 
         self._refits += 1
-        if self._refits == self.WARMUP_REFITS:
+        if self._refits == self.NUM_WARMUP_REFITS:
             logger.info(
-                "Acceptance estimator fitted after %d steps; adaptive "
-                "verification now trimming.",
+                "Acceptance estimator fitted after %d steps. Adaptive "
+                "verification is now active.",
                 self._refits * self.REFIT_INTERVAL,
             )
 
@@ -371,14 +393,28 @@ class OnlineAcceptanceEstimator:
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
         draft_step: torch.Tensor,
+        confidence_probs: torch.Tensor,
     ) -> None:
-        compute_top2_margin(logits, idx_mapping, draft_step, self.slot_margin)
-        torch.sigmoid(self.slot_margin * self.weight + self.bias, out=self.slot_pred)
-
-    def gather_acceptance_probs(
-        self,
-        idx_mapping: torch.Tensor,
-        out: torch.Tensor,
-    ) -> None:
-        num_reqs = idx_mapping.shape[0]
-        out[:num_reqs] = self.slot_pred[idx_mapping.long()]
+        num_tokens, vocab_size = logits.shape
+        _predict_kernel[(num_tokens,)](
+            self.margins,
+            self.margins.stride(0),
+            self.predictions,
+            self.predictions.stride(0),
+            confidence_probs,
+            confidence_probs.stride(0),
+            self.coefficients,
+            self.coefficients.stride(0),
+            logits,
+            logits.stride(0),
+            idx_mapping,
+            draft_step,
+            num_tokens,
+            vocab_size,
+            per_token_step=draft_step.dim() > 0,
+            NUM_SPECULATIVE_STEPS=self.num_speculative_steps,
+            MIN_LOGIT=_MIN_LOGIT,
+            MAX_MARGIN=_MAX_MARGIN,
+            BLOCK_SIZE=8192,
+            num_warps=8,
+        )
