@@ -24,12 +24,19 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.reasoning import ReasoningParser
+    from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
 
 logger = init_logger(__name__)
+
+_INKLING_STRUCTURED_OUTPUT_STOP_TOKENS = (
+    "<|content_model_end_sampling|>",
+    "<|end_message|>",
+    "<|begin_of_text|>",
+)
 
 
 class StructuredOutputManager:
@@ -184,11 +191,13 @@ class StructuredOutputManager:
         try:
             request_type, grammar_spec = struct_request.structured_output_key
             assert self.backend is not None
-            stop_token_ids = (
-                request.sampling_params.all_stop_token_ids
-                if request.sampling_params is not None
-                else None
-            )
+            if request.sampling_params is not None:
+                self._update_sampling_params_for_structured_output(
+                    request.sampling_params
+                )
+                stop_token_ids = request.sampling_params.all_stop_token_ids
+            else:
+                stop_token_ids = None
             return self.backend.compile_grammar(
                 request_type, grammar_spec, stop_token_ids=stop_token_ids
             )
@@ -197,6 +206,27 @@ class StructuredOutputManager:
                 "Failed to compile grammar for request %s", request.request_id
             )
             raise
+
+    def _update_sampling_params_for_structured_output(
+        self, sampling_params: "SamplingParams"
+    ) -> None:
+        if self.vllm_config.structured_outputs_config.reasoning_parser != "inkling":
+            return
+
+        vocab = self.tokenizer.get_vocab()
+        inkling_stop_token_ids = [
+            token_id
+            for token in _INKLING_STRUCTURED_OUTPUT_STOP_TOKENS
+            if (token_id := vocab.get(token)) is not None
+        ]
+        if not inkling_stop_token_ids:
+            return
+
+        sampling_params._all_stop_token_ids.update(inkling_stop_token_ids)
+        assert sampling_params.stop_token_ids is not None
+        sampling_params.stop_token_ids = list(
+            dict.fromkeys([*sampling_params.stop_token_ids, *inkling_stop_token_ids])
+        )
 
     def _fill_bitmasks(
         self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]

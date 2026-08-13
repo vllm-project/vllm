@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.sampling_params import SamplingParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
@@ -350,3 +351,42 @@ class TestReasoningStructuredOutput:
         assert manager_with_reasoner.trim_reasoning_for_advance(
             mock_request_with_structured_output, new_token_ids
         ) == [271, 5005]
+
+    def test_inkling_structural_tokens_are_stop_overrides(
+        self,
+        mock_vllm_config,
+        mock_request_with_structured_output,
+    ):
+        mock_vllm_config.structured_outputs_config.reasoning_parser = "inkling"
+        manager = StructuredOutputManager(mock_vllm_config)
+        manager.backend = Mock()
+        manager.tokenizer = Mock()
+        manager.tokenizer.get_vocab.return_value = {
+            "<|endoftext|>": 199999,
+            "<|content_model_end_sampling|>": 200006,
+            "<|end_message|>": 200010,
+            "<|begin_of_text|>": 200028,
+        }
+
+        sampling_params = SamplingParams(stop_token_ids=[199999])
+        mock_request_with_structured_output.sampling_params = sampling_params
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.JSON,
+            '{"type": "object"}',
+        )
+
+        manager._create_grammar(mock_request_with_structured_output)
+
+        manager.backend.compile_grammar.assert_called_once_with(
+            StructuredOutputOptions.JSON,
+            '{"type": "object"}',
+            stop_token_ids={199999, 200006, 200010, 200028},
+        )
+        assert sampling_params.all_stop_token_ids == {
+            199999,
+            200006,
+            200010,
+            200028,
+        }
+        assert sampling_params.stop_token_ids == [199999, 200006, 200010, 200028]
