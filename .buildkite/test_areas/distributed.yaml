@@ -280,6 +280,7 @@ steps:
   - tests/distributed/
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
+  - pytest -v -s distributed/test_pp_encoder_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
 
 - label: RayExecutorV2 (4 GPUs)

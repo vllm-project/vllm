@@ -370,6 +370,59 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
 
 
+@pytest.mark.skip_global_cleanup
+def test_encoder_cudagraph_manager_skipped_on_non_first_pp_rank(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.compilation_config = SimpleNamespace(cudagraph_mm_encoder=True)
+    runner.supports_mm_inputs = True
+    runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+    runner.vllm_config = SimpleNamespace(is_ec_producer_only=False)
+    runner.get_model = Mock()
+
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=False),
+    )
+
+    assert runner._create_encoder_cudagraph_manager() is None
+    runner.get_model.assert_not_called()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("is_encoder_decoder", "is_ec_producer_only"),
+    [(True, False), (False, True)],
+    ids=["encoder-decoder", "ec-producer"],
+)
+def test_encoder_cudagraph_support_checked_on_non_first_pp_rank(
+    monkeypatch: pytest.MonkeyPatch,
+    is_encoder_decoder: bool,
+    is_ec_producer_only: bool,
+):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.compilation_config = SimpleNamespace(cudagraph_mm_encoder=True)
+    runner.supports_mm_inputs = True
+    runner.model_config = SimpleNamespace(
+        is_encoder_decoder=is_encoder_decoder,
+    )
+    runner.vllm_config = SimpleNamespace(
+        is_ec_producer_only=is_ec_producer_only,
+    )
+    runner.get_model = Mock(return_value=object())
+
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=False),
+    )
+
+    assert runner._create_encoder_cudagraph_manager() is None
+    runner.get_model.assert_called_once()
+
+
 def test_select_common_block_size_no_valid_option():
     backend_a = _make_mock_backend_for_kernel_block_size([64])
     backend_b = _make_mock_backend_for_kernel_block_size([MultipleOf(16)])

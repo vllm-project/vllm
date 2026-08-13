@@ -6731,6 +6731,15 @@ class GPUModelRunner(
         ):
             return None
 
+        # Decoder-only multimodal models run the encoder only on the first PP
+        # rank. Encoder-decoder models and encode-only EC producers run it on
+        # every rank.
+        encoder_runs_on_all_pp_ranks = self.model_config.is_encoder_decoder or (
+            self.vllm_config.is_ec_producer_only
+        )
+        if not encoder_runs_on_all_pp_ranks and not get_pp_group().is_first_rank:
+            return None
+
         # Use get_model() to unwrap CUDAGraphWrapper/UBatchWrapper, because
         # @runtime_checkable Protocol isinstance() checks do not work through
         # __getattr__ forwarding.
