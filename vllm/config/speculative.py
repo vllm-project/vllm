@@ -3,7 +3,7 @@
 
 import copy
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -727,18 +727,23 @@ class SpeculativeConfig:
         method: SpeculativeMethod,
         hf_config: PretrainedConfig,
     ) -> int | None:
-        """Structural token default for block drafters.
-
-        A block drafter only runs at its checkpoint block size: DFlash
-        proposes ``block_size - 1`` tokens (the anchor is a bonus token) and
-        DSpark proposes ``block_size`` tokens per block.
-        """
+        """Return the checkpoint's default proposal count for block drafters."""
         if method not in ("dflash", "dspark"):
             return None
-        block_size = getattr(hf_config, "block_size", None)
-        if not isinstance(block_size, int):
+        dflash_config = getattr(hf_config, "dflash_config", None)
+        if isinstance(dflash_config, Mapping):
+            block_size = dflash_config.get("block_size")
+        else:
+            block_size = getattr(dflash_config, "block_size", None)
+        if block_size is None:
+            block_size = getattr(hf_config, "block_size", None)
+        if not isinstance(block_size, int) or isinstance(block_size, bool):
             return None
-        tokens = block_size - 1 if method == "dflash" else block_size
+        if method == "dflash":
+            tokens = block_size - 1
+        else:
+            sample_from_anchor = getattr(hf_config, "sample_from_anchor", True)
+            tokens = block_size if sample_from_anchor else block_size - 1
         return tokens if tokens > 0 else None
 
     @staticmethod

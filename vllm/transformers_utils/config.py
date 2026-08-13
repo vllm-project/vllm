@@ -666,7 +666,7 @@ def maybe_override_with_speculators(
 
     if speculators_config is None:
         # The target is not a speculators checkpoint, but the draft model
-        # named in the speculative config may still declare its method.
+        # named in the speculative config may still declare its settings.
         vllm_speculative_config = _maybe_adopt_spec_model_declaration(
             vllm_speculative_config, hf_token=hf_token, **kwargs
         )
@@ -702,8 +702,6 @@ def _maybe_adopt_spec_model_declaration(
     """
     if not vllm_speculative_config:
         return vllm_speculative_config
-    if vllm_speculative_config.get("method") is not None:
-        return vllm_speculative_config
     draft_model = vllm_speculative_config.get("model")
     if not isinstance(draft_model, str) or is_cloud_storage(draft_model):
         return vllm_speculative_config
@@ -716,10 +714,10 @@ def _maybe_adopt_spec_model_declaration(
             **without_trust_remote_code(kwargs),
         )
     except Exception:
-        # Keep the explicit-method error downstream as the actionable message.
+        # Keep downstream validation as the actionable error.
         logger.debug(
             "Could not read the draft model config from %s while resolving "
-            "the speculative method.",
+            "the speculative settings.",
             draft_model,
             exc_info=True,
         )

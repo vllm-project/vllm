@@ -2120,14 +2120,14 @@ def test_speculators_format_preserves_explicit_shorthand_method():
     }
 
 
-def _spec_model_declaration_configs():
+def _spec_model_declaration_configs(model_type="dflash", tokens=15):
     return {
         "target/model": {"architectures": ["LlamaForCausalLM"]},
         "draft/model": {
-            "speculators_model_type": "dflash",
+            "speculators_model_type": model_type,
             "transformer_layer_config": {},
             "speculators_config": {
-                "proposal_methods": [{"speculative_tokens": 15}],
+                "proposal_methods": [{"speculative_tokens": tokens}],
                 "verifier": {"name_or_path": "target/model"},
             },
         },
@@ -2135,24 +2135,70 @@ def _spec_model_declaration_configs():
 
 
 @pytest.mark.parametrize(
-    ("explicit", "expected"),
+    ("model_type", "tokens", "explicit", "expected"),
     [
         pytest.param(
+            "dflash",
+            15,
             {"model": "draft/model"},
             {"method": "dflash", "model": "draft/model", "num_speculative_tokens": 15},
             id="declaration-populates-method-and-tokens",
         ),
         pytest.param(
+            "dflash",
+            15,
             {"model": "draft/model", "num_speculative_tokens": 3},
             {"method": "dflash", "model": "draft/model", "num_speculative_tokens": 3},
             id="explicit-tokens-take-precedence",
         ),
+        pytest.param(
+            "dflash",
+            15,
+            {"model": "draft/model", "method": "dflash"},
+            {
+                "method": "dflash",
+                "model": "draft/model",
+                "num_speculative_tokens": 15,
+            },
+            id="explicit-method-still-adopts-tokens",
+        ),
+        pytest.param(
+            "peagle",
+            7,
+            {"model": "draft/model", "method": "eagle3"},
+            {
+                "method": "eagle3",
+                "model": "draft/model",
+                "num_speculative_tokens": 7,
+                "parallel_drafting": True,
+            },
+            id="explicit-method-still-adopts-peagle-settings",
+        ),
+        pytest.param(
+            "peagle",
+            7,
+            {
+                "model": "draft/model",
+                "method": "eagle3",
+                "num_speculative_tokens": 3,
+                "parallel_drafting": False,
+            },
+            {
+                "method": "eagle3",
+                "model": "draft/model",
+                "num_speculative_tokens": 3,
+                "parallel_drafting": False,
+            },
+            id="explicit-settings-take-precedence-field-by-field",
+        ),
     ],
 )
-def test_spec_model_declaration_resolves_method(explicit, expected):
+def test_spec_model_declaration_fills_missing_settings(
+    model_type, tokens, explicit, expected
+):
     from vllm.transformers_utils.config import maybe_override_with_speculators
 
-    configs = _spec_model_declaration_configs()
+    configs = _spec_model_declaration_configs(model_type, tokens)
 
     with patch(
         "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
@@ -2167,26 +2213,6 @@ def test_spec_model_declaration_resolves_method(explicit, expected):
 
     assert (model, tokenizer) == ("target/model", None)
     assert speculative_config == expected
-
-
-def test_spec_model_with_explicit_method_skips_declaration():
-    from vllm.transformers_utils.config import maybe_override_with_speculators
-
-    configs = {"target/model": {"architectures": ["LlamaForCausalLM"]}}
-    explicit = {"model": "draft/model", "method": "draft_model"}
-
-    with patch(
-        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
-        side_effect=lambda model, **kwargs: (configs[model], {}),
-    ):
-        _, _, speculative_config = maybe_override_with_speculators(
-            model="target/model",
-            tokenizer=None,
-            trust_remote_code=False,
-            vllm_speculative_config=explicit,
-        )
-
-    assert speculative_config == explicit
 
 
 def test_spec_model_without_declaration_stays_unresolved():
@@ -2252,10 +2278,29 @@ def test_explicit_method_selects_deepseek_v4_loader(
     ("method", "config_kwargs", "expected"),
     [
         pytest.param("dflash", {"block_size": 16}, 15, id="dflash-anchor-is-bonus"),
+        pytest.param(
+            "dflash",
+            {"dflash_config": {"block_size": 16}},
+            15,
+            id="dflash-nested-block-size",
+        ),
+        pytest.param(
+            "dflash",
+            {"block_size": 16, "dflash_config": {"block_size": 8}},
+            7,
+            id="dflash-nested-block-size-takes-precedence",
+        ),
         pytest.param("dspark", {"block_size": 7}, 7, id="dspark-full-block"),
+        pytest.param(
+            "dspark",
+            {"block_size": 7, "sample_from_anchor": False},
+            6,
+            id="dspark-bonus-anchor",
+        ),
         pytest.param("dflash", {}, None, id="no-block-size-stays-required"),
         pytest.param("draft_model", {"block_size": 16}, None, id="non-block-drafter"),
         pytest.param("dflash", {"block_size": 1}, None, id="degenerate-block"),
+        pytest.param("dspark", {"block_size": True}, None, id="boolean-block-size"),
     ],
 )
 def test_block_drafters_default_tokens_from_block_size(method, config_kwargs, expected):
