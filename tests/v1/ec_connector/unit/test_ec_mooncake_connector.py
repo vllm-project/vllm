@@ -35,6 +35,7 @@ class CopyingFakeTransferEngine:
         self.register_calls: list[list[int]] = []
         self.unregister_calls: list[int] = []
         self.batch_unregister_calls: list[list[int]] = []
+        self.transfer_calls: list[list[int]] = []
 
     def initialize(self, local_hostname, metadata_server, protocol, device_name) -> int:
         return 0
@@ -45,6 +46,7 @@ class CopyingFakeTransferEngine:
     def batch_transfer_sync_write(
         self, target_hostname, buffers, peer_buffer_addresses, lengths
     ) -> int:
+        self.transfer_calls.append([int(length) for length in lengths])
         for src, dst, nbytes in zip(buffers, peer_buffer_addresses, lengths):
             ctypes.memmove(int(dst), int(src), int(nbytes))
         return 0
@@ -381,9 +383,83 @@ class TestECMooncakeWorkerTransfer:
             consumer_engine = consumer._engine
             assert isinstance(consumer_engine, CopyingFakeTransferEngine)
             assert consumer_engine.registered == set()
-            assert consumer_engine.unregister_calls == [loaded[mm_hash].data_ptr()]
-            producer.shutdown()
+            assert consumer_engine.batch_unregister_calls == [
+                [loaded[mm_hash].data_ptr()]
+            ]
             consumer.shutdown()
+            producer.shutdown()
+
+    def test_batches_multi_item_transfer_and_reuses_socket(
+        self, mock_vllm_config_producer
+    ):
+        port = _find_free_port()
+        mock_vllm_config_producer.ec_transfer_config.ec_buffer_device = "cpu"
+        mock_vllm_config_producer.ec_transfer_config.ec_connector_extra_config[
+            "registry_http_port"
+        ] = port
+        sources = {f"hash_{i}": torch.randn(4, 16) for i in range(3)}
+
+        with patch_ec_mooncake_deps():
+            producer = ECMooncakeConnector(
+                mock_vllm_config_producer, ECConnectorRole.WORKER
+            )
+            for mm_hash, tensor in sources.items():
+                producer.save_caches({mm_hash: tensor}, mm_hash)
+
+            consumer_cfg = Mock(spec=VllmConfig)
+            consumer_cfg.parallel_config = mock_vllm_config_producer.parallel_config
+            consumer_cfg.ec_transfer_config = Mock()
+            consumer_cfg.ec_transfer_config.is_ec_producer = False
+            consumer_cfg.ec_transfer_config.is_ec_consumer = True
+            consumer_cfg.ec_transfer_config.ec_buffer_device = "cpu"
+            consumer_cfg.ec_transfer_config.ec_buffer_size = 1e9
+            consumer_cfg.ec_transfer_config.ec_connector_extra_config = {
+                "mooncake_protocol": "tcp"
+            }
+            consumer = ECMooncakeConnector(consumer_cfg, ECConnectorRole.WORKER)
+
+            def make_spec(mm_hash: str) -> ECMooncakeLoadSpec:
+                data = httpx.get(f"http://127.0.0.1:{port}/ec/info/{mm_hash}").json()
+                return ECMooncakeLoadSpec(
+                    mm_hash=mm_hash,
+                    num_token=1,
+                    nbytes=int(data["nbytes"]),
+                    shape=tuple(data["shape"]),
+                    dtype=str(data["dtype"]),
+                    producer_zmq=str(data["producer_zmq"]),
+                    lease_id=str(data["lease_id"]),
+                )
+
+            first_meta = ECMooncakeConnectorMetadata(
+                loads=[make_spec("hash_0"), make_spec("hash_1")]
+            )
+            consumer.bind_connector_metadata(first_meta)
+            loaded: dict[str, torch.Tensor] = {}
+            consumer.start_load_caches(loaded)
+            socket = next(iter(consumer._client_sockets.values()))
+
+            second_meta = ECMooncakeConnectorMetadata(loads=[make_spec("hash_2")])
+            consumer.bind_connector_metadata(second_meta)
+            consumer.start_load_caches(loaded)
+
+            producer_engine = producer._engine
+            consumer_engine = consumer._engine
+            assert isinstance(producer_engine, CopyingFakeTransferEngine)
+            assert isinstance(consumer_engine, CopyingFakeTransferEngine)
+            assert producer_engine.transfer_calls == [[256, 256], [256]]
+            assert len(consumer._client_sockets) == 1
+            assert next(iter(consumer._client_sockets.values())) is socket
+            assert all(
+                torch.equal(loaded[key], value) for key, value in sources.items()
+            )
+            register_sizes = [len(call) for call in consumer_engine.register_calls]
+            assert register_sizes == [2, 1]
+            assert [len(call) for call in consumer_engine.batch_unregister_calls] == [
+                2,
+                1,
+            ]
+            consumer.shutdown()
+            producer.shutdown()
 
     def test_producer_evicts_lru_registration_at_capacity(
         self, mock_vllm_config_producer
