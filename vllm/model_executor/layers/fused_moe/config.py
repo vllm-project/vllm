@@ -8,7 +8,12 @@ import torch
 
 from vllm.config import ParallelConfig, SchedulerConfig
 from vllm.config.kernel import MoEBackend
-from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
+from vllm.distributed import (
+    get_dp_group,
+    get_ep_group,
+    get_pcp_group,
+    get_tensor_model_parallel_rank,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
@@ -1214,6 +1219,22 @@ class FusedMoEParallelConfig:
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
         pcp_size = pcp_size_
         pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
+        if use_ep and vllm_parallel_config.expert_parallel_size is not None:
+            ep_group = get_ep_group()
+            return FusedMoEParallelConfig(
+                tp_size=tp_size_,
+                tp_rank=(get_tensor_model_parallel_rank() if tp_size_ > 1 else 0),
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
+                dp_size=dp_size,
+                dp_rank=dp_rank,
+                ep_size=ep_group.world_size,
+                ep_rank=ep_group.rank_in_group,
+                sp_size=1,
+                use_ep=True,
+                all2all_backend=vllm_parallel_config.all2all_backend,
+                enable_eplb=vllm_parallel_config.enable_eplb,
+            )
         tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
             tp_size_, dp_size_, dp_rank, pcp_size_, pcp_rank
         )
