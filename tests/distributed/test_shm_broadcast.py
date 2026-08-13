@@ -1,17 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
+import pickle
 import random
 import threading
 import time
+from types import SimpleNamespace
 from unittest import mock
 
 import multiprocess as mp
 import numpy as np
 import pytest
+import torch
 import torch.distributed as dist
 
-from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
+from vllm.distributed.device_communicators import shm_broadcast
+from vllm.distributed.device_communicators.shm_broadcast import (
+    MessageQueue,
+    ShmRingBuffer,
+    _rebuild_tensor,
+    _reduce_tensor,
+    check_shm_free_space,
+)
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
@@ -348,6 +359,150 @@ def test_message_queue_busy_to_idle():
     distributed_run(worker_fn_test_busy_to_idle, 4)
 
 
+@worker_fn_wrapper
+def worker_fn_tensor_broadcast():
+    rank = dist.get_rank()
+    writer_rank = 0
+    message_queue = MessageQueue.create_from_process_group(
+        dist.group.WORLD, 8 * 1024 * 1024, 4, writer_rank
+    )
+
+    # Both ranks construct the identical reference payload.
+    torch.manual_seed(42)
+    payload = {
+        # 2MiB: rides the shm ring as an out-of-band buffer (the receiving
+        # side must copy out of the reusable ring chunk).
+        "mid": torch.randn(1024, 512),
+        # 16MiB > max_chunk_bytes: overflows to the zmq socket (the
+        # receiving side aliases the zmq.Frame zero-copy).
+        "big": torch.randn(4096, 2048, dtype=torch.bfloat16),
+        "nested": ["plain", 123, {"inner": torch.arange(5)}],
+    }
+
+    if rank == writer_rank:
+        with mock.patch(
+            "vllm.distributed.device_communicators.shm_broadcast._reduce_tensor",
+            wraps=_reduce_tensor,
+        ) as wrapped_reduce:
+            message_queue.enqueue(payload)
+        assert wrapped_reduce.call_count == 3
+        # Cycle the ring (max_chunks=4) several times over so that aliased
+        # ring chunks would be overwritten.
+        for i in range(16):
+            message_queue.enqueue({"junk": torch.full((1024, 512), float(i))})
+    else:
+        received = message_queue.dequeue(timeout=30)
+        for key in ("mid", "big"):
+            assert torch.equal(received[key], payload[key]), key
+            assert received[key].dtype == payload[key].dtype, key
+        assert torch.equal(received["nested"][2]["inner"], torch.arange(5))
+
+        snapshot = received["mid"].clone()
+        for i in range(16):
+            junk = message_queue.dequeue(timeout=30)
+            assert torch.equal(junk["junk"], torch.full((1024, 512), float(i)))
+        # Tensors received via the shm ring must not alias chunk memory
+        # that the writer has reused for subsequent messages.
+        assert torch.equal(received["mid"], snapshot)
+        # Rebuilt tensors must be writable, like regular tensors.
+        received["mid"] += 1.0
+        received["big"][0, 0] = 1.0
+
+    dist.barrier()
+    print(f"tensor broadcast passed the test! Rank {rank}")
+
+
+def test_tensor_broadcast():
+    distributed_run(worker_fn_tensor_broadcast, 2)
+
+
+def _dumps_oob(obj) -> tuple[bytes, list]:
+    """Pickle `obj` the same way `MessageQueue.enqueue` does: tensor
+    dispatch table + out-of-band buffers >= 1MiB."""
+    buffers = []
+
+    def callback(buf: pickle.PickleBuffer) -> bool:
+        raw = buf.raw()
+        if raw.nbytes < 1024 * 1024:
+            return True
+        buffers.append(raw)
+        return False
+
+    bio = io.BytesIO()
+    pickler = pickle.Pickler(
+        bio, protocol=pickle.HIGHEST_PROTOCOL, buffer_callback=callback
+    )
+    pickler.dispatch_table = {torch.Tensor: _reduce_tensor}
+    pickler.dump(obj)
+    return bio.getvalue(), buffers
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "small",
+        "mid",
+        "bf16",
+        "fp8",
+        "empty",
+        "scalar",
+        "noncontig",
+        "requires_grad",
+        "conj",
+        "param",
+    ],
+)
+def test_tensor_pickle_roundtrip(case: str):
+    tensor = {
+        # Inlined in-band (< 1MiB) and out-of-band (>= 1MiB) buffers.
+        "small": lambda: torch.randn(100, 10),
+        "mid": lambda: torch.randn(1024, 512),
+        # Dtypes numpy doesn't recognize.
+        "bf16": lambda: torch.randn(512, 512, dtype=torch.bfloat16),
+        "fp8": lambda: torch.randn(32, 32).to(torch.float8_e4m3fn),
+        # Shape edge cases.
+        "empty": lambda: torch.empty(0, 8),
+        "scalar": lambda: torch.tensor(3.14),
+        "noncontig": lambda: torch.randn(64, 64).t(),
+        # These fall back to torch's default reducer.
+        "requires_grad": lambda: torch.randn(8, 8, requires_grad=True),
+        "conj": lambda: torch.randn(4, dtype=torch.complex64).conj(),
+        "param": lambda: torch.nn.Parameter(torch.randn(4), requires_grad=False),
+    }[case]()
+
+    data, buffers = _dumps_oob({"tensor": tensor, "meta": list(range(10))})
+    received = pickle.loads(data, buffers=buffers)["tensor"]
+
+    assert received.shape == tensor.shape
+    assert received.dtype == tensor.dtype
+    if tensor.dtype == torch.float8_e4m3fn:
+        assert torch.equal(received.view(torch.uint8), tensor.view(torch.uint8))
+    else:
+        assert torch.equal(received, tensor)
+    assert received.requires_grad == tensor.requires_grad
+    assert isinstance(received, type(tensor))
+    if tensor.numel() and not tensor.requires_grad:
+        # Rebuilt tensors must be writable, like regular tensors.
+        received.view(-1)[0] = 1.0
+
+
+@pytest.mark.parametrize("case", ["cuda", "requires_grad", "conj"])
+def test_reduce_tensor_fallback(case: str):
+    """Tensors the zero-copy reducer can't safely alias must fall back to
+    torch's default reduction."""
+    if case == "cuda":
+        if not torch.cuda.is_available():
+            pytest.skip("requires CUDA")
+        tensor = torch.randn(4, device="cuda")
+    elif case == "requires_grad":
+        tensor = torch.randn(8, requires_grad=True)
+    else:
+        tensor = torch.randn(4, dtype=torch.complex64).conj()
+
+    reduced = _reduce_tensor(tensor)
+    assert reduced[0] is not _rebuild_tensor
+
+
 @pytest.mark.parametrize("should_warn", [False, True])
 def test_reader_timeout_caps_indefinite_waits(should_warn):
     with (
@@ -522,3 +677,104 @@ def test_warning_logs(caplog_vllm):
         # Clean up when done
         writer.shutdown()
         reader.shutdown()
+
+
+def _fake_disk_usage(free_bytes: int):
+    return SimpleNamespace(total=free_bytes, used=0, free=free_bytes)
+
+
+def test_check_shm_free_space_raises_when_insufficient(tmp_path):
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(32 << 20)
+        ),
+        pytest.raises(RuntimeError, match="Insufficient space"),
+    ):
+        check_shm_free_space(240 << 20, shm_path=str(tmp_path))
+
+
+def test_check_shm_free_space_passes_when_sufficient(tmp_path):
+    with mock.patch.object(
+        shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(512 << 20)
+    ):
+        check_shm_free_space(240 << 20, shm_path=str(tmp_path))
+
+
+def test_check_shm_free_space_skipped_when_path_missing(tmp_path):
+    check_shm_free_space(1 << 60, shm_path=str(tmp_path / "does-not-exist"))
+
+
+def test_shm_ring_buffer_creation_checks_free_space():
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(1 << 20)
+        ),
+        mock.patch.object(shm_broadcast.os.path, "isdir", return_value=True),
+        pytest.raises(RuntimeError, match="Insufficient space"),
+    ):
+        ShmRingBuffer(n_reader=1, max_chunk_bytes=24 * 1024 * 1024, max_chunks=10)
+
+
+def test_remote_subscribe_addr_unique_concurrent_writers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Writers bind the remote socket to port 0 (kernel-assigned), so
+    concurrent writers never race for the same probed port and the
+    announced address is connectable.
+
+    Pre-fix, the writer probed a port with get_open_port() and bound it
+    afterwards; pinning the probe to one free port makes every writer
+    bind the same port and fail deterministically on that code path,
+    while the late-binding implementation never consults the probe."""
+    from vllm.distributed.device_communicators import shm_broadcast
+
+    colliding_port = get_open_port()
+    monkeypatch.setattr(
+        shm_broadcast, "get_open_port", lambda: colliding_port, raising=False
+    )
+
+    n_writers = 32
+    queues: list[MessageQueue] = []
+    lock = threading.Lock()
+
+    def make_writer():
+        q = MessageQueue(
+            n_reader=1,
+            n_local_reader=0,
+            max_chunk_bytes=4096,
+            max_chunks=2,
+            connect_ip="127.0.0.1",
+        )
+        with lock:
+            queues.append(q)
+
+    threads = [threading.Thread(target=make_writer) for _ in range(n_writers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(queues) == n_writers
+    addrs = [q.export_handle().remote_subscribe_addr for q in queues]
+    assert all(addr and addr.startswith("tcp://") for addr in addrs)
+    assert len(set(addrs)) == n_writers
+
+    writer = queues[0]
+    received = []
+
+    def reader_main():
+        reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+        reader.wait_until_ready()
+        received.append(reader.dequeue())
+        reader.remote_socket.close(linger=0)
+
+    reader_thread = threading.Thread(target=reader_main)
+    reader_thread.start()
+    writer.wait_until_ready()
+    writer.enqueue("ping")
+    reader_thread.join(timeout=30)
+    assert not reader_thread.is_alive()
+    assert received == ["ping"]
+
+    for q in queues:
+        q.remote_socket.close(linger=0)

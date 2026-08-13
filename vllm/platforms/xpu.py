@@ -110,6 +110,23 @@ class XPUPlatform(Platform):
     ray_device_key: str = "GPU"
     dist_backend: str = "xccl"  # xccl only
     device_control_env_var: str = "ZE_AFFINITY_MASK"
+    supported_quantization: list[str] = [
+        "awq",
+        "gptq",
+        "auto_awq",
+        "auto_gptq",
+        "inc",
+        "fp8",
+        "deepseek_v4_fp8",
+        "mxfp4",
+        "mxfp8",
+        "fp8_per_tensor",
+        "fp8_per_block",
+        "online",
+        "gpt_oss_mxfp4",
+        "modelopt",
+        "compressed-tensors",
+    ]
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -282,6 +299,11 @@ class XPUPlatform(Platform):
                 "XPU Graph is disabled by environment variable, "
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
+        else:
+            logger.warning_once(
+                "XPU Graph support is experimental and currently only supports "
+                "single-GPU execution."
+            )
 
         # Disable fusion passes not yet supported on XPU.
         from vllm.config.compilation import CompilationMode
@@ -294,7 +316,6 @@ class XPUPlatform(Platform):
             "fuse_act_padding": "Activation + padding fusion",
             "fuse_rope_kvcache": "RoPE + KV cache fusion",
             "fuse_rope_kvcache_cat_mla": "RoPE + KV cache + MLA fusion",
-            "enable_qk_norm_rope_fusion": "QK Norm + RoPE fusion",
         }
         if compilation_config.mode != CompilationMode.NONE:
             for flag, feature_name in fusion_passes_to_disable.items():
@@ -304,6 +325,30 @@ class XPUPlatform(Platform):
                         feature_name,
                     )
                     setattr(pass_config, flag, False)
+
+        # UVA-offloaded weights are host USM allocations, which Inductor's
+        # static Triton launcher rejects ("Pointer argument doesn't reference
+        # XPU device memory"). Fall back to Triton's own launcher. Remove once
+        # the released torch contains pytorch/pytorch#188240, which relaxes
+        # that check to any memory type known by the driver.
+        offload_config = vllm_config.offload_config
+        uva_offloading = offload_config.offload_backend == "uva" or (
+            offload_config.offload_backend == "auto"
+            and offload_config.prefetch.offload_group_size == 0
+            and offload_config.uva.cpu_offload_gb > 0
+        )
+        if (
+            uva_offloading
+            and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
+            and compilation_config.mode != CompilationMode.NONE
+        ):
+            compilation_config.inductor_compile_config.setdefault(
+                "use_static_cuda_launcher", False
+            )
+            logger.info_once(
+                "Disabling Inductor's static Triton launcher because UVA "
+                "weight offloading is enabled."
+            )
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -439,7 +484,7 @@ class XPUPlatform(Platform):
         # use fused kernels where available when no codegen
         cc = vllm_config.compilation_config
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
-        default = ["native"] if using_inductor else ["xpu_kernels", "native"]
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
 
         return IrOpPriorityConfig.with_default(default)
 

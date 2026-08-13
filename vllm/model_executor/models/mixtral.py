@@ -39,9 +39,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -94,7 +92,6 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
 
         # Expert Parallelism Load balancing settings.
@@ -107,11 +104,6 @@ class MixtralMoE(nn.Module):
         self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
         # Gate always runs at half / full precision for now.
 
         self.gate = ReplicatedLinear(
@@ -123,7 +115,7 @@ class MixtralMoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,

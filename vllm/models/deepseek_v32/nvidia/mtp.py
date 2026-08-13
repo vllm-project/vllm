@@ -6,9 +6,11 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 
-import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -24,10 +26,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_mtp import (
-    SharedHead,
-    _restore_full_token_layout_if_needed,
-)
+from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
@@ -38,15 +37,20 @@ from vllm.model_executor.models.utils import (
     get_pp_missing_layer_names,
     maybe_prefix,
 )
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_shard,
+)
+from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backends.mla.sparse_utils import (
-    phys_shadow,
-    register_phys_shadow,
-)
 
-from .fused_ops import fused_allreduce_rms_norm
-from .kernels import fused_eh_norm
+from .glm52_low_latency_gemm import (
+    build_glm52_plan,
+    enable_glm52_low_latency_gemm,
+    run_glm52_plan,
+)
 from .model import DeepseekV32DecoderLayer
 
 
@@ -61,18 +65,10 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
-        # bf16 skinny GEMM for the eh_proj, B300+B200 measured: GLM-5.2
-        # (6144, 12288) wins at M <= 3, DSv3.2 (7168, 14336) at M <= 2;
-        # cuBLAS holds above (the 151/205MB weights stream at ~5.7TB/s).
-        eh_dispatch = {(6144, 12288): 3, (7168, 14336): 2}
-        eh_weight = getattr(self.eh_proj, "weight", None)
-        self._eh_skinny_max = (
-            eh_dispatch.get(tuple(eh_weight.shape), 0)
-            if current_platform.is_device_capability_family(100)
-            and hasattr(torch.ops._C, "bf16_skinny_gemm")
-            and eh_weight is not None
-            and eh_weight.dtype == torch.bfloat16
-            else 0
+        self._eh_plan = (
+            build_glm52_plan(self.eh_proj.weight, vllm_config.model_config.dtype)
+            if config.model_type == "glm_moe_dsa"
+            else None
         )
 
         topk_indices_buffer = torch.empty(
@@ -81,7 +77,6 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             dtype=torch.int32,
             device=current_platform.device_type,
         )
-        register_phys_shadow(topk_indices_buffer)
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
@@ -110,22 +105,23 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             self.hnorm.weight,
             self.enorm.variance_epsilon,
         )
-        if (
-            eh_input.shape[0] <= self._eh_skinny_max
-            and eh_input.dtype == torch.bfloat16
-        ):
-            hidden_states = ops.bf16_skinny_gemm(eh_input, self.eh_proj.weight)
-        else:
+        is_sequence_parallel = self.mtp_block.use_sequence_parallel
+        if is_sequence_parallel:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                forward_context = get_forward_context()
+                forward_context.is_padding = sp_padding_mask(
+                    forward_context.is_padding, eh_input
+                )
+            eh_input = sp_shard(eh_input)
+        hidden_states = run_glm52_plan(self._eh_plan, eh_input, self.eh_proj.weight)
+        if hidden_states is None:
             hidden_states = self.eh_proj(eh_input)
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        hidden_states, residual = _restore_full_token_layout_if_needed(
-            hidden_states,
-            residual,
-            positions.shape[0],
-            is_sequence_parallel=self.mtp_block.use_sequence_parallel_moe,
-        )
+        if not is_sequence_parallel:
+            # Without sequence parallelism, the MoE output is left un-reduced.
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         # Recycle the POST-final-norm hidden into the next draft step. The
         # residual-add is fused into the final RMSNorm so it is computed
         # exactly once, and the result is returned for both tuple positions:
@@ -136,14 +132,9 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         # is understood by both the V2 speculator (isinstance-tuple check) and
         # the legacy proposer (model_returns_tuple is True for the
         # DeepSeekMTPModel architecture).
-        if self.mtp_block.use_sequence_parallel_moe:
-            hidden_states, _ = self.shared_head.norm(hidden_states, residual)
-        else:
-            # The MoE output is left un-reduced; fuse its all-reduce into the
-            # final norm, as the main model does at layer boundaries.
-            hidden_states, _ = fused_allreduce_rms_norm(
-                hidden_states, residual, self.shared_head.norm
-            )
+        hidden_states, _ = self.shared_head.norm(hidden_states, residual)
+        if is_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
         return hidden_states, hidden_states
 
 
@@ -186,15 +177,6 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
             if self_attn is not None and hasattr(self_attn, "topk_indices_buffer"):
                 topk_indices_buffer = self_attn.topk_indices_buffer
                 topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
-                # The physical-index shadow mirrors this buffer row-wise
-                # (shadow[j] == convert(logical[j])); re-arrange it the same
-                # way or skip_topk draft steps read the step-0 multi-token
-                # layout's rows for the wrong tokens/requests.
-                shadow = phys_shadow(topk_indices_buffer)
-                if shadow is not None:
-                    phys, seq = shadow
-                    phys[:num_slots] = phys[slot_ids]
-                    seq[:num_slots] = seq[slot_ids]
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -230,19 +212,6 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         # second RMSNorm.
         return self.logits_processor(mtp_layer.shared_head.head, hidden_states)
 
-    def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
-    ) -> torch.Tensor:
-        # Greedy draft token ids via vocab-parallel local argmax: skips the
-        # full-vocab logits all-gather (use_local_argmax_reduction).
-        current_step_idx = spec_step_idx % self.num_mtp_layers
-        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
-        return self.logits_processor.get_top_tokens(
-            mtp_layer.shared_head.head, hidden_states
-        )
-
 
 class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -252,6 +221,8 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.model = DeepseekV32MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if self.config.model_type == "glm_moe_dsa":
+            enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
@@ -290,25 +261,6 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
-
-    def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int | None = None,
-    ) -> torch.Tensor:
-        # The V2 speculator calls this without spec_step_idx; that is only
-        # correct while a single MTP layer is cycled for every draft step
-        # (num_nextn_predict_layers == 1, as in GLM-5.2/DSV3.2). Guard the
-        # assumption so a future multi-layer MTP fails loudly instead of
-        # silently using step 0's head for every step.
-        if spec_step_idx is None:
-            assert self.model.num_mtp_layers == 1, (
-                "get_top_tokens called without spec_step_idx on a "
-                "multi-layer MTP; thread the draft step index through "
-                "the speculator."
-            )
-            spec_step_idx = 0
-        return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         spec_layer_weight_names = [

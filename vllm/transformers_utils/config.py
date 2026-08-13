@@ -72,6 +72,7 @@ class LazyConfigDict(dict):
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     arctic="ArcticConfig",
+    axk1="AXK1Config",
     bagel="BagelConfig",
     umm="CheersConfig",
     chatglm="ChatGLMConfig",
@@ -86,6 +87,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     deepseek_v4="DeepseekV4Config",
+    dots3_note="Dots3NoteConfig",
+    k3_dspark="K3DSparkConfig",
     flex_olmo="FlexOlmoConfig",
     fireredlid="FireRedLIDConfig",
     funaudiochat="FunAudioChatConfig",
@@ -99,6 +102,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="KimiK25Config",
+    kimi_k3="KimiK3Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     mlp_speculator="MLPSpeculatorConfig",
@@ -123,7 +127,9 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
     qwen3_5="Qwen3_5Config",
+    qwen3_5_text="Qwen3_5TextConfig",
     qwen3_5_moe="Qwen3_5MoeConfig",
+    qwen3_5_moe_text="Qwen3_5MoeTextConfig",
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
@@ -599,16 +605,6 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
     return _is_encoder_decoder(config) or _is_encoder_decoder(config.get_text_config())
 
 
-def is_interleaved(config: PretrainedConfig) -> bool:
-    """
-    Detect if the model with this config is used with interleaved attention.
-    """
-    text_config = config.get_text_config()
-    if layer_types := getattr(text_config, "layer_types", None):
-        return len(set(layer_types)) > 1
-    return False
-
-
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
     """
     Update kwargs for AutoConfig initialization based on model_type
@@ -1076,6 +1072,7 @@ def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
     revision: str | None = None,
+    code_revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
     hf_token: bool | str | None = None,
 ) -> GenerationConfig | None:
@@ -1091,6 +1088,7 @@ def try_get_generation_config(
                 model,
                 trust_remote_code=trust_remote_code,
                 revision=revision,
+                code_revision=code_revision,
                 config_format=config_format,
                 token=hf_token,
             )
