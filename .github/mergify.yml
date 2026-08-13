@@ -440,8 +440,9 @@ pull_request_rules:
       add:
         - speculative-decoding
 
-# dflash is a speculative decoding technique. It carries its own label in
-# addition to speculative-decoding, never instead of it.
+# dflash covers the DFlash and DSpark speculative decoding techniques as one
+# workstream, matching how they are tracked in the sprint board. It is applied
+# in addition to speculative-decoding, never instead of it.
 - name: label-dflash
   description: Automatically apply dflash label
   conditions:
@@ -452,6 +453,13 @@ pull_request_rules:
       - files~=^vllm/model_executor/models/.*dflash.*\.py
       - files~=^tests/.*dflash.*\.py
       - title~=(?i)dflash
+      - files~=^vllm/v1/worker/gpu/spec_decode/dspark/
+      - files~=^vllm/model_executor/models/.*dspark.*\.py
+      - files~=^vllm/models/deepseek_v4/nvidia/dspark\.py
+      - files~=^vllm/models/deepseek_v4/amd/dspark\.py
+      - files~=^vllm/models/deepseek_v4/xpu/dspark\.py
+      - files~=^tests/.*dspark.*\.py
+      - title~=(?i)dspark
   actions:
     label:
       add:
