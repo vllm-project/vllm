@@ -424,18 +424,17 @@ if __name__ == "__main__":
 
     print(f"Found {len(wheel_files)} wheel files for version {version}: {wheel_files}")
 
-    # Keep the requested vLLM wheels and the XPU Triton shim for a release.
+    # keep only "official" files for a non-nightly version (specified by cli args)
     PY_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([a-zA-Z0-9.+-]*)?$")
     if PY_VERSION_RE.match(version):
         # upload-wheels.sh ensures no "dev" is in args.version
-        def belongs_to_release_index(file: str) -> bool:
-            info = parse_from_filename(file)
-            package = normalize_package_name(info.package_name)
-            if package == "vllm":
-                return version in file and "dev" not in file
-            return package == "triton" and info.variant == "xpu"
-
-        wheel_files = list(filter(belongs_to_release_index, wheel_files))
+        wheel_files = list(
+            filter(
+                lambda x: (version in x and "dev" not in x)
+                or (x.startswith("triton-") and "+xpu-" in x),
+                wheel_files,
+            )
+        )
         print(f"Non-nightly version detected, wheel files used: {wheel_files}")
     else:
         print("Nightly version detected, keeping all wheel files.")

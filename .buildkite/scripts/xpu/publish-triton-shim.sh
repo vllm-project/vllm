@@ -11,10 +11,15 @@ readonly WHEEL_SHA256="3c822f73e9870512f59a6ecf5dc305a4bcab11fa623f9ce91011f6043
 readonly WHEEL_FILENAME="${WHEEL_URL##*/}"
 readonly ENCODED_WHEEL_FILENAME="${WHEEL_FILENAME/+/%2B}"
 readonly S3_PREFIX="s3://${BUCKET}/${PREFIX}/"
+readonly COMMIT="${BUILDKITE_COMMIT:-}"
 readonly DRY_RUN="${DRY_RUN:-0}"
 
 if [[ "$DRY_RUN" != "0" && "$DRY_RUN" != "1" ]]; then
     echo "DRY_RUN must be 0 or 1" >&2
+    exit 2
+fi
+if [[ "$DRY_RUN" == "0" && ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "BUILDKITE_COMMIT must be a full lowercase commit hash" >&2
     exit 2
 fi
 
@@ -31,8 +36,7 @@ objects_path="$work_dir/objects.json"
 index_output_dir="$work_dir/$PREFIX"
 index_generator="$work_dir/generate-nightly-index.py"
 
-curl --fail --location --retry 3 --connect-timeout 30 --max-time 300 \
-    --output "$wheel_path" "$WHEEL_URL"
+curl --fail --location --retry 3 --output "$wheel_path" "$WHEEL_URL"
 
 if command -v sha256sum >/dev/null 2>&1; then
     actual_sha=$(sha256sum "$wheel_path")
@@ -88,4 +92,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
 else
     aws s3 cp --recursive "$index_output_dir/" "$S3_PREFIX"
     echo "Published XPU Triton shim index to https://wheels.vllm.ai/$PREFIX/"
+    aws s3 cp "$S3_PREFIX$WHEEL_FILENAME" \
+        "s3://$BUCKET/$COMMIT/$WHEEL_FILENAME"
+    echo "Staged XPU Triton shim for https://wheels.vllm.ai/$COMMIT/xpu/"
 fi
