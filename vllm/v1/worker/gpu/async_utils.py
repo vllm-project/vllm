@@ -17,7 +17,7 @@ from vllm.v1.outputs import (
     PoolerOutput,
     RoutedExpertsTensors,
 )
-from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.utils import raise_if_nan_logits
 
 if TYPE_CHECKING:
@@ -150,6 +150,11 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
+            self.sampling_mask_tensors: SamplingMaskTensors | None = None
+            if sampler_output.sampling_mask_tensors is not None:
+                self.sampling_mask_tensors = (
+                    sampler_output.sampling_mask_tensors.to_cpu_nonblocking()
+                )
             self.routed_experts_cpu: RoutedExpertsTensors | None = None
             if routed_experts is not None:
                 self.routed_experts_cpu = routed_experts.to_cpu_nonblocking()
@@ -174,6 +179,11 @@ class AsyncOutput(AsyncModelRunnerOutput):
         for token_ids, num_tokens in zip(sampled_token_ids, num_sampled_tokens):
             del token_ids[num_tokens:]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
+
+        if self.sampling_mask_tensors is not None:
+            self.model_runner_output.sampling_masks = (
+                self.sampling_mask_tensors.tolists(self.num_sampled_tokens_np)
+            )
 
         if self.num_nans is not None:
             self.model_runner_output.num_nans_in_logits = dict(

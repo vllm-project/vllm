@@ -4,46 +4,36 @@ import weakref
 
 import pytest
 
-from vllm import LLM
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 
 
 @pytest.fixture(scope="function")
-def text_llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct", enforce_eager=True, seed=0)
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+def text_llm(vllm_runner):
+    with vllm_runner(
+        "meta-llama/Llama-3.2-1B-Instruct", enforce_eager=True, seed=0
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.fixture(scope="function")
-def llm_for_failure_test():
+def llm_for_failure_test(vllm_runner):
     """
     Fixture for testing issue #26081.
     Uses a small max_model_len to easily trigger length errors.
     """
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model="meta-llama/Llama-3.2-1B-Instruct",
+    with vllm_runner(
+        "meta-llama/Llama-3.2-1B-Instruct",
         enforce_eager=True,
         seed=0,
         max_model_len=128,
         disable_log_stats=True,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 def test_chat(text_llm):
@@ -99,21 +89,16 @@ def test_llm_chat_tokenization_no_double_bos(text_llm):
 
 
 @pytest.fixture(scope="function")
-def thinking_llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model="Qwen/Qwen3-0.6B",
+def thinking_llm(vllm_runner):
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
         max_model_len=4096,
         enforce_eager=True,
         seed=0,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.mark.parametrize("enable_thinking", [True, False])
