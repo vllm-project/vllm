@@ -624,7 +624,7 @@ class ParserEngine(Parser):
     ) -> str | None:
         return None
 
-    def count_reasoning_tokens(self, token_ids: Sequence[int] | None = None) -> int:
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         """Return reasoning tokens observed by the parser engine so far."""
         return self._engine.reasoning_token_count
 
