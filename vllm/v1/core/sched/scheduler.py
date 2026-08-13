@@ -1710,13 +1710,13 @@ class Scheduler(SchedulerInterface):
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
 
-    def _get_new_block_ids_to_zero(self) -> list[int] | None:
+    def _get_new_block_ids_to_zero(self) -> list[list[int]] | None:
         # Drain new attention block ids every step so the manager-side list
         # does not grow unbounded; only kv-cache zeroing consumes them.
-        new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids()
+        new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids_by_group()
         if not self.needs_kv_cache_zeroing:
             return None
-        return new_block_ids_to_zero or None
+        return new_block_ids_to_zero if any(new_block_ids_to_zero) else None
 
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
