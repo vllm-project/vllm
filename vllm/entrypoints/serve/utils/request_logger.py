@@ -32,6 +32,9 @@ class RequestLogger:
                 "To view more details, set `VLLM_LOGGING_LEVEL=DEBUG`."
             )
 
+    def log_arrival(self, request_id: str) -> None:
+        logger.info("Arrived request %s", request_id)
+
     def log_inputs(
         self,
         request_id: str,

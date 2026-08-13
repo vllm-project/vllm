@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
+    track_request_exit,
     validate_json_request,
     with_cancellation,
 )
@@ -43,6 +44,7 @@ def completion(request: Request) -> OpenAIServingCompletion | None:
 )
 @with_cancellation
 @load_aware_call
+@track_request_exit
 async def create_completion(request: CompletionRequest, raw_request: Request):
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
