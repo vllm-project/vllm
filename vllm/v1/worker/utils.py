@@ -538,17 +538,7 @@ def bind_kv_cache(
             # TODO - analyze where runner_kv_caches is used and the right
             # way to ensure it properly reflects multiple attention layers
             # in the same decoder block.
-            if (
-                current_platform.is_cuda_alike()
-                or current_platform.is_xpu()
-                or current_platform.is_cpu()
-            ):
-                # We know that the GPU / CPU runner is not impacted by this
-                # case. Some test code depends on runner_kv_caches, but
-                # not in a way that's impacted by ignoring this.
-                pass
-            else:
-                raise NotImplementedError
+            current_platform.check_runner_kv_caches_multi_layer()
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
 
