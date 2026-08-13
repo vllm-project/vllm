@@ -383,6 +383,9 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             if is_padding is not None:
                 is_padding = is_padding[:num_tokens]
 
+        if self.capture_fn is not None:
+            self.capture_fn(topk_ids)
+
         eplb_state = self.eplb_state
         if eplb_state.logical_to_physical_map is not None:
             assert eplb_state.expert_load_view is not None
@@ -1014,6 +1017,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvgfab": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj"],
         "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
