@@ -81,6 +81,7 @@ class ModelState(ABC):
             )
 
             self.encoder_cache = encoder_cache
+            observability_config = vllm_config.observability_config
             self.encoder_runner = EncoderRunner(
                 model=self.model,
                 max_num_tokens=self.max_num_tokens,
@@ -89,6 +90,10 @@ class ModelState(ABC):
                 dtype=self.dtype,
                 device=self.device,
                 cudagraph_manager=cudagraph_manager,
+                enable_timing=bool(
+                    observability_config
+                    and observability_config.enable_mm_processor_stats
+                ),
             )
 
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
@@ -159,6 +164,24 @@ class ModelState(ABC):
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
         """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
         return None
+
+    def execute_mm_encoder(
+        self, scheduled_encoder_inputs: dict[str, list[int]]
+    ) -> None:
+        """Run the multi-modal encoder and cache its outputs by `mm_hash`.
+
+        The encode half of `get_mm_embeddings`, without the gather, for callers
+        that run no language model.
+        """
+        mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
+            scheduled_encoder_inputs
+        )
+        if mm_kwargs:
+            with self.encoder_runner.timed_encoder_operation(
+                scheduled_encoder_inputs.keys()
+            ):
+                encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
     def gather_mm_embeddings(
         self, input_batch: InputBatch, draft_lookahead: int = 0

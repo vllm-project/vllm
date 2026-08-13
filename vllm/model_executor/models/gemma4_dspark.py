@@ -20,6 +20,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
 from .qwen3_dflash import DFlashQwen3Model, _dflash_layer_causal
@@ -38,18 +39,14 @@ class Gemma4DSparkAttention(Gemma4MTPAttention):
         prefix: str,
     ) -> None:
         layer_idx = extract_layer_index(prefix)
-        is_full = config.layer_types[layer_idx] == "full_attention"
-        head_dim = (
-            getattr(config, "global_head_dim", config.head_dim)
-            if is_full
-            else config.head_dim
+        layer_type = config.layer_types[layer_idx]
+        self.use_k_eq_v = layer_type == "full_attention" and getattr(
+            config, "attention_k_eq_v", False
         )
-        use_k_eq_v = is_full and getattr(config, "attention_k_eq_v", False)
-        num_kv_heads = (
-            getattr(config, "num_global_key_value_heads", config.num_key_value_heads)
-            if use_k_eq_v
-            else config.num_key_value_heads
-        )
+
+        layer_config = gemma4_layer_config(config, layer_idx)
+        head_dim = layer_config.head_dim
+        num_kv_heads = layer_config.num_key_value_heads
         super().__init__(
             config=config,
             hidden_size=config.hidden_size,
@@ -64,7 +61,6 @@ class Gemma4DSparkAttention(Gemma4MTPAttention):
         )
         self.is_kv_shared_layer = False
         self.causal = _dflash_layer_causal(config, layer_idx)
-        self.use_k_eq_v = use_k_eq_v
         self.kv_size = self.num_kv_heads * self.head_dim
         attn_bias = getattr(config, "attention_bias", False)
         self.k_proj = ColumnParallelLinear(
@@ -76,7 +72,7 @@ class Gemma4DSparkAttention(Gemma4MTPAttention):
         )
         self.v_proj = (
             None
-            if use_k_eq_v
+            if self.use_k_eq_v
             else ColumnParallelLinear(
                 config.hidden_size,
                 self.total_num_kv_heads * self.head_dim,
