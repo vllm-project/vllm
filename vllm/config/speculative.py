@@ -3,7 +3,7 @@
 
 import copy
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -693,17 +693,51 @@ class SpeculativeConfig:
         return target_hf_overrides(hf_config)
 
     @staticmethod
+    def _update_nested_hf_config(
+        target: PretrainedConfig | dict[str, Any],
+        updates: Mapping[str, Any],
+    ) -> None:
+        for key, value in updates.items():
+            nested_target = (
+                target.get(key)
+                if isinstance(target, dict)
+                else getattr(target, key, None)
+            )
+            if (
+                isinstance(value, Mapping)
+                and nested_target is not None
+                and (
+                    isinstance(nested_target, dict)
+                    or hasattr(nested_target, "__dict__")
+                )
+            ):
+                SpeculativeConfig._update_nested_hf_config(nested_target, value)
+            elif isinstance(target, dict):
+                target[key] = value
+            else:
+                setattr(target, key, value)
+
+    @staticmethod
+    def _apply_mapping_hf_override(
+        target_hf_overrides: Mapping[str, Any],
+        hf_config: PretrainedConfig,
+    ) -> PretrainedConfig:
+        """Apply target CLI overrides before deriving the embedded draft config."""
+        SpeculativeConfig._update_nested_hf_config(hf_config, target_hf_overrides)
+        return SpeculativeConfig.hf_config_override(hf_config)
+
+    @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
+        *,
+        forward_mapping: bool = False,
     ) -> Callable[[PretrainedConfig], PretrainedConfig]:
         """Build the ``hf_overrides`` for the draft ``ModelConfig``.
 
-        Callable overrides on the target are config-to-config transforms
-        (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
-        reach the draft config — otherwise a draft belonging to a large
-        target is instantiated at full size even when the target is shrunk.
-        Dict overrides are target-specific key patches and are not applied
-        to the draft.
+        Callable overrides on the target are config-to-config transforms and
+        must also reach the draft config. Mapping overrides normally remain
+        target-only, but embedded MTP drafts opt in so runtime positional
+        changes remain identical between target and draft.
 
         The composed override must stay picklable: the draft ``ModelConfig``
         is sent to spawned engine-core processes, so a local closure would
@@ -711,6 +745,14 @@ class SpeculativeConfig:
         target via ``functools.partial`` over a module-referenceable static
         method instead.
         """
+        if forward_mapping and isinstance(target_hf_overrides, Mapping):
+            if not target_hf_overrides:
+                return SpeculativeConfig.hf_config_override
+            return functools.partial(
+                SpeculativeConfig._apply_mapping_hf_override,
+                copy.deepcopy(dict(target_hf_overrides)),
+            )
+
         if not callable(target_hf_overrides):
             return SpeculativeConfig.hf_config_override
 
@@ -891,9 +933,12 @@ class SpeculativeConfig:
                 else:
                     # Compose any callable hf_overrides set on the target so the
                     # draft config receives the same transform (e.g. the test
-                    # shrink). Dict overrides stay target-only.
+                    # shrink). Embedded MTP drafts also inherit mapping
+                    # overrides because they share the target's positional
+                    # configuration.
                     draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
-                        self.target_model_config.hf_overrides
+                        self.target_model_config.hf_overrides,
+                        forward_mapping=self.method == "mtp",
                     )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
@@ -920,6 +965,19 @@ class SpeculativeConfig:
                     hf_overrides=draft_hf_overrides,
                     config_format=self.target_model_config.config_format,
                 )
+
+                # An embedded MTP head can be stored unquantized inside a
+                # quantized target checkpoint. When users explicitly select a
+                # different draft quantization method, checkpoint-level target
+                # metadata must not override it: only MTP weights are loaded by
+                # the draft model loader.
+                if (
+                    self.method == "mtp"
+                    and self.quantization is not None
+                    and self.quantization != self.target_model_config.quantization
+                ):
+                    self.draft_model_config.quantization = self.quantization
+                    self.draft_model_config.hf_config.quantization_config = None
 
                 # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
                 # omit vocab_size in config.json, so MedusaConfig falls back to

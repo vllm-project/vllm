@@ -40,6 +40,39 @@ def test_dict_overrides_are_not_forwarded_to_draft():
 
 
 @pytest.mark.cpu_test
+def test_dict_rope_overrides_are_forwarded_to_embedded_mtp_draft():
+    """Embedded MTP drafts must share target runtime positional overrides."""
+    composed = SpeculativeConfig.compose_draft_hf_overrides(
+        {
+            "max_position_embeddings": 262144,
+            "rope_parameters": {
+                "rope_type": "yarn",
+                "factor": 2.0,
+                "original_max_position_embeddings": 262144,
+            },
+        },
+        forward_mapping=True,
+    )
+    out = composed(
+        _make_hf_config(
+            architectures=["BailingMoeV3ForCausalLM"],
+            model_type="bailing_hybrid",
+            max_position_embeddings=131072,
+            rope_parameters=None,
+            num_nextn_predict_layers=1,
+        )
+    )
+
+    assert out.architectures == ["BailingMoeV3MTPModel"]
+    assert out.max_position_embeddings == 262144
+    assert out.rope_parameters == {
+        "rope_type": "yarn",
+        "factor": 2.0,
+        "original_max_position_embeddings": 262144,
+    }
+
+
+@pytest.mark.cpu_test
 def test_none_overrides_fall_back_to_arch_mapping():
     composed = SpeculativeConfig.compose_draft_hf_overrides(None)
     assert composed is SpeculativeConfig.hf_config_override

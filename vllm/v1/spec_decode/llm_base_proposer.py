@@ -1288,6 +1288,20 @@ class SpecDecodeBaseProposer:
         spec_cfg = self.speculative_config
         base = self.vllm_config
 
+        # Draft ModelConfig carries independent model, load, and quantization
+        # settings, while new-style model constructors read them from
+        # VllmConfig. Keep the two in sync so draft-specific options are not
+        # silently replaced by the target model's settings.
+        draft_load_config = spec_cfg.draft_load_config or base.load_config
+        base = replace(
+            base,
+            model_config=self.draft_model_config,
+            load_config=draft_load_config,
+            quant_config=VllmConfig.get_quantization_config(
+                self.draft_model_config, draft_load_config
+            ),
+        )
+
         if spec_cfg.moe_backend is not None:
             base = replace(
                 base,
