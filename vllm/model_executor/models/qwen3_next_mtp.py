@@ -132,6 +132,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[current_step_idx]
         if mtp_layer.use_attn_reduce_scatter_for_moe:
+            assert hidden_states.shape[0] == positions.shape[-1]
             hidden_states = sequence_parallel_chunk(hidden_states)
             assert residual is None
         hidden_states, residual = mtp_layer(
