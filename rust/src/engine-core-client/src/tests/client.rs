@@ -2498,9 +2498,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let defaults_request_hex = lines.next().expect("missing defaults request fixture line");
     let multimodal_request_hex = lines.next().expect("missing multimodal request fixture line");
     let outputs_hex = lines.next().expect("missing outputs fixture line");
-    let sampling_mask_outputs_hex = lines
-        .next()
-        .expect("missing sampling mask outputs fixture line");
+    let sampling_mask_outputs_hex =
+        lines.next().expect("missing sampling mask outputs fixture line");
     let inline_logprobs_frames = lines.next().expect("missing inline logprobs fixture line");
     let multipart_logprobs_frames = lines.next().expect("missing multipart logprobs fixture line");
     let inline_prompt_frames = lines.next().expect("missing inline prompt logprobs fixture line");
@@ -2577,10 +2576,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let decoded_sampling_mask_outputs: EngineCoreOutputs =
         rmp_serde::from_slice(&sampling_mask_outputs_bytes).unwrap();
-    let sampling_mask_output = &decoded_sampling_mask_outputs
-        .as_request_batch()
-        .unwrap()
-        .outputs[0];
+    let sampling_mask_output =
+        &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
     assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
     assert!(matches!(
         sampling_mask_output.new_sampling_mask.as_ref(),
