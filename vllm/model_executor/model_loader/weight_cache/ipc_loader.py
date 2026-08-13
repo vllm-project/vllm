@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     get_socket_path,
     recv_msg,
     send_msg,
+    verify_socket_owner,
 )
 from vllm.tracing import instrument
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -53,6 +54,8 @@ class IpcModelLoader(BaseModelLoader):
     - mode: "zero_copy" (default) or "copy".
     - fallback: fall back to disk loading when the daemon is unavailable or
       the fingerprints mismatch (default: True).
+    - connect_timeout_s: socket connect/ping timeout (default: 5.0).
+    - state_timeout_s: timeout for the weight-transfer request (default: 300.0).
 
     Note: in zero-copy mode the weights live in the daemon's CUDA IPC
     allocations, so sleep mode (CuMemAllocator weight offloading) must not be
@@ -66,6 +69,12 @@ class IpcModelLoader(BaseModelLoader):
         self.socket_dir: str | None = extra_config.pop("socket_dir", None)
         self.mode: str = extra_config.pop("mode", "zero_copy")
         self.fallback: bool = extra_config.pop("fallback", True)
+        self.connect_timeout_s: float = float(
+            extra_config.pop("connect_timeout_s", _CONNECT_TIMEOUT_S)
+        )
+        self.state_timeout_s: float = float(
+            extra_config.pop("state_timeout_s", _STATE_TIMEOUT_S)
+        )
         if self.mode not in ("zero_copy", "copy"):
             raise ValueError(
                 f"Invalid weight cache mode {self.mode!r}, "
@@ -88,7 +97,7 @@ class IpcModelLoader(BaseModelLoader):
         loaded through this loader).
         """
         device_index = torch.cuda.current_device()
-        entries = self._fetch_entries(model_config)
+        entries, _ = self._fetch_entries(model_config)
         params = dict(model.named_parameters())
         buffers = dict(model.named_buffers())
         for name, entry in entries.items():
@@ -104,8 +113,10 @@ class IpcModelLoader(BaseModelLoader):
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
         try:
-            entries = self._fetch_entries(model_config)
-            return self._build_model(vllm_config, model_config, prefix, entries)
+            entries, aliases = self._fetch_entries(model_config)
+            return self._build_model(
+                vllm_config, model_config, prefix, entries, aliases
+            )
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
             if not self.fallback:
                 raise
@@ -127,6 +138,7 @@ class IpcModelLoader(BaseModelLoader):
         model_config: ModelConfig,
         prefix: str,
         entries: dict[str, TensorEntry],
+        aliases: dict[str, str],
     ) -> nn.Module:
         device_config = vllm_config.device_config
         load_device = (
@@ -147,7 +159,7 @@ class IpcModelLoader(BaseModelLoader):
                     model_config=model_config,
                     prefix=prefix,
                 )
-            self._apply_entries(model, entries, device_index)
+            self._apply_entries(model, entries, aliases, device_index)
             _materialize_remaining_meta_tensors(
                 model, torch.device(target_device.type, device_index)
             )
@@ -166,30 +178,57 @@ class IpcModelLoader(BaseModelLoader):
         self,
         model: nn.Module,
         entries: dict[str, TensorEntry],
+        aliases: dict[str, str],
         device_index: int,
     ) -> None:
         modules = dict(model.named_modules())
-        for name, entry in entries.items():
+        registered: dict[str, torch.Tensor] = {}
+
+        def _register(name: str, tensor: torch.Tensor, is_param: bool) -> None:
             module_name, _, leaf = name.rpartition(".")
             module = modules.get(module_name)
             if module is None:
                 raise RuntimeError(f"Cached tensor {name} has no matching module")
-            tensor = entry.rebuild(device_index)
-            if self.mode == "copy":
-                tensor = tensor.clone()
             # Replace via registration rather than param.data assignment,
             # which fails for meta tensors. Entries may also introduce
             # post-quantization tensors absent from the meta model.
             module._parameters.pop(leaf, None)
             module._buffers.pop(leaf, None)
-            if entry.kind == "param":
-                module.register_parameter(
-                    leaf, nn.Parameter(tensor, requires_grad=False)
+            if is_param:
+                obj: torch.Tensor = (
+                    tensor
+                    if isinstance(tensor, nn.Parameter)
+                    else nn.Parameter(tensor, requires_grad=False)
                 )
+                module.register_parameter(leaf, obj)
             else:
-                module.register_buffer(leaf, tensor)
+                obj = tensor
+                module.register_buffer(leaf, obj)
+            registered[name] = obj
 
-    def _fetch_entries(self, model_config: ModelConfig) -> dict[str, TensorEntry]:
+        for name, entry in entries.items():
+            tensor = entry.rebuild(device_index)
+            if self.mode == "copy":
+                tensor = tensor.clone()
+            _register(name, tensor, entry.kind == "param")
+
+        # Re-establish tied-weight aliases by registering the *same* object the
+        # canonical name resolved to, so parameter identity (and the tie) is
+        # preserved instead of allocating uninitialized memory.
+        for alias_name, canonical_name in aliases.items():
+            obj = registered.get(canonical_name)
+            if obj is None:
+                logger.warning(
+                    "Cached alias %s references missing canonical tensor %s",
+                    alias_name,
+                    canonical_name,
+                )
+                continue
+            _register(alias_name, obj, isinstance(obj, nn.Parameter))
+
+    def _fetch_entries(
+        self, model_config: ModelConfig
+    ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
         from vllm.distributed import (
             get_tensor_model_parallel_rank,
             get_tensor_model_parallel_world_size,
@@ -202,8 +241,10 @@ class IpcModelLoader(BaseModelLoader):
         )
         return self._request_state(cache_config)
 
-    def _request_state(self, cache_config: CacheConfig) -> dict[str, TensorEntry]:
-        with self._connect(_STATE_TIMEOUT_S) as conn:
+    def _request_state(
+        self, cache_config: CacheConfig
+    ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
+        with self._connect(self.state_timeout_s) as conn:
             send_msg(conn, {"cmd": "get_state", "cache_config": cache_config})
             response = recv_msg(conn)
         status = response.get("status")
@@ -216,10 +257,20 @@ class IpcModelLoader(BaseModelLoader):
                 f"Weight cache daemon error: {response.get('message')}"
             )
         self._check_gpu_uuid(response.get("gpu_uuid"))
-        return response["entries"]
+        return response["entries"], response.get("aliases", {})
 
     def _connect(self, timeout: float) -> socket.socket:
         socket_path = self._resolve_socket_path()
+        # The auto-derived per-user directory is locked to 0700 and checked
+        # strictly. When the operator explicitly configures a path they own the
+        # trust decision, so only ownership/symlink safety is enforced.
+        strict_perms = self.socket_path is None and self.socket_dir is None
+        try:
+            verify_socket_owner(socket_path, strict_perms=strict_perms)
+        except OSError as e:
+            raise WeightCacheUnavailableError(
+                f"Weight cache socket {socket_path} is unavailable: {e}"
+            ) from e
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         try:
@@ -256,7 +307,7 @@ class IpcModelLoader(BaseModelLoader):
 
     def _send_release(self) -> None:
         try:
-            with self._connect(_CONNECT_TIMEOUT_S) as conn:
+            with self._connect(self.connect_timeout_s) as conn:
                 send_msg(conn, {"cmd": "release"})
                 recv_msg(conn)
         except (WeightCacheUnavailableError, ConnectionError, OSError):

@@ -3,14 +3,19 @@
 """CacheConfig fingerprinting and socket protocol for the weight cache daemon.
 
 The protocol uses pickle over a Unix domain socket and is only intended for
-communication between trusted local processes owned by the same user; the
-daemon restricts the socket file permissions to the owner (0600).
+communication between trusted local processes owned by the same user. The
+sockets live in a per-user private directory (mode 0700) and the daemon
+restricts the socket file permissions to the owner (0600). Both the daemon and
+the engine verify that the directory and socket are owned by the current user
+and are not group/world accessible before trusting them, so a different local
+user cannot pre-plant a malicious socket at a predictable path.
 """
 
 import json
 import os
 import pickle
 import socket
+import stat
 import struct
 import tempfile
 from dataclasses import dataclass, fields
@@ -18,15 +23,22 @@ from typing import Any
 
 import torch
 
+import vllm.version
 from vllm.config import ModelConfig
 from vllm.utils.hashing import safe_hash
 
 SOCKET_NAME_TEMPLATE = "vllm_weight_cache_gpu{gpu_id}.sock"
+SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
 
 _LEN_STRUCT = struct.Struct("!Q")
 # Sanity bound for a single message. IPC handles are tiny; only small
 # non-CUDA tensors are ever shipped by value.
 MAX_MSG_SIZE = 1 << 34
+
+
+def _current_uid() -> int:
+    getuid = getattr(os, "getuid", None)
+    return getuid() if getuid is not None else -1
 
 
 class WeightCacheUnavailableError(Exception):
@@ -53,9 +65,100 @@ def get_physical_device_id(device_index: int) -> int | None:
         return None
 
 
+def get_socket_dir(socket_dir: str | None = None) -> str:
+    """Return the directory that holds the daemon sockets.
+
+    When no explicit directory is given, use a per-user private directory
+    under the system temp dir so its path is unpredictable to other users and
+    can be locked down to mode 0700.
+    """
+    if socket_dir is not None:
+        return socket_dir
+    return os.path.join(
+        tempfile.gettempdir(), SOCKET_DIR_TEMPLATE.format(uid=_current_uid())
+    )
+
+
 def get_socket_path(gpu_id: int, socket_dir: str | None = None) -> str:
-    socket_dir = socket_dir or tempfile.gettempdir()
-    return os.path.join(socket_dir, SOCKET_NAME_TEMPLATE.format(gpu_id=gpu_id))
+    directory = get_socket_dir(socket_dir)
+    return os.path.join(directory, SOCKET_NAME_TEMPLATE.format(gpu_id=gpu_id))
+
+
+def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None:
+    """Create the socket directory (if needed) locked down to the owner.
+
+    Called by the daemon before binding. Existing directories are re-checked
+    and, for the auto-derived path, tightened so a pre-existing world-writable
+    directory is rejected.
+    """
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    if strict_perms:
+        os.chmod(directory, 0o700)
+    verify_private_dir(directory, strict_perms=strict_perms)
+
+
+def verify_private_dir(directory: str, strict_perms: bool = True) -> None:
+    """Verify a directory is a real dir owned by us and not world/group readable.
+
+    When ``strict_perms`` is False the group/world permission bits are not
+    checked; this is used for directories the operator explicitly configured
+    (they own the trust decision), while the auto-derived per-user directory is
+    always checked strictly.
+    """
+    info = os.lstat(directory)
+    if stat.S_ISLNK(info.st_mode):
+        raise WeightCacheUnavailableError(
+            f"Refusing to use symlinked socket directory {directory}"
+        )
+    if not stat.S_ISDIR(info.st_mode):
+        raise WeightCacheUnavailableError(f"{directory} is not a directory")
+    uid = _current_uid()
+    if uid != -1 and info.st_uid != uid:
+        raise WeightCacheUnavailableError(
+            f"Socket directory {directory} is not owned by the current user"
+        )
+    if strict_perms and info.st_mode & 0o077:
+        raise WeightCacheUnavailableError(
+            f"Socket directory {directory} is group/world accessible"
+        )
+
+
+def verify_socket_owner(socket_path: str, strict_perms: bool = True) -> None:
+    """Verify the socket lives in a private dir and is owned by the current user.
+
+    Called by the engine before connecting so it never talks to a socket a
+    different user could have planted.
+    """
+    verify_private_dir(os.path.dirname(socket_path), strict_perms=strict_perms)
+    info = os.lstat(socket_path)
+    if stat.S_ISLNK(info.st_mode):
+        raise WeightCacheUnavailableError(
+            f"Refusing to connect to symlinked socket {socket_path}"
+        )
+    uid = _current_uid()
+    if uid != -1 and info.st_uid != uid:
+        raise WeightCacheUnavailableError(
+            f"Socket {socket_path} is not owned by the current user"
+        )
+
+
+def verify_peer_is_owner(conn: socket.socket) -> None:
+    """Best-effort check that the connecting peer runs as the current user.
+
+    Uses SO_PEERCRED where available (Linux). Silently returns on platforms
+    that do not expose peer credentials.
+    """
+    so_peercred = getattr(socket, "SO_PEERCRED", None)
+    if so_peercred is None:
+        return
+    try:
+        creds = conn.getsockopt(socket.SOL_SOCKET, so_peercred, struct.calcsize("3i"))
+        _, peer_uid, _ = struct.unpack("3i", creds)
+    except OSError:
+        return
+    uid = _current_uid()
+    if uid != -1 and peer_uid != uid:
+        raise PermissionError(f"Rejecting weight cache connection from uid {peer_uid}")
 
 
 def _hash_quant_config(quant_config: Any) -> str:
@@ -82,6 +185,8 @@ class CacheConfig:
     dtype: str
     quantization: str | None
     quant_config_hash: str
+    revision: str | None
+    vllm_version: str
 
     @classmethod
     def from_model_config(
@@ -104,6 +209,8 @@ class CacheConfig:
             dtype=str(model_config.dtype),
             quantization=model_config.quantization,
             quant_config_hash=_hash_quant_config(quant_config),
+            revision=model_config.revision,
+            vllm_version=vllm.version.__version__,
         )
 
     def mismatched_fields(self, other: "CacheConfig") -> list[str]:

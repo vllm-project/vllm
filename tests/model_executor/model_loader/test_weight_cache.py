@@ -32,6 +32,8 @@ def _make_cache_config(**overrides) -> CacheConfig:
         dtype="torch.bfloat16",
         quantization=None,
         quant_config_hash="",
+        revision=None,
+        vllm_version="test",
     )
     kwargs.update(overrides)
     return CacheConfig(**kwargs)
@@ -114,7 +116,7 @@ def _serve_one_response(server: socket.socket, response: dict) -> None:
         send_msg(conn, response)
 
 
-def _request_against_fake_daemon(tmp_path, response: dict) -> dict:
+def _request_against_fake_daemon(tmp_path, response: dict):
     socket_path = str(tmp_path / "daemon.sock")
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(socket_path)
@@ -153,13 +155,49 @@ def test_error_response_raises(tmp_path):
 
 def test_ok_response_returns_entries(tmp_path):
     entry = TensorEntry.from_tensor(torch.arange(4, dtype=torch.float32), "param")
-    entries = _request_against_fake_daemon(
+    entries, aliases = _request_against_fake_daemon(
         tmp_path, {"status": "ok", "entries": {"layer.weight": entry}}
     )
+    assert aliases == {}
     assert torch.equal(
         entries["layer.weight"].rebuild(0),
         torch.arange(4, dtype=torch.float32),
     )
+
+
+class _TiedModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed = torch.nn.Embedding(4, 3)
+        self.lm_head = torch.nn.Linear(3, 4, bias=False)
+        self.lm_head.weight = self.embed.weight
+
+
+def test_export_entries_records_tied_alias():
+    from vllm.model_executor.model_loader.weight_cache.daemon import export_entries
+
+    entries, aliases = export_entries(_TiedModel())
+    assert "embed.weight" in entries
+    assert "lm_head.weight" not in entries
+    assert aliases == {"lm_head.weight": "embed.weight"}
+
+
+def test_apply_entries_restores_tied_identity():
+    from vllm.model_executor.model_loader.weight_cache.daemon import export_entries
+
+    src = _TiedModel()
+    entries, aliases = export_entries(src)
+
+    dst = _TiedModel()
+    # Break the tie so the two names point at distinct parameters, mimicking a
+    # freshly initialized model before the cached weights are applied.
+    dst.lm_head.weight = torch.nn.Parameter(torch.zeros(4, 3))
+
+    loader = IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    loader._apply_entries(dst, entries, aliases, device_index=0)
+
+    assert dst.lm_head.weight is dst.embed.weight
+    assert torch.equal(dst.embed.weight, src.embed.weight)
 
 
 def _ipc_producer(conn, done) -> None:

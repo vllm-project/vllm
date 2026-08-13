@@ -16,6 +16,9 @@ Engines then load from the daemons with:
 
     vllm serve /path/to/model --tensor-parallel-size 4 \\
         --load-format ipc_cache
+
+Only tensor parallelism is supported; pipeline, data, and expert parallelism
+are rejected at launch.
 """
 
 import multiprocessing
@@ -35,14 +38,57 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     CacheConfig,
     TensorEntry,
+    ensure_private_socket_dir,
     get_physical_device_id,
     get_socket_path,
     recv_msg,
     send_msg,
+    verify_peer_is_owner,
 )
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def export_entries(
+    model: torch.nn.Module,
+) -> tuple[dict[str, TensorEntry], dict[str, str]]:
+    """Export a model's tensors, preserving tied-parameter aliases.
+
+    ``named_parameters``/``named_buffers`` are iterated with
+    ``remove_duplicate=False`` so tied weights (e.g. ``lm_head.weight`` sharing
+    storage with ``embed_tokens.weight``) are not silently dropped. Each unique
+    tensor is exported once; every additional name that refers to the same
+    tensor object is recorded in the returned alias map so the client can
+    re-establish the shared identity instead of allocating uninitialized
+    memory for it.
+
+    Returns:
+        A ``(entries, aliases)`` pair where ``entries`` maps a canonical name to
+        its ``TensorEntry`` and ``aliases`` maps each duplicate name to its
+        canonical name.
+    """
+    entries: dict[str, TensorEntry] = {}
+    aliases: dict[str, str] = {}
+    canonical_by_id: dict[int, str] = {}
+
+    def _add(name: str, tensor: torch.Tensor, kind: str) -> None:
+        canonical = canonical_by_id.get(id(tensor))
+        if canonical is not None:
+            aliases[name] = canonical
+            return
+        canonical_by_id[id(tensor)] = name
+        entries[name] = TensorEntry.from_tensor(tensor, kind)
+
+    for name, param in model.named_parameters(remove_duplicate=False):
+        _add(name, param, "param")
+    # named_buffers includes non-persistent buffers (e.g. rotary embedding
+    # caches) that state_dict would miss.
+    for name, buffer in model.named_buffers(remove_duplicate=False):
+        if name in entries or name in aliases:
+            continue
+        _add(name, buffer, "buffer")
+    return entries, aliases
 
 
 class WeightCacheDaemon:
@@ -61,6 +107,7 @@ class WeightCacheDaemon:
         self.socket_dir = socket_dir
         self.model: torch.nn.Module | None = None
         self.entries: dict[str, TensorEntry] = {}
+        self.aliases: dict[str, str] = {}
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_config = CacheConfig.from_model_config(
@@ -93,15 +140,7 @@ class WeightCacheDaemon:
 
     def _export_entries(self) -> None:
         assert self.model is not None
-        entries: dict[str, TensorEntry] = {}
-        for name, param in self.model.named_parameters():
-            entries[name] = TensorEntry.from_tensor(param, "param")
-        # named_buffers includes non-persistent buffers (e.g. rotary
-        # embedding caches) that state_dict would miss.
-        for name, buffer in self.model.named_buffers():
-            if name not in entries:
-                entries[name] = TensorEntry.from_tensor(buffer, "buffer")
-        self.entries = entries
+        self.entries, self.aliases = export_entries(self.model)
 
     def serve_forever(self) -> None:
         """Serve requests until terminated.
@@ -111,6 +150,9 @@ class WeightCacheDaemon:
         ready.
         """
         socket_path = self._socket_path()
+        ensure_private_socket_dir(
+            os.path.dirname(socket_path), strict_perms=self.socket_dir is None
+        )
         if os.path.exists(socket_path):
             os.unlink(socket_path)
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -125,9 +167,16 @@ class WeightCacheDaemon:
                 conn, _ = server.accept()
                 with conn:
                     try:
+                        verify_peer_is_owner(conn)
                         self._handle_connection(conn)
                     except (ConnectionError, EOFError):
                         logger.warning("Client disconnected mid-request")
+                    except Exception:
+                        # A single malformed or malicious request must not take
+                        # down the daemon for every other engine on this GPU.
+                        logger.exception(
+                            "Error handling weight cache client; continuing"
+                        )
         finally:
             server.close()
             if os.path.exists(socket_path):
@@ -177,12 +226,14 @@ class WeightCacheDaemon:
             {
                 "status": "ok",
                 "entries": self.entries,
+                "aliases": self.aliases,
                 "gpu_uuid": self._gpu_uuid(),
             },
         )
 
     def _handle_release(self, conn: socket.socket) -> None:
         self.entries.clear()
+        self.aliases.clear()
         self.model = None
         torch.cuda.empty_cache()
         logger.info("Weight cache daemon rank %d released cached weights", self.tp_rank)
@@ -229,9 +280,23 @@ def main() -> None:
             "The weight cache daemon itself must load from disk; use the "
             "default --load-format"
         )
-    if vllm_config.parallel_config.pipeline_parallel_size > 1:
-        raise ValueError("The weight cache daemon only supports TP deployments")
-    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.pipeline_parallel_size > 1:
+        raise ValueError(
+            "The weight cache daemon only supports tensor parallelism; "
+            "pipeline parallelism is not supported"
+        )
+    if parallel_config.data_parallel_size > 1:
+        raise ValueError(
+            "The weight cache daemon only supports tensor parallelism; "
+            "data parallelism is not supported"
+        )
+    if getattr(parallel_config, "enable_expert_parallel", False):
+        raise ValueError(
+            "The weight cache daemon only supports tensor parallelism; "
+            "expert parallelism is not supported"
+        )
+    tp_size = parallel_config.tensor_parallel_size
 
     distributed_init_method = get_distributed_init_method("127.0.0.1", get_open_port())
     ctx = multiprocessing.get_context("spawn")
