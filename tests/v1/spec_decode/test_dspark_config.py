@@ -150,6 +150,11 @@ def test_dspark_sequential_sampling_writes_persistent_draft_logits(monkeypatch):
     speculator.use_fp64_gumbel = False
     speculator._step_cols = torch.arange(num_speculative_steps, dtype=torch.int32)
     speculator._draft_topk = None
+    # object.__new__ skips __init__, so every attribute _sample_sequential reads
+    # has to be set here. Upstream #47808 added a read of this one; without it
+    # the test fails with AttributeError from production code that is in fact
+    # correct -- __init__ always sets it. False alarm, not a defect.
+    speculator.enable_adaptive_verification = False
     speculator._d2t_scatter_index = None
     speculator.draft_tokens = torch.empty(
         max_num_reqs,
@@ -222,6 +227,17 @@ def test_dspark_sequential_sampling_writes_persistent_draft_logits(monkeypatch):
             sampled_by_step[col],
         )
 
+    # The property this asserts -- the draft-logits buffer is never replaced --
+    # is now guaranteed by construction rather than by a clearing call.
+    # 7d9970dec3 replaced the reuse-and-clear scheme (assign base_logits, then
+    # clear_runtime_draft_logits) with a persistent preallocated buffer, because
+    # DSpark drafting is CUDA-graph replayed and a Python-side reassignment does
+    # not run per replay. The method it called is intentionally gone; this
+    # re-checks the same invariant against a second sampling pass instead.
     draft_logits = speculator.draft_logits
-    DSparkSpeculator.clear_runtime_draft_logits(speculator)
+    DSparkSpeculator._sample_sequential(
+        speculator,
+        num_reqs,
+        torch.zeros(num_reqs * num_speculative_steps, 1),
+    )
     assert speculator.draft_logits is draft_logits
