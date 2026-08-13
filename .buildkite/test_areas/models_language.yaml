@@ -65,8 +65,8 @@ steps:
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
-    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+    - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     # Shard the hybrid language model tests that are numerically stable on Hopper.
     - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
@@ -78,8 +78,8 @@ steps:
       depends_on:
       - image-build-amd
       commands:
-      - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-      - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
       - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 # Granite 4 hybrid generation is sensitive to hardware-specific Triton SSD
@@ -93,8 +93,8 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation
   commands:
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
-    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+    - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
 
 - label: Language Models Test (Extended Generation) # 80min
@@ -108,8 +108,8 @@ steps:
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
-    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+    - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
   mirror:
     amd:
@@ -119,8 +119,8 @@ steps:
       depends_on:
       - image-build-amd
       commands:
-      - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-      - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
       - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (PPL)
