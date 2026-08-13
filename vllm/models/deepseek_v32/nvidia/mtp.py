@@ -285,19 +285,9 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
     def get_top_tokens(
         self,
         hidden_states: torch.Tensor,
-        spec_step_idx: int | None = None,
+        spec_step_idx: int = 0,
     ) -> torch.Tensor:
         """See ``DeepseekV32MultiTokenPredictor.get_top_tokens``."""
-        # Callers omit spec_step_idx, which only works while one MTP layer is
-        # cycled for every step. Fail loudly instead of silently reusing step
-        # 0's head on a future multi-layer MTP.
-        if spec_step_idx is None:
-            assert self.model.num_mtp_layers == 1, (
-                "get_top_tokens called without spec_step_idx on a "
-                "multi-layer MTP; thread the draft step index through "
-                "the speculator."
-            )
-            spec_step_idx = 0
         return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
