@@ -521,7 +521,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # fused_wqa_wkv (heaviest) on default; the three lighter input GEMMs
         # on aux streams 0..2 when their owning module exists. ln_events[0]
         # is the fan-out start event; ln_events[1..3] are per-aux done events.
-        # On ROCm, aux_streams is None and execute_in_parallel runs serially.
+        # Falls back to sequential when aux_streams is None.
         aux_fns: list[Callable[[], Any] | None] = [None, None, None]
 
         if self.compressor is not None:
@@ -604,7 +604,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
             # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
             # MLA compressor. Slot [2] is reserved for the indexer's inner
-            # overlap. ROCm (aux_streams is None) falls back to sequential.
+            # overlap. Falls back to sequential when aux_streams is None.
             q, _ = execute_in_parallel(
                 wq_b_kv_insert,
                 [
@@ -936,7 +936,7 @@ class DeepseekV4Indexer(nn.Module):
             use_fp4_cache=self.use_fp4_kv,
         )
 
-        # None on ROCm — maybe_execute_in_parallel falls back to sequential.
+        # None on ROCm CSA path — maybe_execute_in_parallel falls back to sequential.
         self.aux_stream = aux_stream
         self.ln_events: list[torch.cuda.Event] = [
             torch.cuda.Event(),

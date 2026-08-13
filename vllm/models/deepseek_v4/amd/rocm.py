@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 
@@ -496,26 +496,19 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # Disable indexer-inner stream overlap, keep that serial on ROCm.
             self.indexer.aux_stream = None
 
-    def _run_parallel_input_projections(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-    ]:
+    def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
         # When CSA multi-stream overlap is enabled the available aux streams are
-        # reserved for the attention-level overlap in forward().  To avoid
+        # reserved for the attention-level overlap in attention_impl().  To avoid
         # contention we temporarily clear aux_stream_list so that the base-class
         # input-GEMM fan-out runs serially on the default stream.  The streams
         # are restored afterwards so they remain available for the outer
         # execute_in_parallel / maybe_execute_in_parallel dispatch.
         if self.aux_stream_list is None:
-            return super()._run_parallel_input_projections(hidden_states)
+            return super().attn_gemm_parallel_execute(hidden_states)
         saved_streams = self.aux_stream_list
         self.aux_stream_list = None
         try:
-            return super()._run_parallel_input_projections(hidden_states)
+            return super().attn_gemm_parallel_execute(hidden_states)
         finally:
             self.aux_stream_list = saved_streams
 
