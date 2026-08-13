@@ -1099,7 +1099,16 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                     "hc_head_scale": "hc_head_scale",
                     "markov_head.markov_w1.weight": "markov_w1.weight",
                     "markov_head.markov_w2.weight": "markov_w2.weight",
-                    "confidence_head.proj.weight": "confidence_head.weight",
+                    # Identity, not "confidence_head.weight": collapsing our bare
+                    # ReplicatedLinear into upstream's DSparkConfidenceHead moved
+                    # the parameter from `confidence_head.weight` to
+                    # `confidence_head.proj.weight`, because the wrapper holds
+                    # its linear as `.proj`. Left stale this raised
+                    # KeyError: 'confidence_head.weight' at draft-model load.
+                    # It must be listed rather than dropped -- an unlisted `rest`
+                    # falls through to f"layers.{layer_idx}.{rest}", which would
+                    # bury a top-level head under layers.2.
+                    "confidence_head.proj.weight": "confidence_head.proj.weight",
                 }
                 if rest in final_map:
                     return final_map[rest]
