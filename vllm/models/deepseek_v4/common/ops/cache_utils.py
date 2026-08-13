@@ -530,7 +530,7 @@ def _compute_global_topk_indices_and_lens_kernel(
 # 64 for the h_q=64 kernel and 128 for h_q=128; pad to 128 to satisfy both.
 # The extra slots stay as -1 sentinels and `combined_lens` caps the valid
 # range via `topk_length`, so padding is a no-op at kernel level.
-_SPARSE_PREFILL_TOPK_ALIGNMENT = 128
+_SPARSE_PREFILL_TOPK_ALIGNMENT = 256
 
 
 def combine_topk_swa_indices(
