@@ -1081,8 +1081,9 @@ class ShardedRDTWeightTransferEngine(
             _get_original_loader,
         )
         from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
+        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-        def _make_stamp(layer, name, inner):
+        def _make_stamp(layer, name, inner, added=False):
             @functools.wraps(inner)  # keep ``inner``'s signature (incl. ``param``)
             def stamp(*args, **kwargs):
                 recorder.current = (layer, name)
@@ -1094,11 +1095,22 @@ class ShardedRDTWeightTransferEngine(
             # Tag so _restore_after_dry_run can detect and unwrap leaked stamps,
             # and so a second bake doesn't double-wrap.
             stamp._rdt_stamp_inner = inner  # type: ignore[attr-defined]
+            stamp._rdt_stamp_added = added  # type: ignore[attr-defined]
             return stamp
 
         for module in model.modules():
             for name, tensor in get_layer_tensors(module).items():
                 if getattr(tensor, "weight_loader", None) is None:
+                    # A param with NO loader (e.g. GLM's router bias, a plain
+                    # nn.Parameter) is still loaded by the model's load_weights
+                    # through the getattr(param, "weight_loader",
+                    # default_weight_loader) fallback — unstamped, its bake copy
+                    # would be unattributable, making the name residual (a hard
+                    # error on stamped models). Stamp the same default loader
+                    # the fallback would pick; the restore deletes it again.
+                    tensor.weight_loader = _make_stamp(
+                        module, name, default_weight_loader, added=True
+                    )
                     continue
                 # Bypass online_process_loader: stamp the *original* loader.
                 original = _get_original_loader(tensor)
@@ -1129,9 +1141,15 @@ class ShardedRDTWeightTransferEngine(
         for module in model.modules():
             for _name, tensor in get_layer_tensors(module).items():
                 loader = getattr(tensor, "weight_loader", None)
+                added = False
                 while loader is not None and hasattr(loader, "_rdt_stamp_inner"):
+                    added = added or getattr(loader, "_rdt_stamp_added", False)
                     loader = loader._rdt_stamp_inner
                     tensor.weight_loader = loader
+                if added:
+                    # The stamp was ATTACHED to a param that had no loader
+                    # (see _install_recording_stamps); leave none behind.
+                    del tensor.weight_loader
         if hasattr(model, "_original_do_torchao_reload"):
             model._do_torchao_reload = model._original_do_torchao_reload
 

@@ -79,7 +79,17 @@ def _meta_copy_(dest: torch.Tensor, src: "LazyRDTTensor") -> torch.Tensor:
     Moves no data, but still counts against the layer's loaded numel -- vLLM's
     layerwise ``CopyCounter`` drives ``_layerwise_process`` off that count, so a
     skipped ``copy_`` would leave the layer looking unloaded forever.
+
+    A ``dest`` that is NOT on meta is one the layerwise reload never moved
+    there (the ``SKIP_LOAD_TENSORS`` set — e.g. GLM's router
+    ``e_score_correction_bias``, a plain ``nn.Parameter``). Torch forbids
+    ``real.copy_(meta)``, and skipping the counter copy is consistent:
+    ``get_layer_size`` excludes the same set, so these never count toward a
+    layer's total either. The copy is still RECORDED by the caller, so the
+    sync-time replay writes the real param.
     """
+    if not dest.is_meta:
+        return dest
     meta_src = torch.empty(src.shape, dtype=src.dtype, device="meta")
     with torch._C.DisableTorchFunctionSubclass():
         return dest.copy_(meta_src)
