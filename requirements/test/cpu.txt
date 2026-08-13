@@ -1118,7 +1118,7 @@ tokenizers==0.22.2
     #   -r requirements/test/cuda.in
     #   cohere
     #   transformers
-torch==2.13.0+cpu
+torch==2.14.0+cpu
     # via
     #   -r requirements/test/cuda.in
     #   accelerate
@@ -1146,7 +1146,7 @@ torchaudio==2.11.0+cpu
     #   vocos
 torchcodec==0.14.0+cpu
     # via -r requirements/test/cuda.in
-torchvision==0.28.0+cpu
+torchvision==0.29.0+cpu
     # via
     #   -r requirements/test/cuda.in
     #   open-clip-torch
@@ -1181,7 +1181,7 @@ transformers==5.15.0
     #   xgrammar
 transformers-stream-generator==0.0.5
     # via -r requirements/test/cuda.in
-triton==3.6.0
+triton==3.8.0
     # via xgrammar
 tritonclient==2.64.0
     # via -r requirements/test/cuda.in
