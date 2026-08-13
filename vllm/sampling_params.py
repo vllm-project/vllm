@@ -599,13 +599,6 @@ class SamplingParams(
             raise VLLMValidationError(
                 f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
             )
-        if self.routed_experts_prompt_start < 0:
-            raise VLLMValidationError(
-                "routed_experts_prompt_start must be non-negative, got "
-                f"{self.routed_experts_prompt_start}.",
-                parameter="routed_experts_prompt_start",
-                value=self.routed_experts_prompt_start,
-            )
         if self.max_tokens is not None and self.min_tokens > self.max_tokens:
             raise VLLMValidationError(
                 f"min_tokens must be less than or equal to "

@@ -49,10 +49,3 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
-
-
-def test_rejects_negative_routed_experts_prompt_start():
-    with pytest.raises(
-        VLLMValidationError, match="routed_experts_prompt_start must be non-negative"
-    ):
-        SamplingParams(routed_experts_prompt_start=-1)
