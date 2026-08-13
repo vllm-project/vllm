@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,7 +23,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     GroupOffloadConfig,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    generate_block_hash_extra_keys,
+    hash_block_tokens,
+    init_none_hash,
+    maybe_convert_block_hash,
+    to_event_extra_keys,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -36,6 +45,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
+    ReqContext,
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
@@ -68,12 +78,37 @@ def _wire_hash(block_hash: BlockHash):
     return maybe_convert_block_hash(block_hash)
 
 
+def _rehash_request(req, block_size: int) -> None:
+    init_none_hash(sha256)
+    block_hashes: list[BlockHash] = []
+    parent: BlockHash | None = None
+    mm_idx = 0
+    for start in range(0, len(req.all_token_ids), block_size):
+        end = start + block_size
+        assert end <= len(req.all_token_ids)
+        extra_keys, mm_idx = generate_block_hash_extra_keys(req, start, end, mm_idx)
+        parent = hash_block_tokens(
+            sha256,
+            parent,
+            req.all_token_ids[start:end],
+            extra_keys,
+        )
+        block_hashes.append(parent)
+    req.block_hashes = block_hashes
+
+
 def _request(*, block_hashes: list[BlockHash], token_count: int, req_id: str = "req"):
     req = MagicMock()
     req.request_id = req_id
     req.block_hashes = block_hashes
     req.all_token_ids = list(range(1, token_count + 1))
     req.lora_request = None
+    req.mm_features = []
+    req.cache_salt = None
+    req.prompt_embeds = None
+    req._prompt_embeds_per_block_hashes = {}
+    req.req_context = ReqContext(req_id)
+    req.resumable = False
     return req
 
 
@@ -115,13 +150,13 @@ def _record_chunks(
     group_config: GroupOffloadConfig,
     num_chunks: int,
 ) -> list[OffloadKey]:
+    tracker.on_new_request(req.req_context, req, (group_config,))
     keys: list[OffloadKey] = []
     hbf = group_config.hashes_per_chunk
     for chunk_idx in range(num_chunks):
         tail_hash = req.block_hashes[(chunk_idx + 1) * hbf - 1]
         assert tail_hash is not None
         key = make_offload_key(tail_hash, group_config.group_idx)
-        tracker.record_store(req, group_config, chunk_idx, key)
         keys.append(key)
     return keys
 
@@ -132,20 +167,7 @@ def _record_lookup_chunks(
     group_config: GroupOffloadConfig,
     num_chunks: int,
 ) -> list[OffloadKey]:
-    keys: list[OffloadKey] = []
-    hbf = group_config.hashes_per_chunk
-    for chunk_idx in range(num_chunks):
-        tail_hash = req.block_hashes[(chunk_idx + 1) * hbf - 1]
-        assert tail_hash is not None
-        key = make_offload_key(tail_hash, group_config.group_idx)
-        tracker.record_lookup(
-            req,
-            group_config,
-            chunk_idx,
-            key,
-        )
-        keys.append(key)
-    return keys
+    return _record_chunks(tracker, req, group_config, num_chunks)
 
 
 def _stored_event(
@@ -154,6 +176,7 @@ def _stored_event(
     locality: Locality | None = None,
     ownership: str | None = None,
     removal_expected: bool = False,
+    req_context: ReqContext | None = None,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
@@ -162,6 +185,7 @@ def _stored_event(
         locality=locality,
         ownership=ownership,
         removal_expected=removal_expected,
+        req_context=req_context,
     )
 
 
@@ -202,7 +226,14 @@ def test_take_events_forwards_locality_to_rich_store():
 
     events = list(
         tracker.take_events(
-            [_stored_event([key], locality=Locality.LOCAL, medium=Medium.STORAGE)]
+            [
+                _stored_event(
+                    [key],
+                    locality=Locality.LOCAL,
+                    medium=Medium.STORAGE,
+                    req_context=req.req_context,
+                )
+            ]
         )
     )
 
@@ -220,7 +251,14 @@ def test_take_events_forwards_locality_to_placeholder_store():
 
     events = list(
         tracker.take_events(
-            [_stored_event([key], locality=Locality.REMOTE, medium=Medium.STORAGE)]
+            [
+                _stored_event(
+                    [key],
+                    locality=Locality.REMOTE,
+                    medium=Medium.STORAGE,
+                    req_context=req.req_context,
+                )
+            ]
         )
     )
 
@@ -238,8 +276,13 @@ def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
     req = _request(block_hashes=[_hash(i) for i in range(8)], token_count=32)
     key = make_offload_key(req.block_hashes[6], group_config.group_idx)
 
-    tracker.record_partial_store(req, group_config, 28, key)
-    [event] = tracker.take_events([_stored_event([key])])
+    tracker.on_new_request(
+        req.req_context,
+        req,
+        (group_config,),
+        supports_partial_tail=True,
+    )
+    [event] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
 
     assert isinstance(event, BlockStored)
     assert event.block_hashes == [_wire_hash(_hash(i)) for i in range(4, 7)]
@@ -248,7 +291,7 @@ def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
     assert event.block_size == 4
 
 
-def test_partial_tail_lookup_does_not_overwrite_store_metadata():
+def test_partial_tail_event_uses_its_exact_request_context():
     tracker = _tracker()
     group_config = _group_config()
     stored_req = _request(block_hashes=[_hash(0)], token_count=4)
@@ -256,25 +299,34 @@ def test_partial_tail_lookup_does_not_overwrite_store_metadata():
     lookup_req.all_token_ids = [9, 9, 9, 9]
     key = make_offload_key(stored_req.block_hashes[0], group_config.group_idx)
 
-    tracker.record_partial_store(stored_req, group_config, 4, key)
-    tracker.record_partial_lookup(lookup_req, group_config, 4, key)
-    [event] = tracker.take_events([_stored_event([key])])
+    tracker.on_new_request(
+        stored_req.req_context,
+        stored_req,
+        (group_config,),
+        supports_partial_tail=True,
+    )
+    tracker.on_new_request(
+        lookup_req.req_context,
+        lookup_req,
+        (group_config,),
+        supports_partial_tail=True,
+    )
+    [event] = tracker.take_events(
+        [_stored_event([key], req_context=stored_req.req_context)]
+    )
 
     assert isinstance(event, BlockStored)
     assert event.token_ids == [1, 2, 3, 4]
 
 
-@pytest.mark.parametrize(
-    "record_method", ["record_partial_store", "record_partial_lookup"]
-)
-def test_partial_tail_sliding_window_event_uses_placeholder(record_method):
+def test_partial_tail_sliding_window_event_uses_placeholder():
     tracker = _tracker()
     group_config = _group_config(sliding_window_size_in_chunks=1)
     req = _request(block_hashes=[_hash(0)], token_count=4)
     key = make_offload_key(req.block_hashes[0], group_config.group_idx)
 
-    getattr(tracker, record_method)(req, group_config, 4, key)
-    [event] = tracker.take_events([_stored_event([key])])
+    tracker.on_new_request(req.req_context, req, (group_config,))
+    [event] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
 
     assert isinstance(event, BlockStored)
     assert event.block_hashes == [_wire_hash(_hash(0))]
@@ -308,7 +360,9 @@ def test_take_events_publishes_routable_block_stored():
     )
     keys = _record_chunks(tracker, req, group_config, num_chunks=6)
 
-    batch1 = list(tracker.take_events([_stored_event(keys[:3])]))
+    batch1 = list(
+        tracker.take_events([_stored_event(keys[:3], req_context=req.req_context)])
+    )
     assert len(batch1) == 3
 
     for i, event in enumerate(batch1):
@@ -325,12 +379,14 @@ def test_take_events_publishes_routable_block_stored():
             assert event.parent_block_hash == _wire_hash(_hash(i - 1))
         assert event.lora_id is None
         assert event.lora_name is None
-        assert event.extra_keys is None
+        assert event.extra_keys == [None]
         assert event.group_idx == 0
         assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
         assert event.kv_cache_spec_sliding_window is None
 
-    batch2 = list(tracker.take_events([_stored_event(keys[3:])]))
+    batch2 = list(
+        tracker.take_events([_stored_event(keys[3:], req_context=req.req_context)])
+    )
     assert len(batch2) == 3
     assert batch2[0].parent_block_hash == batch1[-1].block_hashes[-1]
 
@@ -338,9 +394,9 @@ def test_take_events_publishes_routable_block_stored():
 
 
 def test_promotion_emits_full_cpu_stored_event():
-    tracker, _, _, key = _lookup_chunk()
+    tracker, req, _, key = _lookup_chunk()
 
-    [event] = tracker.take_events([_stored_event([key])])
+    [event] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
 
     assert isinstance(event, BlockStored)
     assert event.medium == MEDIUM_CPU
@@ -350,10 +406,235 @@ def test_promotion_emits_full_cpu_stored_event():
     assert event.block_size == 4
     assert event.lora_id is None
     assert event.lora_name is None
-    assert event.extra_keys is None
+    assert event.extra_keys == [None]
     assert event.group_idx == 0
     assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert event.kv_cache_spec_sliding_window is None
+
+
+def test_request_event_context_builds_payload_lazily():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    [key] = _record_chunks(tracker, req, _group_config(), num_chunks=1)
+    state = tracker._request_event_context(req.req_context)
+
+    assert state is not None
+    assert not state.locators
+
+    list(tracker.take_events([_stored_event([key], req_context=req.req_context)]))
+
+    assert state.locators[key] == 4
+
+
+def test_request_event_context_indexes_only_valid_group_chunk_tails():
+    tracker = _tracker()
+    group0 = _group_config(group_idx=0, block_size=4, blocks_per_chunk=2)
+    group1 = _group_config(
+        group_idx=1,
+        block_size=8,
+        blocks_per_chunk=2,
+        tokens_per_hash=4,
+    )
+    req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=16)
+    tracker.on_new_request(req.req_context, req, (group0, group1))
+    state = tracker._request_event_context(req.req_context)
+    assert state is not None
+    assert not state.locators
+
+    key0 = make_offload_key(req.block_hashes[1], group0.group_idx)
+    key1 = make_offload_key(req.block_hashes[3], group1.group_idx)
+    events = list(
+        tracker.take_events([_stored_event([key0, key1], req_context=req.req_context)])
+    )
+
+    assert [(event.group_idx, len(event.token_ids)) for event in events] == [
+        (0, 8),
+        (1, 16),
+    ]
+    assert set(state.locators) == {
+        key0,
+        make_offload_key(req.block_hashes[3], group0.group_idx),
+        key1,
+    }
+
+
+def test_stored_event_uses_context_carried_by_raw_event():
+    tracker = _tracker()
+    group_config = _group_config()
+    first_req = _request(block_hashes=[_hash(0)], token_count=4)
+    second_req = _request(block_hashes=[_hash(1)], token_count=4)
+    second_req.all_token_ids = [9, 9, 9, 9]
+    [first_key] = _record_chunks(tracker, first_req, group_config, num_chunks=1)
+    [second_key] = _record_chunks(tracker, second_req, group_config, num_chunks=1)
+
+    [first_event] = tracker.take_events(
+        [_stored_event([first_key], req_context=first_req.req_context)]
+    )
+    [second_event] = tracker.take_events(
+        [_stored_event([second_key], req_context=second_req.req_context)]
+    )
+
+    assert first_req.request_id == second_req.request_id
+    assert first_req.req_context is not second_req.req_context
+    assert first_event.token_ids == [1, 2, 3, 4]
+    assert second_event.token_ids == [9, 9, 9, 9]
+
+
+@pytest.mark.parametrize(
+    "event_context",
+    [None, ReqContext("external")],
+    ids=["missing", "external"],
+)
+def test_stored_event_without_matching_context_uses_placeholder(event_context):
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    [key] = _record_chunks(tracker, req, _group_config(), num_chunks=1)
+
+    [event] = tracker.take_events([_stored_event([key], req_context=event_context)])
+
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(0))]
+    assert event.parent_block_hash is None
+    assert event.token_ids == []
+    assert event.block_size == 0
+
+
+@pytest.mark.parametrize("unsafe_path", ["resumable", "mamba_truncation"])
+def test_token_mutating_request_uses_placeholder(unsafe_path):
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    [key] = _record_chunks(tracker, req, _group_config(), num_chunks=1)
+    if unsafe_path == "resumable":
+        req.resumable = True
+    else:
+        req.kv_transfer_params = {"_p_side_truncated": True}
+
+    [event] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
+
+    assert event.block_hashes == [_wire_hash(_hash(0))]
+    assert event.token_ids == []
+    assert event.block_size == 0
+
+
+def test_full_event_extra_keys_match_gpu_block_granularity():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
+    req.cache_salt = "salt"
+    req.lora_request = SimpleNamespace(
+        adapter_id=7,
+        name="adapter",
+        lora_name="adapter",
+        lora_path="adapter-path",
+    )
+    [key] = _record_chunks(
+        tracker,
+        req,
+        _group_config(blocks_per_chunk=2),
+        num_chunks=1,
+    )
+
+    [event] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
+
+    expected = []
+    mm_idx = 0
+    for start in (0, 4):
+        extra_keys, mm_idx = generate_block_hash_extra_keys(
+            req, start, start + 4, mm_idx
+        )
+        expected.append(extra_keys)
+    assert event.extra_keys == to_event_extra_keys(tuple(expected))
+    assert event.lora_id == 7
+    assert event.lora_name == "adapter"
+
+
+def test_full_event_extra_keys_include_prompt_embeddings():
+    tracker = _tracker()
+    group_config = _group_config(blocks_per_chunk=2)
+    req = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
+    req.prompt_embeds = torch.arange(24, dtype=torch.float32).reshape(8, 3)
+    _rehash_request(req, block_size=4)
+    [key] = _record_chunks(tracker, req, group_config, num_chunks=1)
+
+    [event] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
+
+    expected = []
+    mm_idx = 0
+    for start in (0, 4):
+        extra_keys, mm_idx = generate_block_hash_extra_keys(
+            req, start, start + 4, mm_idx
+        )
+        expected.append(extra_keys)
+    assert event.block_hashes == [_wire_hash(value) for value in req.block_hashes]
+    assert event.token_ids == req.all_token_ids
+    assert event.extra_keys == to_event_extra_keys(tuple(expected))
+
+
+def test_partial_event_extra_keys_include_cache_salt_and_lora():
+    tracker = _tracker()
+    group_config = _group_config(
+        block_size=16,
+        tokens_per_hash=4,
+    )
+    req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=16)
+    req.cache_salt = "salt"
+    req.lora_request = SimpleNamespace(
+        adapter_id=7,
+        name="adapter",
+        lora_name="adapter",
+        lora_path="adapter-path",
+    )
+    key = make_offload_key(req.block_hashes[2], group_config.group_idx)
+
+    tracker.on_new_request(
+        req.req_context,
+        req,
+        (group_config,),
+        supports_partial_tail=True,
+    )
+    [event] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
+
+    expected = []
+    mm_idx = 0
+    for start in (0, 4, 8):
+        extra_keys, mm_idx = generate_block_hash_extra_keys(
+            req, start, start + 4, mm_idx
+        )
+        expected.append(extra_keys)
+    assert event.extra_keys == to_event_extra_keys(tuple(expected))
+    assert event.lora_id == 7
+    assert event.lora_name == "adapter"
+
+
+def test_partial_event_extra_keys_replay_mm_features_from_request_start():
+    tracker = _tracker()
+    group_config = _group_config(
+        block_size=16,
+        tokens_per_hash=4,
+    )
+    req = _request(block_hashes=[_hash(i) for i in range(8)], token_count=32)
+    req.mm_features = [
+        SimpleNamespace(
+            identifier="A",
+            mm_position=SimpleNamespace(offset=18, length=4),
+        ),
+        SimpleNamespace(
+            identifier="B",
+            mm_position=SimpleNamespace(offset=40, length=4),
+        ),
+    ]
+    _rehash_request(req, block_size=4)
+    key = make_offload_key(req.block_hashes[6], group_config.group_idx)
+    tracker.on_new_request(
+        req.req_context,
+        req,
+        (group_config,),
+        supports_partial_tail=True,
+    )
+    [event] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
+
+    assert event.block_hashes == [_wire_hash(value) for value in req.block_hashes[4:7]]
+    assert event.token_ids == req.all_token_ids[16:28]
+    assert event.extra_keys == [(("A", 2),), (("A", -2),), None]
 
 
 @pytest.mark.parametrize(
@@ -378,7 +659,7 @@ def test_event_hashes_use_group_block_size(
     )
     [key] = _record_chunks(tracker, req, group_config, num_chunks=1)
 
-    [event] = tracker.take_events([_stored_event([key])])
+    [event] = tracker.take_events([_stored_event([key], req_context=req.req_context)])
 
     assert isinstance(event, BlockStored)
     assert event.block_hashes == [_wire_hash(_hash(i)) for i in expected_hash_indices]
@@ -399,7 +680,9 @@ def test_lookup_promotion_factor_gt_1_store_and_remove():
     )
     keys = _record_lookup_chunks(tracker, req, group_config, num_chunks=2)
 
-    stored = list(tracker.take_events([_stored_event(keys)]))
+    stored = list(
+        tracker.take_events([_stored_event(keys, req_context=req.req_context)])
+    )
     assert len(stored) == 2
 
     expected_hashes = []
@@ -443,7 +726,16 @@ def test_take_events_factor_gt_1_store_is_order_independent():
     keys = _record_chunks(tracker, req, group_config, num_chunks=2)
     unknown_key = make_offload_key(_hash(12345), 0)
 
-    events = list(tracker.take_events([_stored_event([keys[1], unknown_key, keys[0]])]))
+    events = list(
+        tracker.take_events(
+            [
+                _stored_event(
+                    [keys[1], unknown_key, keys[0]],
+                    req_context=req.req_context,
+                )
+            ]
+        )
+    )
 
     assert len(events) == 3
     chunk1, placeholder, chunk0 = events
@@ -462,12 +754,12 @@ def test_take_events_opt_out_keeps_placeholders():
     _record_lookup_chunks(tracker, req, group_config, num_chunks=3)
 
     assert not tracker.self_describing_enabled
-    assert not tracker._pending_event_metadata
+    assert tracker._request_event_context(req.req_context) is None
 
     events = list(
         tracker.take_events(
             [
-                _stored_event(keys),
+                _stored_event(keys, req_context=req.req_context),
                 _removed_event(keys),
             ]
         )
@@ -498,9 +790,13 @@ def test_event_metadata_skips_non_full_attention_group(
     keys = _record_chunks(tracker, req, group_config, num_chunks=3)
     _record_lookup_chunks(tracker, req, group_config, num_chunks=3)
 
-    assert not tracker._pending_event_metadata
+    state = tracker._request_event_context(req.req_context)
+    assert state is not None
+    assert not state.locators
 
-    events = list(tracker.take_events([_stored_event(keys[:1])]))
+    events = list(
+        tracker.take_events([_stored_event(keys[:1], req_context=req.req_context)])
+    )
     assert len(events) == 1
     assert isinstance(events[0], BlockStored)
     assert events[0].block_size == 0
@@ -520,7 +816,12 @@ def test_primary_removal_preserves_metadata_for_same_batch_kvcr_store(
 
     batch = [
         _removed_event([key]),
-        _stored_event([key], ownership="kvcr", removal_expected=True),
+        _stored_event(
+            [key],
+            ownership="kvcr",
+            removal_expected=True,
+            req_context=req.req_context,
+        ),
     ]
     if secondary_removal_in_same_batch:
         batch.append(secondary_removal)
@@ -550,6 +851,7 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     req = _request(block_hashes=block_hashes, token_count=8)
     group_config = _group_config(blocks_per_chunk=2)
     key = _record_chunks(tracker, req, group_config, num_chunks=1)[0]
+    tracker.record_hit(req.req_context, key)
     confirmed_meta = tracker._pending_event_metadata[key]
     lookup_req = _request(
         block_hashes=block_hashes,
@@ -575,12 +877,8 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
         _wire_hash(_hash(1)),
     ]
 
-    stored = list(tracker.take_events([_stored_event([key])]))
-    assert len(stored) == 1
-    assert stored[0].block_size == 0
-    assert stored[0].token_ids == []
-
-    tracker.record_lookup(lookup_req, group_config, 0, key)
+    tracker.on_new_request(lookup_req.req_context, lookup_req, (group_config,))
+    tracker.record_hit(lookup_req.req_context, key)
     removed = list(tracker.take_events([_removed_event([key])]))
     assert removed[0].block_hashes == [
         _wire_hash(_hash(0)),
@@ -601,6 +899,7 @@ def test_reoffload_preserves_secondary_residency(record_method, position):
                 Medium.STORAGE,
                 ownership="custom",
                 removal_expected=True,
+                req_context=req.req_context,
             )
         ]
     )
@@ -628,6 +927,8 @@ def test_take_events_groups_removed_hashes_by_kv_group():
     req1 = _request(block_hashes=[_hash(10), _hash(11)], token_count=8)
     key0 = _record_chunks(tracker, req0, group0_config, num_chunks=1)[0]
     key1 = _record_chunks(tracker, req1, group1_config, num_chunks=1)[0]
+    list(tracker.take_events([_stored_event([key0], req_context=req0.req_context)]))
+    list(tracker.take_events([_stored_event([key1], req_context=req1.req_context)]))
 
     removed = list(tracker.take_events([_removed_event([key0, key1])]))
 
@@ -646,7 +947,9 @@ def test_take_events_supports_restore_after_eviction():
     req = _request(block_hashes=[_hash(0)], token_count=block_size)
     key = _record_chunks(tracker, req, group_config, num_chunks=1)[0]
 
-    first_store = list(tracker.take_events([_stored_event([key])]))
+    first_store = list(
+        tracker.take_events([_stored_event([key], req_context=req.req_context)])
+    )
     assert len(first_store) == 1
     assert isinstance(first_store[0], BlockStored)
     assert first_store[0].token_ids == [1, 2, 3, 4]
@@ -656,33 +959,52 @@ def test_take_events_supports_restore_after_eviction():
     assert isinstance(removed[0], BlockRemoved)
     assert not tracker._pending_event_metadata
 
-    req.all_token_ids = [5, 6, 7, 8]
-    tracker.record_store(req, group_config, chunk_idx=0, offload_key=key)
+    replacement_req = _request(
+        block_hashes=[_hash(0)],
+        token_count=block_size,
+        req_id=req.request_id,
+    )
+    tracker.on_new_request(
+        replacement_req.req_context, replacement_req, (group_config,)
+    )
 
-    second_store = list(tracker.take_events([_stored_event([key])]))
+    second_store = list(
+        tracker.take_events(
+            [_stored_event([key], req_context=replacement_req.req_context)]
+        )
+    )
     assert len(second_store) == 1
     assert isinstance(second_store[0], BlockStored)
-    assert second_store[0].token_ids == [5, 6, 7, 8]
+    assert second_store[0].token_ids == [1, 2, 3, 4]
 
 
-def test_reset_cache_clears_side_table():
+def test_reset_keeps_request_context_for_secondary_events():
     tracker = _tracker()
     group_config = _group_config()
     req = _request(block_hashes=[_hash(i) for i in range(3)], token_count=12)
     _record_lookup_chunks(tracker, req, group_config, num_chunks=3)
 
+    key = make_offload_key(req.block_hashes[0], group_config.group_idx)
+    tracker.record_hit(req.req_context, key)
+    assert tracker._request_event_context(req.req_context) is not None
     assert tracker._pending_event_metadata
 
     tracker.reset()
 
+    assert tracker._request_event_context(req.req_context) is not None
     assert not tracker._pending_event_metadata
+
+    key = make_offload_key(req.block_hashes[0], group_config.group_idx)
+    [event] = tracker.take_events(
+        [_stored_event([key], medium=Medium.STORAGE, req_context=req.req_context)]
+    )
+    assert event.token_ids == [1, 2, 3, 4]
 
 
 def test_tiering_accepts_self_describing_kv_events():
     vllm_config = create_vllm_config(
         block_size=4,
         max_num_batched_tokens=16,
-        disable_hybrid_kv_cache_manager=False,
     )
     vllm_config.kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",

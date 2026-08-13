@@ -374,6 +374,43 @@ class TestTieringOffloadingManager:
             self.manager._process_finished_jobs()
         completed.assert_called_once_with(to_keys([1]), _CTX, True)
 
+    def test_promotion_stored_event_keeps_request_context(self):
+        mock_region = _mock_mmap_region(2)
+        primary = CPUPrimaryTierOffloadingManager(
+            num_chunks=2,
+            mmap_region=mock_region,
+            enable_events=True,
+            enable_event_provenance=True,
+        )
+        secondary = MetricsSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="test_metrics",
+        )
+        secondary.lookup_result = LookupResult.HIT
+        manager = TieringOffloadingManager(
+            primary_tier=primary,
+            secondary_tiers=[secondary],
+        )
+        req_context = ReqContext(req_id="promotion")
+        [key] = to_keys([1])
+        manager.on_new_request(req_context)
+
+        assert manager.lookup(key, req_context) is LookupResult.HIT_PENDING
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+        )
+        [job] = secondary.submitted_loads
+        secondary.finished_jobs = [JobResult(job_id=job.job_id, success=True)]
+
+        manager._process_finished_jobs()
+
+        [event] = manager.take_events()
+        assert event.keys == [key]
+        assert event.medium is Medium.CPU
+        assert not event.removed
+        assert event.req_context is req_context
+
     def test_take_events_aggregates_tier_owned_events(self, manager_setup):
         primary_event = OffloadingEvent(to_keys([1]), Medium.CPU, removed=False)
         secondary_event1 = OffloadingEvent(to_keys([2]), Medium.STORAGE, removed=False)
@@ -604,7 +641,7 @@ class TestTieringOffloadingManager:
             if successful_indices is None
             else {chunks[i] for i in successful_indices}
         )
-        assert set(self.manager._request_load_sources[_CTX.req_id]) == (
+        assert set(self.manager._request_load_sources[id(_CTX)]) == (
             expected_source_keys
         )
 
@@ -908,6 +945,31 @@ class TestTieringOffloadingManager:
         assert set(jm_b.keys) == {chunks[2], chunks[3]}
         assert jm_b.req_context is ctx_b
 
+    def test_promotion_submit_exception_unwinds_registered_job(self, manager_setup):
+        chunks = to_keys([42, 43])
+        contexts = [
+            ReqContext(req_id="promotion-submit-error-a"),
+            ReqContext(req_id="promotion-submit-error-b"),
+        ]
+        for chunk in chunks:
+            self.secondary_tier1.chunks[chunk] = True
+        self.secondary_tier1.submit_load = MagicMock(
+            side_effect=RuntimeError("submit failed")
+        )
+
+        for chunk, ctx in zip(chunks, contexts):
+            assert self.manager.lookup(chunk, ctx) is LookupResult.HIT_PENDING
+        with pytest.raises(RuntimeError, match="submit failed"):
+            self.manager.on_schedule_end(
+                ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+            )
+
+        assert self.manager._jobs == {}
+        assert self.manager._pending_load_submissions == {}
+        assert self.manager._metrics._tier_states[0].active_promotion_count == 0
+        for chunk, ctx in zip(chunks, contexts):
+            assert self.primary_tier.lookup(chunk, ctx) is LookupResult.MISS
+
     def test_lookup_shared_chunk_no_duplicate_promotion(self, manager_setup):
         """A chunk looked up by two requests in the same step is promoted once.
 
@@ -958,6 +1020,24 @@ class TestTieringOffloadingManager:
         assert self.secondary_tier1.submit_store.call_count == 1
         job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
         assert job_metadata.req_context is ctx
+
+    def test_cascade_submit_exception_unwinds_registered_job(self, manager_setup):
+        chunks = to_keys(range(2))
+        ctx = ReqContext(req_id="cascade-submit-error")
+        self._start_request(ctx)
+        result = self.manager.prepare_store(chunks, ctx)
+        assert result is not None
+        self.secondary_tier1.submit_store = MagicMock(
+            side_effect=RuntimeError("submit failed")
+        )
+
+        with pytest.raises(RuntimeError, match="submit failed"):
+            self.manager.complete_store(chunks, ctx, success=True)
+
+        assert self.manager._jobs == {}
+        assert self.manager._metrics._tier_states[0].active_cascade_count == 0
+        assert all(self.primary_tier._policy.get(key).ref_cnt == 0 for key in chunks)
+        assert self.manager._get_request_state(ctx).pending_primary_stores == 0
 
     def test_on_request_finished_delays_only_secondary_until_store_submitted(
         self, manager_setup
@@ -1014,6 +1094,57 @@ class TestTieringOffloadingManager:
             ("secondary_finish_1", ctx.req_id),
             ("secondary_finish_2", ctx.req_id),
         ]
+        assert id(ctx) not in self.manager._live_req_states
+        assert ctx.req_id not in self.manager._req_state
+
+    def test_complete_store_uses_exact_state_after_req_id_reuse(self, manager_setup):
+        blocks = to_keys(range(2))
+        old_ctx = ReqContext(req_id="reused")
+        new_ctx = ReqContext(req_id="reused")
+        self.manager.on_new_request(old_ctx)
+        result = self.manager.prepare_store(blocks, old_ctx)
+        assert result is not None
+
+        self.manager.on_new_request(new_ctx)
+        new_state = self.manager._req_state[new_ctx.req_id]
+        self.manager.complete_store(blocks, old_ctx, success=False)
+
+        assert new_state.pending_primary_stores == 0
+        assert self.manager._req_state[new_ctx.req_id] is new_state
+
+    def test_load_source_uses_exact_context_after_req_id_reuse(self, manager_setup):
+        key = to_keys(range(1))[0]
+        old_ctx = ReqContext(req_id="reused-source")
+        new_ctx = ReqContext(req_id="reused-source")
+        self.manager.on_new_request(old_ctx)
+        self.manager.on_new_request(new_ctx)
+        self.manager._request_load_sources[id(old_ctx)] = {key: CacheHitSource.DISK}
+        self.manager._request_load_sources[id(new_ctx)] = {key: CacheHitSource.P2P}
+
+        assert self.manager.get_load_source(key, old_ctx) == CacheHitSource.DISK
+        assert self.manager.get_load_source(key, new_ctx) == CacheHitSource.P2P
+
+        self.manager.on_request_finished(old_ctx)
+
+        assert id(old_ctx) not in self.manager._request_load_sources
+        assert self.manager.get_load_source(key, new_ctx) == CacheHitSource.P2P
+
+    def test_reset_finalizes_old_finished_state_after_req_id_reuse(self, manager_setup):
+        old_ctx = ReqContext(req_id="reused-reset")
+        new_ctx = ReqContext(req_id="reused-reset")
+        self.manager.on_new_request(old_ctx)
+        old_state = self.manager._req_state[old_ctx.req_id]
+        old_state.is_finished = True
+        old_state.pending_primary_stores = 1
+        self.manager.on_new_request(new_ctx)
+        new_state = self.manager._req_state[new_ctx.req_id]
+
+        self.manager.reset_cache()
+
+        assert id(old_ctx) not in self.manager._live_req_states
+        assert id(new_ctx) in self.manager._live_req_states
+        assert self.manager._req_state[new_ctx.req_id] is new_state
+        assert not old_ctx._state
 
     def test_failed_store_finalizes_finished_request(self, manager_setup):
         """Failed primary stores still unblock secondary finalization."""
@@ -1234,7 +1365,7 @@ class TestTieringOffloadingManager:
         self._simulate_on_schedule_end()
 
         ctx = self._make_request_level_request("req_cascade")
-        self.manager.primary_tier.lookup = lambda key, req_context: (LookupResult.RETRY)
+        self.manager.primary_tier.lookup = lambda key, req_context: LookupResult.RETRY
 
         with pytest.raises(AssertionError):
             self.manager._cascade_existing_chunks_to_request_level_tiers(keys, ctx, {0})
