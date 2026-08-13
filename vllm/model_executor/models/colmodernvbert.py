@@ -33,6 +33,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.configs.colmodernvbert import ColModernVBertConfig
 
 from .interfaces import (
@@ -161,6 +162,7 @@ class ColModernVBertMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
+        assert isinstance(tokenizer, HfTokenizer)
         text_encoding = tokenizer(
             prompt,
             return_tensors="pt",

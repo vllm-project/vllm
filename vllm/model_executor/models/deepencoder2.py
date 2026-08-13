@@ -15,6 +15,7 @@ from functools import lru_cache
 import torch
 import torch.nn as nn
 import transformers
+from transformers.models.qwen2.modeling_qwen2 import Qwen2Model
 
 from vllm.model_executor.custom_op import PluggableLayer
 
@@ -49,7 +50,6 @@ class CustomQwen2Decoder(PluggableLayer):
         super().__init__()
 
         # load
-        Qwen2Model = transformers.models.qwen2.modeling_qwen2.Qwen2Model
         Qwen2Config = transformers.Qwen2Config
 
         # config
@@ -70,11 +70,11 @@ class CustomQwen2Decoder(PluggableLayer):
         )
 
         #
-        self.model = self._create_custom_model(Qwen2Model, config)
+        self.model = self._create_custom_model(config)
 
         del self.model.embed_tokens
 
-    def _create_custom_model(self, Qwen2Model, config):
+    def _create_custom_model(self, config):
         """Qwen2Model"""
 
         class CustomQwen2ModelInner(Qwen2Model):
