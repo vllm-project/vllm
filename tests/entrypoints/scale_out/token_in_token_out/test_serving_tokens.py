@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 from transformers import AutoTokenizer
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
 from vllm.config.utils import getattr_iter
@@ -107,10 +108,14 @@ async def test_generate_endpoint(client):
     resp.raise_for_status()
     data = resp.json()
     assert "choices" in data
-    assert data["choices"][0]["sampling_mask"] is None
+    assert data["choices"][0].get("sampling_mask") is None
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="sampling mask output is not supported by the Rust frontend",
+)
 @pytest.mark.parametrize(
     "server",
     [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
