@@ -1291,8 +1291,9 @@ setup(
         # only; also needs system GStreamer + libv4l (see docs).
         "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
         "flashinfer": [],  # Kept for backwards compatibility
-        # Optional deps for Helion kernel development
-        # NOTE: When updating helion version, also update CI files:
+        # CUDA builds require Helion; keep this extra for other platforms.
+        # NOTE: When updating the Helion version, also update:
+        #   - requirements/cuda.txt
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
         "helion": ["helion==1.4.0"],
