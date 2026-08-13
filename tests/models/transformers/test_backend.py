@@ -4,6 +4,7 @@
 
 import contextlib
 import os
+import re
 import tempfile
 from typing import Any
 
@@ -15,6 +16,10 @@ from transformers import AutoConfig, AutoModel
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.causal import (
+    get_logit_scale,
+    probe_logit_scale,
+)
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.utils import StageMissingLayer
 
@@ -136,6 +141,100 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
         model="hmellor/tiny-random-Gemma2ForCausalLM",
         kwargs_ref=kwargs_ref,
         kwargs_test=kwargs_test,
+    )
+
+
+@pytest.mark.parametrize(
+    "config_cls,kwargs,expected",
+    [
+        ("GraniteConfig", {"logits_scaling": 8.0}, 0.125),  # divides
+        ("HyperCLOVAXConfig", {"logits_scaling": 8.0}, 8.0),  # muP, multiplies
+        ("CohereConfig", {"logit_scale": 0.0625}, 0.0625),  # multiplies
+        ("MiniCPM3Config", {"dim_model_base": 1280}, 0.5),  # half of `hidden_size`
+        ("InklingTextConfig", {}, 1 / 24),  # `logits_mup_width_multiplier`
+        ("LlamaConfig", {}, 1.0),
+        ("Gemma2Config", {}, 1.0),  # softcapping is not a scale, must not be folded in
+    ],
+)
+def test_get_logit_scale(
+    config_cls: str, kwargs: dict[str, Any], expected: float
+) -> None:
+    """Transformers has no single convention for how it scales the logits."""
+    import transformers
+
+    config = getattr(transformers, config_cls)(**kwargs)
+    assert get_logit_scale(config) == pytest.approx(expected)
+
+
+def test_probe_logit_scale_runs_for_scaled_models() -> None:
+    """Canary: every model which may scale its logits must stay measurable.
+
+    The scale is measured by running the Transformers wrapper's own `forward`. If
+    an upgrade breaks that for a model which does scale its logits, we fall back
+    to no scaling and its logprobs are wrong, so fail here instead.
+    """
+    from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING
+
+    # muP multipliers Transformers applies inside the decoder, which this backend
+    # keeps, so they are correctly absent from the logit scale
+    ignore = {"embedding_multiplier", "residual_multiplier", "attention_multiplier"}
+    checked, failed = [], []
+    for config_cls, model_cls in MODEL_FOR_CAUSAL_LM_MAPPING.items():
+        try:
+            config = config_cls()
+        except Exception:
+            continue
+        fields = [
+            name
+            for name, value in vars(config).items()
+            if re.search(r"logit|mup|multiplier", name, re.I)
+            and name not in ignore
+            and type(value) is float
+        ]
+        if not fields:
+            continue
+        # Non-default values, to reach code guarded on the default being unset
+        for field in fields:
+            setattr(config, field, 8.0)
+        checked.append(model_cls.__name__)
+        try:
+            probe_logit_scale(config)
+        except Exception as e:
+            failed.append(f"{model_cls.__name__} ({', '.join(fields)}): {e!r}")
+
+    assert not failed, f"could not measure the logit scale of: {failed}"
+    assert len(checked) > 10, f"the sweep has stopped finding models: {checked}"
+
+
+def test_logits_scaling(vllm_runner: type[VllmRunner]) -> None:
+    """Granite-style configs divide the logits, which only logprobs reveal.
+
+    Dividing does not reorder the logits, so the generated tokens are identical
+    either way and `check_logprobs_close` cannot catch a missing division.
+    """
+    model = get_model("GraniteForCausalLM")
+    assert AutoConfig.from_pretrained(model).logits_scaling != 1.0
+    kwargs: dict[str, Any] = {"max_model_len": 1024, "enforce_eager": True}
+
+    logprobs = {}
+    for impl in ("auto", "transformers"):
+        with vllm_runner(model, model_impl=impl, **kwargs) as runner:
+            model_config = runner.llm.llm_engine.model_config
+            assert model_config.using_transformers_backend() == (impl == "transformers")
+            _, _, steps = runner.generate_greedy_logprobs(["Hello"], 8, 5)[0]
+            # Scaling the logits stretches the gaps between them, so compare the
+            # spread of each step's logprobs rather than their absolute values
+            logprobs[impl] = [
+                max(lp.logprob for lp in step.values())
+                - min(lp.logprob for lp in step.values())
+                for step in steps
+            ]
+
+    torch.testing.assert_close(
+        torch.tensor(logprobs["transformers"]),
+        torch.tensor(logprobs["auto"]),
+        atol=0.2,
+        rtol=0,
     )
 
 
