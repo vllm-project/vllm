@@ -40,14 +40,18 @@ _RESOURCE_POLICIES = {
     "full": SnapshotResourcePolicy(
         weights="cuda_image", kv="cuda_image", runtime="cuda_image"
     ),
-    "discard_kv": SnapshotResourcePolicy(
+    "minimized": SnapshotResourcePolicy(
+        weights="discard", kv="discard", runtime="cuda_image"
+    ),
+}
+
+_SUPPORTED_RESOURCE_POLICIES = {
+    *_RESOURCE_POLICIES.values(),
+    SnapshotResourcePolicy(
         weights="cuda_image", kv="discard", runtime="cuda_image"
     ),
-    "l1_prepared": SnapshotResourcePolicy(
+    SnapshotResourcePolicy(
         weights="host_backup", kv="discard", runtime="cuda_image"
-    ),
-    "l2_prepared": SnapshotResourcePolicy(
-        weights="discard", kv="discard", runtime="cuda_image"
     ),
 }
 
@@ -73,6 +77,6 @@ def decode_snapshot_resource_policy(
         kv=cast(KVResourcePolicy, value["kv"]),
         runtime=cast(RuntimeResourcePolicy, value["runtime"]),
     )
-    if policy not in _RESOURCE_POLICIES.values():
+    if policy not in _SUPPORTED_RESOURCE_POLICIES:
         raise ValueError("unsupported snapshot resource policy")
     return policy
