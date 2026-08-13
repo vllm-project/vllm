@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import io
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import numpy.typing as npt
@@ -19,7 +21,9 @@ from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
+    PyNvVideoCodecVideoBackend,
     VideoLoader,
+    _pynvvc_frames_to_nhwc,
 )
 
 from ..utils import cosine_similarity, create_video_from_image, normalize_image
@@ -363,6 +367,31 @@ def test_load_base64_jpeg_raises_on_zero_num_frames():
         videoio.load_base64("video/jpeg", data)
 
 
+def test_pynvvideocodec_unrelated_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakePyNvVCException(Exception):
+        pass
+
+    fake_nvc = SimpleNamespace(PyNvVCException=FakePyNvVCException)
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", fake_nvc)
+    original_error = RuntimeError("GPU decoder unavailable")
+
+    def raise_unrelated_error(cls, file_path, nvc):
+        raise original_error
+
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackend,
+        "_read_source_metadata",
+        classmethod(raise_unrelated_error),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        PyNvVideoCodecVideoBackend.decode_frames_pynvvideocodec(b"video", None)
+
+    assert exc_info.value is original_error
+
+
 # ---------------------------------------------------------------------------
 # GPU video backend policy tests
 # ---------------------------------------------------------------------------
@@ -498,3 +527,22 @@ class TestMergeKwargsGpuBackendPolicy:
 
     def test_unknown_backend_not_treated_as_gpu(self):
         assert not VIDEO_LOADER_REGISTRY.backend_requires_gpu("totally_unknown")
+
+
+@pytest.mark.parametrize("layout", ["nhwc", "nchw"])
+def test_pynvvc_frames_normalized_to_nhwc(layout: str):
+    """PyNvVideoCodec frame batches are normalized to NHWC regardless of the
+    per-frame layout the decoder emits (it has varied across versions), so the
+    HF video processors (which materialize a PIL image per frame) receive the
+    same NHWC shape as every other video backend."""
+    torch = pytest.importorskip("torch")
+
+    n, h, w, c = 4, 5, 6, 3
+    nhwc = torch.arange(n * h * w * c, dtype=torch.uint8).reshape(n, h, w, c)
+    frames = nhwc if layout == "nhwc" else nhwc.permute(0, 3, 1, 2).contiguous()
+
+    out = _pynvvc_frames_to_nhwc(frames)
+
+    assert out.shape == (n, h, w, c)
+    assert out.is_contiguous()
+    assert torch.equal(out, nhwc)  # content preserved / correctly transposed
