@@ -39,6 +39,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
     get_linear_quant_method,
+    is_moe_layer_gptq_quantized,
     normalize_and_validate_gptq_desc_act,
     override_config,
 )
@@ -237,6 +238,11 @@ class AutoGPTQConfig(QuantizationConfig):
     ) -> "QuantizeMethodBase | None":
         if isinstance(layer, RoutedExperts):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
+
+            if not is_moe_layer_gptq_quantized(
+                prefix, self.modules_in_block_to_quantize
+            ):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
 
             if not check_moe_marlin_supports_layer(
                 layer, self.group_size, allow_tile_padding=True

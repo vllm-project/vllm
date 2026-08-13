@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.auto_gptq import (
 )
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     is_layer_gptq_quantized,
+    is_moe_layer_gptq_quantized,
     override_config,
 )
 from vllm.platforms import current_platform
@@ -133,6 +134,36 @@ def test_auto_gptq_normalizes_channelwise_activation_order():
             {r"+:model\.layers\.0\..*": {"group_size": 128}},
             {},
         )
+
+
+def test_moe_layer_quantized_only_when_its_experts_are_in_the_checkpoint():
+    """Experts left unquantized in the checkpoint must not get a GPTQ method.
+
+    `modules_in_block_to_quantize` is derived from the checkpoint dtypes, so a
+    partially quantized model (e.g. one whose MTP layer is stored unquantized)
+    only lists the quantized layers' experts. Giving the remaining layer a
+    quantized method makes it allocate `w2_qweight` while the checkpoint
+    provides `w2_weight`.
+    """
+    quantized_layers = [
+        f"language_model.model.layers.{layer}.mlp.experts.{expert}.{proj}"
+        for layer in range(2)
+        for expert in range(2)
+        for proj in ("gate_proj", "down_proj", "up_proj")
+    ]
+
+    assert is_moe_layer_gptq_quantized(
+        "language_model.model.layers.0.mlp.experts", quantized_layers
+    )
+    assert not is_moe_layer_gptq_quantized("mtp.layers.0.mlp.experts", quantized_layers)
+    # Block-relative names (as written by optimum) cannot distinguish layers.
+    assert is_moe_layer_gptq_quantized(
+        "mtp.layers.0.mlp.experts", ["mlp.experts.0.down_proj"]
+    )
+    # Configs that never mention experts carry no information about them.
+    assert is_moe_layer_gptq_quantized(
+        "mtp.layers.0.mlp.experts", ["mtp.layers.0.self_attn.q_proj"]
+    )
 
 
 def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
