@@ -166,24 +166,39 @@ int& shard_count() {
 }
 }  // namespace vllm_cpu_moe_numa
 
+// The NUMA node each shard's threads run on, in shard order. Shard `s` is not
+// assumed to live on node `s`: under a cpuset the usable nodes can be any
+// subset, e.g. {2, 3}, and binding those shards to nodes 0 and 1 would place
+// every page on a node whose CPUs are not running the work.
+static std::vector<int64_t>& moe_numa_shard_nodes() {
+  static std::vector<int64_t> nodes;
+  return nodes;
+}
+
 int64_t cpu_moe_numa_shards() { return vllm_cpu_moe_numa::shard_count(); }
 
 #ifdef VLLM_NUMA_DISABLED
-void set_cpu_moe_numa_shards(int64_t shards) {}
+void set_cpu_moe_numa_nodes(std::vector<int64_t> node_ids) {}
 
 void place_moe_expert_weight(at::Tensor& weight, int64_t block_size) {}
 #else
-void set_cpu_moe_numa_shards(int64_t shards) {
-  TORCH_CHECK(shards >= 1, "shard count must be >= 1, got ", shards);
-  if (shards > 1) {
-    TORCH_CHECK(numa_available() != -1,
-                "NUMA sharding was requested but libnuma reports no NUMA "
-                "support on this machine.");
-    TORCH_CHECK(shards <= numa_num_configured_nodes(), "asked for ", shards,
-                " MoE shards but the machine has ", numa_num_configured_nodes(),
-                " NUMA nodes.");
+void set_cpu_moe_numa_nodes(std::vector<int64_t> node_ids) {
+  const int shards = static_cast<int>(node_ids.size());
+  // Only what has to hold for the *kernel*: distinct, non-negative ids. Whether
+  // the machine actually has those nodes is checked where it matters, in
+  // place_moe_expert_weight, and warned about rather than raised. Splitting the
+  // loop is meaningful without them -- it is how the split is tested on a
+  // single-node machine, where no placement is possible but the arithmetic
+  // still has to come out bit for bit the same.
+  for (size_t i = 0; i < node_ids.size(); ++i) {
+    TORCH_CHECK(node_ids[i] >= 0, "node id must be >= 0, got ", node_ids[i]);
+    for (size_t j = 0; j < i; ++j) {
+      TORCH_CHECK(node_ids[i] != node_ids[j], "node id ", node_ids[i],
+                  " appears twice in the MoE shard node list.");
+    }
   }
-  vllm_cpu_moe_numa::shard_count() = static_cast<int>(shards);
+  moe_numa_shard_nodes() = std::move(node_ids);
+  vllm_cpu_moe_numa::shard_count() = std::max(shards, 1);
 }
 
 // Move the pages of one expert weight so that each shard's rows sit on the node
@@ -203,8 +218,30 @@ void place_moe_expert_weight(at::Tensor& weight, int64_t block_size) {
   if (shards <= 1 || numa_available() == -1) {
     return;
   }
-  TORCH_CHECK(weight.is_contiguous(), "expert weight must be contiguous");
-  TORCH_CHECK(weight.dim() >= 2, "expert weight must be at least 2-D");
+  // Best-effort all the way down: a weight this does not understand is left
+  // where it is, which costs speed, rather than aborting a model load that
+  // would otherwise have worked.
+  if (!weight.is_contiguous() || weight.dim() < 2) {
+    TORCH_WARN_ONCE(
+        "place_moe_expert_weight: skipping an expert weight that is not a "
+        "contiguous tensor of rank >= 2; it stays where it was allocated and "
+        "will be read across NUMA nodes.");
+    return;
+  }
+  const std::vector<int64_t>& nodes = moe_numa_shard_nodes();
+  if (static_cast<int>(nodes.size()) != shards) {
+    return;
+  }
+  const int64_t max_node = numa_max_node();
+  for (const int64_t node : nodes) {
+    if (node > max_node) {
+      TORCH_WARN_ONCE(
+          "place_moe_expert_weight: node ", node,
+          " does not exist on this machine (nodes are 0..", max_node,
+          "); leaving the expert weights where they were allocated.");
+      return;
+    }
+  }
 
   const int64_t experts = weight.size(0);
   const int64_t rows = weight.size(1);
@@ -248,7 +285,11 @@ void place_moe_expert_weight(at::Tensor& weight, int64_t block_size) {
         continue;
       }
       numa_bitmask_clearall(mask);
-      numa_bitmask_setbit(mask, shard);
+      numa_bitmask_setbit(mask, static_cast<unsigned int>(nodes[shard]));
+      // `mask->size + 1` is libnuma's own maxnode convention, not an overrun:
+      // the kernel decrements maxnode before sizing the copy (`--maxnode` at
+      // the top of get_nodes() in mm/mempolicy.c), so this reads exactly the
+      // longs numa_allocate_nodemask() allocated.
       if (mbind(aligned_lo, aligned_hi - aligned_lo, MPOL_BIND, mask->maskp,
                 mask->size + 1, MPOL_MF_MOVE) != 0) {
         ++failures;

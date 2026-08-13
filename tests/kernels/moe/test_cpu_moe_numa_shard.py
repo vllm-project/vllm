@@ -2,20 +2,31 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NUMA sharding of the CPU MoE experts.
 
-Sharding only changes *which thread* computes which output block; the arithmetic
-of each block is untouched. So the bar is not a tolerance -- it is
-``torch.equal`` against the unsharded run. Anything else means a block was
-computed twice, or not at all, or with the wrong slice of the weights, and those
-are the three ways this can be wrong.
+Two halves, and they fail for different reasons.
+
+The kernel half: sharding only changes *which thread* computes which output
+block; the arithmetic of each block is untouched. So the bar is not a tolerance
+-- it is ``torch.equal`` against the unsharded run. Anything else means a block
+was computed twice, or not at all, or with the wrong slice of the weights, and
+those are the three ways this can be wrong.
+
+The policy half: the kernel maps thread ``ith`` to shard ``ith // (nth //
+shards)``, so sharding is only safe where that map is true of the actual thread
+binding. Those tests drive the policy against a synthetic topology, because the
+cases worth covering -- one node's CPUs, non-contiguous node ids, fewer threads
+than CPUs -- are not all reachable on whatever machine CI runs on.
 """
 
 import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe import cpu_numa_shard
 from vllm.model_executor.layers.fused_moe.cpu_numa_shard import (
     BLOCK_N,
-    plan_shards,
+    NODES_ENV,
+    plan_shard_nodes,
+    shard_nodes,
 )
 from vllm.platforms import current_platform
 
@@ -31,7 +42,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def _run(shards: int, M: int, N: int, K: int, E: int, topk: int, seed: int):
-    torch.ops._C.set_cpu_moe_numa_shards(shards)
+    torch.ops._C.set_cpu_moe_numa_nodes(list(range(shards)))
     try:
         set_random_seed(seed)
         dtype = torch.bfloat16
@@ -68,7 +79,7 @@ def _run(shards: int, M: int, N: int, K: int, E: int, topk: int, seed: int):
             True,
         )
     finally:
-        torch.ops._C.set_cpu_moe_numa_shards(1)
+        torch.ops._C.set_cpu_moe_numa_nodes([])
 
 
 # The first three split evenly; the rest do not, which is the case that matters.
@@ -117,12 +128,130 @@ def test_shard_count_defaults_to_one():
     assert torch.ops._C.cpu_moe_numa_shards() == 1
 
 
-def test_policy_declines_without_ordered_thread_binding(monkeypatch):
-    """Without an ordered binding a thread's node cannot be derived from its
-    index, so the policy must decline rather than guess."""
-    monkeypatch.delenv("VLLM_CPU_MOE_NUMA_SHARDS", raising=False)
+# ---------------------------------------------------------------------------
+# The policy, against a synthetic topology.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def topology(tmp_path, monkeypatch):
+    """Fake ``/sys/devices/system/node`` so the policy can be driven anywhere.
+
+    Returns a callable taking ``{node_id: "cpulist"}``, mirroring the sysfs
+    layout the policy reads, including the non-contiguous node ids a cpuset can
+    leave behind.
+    """
+
+    def build(nodes: dict[int, str]):
+        for node, cpulist in nodes.items():
+            node_dir = tmp_path / f"node{node}"
+            node_dir.mkdir()
+            (node_dir / "cpulist").write_text(cpulist + "\n")
+        monkeypatch.setattr(cpu_numa_shard, "_SYS_NODE", tmp_path)
+
+    monkeypatch.delenv(NODES_ENV, raising=False)
     monkeypatch.delenv("KMP_AFFINITY", raising=False)
     monkeypatch.delenv("GOMP_CPU_AFFINITY", raising=False)
-    monkeypatch.setenv("OMP_PLACES", "{0,1,2,3}")
+    return build
+
+
+def test_policy_shards_when_threads_span_the_nodes(topology, monkeypatch):
+    """The configuration this exists for: one rank across every node."""
+    topology({0: "0-7", 1: "8-15", 2: "16-23", 3: "24-31"})
+    monkeypatch.setenv("GOMP_CPU_AFFINITY", " ".join(str(c) for c in range(32)))
+    assert shard_nodes(num_threads=32) == [0, 1, 2, 3]
+
+
+def test_policy_declines_when_threads_are_on_one_node(topology, monkeypatch):
+    """The auto-bind default, and the case that has to decline.
+
+    ``VLLM_CPU_OMP_THREADS_BIND=auto`` gives a rank the CPUs of one node but
+    leaves the *process* affinity mask untouched, so a policy that read
+    ``sched_getaffinity`` would see four nodes here and shard onto all of them
+    -- placing three quarters of the weights on nodes whose CPUs never run.
+    """
+    topology({0: "0-7", 1: "8-15", 2: "16-23", 3: "24-31"})
+    monkeypatch.setenv("GOMP_CPU_AFFINITY", " ".join(str(c) for c in range(8)))
+    assert shard_nodes(num_threads=8) == []
+
+
+def test_policy_uses_the_real_node_ids(topology, monkeypatch):
+    """Under ``numactl --cpunodebind=2,3`` the shards are nodes 2 and 3.
+
+    Shard *index* and node *id* are different things, and only on the common
+    machine do they coincide. Getting this wrong binds the pages to nodes 0 and
+    1, which either fails or puts every page away from its threads.
+    """
+    topology({0: "0-7", 1: "8-15", 2: "16-23", 3: "24-31"})
+    monkeypatch.setenv("GOMP_CPU_AFFINITY", " ".join(str(c) for c in range(16, 32)))
+    assert shard_nodes(num_threads=16) == [2, 3]
+
+
+def test_policy_follows_the_threads_not_the_machine(topology, monkeypatch):
+    """``OMP_NUM_THREADS`` below the CPU list shards onto fewer nodes.
+
+    32 CPUs are listed but only 16 threads run, so threads 0..15 sit on nodes 0
+    and 1 and nodes 2 and 3 never execute anything. The answer is those two
+    nodes: counting the machine's nodes instead would put half the weights
+    where no thread will read them.
+    """
+    topology({0: "0-7", 1: "8-15", 2: "16-23", 3: "24-31"})
+    monkeypatch.setenv("GOMP_CPU_AFFINITY", " ".join(str(c) for c in range(32)))
+    assert shard_nodes(num_threads=16) == [0, 1]
+
+
+def test_policy_declines_on_an_interleaved_cpu_list(topology, monkeypatch):
+    """Round-robin across nodes: every run of threads spans every node."""
+    topology({0: "0-7", 1: "8-15"})
+    order = [c for pair in zip(range(0, 8), range(8, 16)) for c in pair]
+    monkeypatch.setenv("GOMP_CPU_AFFINITY", " ".join(str(c) for c in order))
+    assert shard_nodes(num_threads=16) == []
+
+
+def test_policy_declines_when_threads_do_not_divide(topology, monkeypatch):
+    topology({0: "0-7", 1: "8-15", 2: "16-23"})
+    monkeypatch.setenv("GOMP_CPU_AFFINITY", " ".join(str(c) for c in range(24)))
+    assert shard_nodes(num_threads=22) == []
+
+
+def test_policy_reads_the_iomp_proclist(topology, monkeypatch):
+    """libiomp is the default when it is preloaded, and it spells this its own
+    way: an explicit ``proclist`` rather than ``GOMP_CPU_AFFINITY``."""
+    topology({0: "0-7", 1: "8-15"})
+    proclist = ",".join(str(c) for c in range(16))
+    monkeypatch.setenv(
+        "KMP_AFFINITY", f"granularity=fine,explicit,proclist=[{proclist}]"
+    )
+    assert shard_nodes(num_threads=16) == [0, 1]
+
+
+def test_policy_declines_without_ordered_thread_binding(topology, monkeypatch):
+    """Without an ordered binding a thread's node cannot be derived from its
+    index, so the policy must decline rather than guess.
+
+    ``OMP_PLACES={0,1,...}`` with ``OMP_PROC_BIND=true`` is what vLLM falls back
+    to when it has neither OpenMP runtime: it names one place holding every CPU,
+    so it pins nothing in particular.
+    """
+    topology({0: "0-7", 1: "8-15"})
+    monkeypatch.setenv("OMP_PLACES", "{" + ",".join(str(c) for c in range(16)) + "}")
     monkeypatch.setenv("OMP_PROC_BIND", "true")
-    assert plan_shards() == 1
+    assert shard_nodes(num_threads=16) == []
+
+
+def test_policy_declines_on_a_grouped_proclist(topology, monkeypatch):
+    """A KMP proclist may give a thread several CPUs; that is not handled."""
+    topology({0: "0-7", 1: "8-15"})
+    monkeypatch.setenv(
+        "KMP_AFFINITY", "granularity=fine,explicit,proclist=[{0,1},{8,9}]"
+    )
+    assert shard_nodes(num_threads=2) == []
+
+
+def test_env_override_names_nodes_not_a_count(topology, monkeypatch):
+    """The escape hatch takes node ids, so it can express ``2,3``."""
+    topology({0: "0-7", 1: "8-15", 2: "16-23", 3: "24-31"})
+    monkeypatch.setenv("GOMP_CPU_AFFINITY", " ".join(str(c) for c in range(8)))
+    assert plan_shard_nodes() == []
+    monkeypatch.setenv(NODES_ENV, "2,3")
+    assert plan_shard_nodes() == [2, 3]
