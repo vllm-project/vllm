@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared FSDP2 shard loader for the sharded-RDT examples.
+"""FSDP2 shard loader for the sharded-RDT examples.
 
-`rlhf_sharded_rdt_fsdp_ep.py` and `rlhf_sharded_rdt_mn.py` both need a trainer
-whose weights are real (so a weight sync transfers something meaningful) without
-ever materializing the whole model on one GPU. They had byte-identical copies of
-this function apart from one import; it lives here so a fix lands in both.
-
-Mirrors `rdt_vllm_serve.py`, which the examples already share.
+`rlhf_sharded_rdt_fsdp_ep.py` needs a trainer whose weights are real (so a
+weight sync transfers something meaningful) without ever materializing the whole
+model on one GPU. Kept out of the example so that file stays about the weight
+sync rather than about checkpoint loading, alongside `rdt_vllm_serve.py`.
 """
 
 import os

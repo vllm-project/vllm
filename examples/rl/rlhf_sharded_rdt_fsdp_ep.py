@@ -3,11 +3,11 @@
 """RLHF weight sync: 8-rank FSDP2 trainer -> vLLM DP8+EP inference via the
 sharded-RDT weight-transfer backend, driven over the HTTP control plane.
 
-A fixed 8->8 (1:1) specialization of rlhf_sharded_rdt_mn.py, kept as a distinct
-example because it exercises STRICT_PACK placement-group scheduling (all FSDP
-ranks packed onto one node, inference DP ranks on the other) and always-on
-expert parallelism. For the arbitrary M:N regimes (fan-in / split) and the
-env-driven fleet sizing, see rlhf_sharded_rdt_mn.py.
+The reference example for the backend: a fixed 8->8 (1:1) fleet with STRICT_PACK
+placement-group scheduling (all FSDP ranks packed onto one node, inference DP
+ranks on the other) and always-on expert parallelism. Producers and consumers
+need not match 1:1 — ``RdtRouter`` (sharded_rdt_common.py) handles fan-in and
+split fleets — but this example fixes the sizes to keep the wiring readable.
 
 Architecture:
   - Each FSDP trainer rank builds a ``ShardedRDTTrainerWeightTransferEngine``
@@ -32,8 +32,7 @@ Requirements on the vLLM server (this script launches it for you):
   - The server must share the trainer's Ray cluster (``address=auto``) so its
     workers can resolve the trainer serve actors by name+namespace.
 
-Needs two 8-GPU nodes (8 trainer + 8 inference). For a single-node,
-size-configurable run, use rlhf_sharded_rdt_mn.py.
+Needs two 8-GPU nodes (8 trainer + 8 inference).
 """
 
 import os

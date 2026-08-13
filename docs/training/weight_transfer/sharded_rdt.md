@@ -168,7 +168,7 @@ The producer server's concurrency has hazards that are currently prevented by pr
 
 ## Examples
 
-- `examples/rl/rlhf_sharded_rdt.py` — minimal single node, 1 trainer + TP-2
-- `examples/rl/rlhf_sharded_rdt_mn.py` — arbitrary M:N across nodes, env-driven
-- `examples/rl/rlhf_sharded_rdt_qwen235b.py` — Qwen3-235B-A22B with partial (pipeline-style) ownership
-- `examples/rl/rlhf_sharded_rdt_kimi.py` — 1T FP8 MoE from a raw sharded checkpoint
+Both need two 8-GPU nodes (one trainer fleet, one inference fleet).
+
+- `examples/rl/rlhf_sharded_rdt_fsdp_ep.py` — the reference example: 8-rank FSDP2 trainer -> vLLM DP8+EP, over the HTTP control plane
+- `examples/rl/rlhf_sharded_rdt_kimi.py` — 1T FP8 MoE from a raw sharded checkpoint, via a custom `WeightSource`
