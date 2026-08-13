@@ -1269,6 +1269,41 @@ def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index
     )
 
 
+def test_thinking_budget_marker_search_is_incremental():
+    """Long thinking sections must not rescan the full output every step."""
+    h = ThinkingBudgetStateHolder(
+        MockReasoningConfig(), 8, 0, torch.device("cpu"), False
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, SamplingParams(thinking_token_budget=10_000), None, [])],
+            moved=(),
+        )
+    )
+    scanned_tokens = 0
+    original_find = h._find_last_sequence_index
+
+    def counted_find(target_list: list[int], token_ids: list[int]) -> int:
+        nonlocal scanned_tokens
+        scanned_tokens += len(target_list)
+        return original_find(target_list, token_ids)
+
+    h._find_last_sequence_index = counted_find  # type: ignore[method-assign]
+    out = list(MockReasoningConfig.reasoning_start_token_ids)
+    h.update_state([out], None, None)
+    for _ in range(500):
+        out.append(42)
+        h.update_state([out], None, None)
+
+    max_marker_len = max(
+        len(MockReasoningConfig.reasoning_start_token_ids),
+        len(MockReasoningConfig.reasoning_end_token_ids),
+    )
+    assert scanned_tokens <= 2 * len(out) * max_marker_len
+
+
 # --- Thinking budget re-entry tests (issue #43708) ---
 # Regression tests: after budget forces end-of-thinking token sequence,
 # the state machine must detect and enforce budget on subsequent blocks.
