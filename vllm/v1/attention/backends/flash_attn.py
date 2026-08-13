@@ -229,31 +229,17 @@ class FlashAttentionBackend(AttentionBackend):
                 head_size=head_size,
                 head_size_v=head_size,
                 has_sinks=has_sink,
-                requires_sequence_lengths=True,
             )
         ):
             return "FP8 KV cache requires FA3 on SM90 or FA4 on SM100"
-        vllm_config = get_current_vllm_config_or_none()
-        model_config = vllm_config.model_config if vllm_config is not None else None
-        requires_fa4_mask = use_mm_prefix or (
-            model_config is not None
-            and (
-                getattr(model_config, "rswa_window", None) is not None
-                or getattr(model_config, "is_diffusion", False)
-            )
-        )
         if (
-            requires_fa4_mask
-            and get_flash_attn_version(
-                head_size=head_size,
-                has_sinks=has_sink,
-                requires_sequence_lengths=True,
-            )
-            != 4
+            use_mm_prefix
+            and get_flash_attn_version(head_size=head_size, has_sinks=has_sink) != 4
         ):
             return (
-                "requested attention mask requires FlashAttention v4, which "
-                "does not resolve for this head_size"
+                "mm_prefix (PrefixLM bidirectional attention) requires "
+                "FlashAttention v4, which does not resolve for this "
+                "head_size"
             )
         return None
 
@@ -872,14 +858,8 @@ class FlashAttentionImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.attn_type = attn_type
-        requires_sequence_lengths = attn_type not in (
-            AttentionType.ENCODER_ONLY,
-            AttentionType.ENCODER,
-        )
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=alibi_slopes is not None,
-            requires_local_attention=sliding_window is not None,
-            requires_sequence_lengths=requires_sequence_lengths,
             head_size=head_size,
             has_sinks=sinks is not None,
         )
@@ -898,7 +878,6 @@ class FlashAttentionImpl(AttentionImpl):
             head_size=head_size,
             head_size_v=head_size,
             has_sinks=sinks is not None,
-            requires_sequence_lengths=requires_sequence_lengths,
         ):
             raise NotImplementedError(
                 f"FlashAttention does not support {self.kv_cache_dtype}"
@@ -1074,11 +1053,6 @@ class FlashAttentionImpl(AttentionImpl):
                 mm_aux = None
                 if (
                     mm_prefix_query_ranges is not None
-                    and self.vllm_flash_attn_version != 4
-                ):
-                    raise NotImplementedError("mm_prefix attention requires FA4")
-                if (
-                    mm_prefix_query_ranges is not None
                     and not is_dynamic_causal
                     and causal is True
                     and self.vllm_flash_attn_version == 4
@@ -1118,11 +1092,6 @@ class FlashAttentionImpl(AttentionImpl):
                 # supersedes any FA-layer sliding_window_size parameter.
                 rswa_mask_mod_fn = None
                 rswa_aux = None
-                if (
-                    attn_metadata.rswa_prefix_lens is not None
-                    and self.vllm_flash_attn_version != 4
-                ):
-                    raise NotImplementedError("R-SWA attention requires FA4")
                 if (
                     attn_metadata.rswa_prefix_lens is not None
                     and self.vllm_flash_attn_version == 4

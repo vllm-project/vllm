@@ -364,10 +364,7 @@ class MMEncoderAttention(CustomOp):
         }
 
         self._fa_version = (
-            get_flash_attn_version(
-                head_size=head_size,
-                requires_sequence_lengths=False,
-            )
+            get_flash_attn_version(head_size=head_size)
             if self.is_flash_attn_backend
             else None
         )

@@ -363,10 +363,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self._n_centroids = cfg.n_centroids if not cfg.key_fp8 else 1
 
         # Detect flash-attn version (FA2/3/4) for prefill paths.
-        self.fa_version = get_flash_attn_version(
-            head_size=head_size,
-            requires_sequence_lengths=False,
-        )
+        self.fa_version = get_flash_attn_version(head_size=head_size)
 
         # Fixed NUM_KV_SPLITS (grid dims must be constant for cudagraph,
         # and benchmarks show no regression vs dynamic in eager mode).

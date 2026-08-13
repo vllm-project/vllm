@@ -558,26 +558,21 @@ def test_flash_attn_accepts_handled_fp8_variants(
     assert FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
 
 
-def _mock_sm100_fa4(monkeypatch: pytest.MonkeyPatch) -> DeviceCapability:
+def test_sm100_hd256_falls_back_to_fa2(monkeypatch: pytest.MonkeyPatch):
     import vllm.v1.attention.backends.fa_utils as fa_utils_mod
+    from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
     flash_attn_interface = pytest.importorskip(
         "vllm.vllm_flash_attn.flash_attn_interface",
         exc_type=ImportError,
     )
 
-    capability = DeviceCapability(10, 0)
     monkeypatch.setattr(fa_utils_mod.current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(fa_utils_mod.current_platform, "is_rocm", lambda: False)
     monkeypatch.setattr(
         fa_utils_mod.current_platform,
         "get_device_capability",
-        lambda: capability,
-    )
-    monkeypatch.setattr(
-        fa_utils_mod.current_platform,
-        "is_device_capability_family",
-        lambda family: family == 100,
+        lambda: DeviceCapability(10, 0),
     )
     monkeypatch.setattr(fa_utils_mod.envs, "VLLM_BATCH_INVARIANT", False)
     monkeypatch.setattr(
@@ -585,63 +580,6 @@ def _mock_sm100_fa4(monkeypatch: pytest.MonkeyPatch) -> DeviceCapability:
         "is_fa_version_supported",
         lambda version: version in (2, 4),
     )
-    return capability
-
-
-def test_sm100_hd256_sequence_lengths_fall_back_to_fa2(monkeypatch):
-    from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-
-    _mock_sm100_fa4(monkeypatch)
-
+    assert get_flash_attn_version(head_size=128) == 4
+    assert get_flash_attn_version(head_size=192, head_size_v=128) == 4
     assert get_flash_attn_version(head_size=256) == 2
-    assert (
-        get_flash_attn_version(
-            head_size=256,
-            requires_sequence_lengths=False,
-        )
-        == 4
-    )
-
-
-def test_sm100_hd256_rejects_fa4_only_decoder_combinations(monkeypatch):
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-    capability = _mock_sm100_fa4(monkeypatch)
-    common = dict(
-        head_size=256,
-        dtype=torch.float16,
-        block_size=16,
-        use_mla=False,
-        has_sink=False,
-        use_sparse=False,
-        device_capability=capability,
-    )
-
-    fp8_reason = FlashAttentionBackend.supports_combination(
-        kv_cache_dtype="fp8",
-        use_mm_prefix=False,
-        **common,
-    )
-    mm_prefix_reason = FlashAttentionBackend.supports_combination(
-        kv_cache_dtype=None,
-        use_mm_prefix=True,
-        **common,
-    )
-
-    assert fp8_reason == "FP8 KV cache requires FA3 on SM90 or FA4 on SM100"
-    assert mm_prefix_reason is not None
-    assert "requires FlashAttention v4" in mm_prefix_reason
-
-
-def test_sm100_hd256_diffkv_falls_back_from_flash_attention(monkeypatch):
-    from vllm.v1.attention.backends.flash_attn_diffkv import (
-        FlashAttentionDiffKVBackend,
-    )
-
-    _mock_sm100_fa4(monkeypatch)
-
-    assert not FlashAttentionDiffKVBackend.is_supported_on_current_device(
-        head_size=256,
-        head_size_v=128,
-        has_sinks=False,
-    )

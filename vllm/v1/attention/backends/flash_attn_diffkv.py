@@ -60,7 +60,6 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
                 head_size=head_size,
                 head_size_v=head_size_v,
                 has_sinks=has_sinks,
-                requires_sequence_lengths=True,
             )
         except Exception:
             return False
@@ -126,19 +125,12 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         # Re-derive the FA version with diff-kv context so that
         # get_flash_attn_version can apply the FA3 -> FA4 upgrade rule
         # for sinks + hdim != hdim_v.
-        requires_sequence_lengths = self.attn_type not in (
-            AttentionType.ENCODER_ONLY,
-            AttentionType.ENCODER,
-        )
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=self.alibi_slopes is not None,
             head_size=self.head_size,
             head_size_v=FlashAttentionDiffKVBackend.head_size_v,
             has_sinks=self.sinks is not None,
-            requires_sequence_lengths=requires_sequence_lengths,
         )
-        if self.vllm_flash_attn_version not in (3, 4):
-            raise NotImplementedError("FlashAttention DiffKV requires FA3 or FA4")
 
     def do_kv_cache_update(
         self,
