@@ -490,6 +490,35 @@ def test_draft_model_enables_async_scheduling_by_default():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+def test_batch_invariance_disables_async_scheduling(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    cfg = VllmConfig(
+        model_config=ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048),
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+        ),
+        parallel_config=ParallelConfig(distributed_executor_backend="uni"),
+    )
+
+    assert cfg.scheduler_config.async_scheduling is False
+
+
+def test_batch_invariance_rejects_explicit_async_scheduling(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+
+    with pytest.raises(ValueError, match="VLLM_BATCH_INVARIANT"):
+        VllmConfig(
+            model_config=ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048),
+            scheduler_config=SchedulerConfig(
+                max_model_len=2048,
+                is_encoder_decoder=False,
+                async_scheduling=True,
+            ),
+            parallel_config=ParallelConfig(distributed_executor_backend="uni"),
+        )
+
+
 @dataclass
 class _TestConfigFields:
     a: int

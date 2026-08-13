@@ -1135,6 +1135,14 @@ class VllmConfig:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
             # Currently, async scheduling only support eagle speculative
             # decoding.
+            if envs.VLLM_BATCH_INVARIANT:
+                raise ValueError(
+                    "Async scheduling is not compatible with "
+                    "VLLM_BATCH_INVARIANT=1. Async scheduling composes the next "
+                    "step's batch before the current step retires, so batch "
+                    "composition depends on wall-clock timing and outputs are "
+                    "not reproducible. Please use --no-async-scheduling."
+                )
             if uses_rocm_deepep_ht_dbo:
                 raise ValueError(
                     "Async scheduling is not compatible with ROCm DeepEP "
@@ -1164,7 +1172,14 @@ class VllmConfig:
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
-            if (
+            if envs.VLLM_BATCH_INVARIANT:
+                logger.warning_once(
+                    "Disabling asynchronous scheduling when VLLM_BATCH_INVARIANT "
+                    "is enabled. Async scheduling makes batch composition depend "
+                    "on wall-clock timing, which defeats batch invariance."
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
                 self.model_config is not None
                 and self.model_config.runner_type == "pooling"
             ):
