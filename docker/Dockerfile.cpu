@@ -312,16 +312,38 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/test/cpu.txt --torch-backend cpu && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
+# Installed after requirements/test/cpu.txt (which pins triton==3.6.0) so the
+# triton-cpu wheel isn't overwritten by that pin.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
+    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
+        uv pip install "$(realpath dist/*.whl)"; \
+    fi
+
 ENTRYPOINT ["bash"]
 
 ######################### TEST IMAGE #########################
 FROM vllm-test-deps AS vllm-test
+
+# Re-declared here because this stage is `FROM vllm-test-deps` (not
+# `vllm-build`), so it does not inherit the ARG/ENV defined there. Without it,
+# the guard below would see an empty value and build/install triton-cpu on
+# non-x86 targets (e.g. arm64).
+ARG VLLM_CPU_X86=0
 
 WORKDIR /vllm-workspace
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install dist/*.whl
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
+    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
+        uv pip install "$(realpath dist/*.whl)"; \
+    fi
 
 ADD ./tests/ ./tests/
 ADD ./examples/ ./examples/
