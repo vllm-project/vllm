@@ -947,15 +947,17 @@ steps:
   - trigger: "perf-eval"
     label: ":rocket: Trigger perf-eval"
     key: trigger-perf-eval
-    if: build.env("NIGHTLY") != "1"
+    if: build.env("NIGHTLY") == "1" || build.env("RUN_PERF_EVAL") == "1"
     depends_on:
       - build-release-image-x86
       - build-rocm-release-image
     async: true
+    soft_fail: true
     build:
       branch: "main"
-      message: "vLLM release $BUILDKITE_COMMIT"
+      message: "Evaluate vLLM $BUILDKITE_COMMIT"
       env:
+        NIGHTLY: "${NIGHTLY:-0}"
         VLLM_COMMIT: "$BUILDKITE_COMMIT"
         VLLM_IMAGE_CUDA: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64"
         VLLM_IMAGE_ROCM: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm"
