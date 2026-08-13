@@ -78,6 +78,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         kv_cache_dtype=cache_dtype,
         head_size=576,
         non_causal_multi_token_decode=False,
+        sliding_window=None,
     )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=64), model_config=None
@@ -466,6 +467,7 @@ class MockSparseMLAAttentionLayer:
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim
+        self.q_lora_rank = None
         self.kv_lora_rank = kv_lora_rank
 
         # Compute weight matrices in the format expected by forward_impl
@@ -589,6 +591,7 @@ class MockMLAAttentionLayer(MLAAttention):
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim
+        self.q_lora_rank = None
         self.kv_lora_rank = kv_lora_rank
 
         # Compute weight matrices from kv_b_proj (like MLAAttention does)
