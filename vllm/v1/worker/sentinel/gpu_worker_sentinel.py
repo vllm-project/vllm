@@ -79,7 +79,6 @@ class WorkerSentinel:
         master_ip = params["dp_master_ip"]
         dp_group_rank = params["dp_group_rank"]
         dp_group_size = params["dp_group_size"]
-        self.worker.parallel_config.data_parallel_master_ip = master_ip
         self._clean_worker_state()
         reset_eplb_async_state(self.worker.model_runner)
         if self.worker.parallel_config.data_parallel_size > 1:
