@@ -1904,45 +1904,54 @@ class _ListSource(WeightSource):
 class _FakeProducerServer:
     """In-process stand-in for the _RDTProducerServer Ray actor. Records the
     engine->server call sequence and, by default, frees each group as soon as
-    it is published (simulating the consumer's free_gather back-edge) so the
-    gather loop's backpressure never blocks."""
+    it is published (simulating the consumers' free_group barrier) so the
+    gather loop's backpressure never blocks. Mirrors the real server's
+    per-group barrier: publish/free are keyed by GROUP INDEX and signals count
+    to the ``begin_sync`` live total (see
+    test_sharded_rdt_producer.TestFakeServerAgreesWithTheRealOne)."""
 
     def __init__(self, auto_free=True):
         self.order: list[str] = []
-        self.published: list[tuple] = []
-        self.free_targets: list[int] = []
-        self.inflight: list[tuple] = []
+        self.published: list[int] = []
+        self.live_count = 1
+        self._inflight_groups: list[int] = []
         self.auto_free = auto_free
-        self.free_counts: dict[tuple, int] = {}
-        self._pending_freed: list[tuple] = []
+        self.free_counts: dict[int, int] = {}
+        self._pending_freed: list[int] = []
 
-    def begin_sync(self):
+    # kept under the old name for tests that inspect in-flight groups
+    @property
+    def inflight(self):
+        return self._inflight_groups
+
+    def begin_sync(self, live_count):
         self.order.append("begin")
+        self.live_count = max(1, int(live_count))
 
-    def publish_group(self, key, entries, free_target):
+    def publish_group(self, group_idx, entries):
         self.order.append("publish")
-        self.published.append(key)
-        self.free_targets.append(free_target)
-        self.inflight.append(key)
-        freed: list[tuple] = self._pending_freed
+        self.published.append(group_idx)
+        self._inflight_groups.append(group_idx)
+        freed: list[int] = self._pending_freed
         self._pending_freed = []
-        if self.auto_free or self.free_counts.get(key, 0) >= free_target:
-            self.inflight.remove(key)
-            freed = freed + [key]
+        if self.auto_free or self.free_counts.get(group_idx, 0) >= self.live_count:
+            self._inflight_groups.remove(group_idx)
+            freed = freed + [group_idx]
         return freed
 
-    def free_gather(self, names):
+    def free_group(self, group_idx):
         """Consumer back-edge; may arrive before the group's publish."""
-        key = tuple(names)
-        self.free_counts[key] = self.free_counts.get(key, 0) + 1
-        if key in self.inflight:
-            self.inflight.remove(key)
-            self._pending_freed.append(key)
+        self.free_counts[group_idx] = self.free_counts.get(group_idx, 0) + 1
+        if (
+            group_idx in self._inflight_groups
+            and self.free_counts[group_idx] >= self.live_count
+        ):
+            self._inflight_groups.remove(group_idx)
+            self._pending_freed.append(group_idx)
 
     def free_one(self):
         """Manually free the oldest in-flight group (backpressure test)."""
-        key = self.inflight.pop(0)
-        self._pending_freed.append(key)
+        self._pending_freed.append(self._inflight_groups.pop(0))
 
     def end_sync(self):
         self.order.append("end")
@@ -1981,12 +1990,13 @@ def _rdt_engine_with_fake_server(
     if fleet_owned is None:
         engine._build_router(1, 0)
     else:
-        # Stands in for the (metadata digest, owned groups) all-gather; every
-        # rank reports THIS rank's digest, i.e. agreeing metadata.
+        # Stands in for the (metadata digest, owned groups, ep coord, stamp
+        # digest) all-gather; every rank reports THIS rank's digests, i.e.
+        # agreeing metadata and stamps.
         monkeypatch.setattr(
             engine,
             "_all_gather_owned",
-            lambda w, mine: [(mine[0], o) for o in fleet_owned],
+            lambda w, mine: [(mine[0], o, mine[2], mine[3]) for o in fleet_owned],
         )
         engine._build_router(len(fleet_owned), 0)
     return engine
@@ -2148,71 +2158,85 @@ def test_sharded_rdt_send_weights_surfaces_update_error(monkeypatch):
 
 
 class TestRdtRouter:
-    """Who serves and frees each gather group.
+    """Who serves each (gather group, ep_rank) pull unit.
 
-    A wrong answer here is not a wrong number but a hang: a consumer pulling
-    from a producer that never gathered a group waits forever, and a published
-    group nobody frees stalls the producer's end_sync. So every case checks the
-    conservation law that makes the credit loop terminate — for each group, the
-    per-producer free targets sum to the consumer count.
-    """
-
-    @staticmethod
-    def _conserved(router, num_groups):
-        return all(
-            sum(router.free_target(p, g) for p in router.owners(g))
-            == router.num_consumers
-            for g in range(num_groups)
-        )
+    A wrong answer here is not a wrong number but a hang or a loud misroute: a
+    consumer pulling from a producer that never gathered the name trips its
+    served-names guard. Freeing does NOT route through the router — every
+    consumer signals every owner of a group, and the producers count to the
+    live total — so these tests pin PULL routing only."""
 
     def test_identity_when_fleets_match(self):
         r = RdtRouter(8, 8, None, num_groups=6)
-        assert [r.bound_producers(c) for c in range(8)] == [[c] for c in range(8)]
         assert all(r.producer_for(3, g) == 3 for g in range(6))
-        assert self._conserved(r, 6)
+        assert all(r.producer_for(c, 0) == c for c in range(8))
 
     def test_gather_to_all_keeps_the_historical_binding(self):
-        # 16 producers / 8 consumers: same producers per consumer as the
-        # pre-router block rule, but each group is pulled from ONE of them.
+        """16 producers / 8 consumers: the block rule spreads each consumer's
+        pulls over its block, alternating by group, and every producer NIC
+        still carries traffic."""
         r = RdtRouter(16, 8, None, num_groups=95)
         for c in range(8):
-            assert r.bound_producers(c) == assign_producer_indices(16, 8, c)
+            block = assign_producer_indices(16, 8, c)
+            assert {r.producer_for(c, g) for g in range(95)} == set(block)
         assert [r.producer_for(0, g) for g in range(4)] == [0, 1, 0, 1]
-        # No producer is left publishing groups nobody pulls from it.
-        served = {r.producer_for(c, g) for c in range(8) for g in range(95)}
-        assert served == set(range(16))
-        assert self._conserved(r, 95)
+        # No producer is left out of the pull traffic entirely.
+        assert {r.producer_for(c, g) for c in range(8) for g in range(95)} == set(
+            range(16)
+        )
 
     def test_fan_in_shares_one_producer(self):
         r = RdtRouter(2, 8, None, num_groups=5)
-        assert [r.bound_producers(c) for c in range(8)] == [[c // 4] for c in range(8)]
-        assert r.free_target(0, 0) == 4 and r.free_target(1, 0) == 4
-        assert self._conserved(r, 5)
+        assert [{r.producer_for(c, g) for g in range(5)} for c in range(8)] == [
+            {c // 4} for c in range(8)
+        ]
 
     def test_pipeline_stages_route_to_the_owning_stage(self):
-        # 2 stages x 8 ranks; groups 0-2 on stage 0, 3-5 on stage 1.
+        """2 stages x 8 ranks: groups 0-2 on stage 0, 3-5 on stage 1. Each
+        consumer must reach both stages, pulling each group from an owner."""
         owners = [list(range(8))] * 3 + [list(range(8, 16))] * 3
         r = RdtRouter(16, 8, owners)
         for c in range(8):
-            assert r.bound_producers(c) == [c, c + 8]
             assert [r.producer_for(c, g) for g in range(6)] == [c] * 3 + [c + 8] * 3
         assert r.owned_groups(0) == [0, 1, 2]
         assert r.owned_groups(8) == [3, 4, 5]
-        # A rank owning a group serves exactly one consumer; non-owners serve none.
-        assert r.free_target(0, 0) == 1 and r.free_target(0, 3) == 0
-        assert self._conserved(r, 6)
         r.validate()
 
-    def test_owner_without_a_consumer_gets_a_zero_target(self):
-        # Fewer consumers than a stage has ranks: some owners serve nothing and
-        # must not publish (the trainer skips those groups).
-        owners = [list(range(8))] * 4
-        r = RdtRouter(8, 2, owners)
+    def test_expert_units_route_to_the_matching_coordinate(self):
+        """The two stamp lists must match: a pull for a name stamped k goes to a
+        group owner whose producer_ep_ranks entry is k; -1 keeps the full owner
+        set (the historical routing)."""
+        # 2 stages x (tp2 x ep2): coords repeat per stage.
+        owners = [[0, 1, 2, 3]] * 2 + [[4, 5, 6, 7]] * 2
+        coords = [0, 0, 1, 1, 0, 0, 1, 1]
+        r = RdtRouter(8, 4, owners, producer_ep_ranks=coords)
         r.validate()
-        assert self._conserved(r, 4)
-        assert any(r.free_target(p, g) == 0 for p in range(8) for g in range(4)), (
-            "expected some (producer, group) pairs to serve no consumer"
-        )
+        assert r.owners(0, 1) == [2, 3]
+        assert r.owners(2, 1) == [6, 7]
+        assert r.owners(2) == [4, 5, 6, 7]  # -1: unchanged
+        for c in range(4):
+            assert r.producer_for(c, 0, 1) in (2, 3)
+            assert r.producer_for(c, 2, 0) in (4, 5)
+
+    def test_consumers_spread_over_a_coordinates_owner_set(self):
+        """Several ranks share a coordinate (its TP peers); the block rule must
+        spread consumers across them, not funnel through one."""
+        r = RdtRouter(4, 4, None, num_groups=6, producer_ep_ranks=[0, 0, 1, 1])
+        served = {r.producer_for(c, g, 0) for c in range(4) for g in range(6)}
+        assert served == {0, 1}
+
+    def test_an_empty_pull_unit_raises(self):
+        """A stamped name whose coordinate has no rank in the group's owner set
+        is a routing impossibility and must raise, not hang."""
+        r = RdtRouter(2, 2, None, num_groups=2, producer_ep_ranks=[0, 0])
+        with pytest.raises(ValueError, match="has no owner"):
+            r.producer_for(0, 0, 1)
+
+    def test_stamped_routing_without_coords_raises(self):
+        """name stamps and producer stamps must ship together."""
+        r = RdtRouter(2, 2, None, num_groups=2)
+        with pytest.raises(ValueError, match="producer_ep_ranks"):
+            r.owners(0, 1)
 
     def test_validate_rejects_an_unowned_group(self):
         with pytest.raises(ValueError, match="no owner"):
@@ -2222,96 +2246,9 @@ class TestRdtRouter:
         with pytest.raises(ValueError, match="out of range"):
             RdtRouter(2, 2, [[0, 5]]).validate()
 
-
-class TestRdtRouterLiveConsumers:
-    """``free_target(..., live_consumer_ids=...)`` — syncing to a fleet that has
-    lost a consumer.
-
-    What makes degradation safe is that ``producer_for`` is pure in the consumer
-    id: dropping consumers cannot change a SURVIVING consumer's binding, so a live
-    target is always a subset-count of the provisioned one and a producer never
-    has to serve a name it did not register at init.
-    """
-
-    ROUTERS = {
-        # (num_producers, num_consumers, group_owners, num_groups)
-        "identity_8x8": (8, 8, None, 6),
-        "gather_to_all_16x8": (16, 8, None, 95),
-        "fan_in_2x8": (2, 8, None, 5),
-        "pipeline_2stage": (16, 8, [[*range(8)]] * 3 + [[*range(8, 16)]] * 3, 6),
-        "owners_exceed_consumers": (8, 2, [[*range(8)]] * 4, 4),
-    }
-
-    @staticmethod
-    def _router(spec):
-        p, c, owners, ngroups = spec
-        return RdtRouter(p, c, owners, num_groups=ngroups), ngroups
-
-    @pytest.mark.parametrize("name", list(ROUTERS))
-    def test_full_live_set_matches_no_live_set(self, name):
-        """A fleet that has lost nothing must behave exactly as before."""
-        r, ngroups = self._router(self.ROUTERS[name])
-        everyone = list(range(r.num_consumers))
-        for g in range(ngroups):
-            for p in r.owners(g):
-                assert r.free_target(p, g, everyone) == r.free_target(p, g)
-
-    @pytest.mark.parametrize("name", list(ROUTERS))
-    def test_live_targets_match_a_direct_count(self, name):
-        """Cross-checked against the definition over hole-y live sets — a live set
-        is not required to be a prefix or contiguous."""
-        r, ngroups = self._router(self.ROUTERS[name])
-        c = r.num_consumers
-        for live in ({0}, set(range(c)) - {0}, set(range(0, c, 2)), {c - 1}):
-            for g in range(ngroups):
-                for p in r.owners(g):
-                    expected = sum(1 for x in sorted(live) if r.producer_for(x, g) == p)
-                    assert r.free_target(p, g, live) == expected
-
-    @pytest.mark.parametrize("name", list(ROUTERS))
-    def test_live_targets_conserve_over_the_live_set(self, name):
-        """The termination law restated for a degraded sync: each live consumer
-        frees a group exactly once, so the targets sum to the live count. Short is
-        a hang; long is a double free."""
-        r, ngroups = self._router(self.ROUTERS[name])
-        live = sorted(set(range(r.num_consumers)) - {0})
-        for g in range(ngroups):
-            assert sum(r.free_target(p, g, live) for p in r.owners(g)) == len(live)
-
-    @pytest.mark.parametrize("name", list(ROUTERS))
-    def test_live_targets_never_exceed_provisioned(self, name):
-        r, ngroups = self._router(self.ROUTERS[name])
-        live = set(range(r.num_consumers)) - {0}
-        for g in range(ngroups):
-            for p in r.owners(g):
-                assert r.free_target(p, g, live) <= r.free_target(p, g)
-
-    def test_surviving_consumers_keep_their_bindings(self):
-        r, ngroups = self._router(self.ROUTERS["gather_to_all_16x8"])
-        before = {
-            (c, g): r.producer_for(c, g)
-            for c in range(r.num_consumers)
-            for g in range(ngroups)
-        }
-        live = sorted(set(range(r.num_consumers)) - {3})
-        assert all(
-            r.producer_for(c, g) == before[(c, g)] for c in live for g in range(ngroups)
-        )
-
-    def test_a_dead_consumer_block_zeroes_its_producer(self):
-        """2 producers, 8 consumers: 0-3 pull from producer 0. Kill all four and it
-        has nothing to publish — its groups become gather-and-drop, which the
-        publish loop already handles."""
-        r, ngroups = self._router(self.ROUTERS["fan_in_2x8"])
-        for g in range(ngroups):
-            assert r.free_target(0, g, [4, 5, 6, 7]) == 0
-            assert r.free_target(1, g, [4, 5, 6, 7]) == 4
-
-    def test_empty_live_set_zeroes_everything(self):
-        r, ngroups = self._router(self.ROUTERS["identity_8x8"])
-        assert all(
-            r.free_target(p, g, []) == 0 for g in range(ngroups) for p in r.owners(g)
-        )
+    def test_validate_rejects_a_short_coordinate_list(self):
+        with pytest.raises(ValueError, match="producer_ep_ranks"):
+            RdtRouter(4, 2, None, num_groups=2, producer_ep_ranks=[0, 1]).validate()
 
 
 class _OwnedSource(_ListSource):
@@ -2347,7 +2284,7 @@ def test_sharded_rdt_publishes_only_owned_groups(monkeypatch):
     )
     engine.send_weights()
 
-    assert server.published == [("model.layers.0.w",), ("model.layers.1.w",)]
+    assert server.published == [1, 2]
     assert server.order == ["begin", "publish", "publish", "end"]
     assert engine._inflight == {}
     assert engine._group_owners == [[1], [0], [0], [1]]
@@ -2376,31 +2313,9 @@ def test_sharded_rdt_owned_group_order_mismatch_raises(monkeypatch):
     not torch.cuda.is_available(),
     reason="the gather loop's CUDA-IPC export needs a device",
 )
-def test_sharded_rdt_skips_publishing_a_group_no_consumer_pulls(monkeypatch):
-    """A group gathered but routed to nobody must not be published: it would
-    hold a backpressure slot that no free ever releases."""
-    server = _FakeProducerServer(auto_free=True)
-    source = _rdt_source_two_layers()
-    engine = _rdt_engine_with_fake_server(
-        source,
-        is_sender=False,
-        client=RecordingClient(),
-        server=server,
-        monkeypatch=monkeypatch,
-    )
-    engine._free_targets[1] = 0  # group 1 serves no consumer from this rank
-    engine.send_weights()
-
-    assert ("model.layers.0.w",) not in server.published
-    assert len(server.published) == 3
-    assert server.order.count("publish") == 3
-
-
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="the gather loop's CUDA-IPC export needs a device",
-)
-def test_sharded_rdt_publish_carries_the_group_free_target(monkeypatch):
+def test_sharded_rdt_begin_sync_carries_the_live_count(monkeypatch):
+    """The free barrier's target is one integer per sync: the live consumer
+    count, defaulting to the whole provisioned fleet."""
     server = _FakeProducerServer(auto_free=True)
     engine = _rdt_engine_with_fake_server(
         _rdt_source_two_layers(),
@@ -2410,74 +2325,55 @@ def test_sharded_rdt_publish_carries_the_group_free_target(monkeypatch):
         monkeypatch=monkeypatch,
     )
     engine.send_weights()
-    assert server.free_targets == [1, 1, 1, 1]
+    assert server.live_count == 1  # num_consumers=1 in the harness
+    engine.send_weights(live_consumer_ids=[0])
+    assert server.live_count == 1
 
 
-class TestLiveConsumersScope:
-    """``_live_consumers`` — the per-sync recompute of this rank's free targets.
-
-    The provisioned geometry is frozen for the run; only the expected free count
-    per group moves, and it must move back afterwards so one degraded sync cannot
-    leak into the next.
-    """
+class TestLiveCountPlumbing:
+    """``send_weights(live_consumer_ids)`` -> the barrier target. The
+    provisioned geometry is frozen; a degraded sync only lowers the one integer
+    every owned group's barrier counts to."""
 
     @staticmethod
-    def _engine(num_consumers, world, rank, group_owners=None, num_groups=4):
+    def _engine(num_consumers, world=2, rank=0):
         engine = ShardedRDTTrainerWeightTransferEngine.__new__(
             ShardedRDTTrainerWeightTransferEngine
         )
         engine._init_info = ShardedRDTTrainerInitInfo(
             rank=rank, num_consumers=num_consumers
         )
-        router = RdtRouter(world, num_consumers, group_owners, num_groups=num_groups)
-        engine._router = router
-        engine._owned_idx = (
-            router.owned_groups(rank) if group_owners else list(range(num_groups))
-        )
-        engine._free_targets = {
-            gi: router.free_target(rank, gi) for gi in engine._owned_idx
-        }
-        engine._world_and_rank = lambda: (world, rank)
-        return engine
+        engine._router = RdtRouter(world, num_consumers, None, num_groups=4)
+        engine.source = object()  # send_weights asserts a source is present
+        received: list = []
+        engine._send_weights_inner = received.append
+        return engine, received
 
-    def test_none_leaves_the_targets_untouched(self):
-        engine = self._engine(num_consumers=4, world=4, rank=0)
-        before = dict(engine._free_targets)
-        with engine._live_consumers(None):
-            assert engine._free_targets == before
-        assert engine._free_targets == before
+    def test_none_counts_the_whole_provisioned_fleet(self):
+        engine, got = self._engine(num_consumers=8)
+        engine.send_weights(None)
+        assert got == [8]
 
-    def test_targets_shrink_inside_the_scope(self):
-        engine = self._engine(num_consumers=8, world=2, rank=0)
-        assert set(engine._free_targets.values()) == {4}
-        with engine._live_consumers([0, 1, 4, 5, 6, 7]):
-            assert set(engine._free_targets.values()) == {2}
+    def test_a_live_set_counts_its_distinct_members(self):
+        engine, got = self._engine(num_consumers=8)
+        engine.send_weights([0, 1, 4, 5, 5])
+        assert got == [4]
 
-    def test_provisioned_targets_are_restored(self):
-        engine = self._engine(num_consumers=8, world=2, rank=0)
-        before = dict(engine._free_targets)
-        with engine._live_consumers([4, 5, 6, 7]):
-            assert set(engine._free_targets.values()) == {0}
-        assert engine._free_targets == before
+    def test_a_full_live_set_matches_the_provisioned_count(self):
+        engine, got = self._engine(num_consumers=8)
+        engine.send_weights(list(range(8)))
+        engine.send_weights(None)
+        assert got == [8, 8]
 
-    def test_targets_are_restored_when_the_sync_raises(self):
-        engine = self._engine(num_consumers=8, world=2, rank=0)
-        before = dict(engine._free_targets)
-        with pytest.raises(RuntimeError), engine._live_consumers([4, 5, 6, 7]):
-            raise RuntimeError("gather failed")
-        assert engine._free_targets == before
-
-    def test_owned_groups_never_move(self):
-        """Degrading changes the TARGETS, never the gather schedule: the group
-        collectives span every owner and must run identically on all of them."""
-        owners = [[*range(8)]] * 3 + [[*range(8, 16)]] * 3
-        engine = self._engine(
-            num_consumers=8, world=16, rank=8, group_owners=owners, num_groups=6
-        )
-        assert engine._owned_idx == [3, 4, 5]
-        with engine._live_consumers([0, 1, 2, 3]):
-            assert sorted(engine._free_targets) == [3, 4, 5]
-        assert sorted(engine._free_targets) == [3, 4, 5]
+    def test_which_consumers_died_does_not_matter_only_how_many(self):
+        """The whole point of the barrier: no routed per-producer targets, so
+        the identity of the dead consumer is irrelevant to the producers."""
+        counts = []
+        for live in ([0, 1, 2, 3], [4, 5, 6, 7], [0, 2, 4, 6]):
+            engine, got = self._engine(num_consumers=8)
+            engine.send_weights(live)
+            counts += got
+        assert counts == [4, 4, 4]
 
 
 def test_sharded_rdt_worker_init_info_carries_group_owners(monkeypatch):
@@ -2574,7 +2470,6 @@ def _serve_ring_server(src_name, src):
     srv = _RDTProducerServer(
         num_rdt_buffers=2,
         arena_presize_gb=0.0,
-        nosync=False,
         pack_check=False,
         gather_lookahead=2,
     )
@@ -2598,7 +2493,7 @@ def test_serve_does_not_reuse_packed_views_of_another_shape():
 
     The producer caches the destination views it carves into a serve ring slot.
     Keyed by name alone, the second request is packed through the first's views.
-    Reachable with layerwise_split > 1, when one name's copies split across chunks.
+    Reachable when one name's copies split across (group, ep_rank) chunks.
     """
     name = "model.layers.0.w"
     src = torch.arange(64, dtype=torch.bfloat16, device="cuda").reshape(8, 8)

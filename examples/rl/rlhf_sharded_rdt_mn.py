@@ -29,8 +29,8 @@ Env knobs:
   - fleet/model: MN_TRAINERS, MN_INFERENCE (or MN_INFERENCE_TP x MN_INFERENCE_DP),
     MN_MODEL (default Qwen/Qwen3-0.6B), MN_EP (1 for an MoE model). Dense models
     are served via TP (vLLM rejects DP over dense); MoE via DP(+EP).
-  - transport: NUM_RDT_BUFFERS x LAYERWISE_SPLIT, RDT_ARENA_PRESIZE_GB,
-    RDT_NOSYNC, RDT_PACK_CHECK, RDT_SYNC_ITERS.
+  - transport: NUM_RDT_BUFFERS, RDT_ARENA_PRESIZE_GB,
+    RDT_PACK_CHECK, RDT_SYNC_ITERS.
 
 The server is launched by this script (see rdt_vllm_serve.launch_vllm_serve) with
 dev mode + the Ray v2 executor; it joins this process's Ray cluster so its
@@ -134,9 +134,7 @@ class FSDPTrainWorker:
                 num_consumers=NUM_INFERENCE_CONSUMERS,
                 trainer_actor_namespace=RAY_NAMESPACE,
                 num_rdt_buffers=int(os.environ.get("NUM_RDT_BUFFERS", "2")),
-                layerwise_split=int(os.environ.get("LAYERWISE_SPLIT", "1")),
                 arena_presize_gb=float(os.environ.get("RDT_ARENA_PRESIZE_GB", "0")),
-                nosync=os.environ.get("RDT_NOSYNC", "0") == "1",
                 pack_check=os.environ.get("RDT_PACK_CHECK", "0") == "1",
             ),
             client=HTTPVLLMWeightSyncClient(vllm_endpoint),

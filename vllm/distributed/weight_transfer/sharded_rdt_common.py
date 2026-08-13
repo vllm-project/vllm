@@ -4,8 +4,8 @@
 engines.
 
 Both sides must agree on the M:N producer/consumer binding and per-group
-routing (``RdtRouter``), the arena byte sizing, the greedy byte-balanced
-split, and the op-chain allowlist. Keeping them here — imported by both
+routing (``RdtRouter``), the arena byte sizing, and the op-chain allowlist.
+Keeping them here — imported by both
 ``sharded_rdt_engine`` (consumer) and ``sharded_rdt_trainer`` (producer) —
 makes that agreement a single source of truth rather than two copies that can
 silently drift.
@@ -15,7 +15,7 @@ defines what a group index means for ``WeightSource``, not just for this
 transport.
 """
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 
 import torch
 
@@ -70,20 +70,34 @@ def assign_producer_indices(
 
 
 class RdtRouter:
-    """Decides which producer serves (and is freed for) each gather group.
+    """Decides which producer serves each (gather group, ep_rank) pull unit.
 
     Both engines build this from the same wire-carried data — ``num_producers``,
-    ``num_consumers`` and ``group_owners`` — so producer and consumer always
-    agree on who serves what. Disagreement is not a wrong answer but a hang:
-    a producer waits forever for a name it never gathered, and a group nobody
-    frees stalls ``end_sync``.
+    ``num_consumers``, ``group_owners`` and ``producer_ep_ranks`` — so producer
+    and consumer always agree on who serves what. Disagreement is not a wrong
+    answer but a hang or a loud misroute: a pull routed to a producer that never
+    gathered the name trips its served-names guard.
 
     ``group_owners[g]`` lists the producer ranks that gather and publish group
     ``g``; ``None`` means every producer owns every group (gather-to-all, the
-    layout used when the trainer has no pipeline-parallel split). Each group is
-    served by exactly ONE producer per consumer: splitting one pull across
-    producers only multiplies produce calls, since the consumer's own NIC bounds
-    the pull either way.
+    layout used when the trainer has no pipeline-parallel split).
+
+    ``producer_ep_ranks[r]`` is trainer rank r's expert-parallel coordinate —
+    the second of the two stamp lists that must match. The first,
+    ``name_ep_rank``, stamps each weight name with the coordinate holding it and
+    rides the worker init info, not this router. A pull for a name stamped
+    ``k >= 0`` must go to a group owner whose coordinate is ``k``; ``-1`` names
+    match every group owner. ``None`` means no expert sharding (every stamp -1),
+    which keeps the historical routing exactly.
+
+    Each pull unit is served by exactly ONE producer per consumer: splitting one
+    pull across producers only multiplies produce calls, since the consumer's
+    own NIC bounds the pull either way.
+
+    Freeing does NOT route through this class. Each consumer signals
+    ``free_group(g)`` to EVERY owner of ``g`` (``owners(g)``), and each producer
+    counts signals against the live consumer total handed to ``begin_sync`` —
+    a per-group barrier, not routed ref-counting.
     """
 
     def __init__(
@@ -92,6 +106,7 @@ class RdtRouter:
         num_consumers: int,
         group_owners: list[list[int]] | None = None,
         num_groups: int = 0,
+        producer_ep_ranks: list[int] | None = None,
     ) -> None:
         self.num_producers = max(1, num_producers)
         self.num_consumers = max(1, num_consumers)
@@ -99,86 +114,68 @@ class RdtRouter:
             [sorted(set(owners)) for owners in group_owners] if group_owners else None
         )
         self.num_groups = len(self._owners) if self._owners else max(0, num_groups)
+        self._ep_ranks = list(producer_ep_ranks) if producer_ep_ranks else None
 
-    def owners(self, group_idx: int) -> list[int]:
-        """Producer ranks that gather and publish ``group_idx``."""
-        if self._owners is None:
-            return list(range(self.num_producers))
-        return self._owners[group_idx]
+    def owners(self, group_idx: int, ep_rank: int = -1) -> list[int]:
+        """Producer ranks that publish ``group_idx`` — and, for ``ep_rank >= 0``,
+        also hold that expert coordinate. The intersection is valid because
+        Megatron expert-parallel groups never span pipeline stages: a group's
+        owner set always contains every coordinate."""
+        base = (
+            list(range(self.num_producers))
+            if self._owners is None
+            else list(self._owners[group_idx])
+        )
+        if ep_rank < 0:
+            return base
+        if self._ep_ranks is None:
+            raise ValueError(
+                f"pull unit (group {group_idx}, ep_rank {ep_rank}) requested but no "
+                "producer_ep_ranks were declared; the name stamps and the producer "
+                "stamps must ship together"
+            )
+        return [r for r in base if self._ep_ranks[r] == ep_rank]
 
-    def producer_for(self, consumer_id: int, group_idx: int) -> int:
-        """The single producer ``consumer_id`` pulls ``group_idx`` from.
+    def producer_for(self, consumer_id: int, group_idx: int, ep_rank: int = -1) -> int:
+        """The single producer ``consumer_id`` pulls (``group_idx``,
+        ``ep_rank``) from.
 
-        Blocks consumers across the group's owner set with the same rule that
+        Blocks consumers across the unit's owner set with the same rule that
         binds producers to consumers globally, then rotates by group index. In
         the gather-to-all layout this reproduces the historical contiguous
         binding (consumer c and 16 producers -> {2c, 2c+1}, alternating by
-        group), so every producer NIC still carries traffic. Routing all groups
-        to one owner per consumer instead would leave the surplus owners
-        publishing groups that nobody frees.
+        group), so every producer NIC still carries traffic.
         """
-        own = self.owners(group_idx)
+        own = self.owners(group_idx, ep_rank)
         if not own:
-            raise ValueError(f"group {group_idx} has no owner")
+            raise ValueError(
+                f"pull unit (group {group_idx}, ep_rank {ep_rank}) has no owner"
+            )
         block = assign_producer_indices(len(own), self.num_consumers, consumer_id)
         return own[block[group_idx % len(block)]]
-
-    def bound_producers(self, consumer_id: int) -> list[int]:
-        """Producers ``consumer_id`` pulls from, over all groups."""
-        if self._owners is None and not self.num_groups:
-            return assign_producer_indices(
-                self.num_producers, self.num_consumers, consumer_id
-            )
-        return sorted(
-            {self.producer_for(consumer_id, g) for g in range(self.num_groups)}
-        )
-
-    def free_target(
-        self,
-        producer_rank: int,
-        group_idx: int,
-        live_consumer_ids: Collection[int] | None = None,
-    ) -> int:
-        """How many consumers pull ``group_idx`` from ``producer_rank``.
-
-        Zero is normal: an owner with more peers than consumers still has to run
-        the group's collective, but must not publish it — nothing would free it.
-
-        ``live_consumer_ids`` restricts the scan to the consumers still alive for
-        THIS sync; ``None`` means the whole provisioned set (the behaviour of
-        every deployment that does not tolerate consumer death). This is the
-        entire producer-side mechanism for syncing to a fleet that has lost a
-        consumer: ``producer_for`` is pure in the consumer id, so removing
-        consumers cannot change any surviving consumer's binding — it can only
-        lower some free targets, and a target that falls to zero turns that group
-        into gather-and-drop, which the publish loop already handles. Liveness is
-        a FILTER over the provisioned geometry, never a re-derivation of it:
-        rebuilding the router from a shrunken consumer count would silently
-        re-map every survivor.
-        """
-        live = None if live_consumer_ids is None else set(live_consumer_ids)
-        return sum(
-            1
-            for c in range(self.num_consumers)
-            if (live is None or c in live)
-            and self.producer_for(c, group_idx) == producer_rank
-        )
 
     def owned_groups(self, producer_rank: int) -> list[int]:
         """Groups ``producer_rank`` gathers and publishes."""
         return [g for g in range(self.num_groups) if producer_rank in self.owners(g)]
 
     def validate(self) -> None:
-        """Check the ownership table can be served and fully freed.
+        """Check the ownership tables can be served.
 
         Raises:
             ValueError: a group has no owner, an owner is out of range, or the
-                per-group free targets do not sum to the consumer count (which
-                would leave a published group unfreed or double-freed).
+                producer coordinate list does not cover every producer. Empty
+                (group, ep_rank) pull units are caught at plan build instead —
+                ``producer_for`` raises — because only the consumer's baked
+                copies know which units exist.
         """
         if self._owners is not None and self.num_groups != len(self._owners):
             raise ValueError(
                 f"group count {self.num_groups} != ownership rows {len(self._owners)}"
+            )
+        if self._ep_ranks is not None and len(self._ep_ranks) != self.num_producers:
+            raise ValueError(
+                f"producer_ep_ranks has {len(self._ep_ranks)} entries for "
+                f"{self.num_producers} producers"
             )
         for g in range(self.num_groups):
             own = self.owners(g)
@@ -187,12 +184,6 @@ class RdtRouter:
             bad = [p for p in own if not 0 <= p < self.num_producers]
             if bad:
                 raise ValueError(f"group {g} owners out of range: {bad}")
-            total = sum(self.free_target(p, g) for p in own)
-            if total != self.num_consumers:
-                raise ValueError(
-                    f"group {g} free targets sum to {total}, "
-                    f"expected {self.num_consumers}"
-                )
 
 
 def arena_alloc_bytes(nbytes: int, presize: int = 0) -> int:
@@ -204,23 +195,3 @@ def arena_alloc_bytes(nbytes: int, presize: int = 0) -> int:
     and skip registering the new extent (see ``arena_presize_gb``). Shared by both
     sides (consumer receive arenas + producer serve rings)."""
     return max(nbytes, presize, -(-nbytes // (256 << 20)) * (256 << 20))
-
-
-def greedy_run_starts(weights: list[int], n: int) -> list[int]:
-    """Greedy contiguous byte-balanced partition of ``weights`` into at most
-    ``n`` runs; returns the START index of each run (the first is always 0).
-    Walks left to right, accumulating into the current run and cutting before an
-    item that would push the run past the ``ceil(total/n)`` target — never
-    emitting more than ``n`` runs. An item heavier than the target simply makes
-    its run oversized (accepted). Used by the gather-group -> chunk split
-    (``_chunk_group_scatters``)."""
-    total = sum(weights)
-    target = -(-total // max(1, n))  # ceil
-    starts = [0]
-    cur = 0
-    for i, w in enumerate(weights):
-        if i > 0 and cur + w > target and len(starts) < n:
-            starts.append(i)
-            cur = 0
-        cur += w
-    return starts

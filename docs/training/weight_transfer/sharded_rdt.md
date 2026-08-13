@@ -47,9 +47,9 @@ A `copy_` that arrives with no loader stamp cannot be attributed to a param. It 
 
 Weights are transferred in **gather groups**: `layerwise_groups` (in `base.py`, because it defines what a group index means for any `WeightSource`) partitions the flat name list into the pre block, one group per decoder layer, then the post block. The split is by *position* relative to the first layer name, not by name class, so flattening a partition always reproduces the input order and group index *g* means the same thing on every rank and every consumer.
 
-The group is the unit of three things at once: the trainer's gather, the consumer's free, and the arena budget. Without it a whole model becomes one chunk and the receive and serve arenas balloon to the full per-worker share.
+The group is the unit of three things at once: the trainer's gather, the consumer's free barrier, and the arena budget. Without it a whole model becomes one chunk and the receive and serve arenas balloon to the full per-worker share.
 
-Each group's copies are then cut into `layerwise_split` byte-balanced **chunks**. Copies are atomic, so a single huge one (an untied `lm_head`) simply becomes its own oversized chunk — that is what `arena_presize_gb` exists to cover. A module's copies may span chunks; `materialize` fires on its first chunk and quant/kernel-copy/`reset` on its last, which makes materialize-once correct by construction rather than by a runtime counter.
+Each group's copies are then cut into one **chunk** per producer expert coordinate present — the `ep_rank` stamp of a copy is `name_ep_rank[copy.src_name]`, `-1` (replicated) first, then ascending — so a worker pulls each expert from a rank that actually holds it, under any static vLLM expert placement (`linear`, `round_robin`). Dense models carry only `-1` stamps and keep one chunk per group. Copies are atomic, so a single huge one (an untied `lm_head`) simply makes its chunk oversized — that is what `arena_presize_gb` exists to cover. A module's copies may span chunks (a FusedMoE's experts land on several producer coordinates); `materialize` fires on its first chunk and quant/kernel-copy/`reset` on its last, which makes materialize-once correct by construction rather than by a runtime counter.
 
 Chunks stream over a ring of receive slots (`num_rdt_buffers` deep). While chunk *i*'s RDMA lands inside its `ray.get`, the producer serves chunk *i+1* into its own ring slot and a background thread scatters chunk *i-1* out of another receive slot. The reads themselves stay serialized — they share the flow's NIC, which is the bandwidth floor, not a loss.
 
@@ -61,15 +61,16 @@ Both sides compute the same byte-exact layout independently: slices packed at 16
 
 ## Ownership and M:N routing
 
-Producers and consumers need not be the same size, and a producer need not hold the whole model. `RdtRouter`, built identically on both sides from wire-carried data (`num_producers`, `num_consumers`, `group_owners`), answers two questions with one rule: which producer serves each gather group for a given consumer, and how many consumers must free each producer per group.
+Producers and consumers need not be the same size, and a producer need not hold the whole model. `RdtRouter`, built identically on both sides from wire-carried data (`num_producers`, `num_consumers`, `group_owners`, `producer_ep_ranks`), answers one question: which producer serves each (gather group, `ep_rank`) pull unit for a given consumer.
 
 - `group_owners[g]` lists the producer ranks that gather and publish group *g*. `None` means every producer owns every group — the gather-to-all layout.
-- Each group is served by exactly **one** producer per consumer. Splitting one pull across producers only multiplies produce calls, since the consumer's own NIC bounds the pull either way.
-- `free_target(p, g)` of zero is normal: an owner with more peers than consumers must still run the group's collective, but must not publish it, because nothing would free it.
+- Expert ownership is two parallel stamp lists that must match: `name_ep_rank` stamps each weight name with the expert-parallel coordinate holding it (`-1` = replicated), `producer_ep_ranks` stamps each producer rank with its own coordinate. A pull for a name stamped `k >= 0` goes to a group owner whose coordinate is `k`; `-1` names match every group owner.
+- Each pull unit is served by exactly **one** producer per consumer. Splitting one pull across producers only multiplies produce calls, since the consumer's own NIC bounds the pull either way.
+- Freeing does NOT route: every consumer signals `free_group(g)` at every owner of *g*, exactly once per sync, and each owner counts signals against the live consumer total handed to `begin_sync` — a per-group barrier, one uniform integer, no routed targets.
 
-Disagreement between the two sides is not a wrong number but a **hang**: a producer waits forever for a name it never gathered, and a group nobody frees stalls `end_sync`. Three things guard that: `RdtRouter.validate()` (every group owned, free targets sum to the consumer count), a SHA-256 digest of the metadata name sequence cross-checked across trainer ranks, and the producer's `served_names` allowlist, which turns a misroute into a loud error instead of an unbounded wait.
+Disagreement between the two sides is not a wrong number but a **hang** or a loud misroute. Three things guard it: `RdtRouter.validate()` (every group owned, coordinates cover every producer), SHA-256 digests of the metadata name sequence AND the stamp list cross-checked across trainer ranks, and the producer's `served_names` allowlist (its owned groups' replicated names plus its own coordinate's experts), which turns a misroute into a loud error instead of an unbounded wait.
 
-A pipeline-parallel trainer declares partial ownership through `WeightSource.owned_groups()`. Two requirements come with it: `metadata()` must still describe the **whole** model on every rank (only the sender's metadata reaches the consumers, so a rank describing just its own share would leave the rest silently un-transferred), and iteration must yield **only** the owned groups, in metadata order.
+A pipeline-parallel trainer declares partial ownership through `WeightSource.owned_groups()`; an expert-parallel trainer declares name-level ownership through `WeightSource.expert_ownership()`. The same requirements come with both: `metadata()` must still describe the **whole** model on every rank (only the sender's metadata reaches the consumers, so a rank describing just its own share would leave the rest silently un-transferred), iteration must yield **only** the owned groups, in metadata order, and within them a name stamped with a foreign coordinate yields `None` (the name stays in the list; only the data is absent).
 
 ## Producer lifecycle
 
@@ -77,27 +78,26 @@ Each trainer rank owns a `_RDTProducerServer` Ray actor sharing its GPU. One gro
 
 ```
 engine                      server                          consumer
-  begin_sync() ───────────►  reset free counts / backpressure
+  begin_sync(live_count) ──►  reset counts, set the barrier target
   gather group (collective)
-  publish_group(key, ...) ─► wait while lookahead is full
-                             rebuild CUDA-IPC tensors
-                             arm free_target, take a slot
+  publish_group(gi, ...) ──► wait while lookahead is full
+                             rebuild CUDA-IPC tensors, take a slot
                                    ◄──── rdt_produce_weights_batched
                                          wait for names in cache
                                          replay chains, pack, serve
-                                   ◄──── free_gather(names)
-                             ref-count; on the last one:
+                                   ◄──── free_group(gi)   (from EVERY consumer)
+                             count to live_count; on the last one:
                              drop cache entries, release the slot
   end_sync() ─────────────►  wait until nothing is in flight
 ```
 
 Details that matter:
 
-- **The group key IS its name tuple.** No name→key map can go stale, and a free whose names do not match a published group cannot silently release a different one.
-- **Frees can arrive before their publish.** A consumer with nothing to pull for a group frees it as its plan starts. So `publish_group` completes a group whose frees have already all landed, rather than waiting for one that will never come again.
+- **Freeing is a barrier keyed by group index.** Every live consumer signals every owner of a group exactly once per sync — after its last chunk of the group, or at sync start when it pulls nothing from it. The free contract is an integer; there is no cross-side name-tuple matching to get wrong.
+- **Signals can arrive before their publish.** A consumer with nothing to pull for a group signals it as its plan starts. So `publish_group` completes a group whose barrier is already satisfied, rather than waiting for a signal that will never come again.
 - **CUDA-IPC exports must outlive the import.** The engine holds strong refs to every gathered tensor it shared and drops them only when the server reports the group freed.
 - **One IPC export per storage, not per name.** Names are described as `as_strided` view specs against a whole-storage uint8 export. The per-name rebuild this replaced cost ~32 µs/name of pure Python plus an IPC open per new storage — and IPC opens are ~9× slower again when the exporting process uses the `expandable_segments` allocator, which is why `trainer_init` warns about it.
-- **`gather_lookahead` bounds trainer memory.** `publish_group` blocks while that many groups are resident; the consumer's `free_gather` back-edge drains it. So the gather loop self-paces to the consumers' pull rate.
+- **`gather_lookahead` bounds trainer memory.** `publish_group` blocks while that many groups are resident; the consumers' `free_group` barrier drains it. So the gather loop self-paces to the consumers' pull rate. The default of 1 is the steady state "serve group N while gathering N+1"; raise it if the barrier ever paces the wall.
 - **`warmup_nixl` breaks a startup deadlock.** Creating the NIXL agent lazily deadlocks on EFA-class fabrics: libfabric's `fi_getinfo` probes CUDA HMEM with a `cudaMalloc`/`cudaFree`, and `cudaFree` blocks behind the co-resident trainer rank's persistent NCCL kernel — which cannot finish because the collective waits on the sender rank, which waits on the worker-init RPC, which waits on this server. Creating the agent up front, while the GPU is quiet, breaks the cycle.
 
 ## The slot generation handshake
@@ -118,9 +118,8 @@ The guard must precede `set_target_for_ref`, not just the `ray.get`: the transfe
 | Knob | Default | Effect |
 | ---- | ------- | ------ |
 | `num_rdt_buffers` | 2 | Ring depth on both sides. Must match, and the producer's ring must be no shallower than the consumer's — the producer-ring safety argument depends on it. |
-| `layerwise_split` | 1 | Chunks per gather group. Tune with `num_rdt_buffers` so `depth × chunk_bytes` stays inside the fabric's address-translation reach. |
 | `arena_presize_gb` | 0 | Pre-size each arena slot. Set it to cover the largest atomic chunk. |
-| `gather_lookahead` | 2 | Resident gathered groups on the trainer before the gather loop blocks. |
+| `gather_lookahead` | 1 | Resident gathered groups on the trainer before the gather loop blocks; the per-group free barrier is the back-edge. |
 | `pack_check` | off | Checksum every blob on both sides for offline diffing. |
 
 Two results worth not rediscovering:

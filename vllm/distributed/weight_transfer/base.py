@@ -150,6 +150,45 @@ class WeightSource(ABC):
         """
         return None
 
+    def expert_ownership(self) -> "tuple[list[int], int] | None":
+        """Name-level ownership WITHIN owned groups, or None for none.
+
+        Sibling of `owned_groups`, one grain finer: `owned_groups` says which
+        gather groups this rank takes part in at all; this says which NAMES
+        inside those groups it actually holds. The only realistic name-level
+        sharding is expert parallelism — a rank holds whole experts, its EP
+        peers hold the others — hence the concrete name.
+
+        Returns ``(name_ep_rank, my_ep_rank)``:
+
+        * ``name_ep_rank[i]`` stamps ``metadata()[i]``: the producer EP rank
+          holding that name, or ``-1`` for names replicated across EP
+          (attention, norms, router/gate, embeddings, dense layers). Like
+          ``metadata()``, it must describe the WHOLE model identically on
+          every rank — the consumers' pull routing is built from the sender's
+          copy alone, and the engine digest-checks it across ranks.
+        * ``my_ep_rank`` is THIS rank's own EP coordinate. The engine
+          all-gathers the coordinates (the mirror of the ``owned_groups`` ->
+          ``group_owners`` split), so the source never sees the fleet.
+
+        Three invariants come with declaring it (sources enforce their own
+        preconditions):
+
+        * Stamps must be truthful against iteration: within an owned group, a
+          name stamped ``-1`` or ``my_ep_rank`` yields a real tensor; any other
+          stamp yields ``None`` (the name still appears, in metadata order, so
+          the group-order check holds — only the data is absent).
+        * All ranks must derive the identical ``name_ep_rank`` list.
+        * Ranks declaring the same coordinate must hold identical name sets for
+          every group they co-own — routing spreads consumers across a
+          coordinate's owner set, so its members must be interchangeable.
+
+        The default (None) means every name is held by every owner of its
+        group — equivalent to all ``-1`` — and is correct for any source whose
+        iteration yields real tensors for everything it owns.
+        """
+        return None
+
     def groups(self) -> list[list[str]]:
         """This rank's gather groups, in metadata order: `layerwise_groups` over
         `metadata()`, restricted to `owned_groups()` when that is overridden.

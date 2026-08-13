@@ -21,7 +21,6 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     SUPPORTED_OPS,
     RdtRouter,
     arena_alloc_bytes,
-    greedy_run_starts,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
@@ -74,26 +73,32 @@ def _copy(name, layer_param="weight", *, offset=0, shape=(4,), ops=()):
     )
 
 
-def _planner(baked, *, name_meta, live=None, split=1):
+def _planner(baked, *, name_meta, live=None, name_ep_rank=None):
     """A planning-only engine.
 
     `__init__` needs a config/model/device the planner never reads, so build the
     instance without it and set exactly the state `_build_call_plan` consumes:
-    the baked plan, the name metadata, the live-name set and the chunk split.
-    With a single bound producer `_local_owner_of` short-circuits to 0, but it
-    asserts on the router before reaching that shortcut, so a trivial
-    gather-to-all router is installed too.
+    the baked plan, the name metadata, the live-name set and the expert stamps
+    (``name_ep_rank``: name -> producer EP coordinate; unstamped = -1).
+
+    Unstamped: one producer that owns everything (the degenerate router).
+    Stamped: routing needs a rank per coordinate, so a four-producer router
+    with coordinates 0-3 stands in — plan-level tests assert chunk structure,
+    not owner values.
     """
     eng = object.__new__(ShardedRDTWeightTransferEngine)
     eng._name_to_module = dict(baked)
     eng._name_meta = dict(name_meta)
     eng._live_names = set(live or name_meta)
-    eng._split = split
+    eng._name_ep_rank = {n: er for n, er in (name_ep_rank or {}).items() if er >= 0}
     eng._name_group_idx = {}
-    eng._produce_methods = [object()]  # len <= 1 => _local_owner_of returns 0
-    eng._router = RdtRouter(1, 1, None, 0)
+    if eng._name_ep_rank:
+        eng._produce_methods = [object()] * 4
+        eng._router = RdtRouter(4, 1, None, 0, producer_ep_ranks=[0, 1, 2, 3])
+    else:
+        eng._produce_methods = [object()]
+        eng._router = RdtRouter(1, 1, None, 0)
     eng._consumer_id = 0
-    eng._local_of_producer = {0: 0}
     return eng
 
 
@@ -403,53 +408,81 @@ class TestPackedLayout:
 # ---------------------------------------------------------------------------
 
 
-class TestChunkGroupScatters:
-    def test_split_one_keeps_the_group_whole(self):
+class TestChunkModuleScatters:
+    """The chunk cut: one chunk per distinct producer ep_rank present in the
+    copies — ``-1`` (replicated) first, then ascending. Derived purely from the
+    bake plus the name stamps, so vLLM's expert placement needs no cases."""
+
+    def test_unstamped_copies_form_one_chunk(self):
         layer = _FakeLayer("l")
         copies = [_copy(f"w{i}", shape=(4,)) for i in range(5)]
-        eng = _planner(
-            {f"w{i}": _BakedModule(layer=layer, copies=copies) for i in range(5)},
-            name_meta={f"w{i}": ("bfloat16", [4]) for i in range(5)},
-            split=1,
-        )
+        eng = _planner({}, name_meta={f"w{i}": ("bfloat16", [4]) for i in range(5)})
         chunks = eng._chunk_module_scatters([_BakedModule(layer=layer, copies=copies)])
-        assert len(chunks) == 1
-        assert len(chunks[0]) == 5
+        assert [er for er, _s in chunks] == [-1]
+        assert len(chunks[0][1]) == 5
 
-    def test_split_three_cuts_byte_balanced_runs(self):
-        layer = _FakeLayer("l")
-        copies = [_copy(f"w{i}", shape=(4,)) for i in range(6)]
-        eng = _planner(
-            {}, name_meta={f"w{i}": ("bfloat16", [4]) for i in range(6)}, split=3
-        )
-        chunks = eng._chunk_module_scatters([_BakedModule(layer=layer, copies=copies)])
-        assert [len(c) for c in chunks] == [2, 2, 2]
-
-    def test_a_single_oversized_copy_becomes_its_own_chunk(self):
-        """Copies are atomic, so an untied lm_head cannot be subdivided — it
-        just makes its run oversized. This is what arena_presize_gb is for."""
-        layer = _FakeLayer("l")
-        copies = [_copy("small", shape=(1,)), _copy("huge", shape=(1000,))]
+    def test_one_chunk_per_ep_rank_minus_one_first_then_ascending(self):
+        layer = _FakeLayer("moe")
+        names = ["norm", "e5", "e0", "e2"]
+        copies = [_copy(n, shape=(4,)) for n in names]
         eng = _planner(
             {},
-            name_meta={"small": ("bfloat16", [1]), "huge": ("bfloat16", [1000])},
-            split=2,
+            name_meta={n: ("bfloat16", [4]) for n in names},
+            name_ep_rank={"e0": 0, "e2": 1, "e5": 2},
         )
         chunks = eng._chunk_module_scatters([_BakedModule(layer=layer, copies=copies)])
-        assert [[s.src[0] for s in c] for c in chunks] == [["small"], ["huge"]]
+        assert [er for er, _s in chunks] == [-1, 0, 1, 2]
+        assert [[s.src[0] for s in sc] for _er, sc in chunks] == [
+            ["norm"],
+            ["e0"],
+            ["e2"],
+            ["e5"],
+        ]
 
-    def test_a_single_copy_never_splits(self):
-        layer = _FakeLayer("l")
-        eng = _planner({}, name_meta={"w": ("bfloat16", [8])}, split=4)
-        chunks = eng._chunk_module_scatters(
-            [_BakedModule(layer=layer, copies=[_copy("w", shape=(8,))])]
+    def test_copy_order_within_a_chunk_is_bake_order(self):
+        """Scatter order within a chunk must follow the bake, not the stamp
+        sort: the packed layout and the producer's replay agree on keys order."""
+        layer = _FakeLayer("moe")
+        names = ["e3", "e1", "e2"]  # one stamp, deliberately unsorted names
+        copies = [_copy(n, shape=(4,)) for n in names]
+        eng = _planner(
+            {},
+            name_meta={n: ("bfloat16", [4]) for n in names},
+            name_ep_rank={n: 0 for n in names},
         )
-        assert len(chunks) == 1
+        ((er, scatters),) = eng._chunk_module_scatters(
+            [_BakedModule(layer=layer, copies=copies)]
+        )
+        assert er == 0
+        assert [s.src[0] for s in scatters] == names
+
+    def test_stamps_interleave_across_modules_without_reordering_within(self):
+        """Two modules' copies bucket by stamp; within each bucket the order is
+        module-then-bake order."""
+        a, b = _FakeLayer("a"), _FakeLayer("b")
+        mods = [
+            _BakedModule(
+                layer=a, copies=[_copy("a0", shape=(4,)), _copy("a1", shape=(4,))]
+            ),
+            _BakedModule(
+                layer=b, copies=[_copy("b0", shape=(4,)), _copy("b1", shape=(4,))]
+            ),
+        ]
+        eng = _planner(
+            {},
+            name_meta={n: ("bfloat16", [4]) for n in ("a0", "a1", "b0", "b1")},
+            name_ep_rank={"a0": 0, "a1": 1, "b0": 0, "b1": 1},
+        )
+        chunks = eng._chunk_module_scatters(mods)
+        assert [(er, [s.src[0] for s in sc]) for er, sc in chunks] == [
+            (0, ["a0", "b0"]),
+            (1, ["a1", "b1"]),
+        ]
 
     def test_scatters_carry_their_own_dtype_and_nbytes(self):
         layer = _FakeLayer("l")
         eng = _planner({}, name_meta={"w": ("float32", [10])})
-        (scatters,) = eng._chunk_module_scatters(
+        ((_er, scatters),) = eng._chunk_module_scatters(
             [_BakedModule(layer=layer, copies=[_copy("w", shape=(10,))])]
         )
         (sc,) = scatters
@@ -464,7 +497,7 @@ class TestChunkGroupScatters:
 
 
 class TestBuildCallPlan:
-    def test_one_chunk_per_group_at_split_one(self):
+    def test_one_chunk_per_group_when_unstamped(self):
         baked, name_meta, names, group_lens = _one_module_per_layer(3)
         eng = _planner(baked, name_meta=name_meta)
         plan = eng._build_call_plan(names, group_lens)
@@ -472,7 +505,7 @@ class TestBuildCallPlan:
         assert plan.pre_free == []
         assert plan.residual == []
 
-    def test_split_multiplies_chunks_within_a_group(self):
+    def test_stamps_multiply_chunks_within_a_group(self):
         layer = _FakeLayer("l")
         names = [f"w{i}" for i in range(4)]
         copies = [_copy(n, shape=(4,)) for n in names]
@@ -480,20 +513,21 @@ class TestBuildCallPlan:
         eng = _planner(
             {n: group for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
-            split=2,
+            name_ep_rank={"w2": 0, "w3": 1},
         )
         plan = eng._build_call_plan(names, [4])
-        assert len(plan.chunks) == 2
+        assert len(plan.chunks) == 3  # -1, 0, 1
 
     def test_materialize_fires_on_a_modules_first_chunk_only(self):
-        """Empty HF params are allocated once per module, by construction."""
+        """Empty HF params are allocated once per module, by construction —
+        including a FusedMoE-like module whose copies span ep_rank chunks."""
         layer = _FakeLayer("spanning")
         names = [f"w{i}" for i in range(4)]
         group = _BakedModule(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
         eng = _planner(
             {n: group for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
-            split=2,
+            name_ep_rank={"w0": 0, "w1": 0, "w2": 1, "w3": 1},
         )
         plan = eng._build_call_plan(names, [4])
         assert [c.materialize for c in plan.chunks] == [[layer], []]
@@ -505,63 +539,56 @@ class TestBuildCallPlan:
         eng = _planner(
             {n: group for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
-            split=2,
+            name_ep_rank={"w0": 0, "w1": 0, "w2": 1, "w3": 1},
         )
         plan = eng._build_call_plan(names, [4])
         assert [c.quant for c in plan.chunks] == [[], [layer]]
 
-    def test_free_fires_on_each_groups_last_chunk(self):
+    def test_free_signal_fires_on_each_groups_last_chunk(self):
         baked, name_meta, names, group_lens = _one_module_per_layer(2)
         eng = _planner(baked, name_meta=name_meta)
         plan = eng._build_call_plan(names, group_lens)
-        assert [c.free for c in plan.chunks] == [
-            [(0, ["embed.weight"])],
-            [(1, ["model.layers.0.w"])],
-            [(2, ["model.layers.1.w"])],
-            [(3, ["norm.weight"])],
-        ]
+        assert [c.free for c in plan.chunks] == [[0], [1], [2], [3]]
 
-    def test_free_waits_for_a_groups_last_chunk_when_it_is_split(self):
-        """The load-bearing case: with the group split across chunks the free
-        must hang off the LAST one. Freeing earlier lets the trainer drop the
-        gather buffers while a later chunk's RDMA is still reading them."""
+    def test_free_signal_waits_for_a_groups_last_chunk_when_it_is_split(self):
+        """The load-bearing case: with the group cut across ep_rank chunks the
+        signal must hang off the LAST one. Signaling earlier lets the producers
+        drop the gather buffers while a later chunk's RDMA is still reading."""
         layer = _FakeLayer("l")
         names = [f"w{i}" for i in range(4)]
         group = _BakedModule(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
         eng = _planner(
             {n: group for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
-            split=2,
+            name_ep_rank={"w2": 0, "w3": 1},
         )
         plan = eng._build_call_plan(names, [4])
-        assert len(plan.chunks) == 2
-        assert [c.free for c in plan.chunks] == [[], [(0, names)]]
+        assert len(plan.chunks) == 3
+        assert [c.free for c in plan.chunks] == [[], [], [0]]
 
-    def test_free_timing_across_two_split_groups(self):
-        """Two groups x 2 chunks each: frees land on chunks 1 and 3 only."""
+    def test_free_signal_timing_across_two_split_groups(self):
+        """Two groups x 2 ep_rank chunks each: signals land on each group's
+        last chunk only."""
         names_a = [f"model.layers.0.w{i}" for i in range(4)]
         names_b = [f"model.layers.1.w{i}" for i in range(4)]
-        baked, name_meta = {}, {}
+        baked, name_meta, stamps = {}, {}, {}
         for names in (names_a, names_b):
             layer = _FakeLayer(names[0])
             group = _BakedModule(
                 layer=layer, copies=[_copy(n, shape=(4,)) for n in names]
             )
-            for n in names:
+            for i, n in enumerate(names):
                 baked[n] = group
                 name_meta[n] = ("bfloat16", [4])
-        eng = _planner(baked, name_meta=name_meta, split=2)
+                stamps[n] = i // 2  # two stamps per group
+        eng = _planner(baked, name_meta=name_meta, name_ep_rank=stamps)
         plan = eng._build_call_plan(names_a + names_b, [4, 4])
-        assert [c.free for c in plan.chunks] == [
-            [],
-            [(0, names_a)],
-            [],
-            [(1, names_b)],
-        ]
+        assert [c.free for c in plan.chunks] == [[], [0], [], [1]]
 
-    def test_a_group_with_nothing_local_is_freed_after_the_previous_chunk(self):
-        """The trainer gathered it under the lockstep plan, so it must still be
-        freed — hung off the last chunk this worker does pull."""
+    def test_a_group_with_nothing_local_is_signaled_at_sync_start(self):
+        """The owners still published it, so this consumer must signal it —
+        immediately, before the pipeline (signal-before-publish is tolerated),
+        never hung off another group's chunk."""
         baked, name_meta, names, group_lens = _one_module_per_layer(2)
         del baked["model.layers.1.w"]  # nothing baked, and not live => no pull
         eng = _planner(
@@ -569,19 +596,15 @@ class TestBuildCallPlan:
         )
         plan = eng._build_call_plan(names, group_lens)
         assert len(plan.chunks) == 3
-        assert plan.chunks[1].free == [
-            (1, ["model.layers.0.w"]),
-            (2, ["model.layers.1.w"]),
-        ]
+        assert plan.pre_free == [2]
+        assert [c.free for c in plan.chunks] == [[0], [1], [3]]
 
     def test_leading_groups_with_nothing_local_go_to_pre_free(self):
-        """No chunk exists yet to hang the free on, so it fires before the
-        pipeline starts."""
         baked, name_meta, names, group_lens = _one_module_per_layer(2)
         del baked["embed.weight"]
         eng = _planner(baked, name_meta=name_meta, live=set(names) - {"embed.weight"})
         plan = eng._build_call_plan(names, group_lens)
-        assert plan.pre_free == [(0, ["embed.weight"])]
+        assert plan.pre_free == [0]
         assert len(plan.chunks) == 3
 
     def test_live_but_unbaked_names_become_residual(self):
@@ -643,74 +666,237 @@ class TestBuildCallPlan:
         assert [c.owner for c in plan.chunks] == [0] * len(plan.chunks)
 
 
-class TestCallPlanRouting:
-    """Under partial ownership each chunk must be pulled from — and each group
-    freed at — the one producer that gathered it."""
+class TestResidualGuard:
+    """Residual (live-but-unbaked) names load AFTER the pipeline — after this
+    consumer signaled every group, i.e. after the producers freed them. On an
+    expert-sharded model that is a guaranteed stall-watchdog death, so the plan
+    build fails at init instead."""
 
-    def _routed_planner(self, group_owners, num_consumers, consumer_id, n_local):
+    def _static_plan(self, eng, names, group_lens):
+        from vllm.distributed.weight_transfer.sharded_rdt_engine import (
+            ShardedRDTWeightTransferInitInfo,
+        )
+
+        eng._build_static_plan(
+            ShardedRDTWeightTransferInitInfo(names=names, group_lens=group_lens)
+        )
+
+    def test_residual_on_a_stamped_model_fails_at_init(self):
+        baked, name_meta, names, group_lens = _one_module_per_layer(2)
+        del baked["norm.weight"]  # unbaked but live => residual
+        eng = _planner(
+            baked,
+            name_meta=name_meta,
+            live=set(names),
+            name_ep_rank={"model.layers.0.w": 0},
+        )
+        with pytest.raises(RuntimeError, match="residual"):
+            self._static_plan(eng, names, group_lens)
+
+    def test_residual_on_an_unstamped_model_stays_a_plain_load(self):
+        baked, name_meta, names, group_lens = _one_module_per_layer(2)
+        del baked["norm.weight"]
+        eng = _planner(baked, name_meta=name_meta, live=set(names))
+        self._static_plan(eng, names, group_lens)
+        assert eng._cached_plan.residual == ["norm.weight"]
+
+
+class TestCallPlanRouting:
+    """Under partial ownership each chunk must be pulled from a producer that
+    actually holds its (group, ep_rank) unit. Consumers bind EVERY producer
+    (signals fan out to all owners), so local index == trainer rank."""
+
+    def _routed_planner(
+        self,
+        group_owners,
+        num_consumers,
+        consumer_id,
+        *,
+        producer_ep_ranks=None,
+        **planner_kw,
+    ):
         from vllm.distributed.weight_transfer.sharded_rdt_common import RdtRouter
 
         baked, name_meta, names, group_lens = _one_module_per_layer(
             len(group_owners) - 2
         )
-        eng = _planner(baked, name_meta=name_meta)
+        eng = _planner(baked, name_meta=name_meta, **planner_kw)
+        n_prod = max(max(o) for o in group_owners) + 1
         router = RdtRouter(
-            num_producers=max(max(o) for o in group_owners) + 1,
+            num_producers=n_prod,
             num_consumers=num_consumers,
             group_owners=group_owners,
             num_groups=len(group_owners),
+            producer_ep_ranks=producer_ep_ranks,
         )
         router.validate()
         eng._router = router
         eng._consumer_id = consumer_id
-        eng._produce_methods = [object()] * n_local
-        eng._local_of_producer = {
-            p: i for i, p in enumerate(router.bound_producers(consumer_id))
-        }
+        eng._produce_methods = [object()] * n_prod
         return eng, names, group_lens
 
     def test_two_stage_ownership_splits_chunks_between_owners(self):
         """Two PP stages, 4 groups: stage 0 owns the first half, stage 1 the
         second. Every chunk goes to an owner of its group."""
         owners = [[0], [0], [1], [1]]
-        eng, names, group_lens = self._routed_planner(owners, 1, 0, 2)
+        eng, names, group_lens = self._routed_planner(owners, 1, 0)
         plan = eng._build_call_plan(names, group_lens)
         assert [c.owner for c in plan.chunks] == [0, 0, 1, 1]
 
     def test_a_multi_owner_group_still_resolves_to_one_producer(self):
-        """Every group is served by exactly ONE producer per consumer: splitting a
-        pull only multiplies produce calls, since the consumer's NIC bounds it."""
+        """Every pull unit is served by exactly ONE producer per consumer:
+        splitting a pull only multiplies produce calls, since the consumer's NIC
+        bounds it."""
         owners = [[0, 1], [0, 1], [0, 1], [0, 1]]
-        eng, names, group_lens = self._routed_planner(owners, 1, 0, 2)
+        eng, names, group_lens = self._routed_planner(owners, 1, 0)
         plan = eng._build_call_plan(names, group_lens)
         assert all(isinstance(c.owner, int) for c in plan.chunks)
         assert all(0 <= c.owner < 2 for c in plan.chunks)
+
+    def test_an_expert_chunk_routes_to_the_matching_coordinate_owner(self):
+        """PP ∩ EP: 2 stages x ep2, coords [0, 1, 0, 1]. A chunk stamped 1 in a
+        stage-1 group must land on the ONE rank in stage 1 with coordinate 1."""
+        owners = [[0, 1], [0, 1], [2, 3], [2, 3]]
+        # _one_module_per_layer(2): groups = embed, layers.0, layers.1, norm.
+        # Stamp group 2's single name with coordinate 1.
+        eng, names, group_lens = self._routed_planner(
+            owners,
+            1,
+            0,
+            producer_ep_ranks=[0, 1, 0, 1],
+            name_ep_rank={"model.layers.1.w": 1},
+        )
+        plan = eng._build_call_plan(names, group_lens)
+        assert plan.chunks[2].owner == 3
+        # Unstamped chunks stay within their group's owner set.
+        assert plan.chunks[0].owner in (0, 1)
+        assert plan.chunks[3].owner in (2, 3)
+
+    def test_an_unowned_pull_unit_fails_at_plan_build(self):
+        """A stamped name whose coordinate has no rank inside the group's owner
+        set must raise at init (plan build), not hang at first pull."""
+        owners = [[0, 1], [0, 1], [0, 1], [0, 1]]
+        eng, names, group_lens = self._routed_planner(
+            owners,
+            1,
+            0,
+            producer_ep_ranks=[0, 0],
+            name_ep_rank={"model.layers.1.w": 1},
+        )
+        with pytest.raises(ValueError, match="has no owner"):
+            eng._build_call_plan(names, group_lens)
+
+
+class TestSignalCompleteness:
+    """Every gather group is signaled exactly once — after its last chunk when
+    the worker pulls from it, at sync start otherwise — for ANY expert
+    placement. A group signaled twice over-credits the barrier; a group never
+    signaled parks a producer credit and hangs end_sync."""
+
+    def _moe_planner(self, worker_experts, *, ep_size=4, n_experts=8, n_layers=2):
+        """pre / n_layers MoE layers / post. Each layer: one norm (its own
+        module, stamp -1) + n_experts expert names stamped ``e // n_local``.
+        The worker's bake covers only ``worker_experts`` (its placement);
+        foreign expert names never copied => dropped entirely, as in the real
+        bake."""
+        n_local = n_experts // ep_size
+        names = ["embed.weight"]
+        group_lens = [1]
+        baked = {
+            "embed.weight": _BakedModule(
+                layer=_FakeLayer("embed"), copies=[_copy("embed.weight", shape=(4,))]
+            )
+        }
+        name_meta = {"embed.weight": ("bfloat16", [4])}
+        stamps: dict = {}
+        live = {"embed.weight"}
+        for li in range(n_layers):
+            norm = f"model.layers.{li}.norm"
+            enames = [f"model.layers.{li}.experts.{e}.w" for e in range(n_experts)]
+            names += [norm] + enames
+            group_lens.append(1 + n_experts)
+            name_meta[norm] = ("bfloat16", [4])
+            live.add(norm)
+            baked[norm] = _BakedModule(
+                layer=_FakeLayer(f"norm{li}"), copies=[_copy(norm, shape=(4,))]
+            )
+            fused = _BakedModule(
+                layer=_FakeLayer(f"moe{li}"),
+                copies=[
+                    _copy(f"model.layers.{li}.experts.{e}.w", shape=(4,))
+                    for e in worker_experts
+                ],
+            )
+            for e in range(n_experts):
+                n = f"model.layers.{li}.experts.{e}.w"
+                name_meta[n] = ("bfloat16", [4])
+                stamps[n] = e // n_local
+                if e in worker_experts:
+                    baked[n] = fused
+                    live.add(n)
+        names.append("lm_head.weight")
+        group_lens.append(1)
+        baked["lm_head.weight"] = _BakedModule(
+            layer=_FakeLayer("head"), copies=[_copy("lm_head.weight", shape=(4,))]
+        )
+        name_meta["lm_head.weight"] = ("bfloat16", [4])
+        live.add("lm_head.weight")
+        eng = _planner(baked, name_meta=name_meta, live=live, name_ep_rank=stamps)
+        return eng, names, group_lens
+
+    @staticmethod
+    def _signals(plan):
+        return sorted(list(plan.pre_free) + [gi for c in plan.chunks for gi in c.free])
+
+    def test_linear_placement_signals_every_group_exactly_once(self):
+        eng, names, group_lens = self._moe_planner(worker_experts=[0, 1, 2, 3])
+        plan = eng._build_call_plan(names, group_lens)
+        assert self._signals(plan) == list(range(len(group_lens)))
+        assert plan.residual == []
+
+    def test_round_robin_placement_signals_every_group_exactly_once(self):
+        eng, names, group_lens = self._moe_planner(worker_experts=[0, 2, 4, 6])
+        plan = eng._build_call_plan(names, group_lens)
+        assert self._signals(plan) == list(range(len(group_lens)))
+        assert plan.residual == []
+
+    def test_placement_changes_only_the_chunk_count_never_the_signals(self):
+        """linear experts 0-3 hit 2 producer coordinates; round_robin 0,2,4,6
+        hits all 4. More chunks per group, identical signal set."""
+        plans = {}
+        for label, experts in (("linear", [0, 1, 2, 3]), ("round_robin", [0, 2, 4, 6])):
+            eng, names, group_lens = self._moe_planner(worker_experts=experts)
+            plans[label] = eng._build_call_plan(names, group_lens)
+        # per MoE group: norm chunk (-1) + one chunk per coordinate present
+        assert (
+            len(plans["linear"].chunks) == 2 + 2 * 3
+        )  # embed+head + 2 layers x (1 + 2)
+        assert len(plans["round_robin"].chunks) == 2 + 2 * 5  # 2 layers x (1 + 4)
+        assert self._signals(plans["linear"]) == self._signals(plans["round_robin"])
+
+    def test_the_fused_module_materializes_first_and_quants_last_across_chunks(self):
+        """The FusedMoE shape: one module's copies span every ep_rank chunk of
+        its group; materialize on its first, quant on its last."""
+        eng, names, group_lens = self._moe_planner(
+            worker_experts=[0, 2, 4, 6], n_layers=1
+        )
+        plan = eng._build_call_plan(names, group_lens)
+        # group 1 = [norm chunk, coord 0..3 chunks] at chunk indices 1..5
+        fused_chunks = [
+            c
+            for c in plan.chunks[1:6]
+            if any("experts" in sc.src[0] for sc in c.scatters)
+        ]
+        assert len(fused_chunks) == 4
+        (fused_layer,) = fused_chunks[0].materialize
+        assert fused_layer.tag == "moe0"
+        assert fused_chunks[0].quant == []
+        assert fused_chunks[-1].quant == [fused_layer]
 
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-
-
-class TestGreedyRunStarts:
-    def test_equal_weights_split_evenly(self):
-        assert greedy_run_starts([1] * 6, 3) == [0, 2, 4]
-
-    def test_never_emits_more_than_n_runs(self):
-        assert len(greedy_run_starts([1] * 100, 4)) == 4
-
-    def test_first_start_is_always_zero(self):
-        assert greedy_run_starts([5, 1, 1], 3)[0] == 0
-
-    def test_an_item_heavier_than_the_target_makes_its_run_oversized(self):
-        # target = ceil(102/2) = 51; the 100 cannot be subdivided.
-        assert greedy_run_starts([1, 100, 1], 2) == [0, 1]
-
-    def test_single_run_when_n_is_one(self):
-        assert greedy_run_starts([3, 4, 5], 1) == [0]
-
-    def test_empty_weights(self):
-        assert greedy_run_starts([], 3) == [0]
 
 
 class TestArenaAllocBytes:
@@ -868,13 +1054,15 @@ class TestUnbakedPullRouting:
     def _engine(self, consumer_id, name_group_idx, owners_by_group):
         eng = object.__new__(ShardedRDTWeightTransferEngine)
         eng._name_meta = {n: ("bfloat16", [2]) for n in name_group_idx}
+        eng._name_ep_rank = {}
         eng._cached_plan = _CallPlan(
             chunks=[], pre_free=[], residual=[], name_group_idx=dict(name_group_idx)
         )
         eng._consumer_id = consumer_id
         n_prod = max(max(o) for o in owners_by_group) + 1
-        eng._router = RdtRouter(n_prod, 1, owners_by_group, len(owners_by_group))
-        eng._local_of_producer = {p: i for i, p in enumerate(range(n_prod))}
+        # num_consumers=8 so the harness's consumer ids (up to 7) are real
+        # fleet positions rather than out-of-range indices.
+        eng._router = RdtRouter(n_prod, 8, owners_by_group, len(owners_by_group))
         eng._produce_methods = [_RecordingProducer(p) for p in range(n_prod)]
         return eng
 
