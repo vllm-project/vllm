@@ -349,6 +349,24 @@ class TestTurboQuantKVCacheShape:
                 4, 16, 8, 128, cache_dtype_str="auto"
             )
 
+    def test_shape_rejects_auto_with_no_config_context(self, monkeypatch):
+        """No engine context must still raise ValueError, not an assertion.
+
+        ``get_kv_cache_shape`` is reachable from probes and tests that run
+        outside ``set_current_vllm_config``, so resolving the preset must not
+        turn the caller's "Unknown cache dtype" into a config AssertionError.
+        """
+        import vllm.config.vllm as vllm_config_module
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionBackend,
+        )
+
+        monkeypatch.setattr(vllm_config_module, "_current_vllm_config", None)
+        with pytest.raises(ValueError, match="Unknown TurboQuant"):
+            TurboQuantAttentionBackend.get_kv_cache_shape(
+                4, 16, 8, 128, cache_dtype_str="auto"
+            )
+
 
 class TestTurboQuantWorkspaceReservation:
     @staticmethod

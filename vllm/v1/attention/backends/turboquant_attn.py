@@ -24,7 +24,7 @@ from typing import Any, ClassVar
 import torch
 import torch.nn.functional as F
 
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
@@ -101,12 +101,17 @@ def _resolve_tq_preset(cache_dtype_str: str) -> str:
     enforced by ``validate_configuration`` for auto-selected and explicitly
     selected backends alike), so the engine-wide ``cache_dtype`` is
     authoritative whenever the hint is not a preset itself.
+
+    Falls back to the hint unchanged when there is no config context, so a
+    caller outside an engine still gets the original ``Unknown cache dtype``
+    error from the caller rather than a config assertion from here.
     """
     from vllm.model_executor.layers.quantization.turboquant.config import TQ_PRESETS
 
     if cache_dtype_str in TQ_PRESETS:
         return cache_dtype_str
-    cache_config = get_current_vllm_config().cache_config
+    vllm_config = get_current_vllm_config_or_none()
+    cache_config = vllm_config.cache_config if vllm_config is not None else None
     if cache_config is not None and cache_config.cache_dtype in TQ_PRESETS:
         return cache_config.cache_dtype
     return cache_dtype_str
