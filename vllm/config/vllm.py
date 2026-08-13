@@ -1039,6 +1039,31 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
+    def _verify_sampling_replay_config(self) -> None:
+        model_config = self.model_config
+        if model_config is None or not model_config.return_sampling_mask:
+            return
+        if not self.use_v2_model_runner:
+            raise ValueError("sampling distribution replay requires Model Runner V2")
+        if self.speculative_config is not None:
+            raise ValueError(
+                "sampling distribution replay does not support speculative decoding"
+            )
+        if model_config.is_diffusion:
+            raise ValueError(
+                "sampling distribution replay does not support diffusion models"
+            )
+        if model_config.logits_processors:
+            raise ValueError(
+                "sampling distribution replay does not support custom logits processors"
+            )
+        if model_config.logprobs_mode != "processed_logprobs":
+            raise ValueError(
+                "sampling distribution replay requires "
+                "logprobs_mode='processed_logprobs' so that returned logprobs "
+                "are normalized over the same nucleus as the sampling mask"
+            )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1079,6 +1104,8 @@ class VllmConfig:
                     "--enable-return-routed-experts is incompatible with KV "
                     "connectors (PD disaggregation, KV cache offload)."
                 )
+
+        self._verify_sampling_replay_config()
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
@@ -2402,6 +2429,34 @@ class VllmConfig:
                 and self.parallel_config.pipeline_parallel_size > 1
             ):
                 unsupported.append("EAGLE3 with pipeline parallelism")
+
+            if (
+                speculative_config.enable_adaptive_verification
+                and self.lora_config is not None
+            ):
+                # The per-token LoRA mapping is built from CPU placeholder boundaries,
+                # while the trimmed batch's true boundaries are decided on the GPU.
+                unsupported.append("adaptive verification with LoRA")
+
+            if (
+                speculative_config.enable_adaptive_verification
+                and self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+            ):
+                # The draft budget divides by step costs profiled from captured
+                # cudagraphs; eager execution captures none.
+                unsupported.append(
+                    "adaptive verification with enforce_eager/cudagraph_mode=none"
+                )
+
+            if (
+                speculative_config.enable_adaptive_verification
+                and self.parallel_config.pipeline_parallel_size > 1
+            ):
+                # Cost curves and confidences currently only exist on the last PP rank;
+                # earlier ranks would diverge on the trimmed batch shape.
+                # TODO: we should be able to support adaptive verification with PP by
+                # broadcasting the cost curves and confidences to all ranks.
+                unsupported.append("adaptive verification with pipeline parallelism")
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
