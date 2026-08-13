@@ -4,6 +4,7 @@
 import math
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 import numpy as np
 import torch
@@ -476,20 +477,12 @@ class ComputeSlotMappingKernel(VllmJitKernel["ComputeSlotMappingKernel.CompileKe
     def dispatch(  # type: ignore[override]
         self,
         *,
-        kv_cache_block_size: int,
-        blocks_per_kv_block: int,
-        total_cp_world_size: int,
-        total_cp_rank: int,
-        cp_kv_cache_interleave_size: int,
         block_table_stride: int,
         block_size: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
-            kv_cache_block_size=kv_cache_block_size,
-            blocks_per_kv_block=blocks_per_kv_block,
-            total_cp_world_size=total_cp_world_size,
-            total_cp_rank=total_cp_rank,
-            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+            **compile_key_fields,
             block_table_stride=triton_scalar_specialization_rep(block_table_stride),
             block_size=triton_scalar_specialization_rep(block_size),
         )
@@ -524,34 +517,10 @@ class ComputeSlotMappingKernel(VllmJitKernel["ComputeSlotMappingKernel.CompileKe
     def __call__(
         self,
         num_reqs: int,
-        num_tokens: int,
-        max_num_tokens: int,
-        query_start_loc: torch.Tensor,
-        positions: torch.Tensor,
-        block_table: torch.Tensor,
-        block_table_stride: int,
-        block_size: int,
-        slot_mapping: torch.Tensor,
-        kv_cache_block_size: int,
-        blocks_per_kv_block: int,
-        total_cp_world_size: int,
-        total_cp_rank: int,
-        cp_kv_cache_interleave_size: int,
+        *args: Any,
     ) -> None:
         self.kernel[(num_reqs + 1,)](
-            num_tokens,
-            max_num_tokens,
-            query_start_loc,
-            positions,
-            block_table,
-            block_table_stride,
-            block_size,
-            slot_mapping,
-            KV_CACHE_BLOCK_SIZE=kv_cache_block_size,
-            BLOCKS_PER_KV_BLOCK=blocks_per_kv_block,
-            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-            TOTAL_CP_RANK=total_cp_rank,
-            CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
+            *args,
             PAD_ID=PAD_SLOT_ID,
             BLOCK_SIZE=self.triton_block_size,
         )

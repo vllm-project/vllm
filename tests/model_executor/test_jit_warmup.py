@@ -378,8 +378,54 @@ def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> No
 
     with pytest.raises(ValueError, match="local assignments"):
         BranchKernel()
-    with pytest.raises(ValueError, match=r"cannot use \*\*kwargs in CompileKey"):
+    with pytest.raises(ValueError, match="may only unpack its variadic keyword"):
         KwargsReturnKernel()
+
+
+def test_dispatch_can_forward_compile_key_fields() -> None:
+    class ForwardingKernel(VllmJitKernel["ForwardingKernel.CompileKey"]):
+        @dataclass(frozen=True)
+        class CompileKey:
+            mode: int
+            block_size: int
+
+        def dispatch(  # type: ignore[override]
+            self,
+            *,
+            tokens: int,
+            **compile_key_fields: int,
+        ) -> CompileKey:
+            return self.CompileKey(
+                **compile_key_fields,
+                block_size=_round_up(tokens, multiple=4),
+            )
+
+        def get_warmup_keys(self) -> list[CompileKey]:
+            return self._trace_dispatch(self.dispatch)(
+                tokens=(1, 5),
+                mode=(2, 3),
+            )
+
+        def compile(self, compile_key: CompileKey) -> None:
+            pass
+
+    kernel = ForwardingKernel()
+    expected = kernel.CompileKey(
+        mode=2,
+        block_size=8,
+    )
+    assert kernel.dispatch(tokens=5, mode=2) == expected
+    assert kernel.compile_key({"tokens": 5, "mode": 2}) == expected
+    assert kernel.get_warmup_keys() == [
+        kernel.CompileKey(mode=2, block_size=4),
+        kernel.CompileKey(mode=3, block_size=4),
+        kernel.CompileKey(mode=2, block_size=8),
+        kernel.CompileKey(mode=3, block_size=8),
+    ]
+    with pytest.raises(TypeError, match="field 'block_size' is specified twice"):
+        kernel.compile_key({"tokens": 5, "mode": 2, "block_size": 4})
+    with pytest.raises(TypeError, match="unexpected keyword argument 'extra'"):
+        kernel.compile_key({"tokens": 5, "mode": 2, "extra": 1})
 
 
 def test_dispatch_supports_tuple_and_mapping_subscriptions() -> None:

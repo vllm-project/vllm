@@ -29,6 +29,9 @@ A warmup implementation should:
 
 ## Kernel Contract
 
+Here, a **kernel wrapper** (or just **wrapper**) is an instance of a concrete `VllmJitKernel`
+subclass.
+
 Each warmable kernel should expose a wrapper object near the kernel's normal
 runtime entry point. The backend-agnostic pieces are `CompileKey`,
 `dispatch(...)`, and `get_warmup_keys(...)`. Backend-specific details belong
@@ -77,27 +80,27 @@ path. This keeps dispatch behavior shared instead of duplicated.
   `CompileKey` objects.
 - `compile_key(kwargs)` builds one `CompileKey` from one concrete dispatch input
   dictionary.
-- `_get_or_compile(compile_key)` returns an owner-cached executor. On a miss,
-  it invokes the owner's monitored `compile(...)` path and then returns the
-  executor populated by that method.
+- `_get_or_compile(compile_key)` returns an executor cached by the kernel
+  wrapper. On a miss, it invokes the wrapper's monitored `compile(...)` path
+  and then returns the executor populated by that method.
 
 Runtime miss handling follows the backend's cache model:
 
 - Triton and TileLang call their native JIT entry points normally. Their native
   cache handles hits, and `jit_monitor` reports unexpected runtime compilation.
-- CuTeDSL compile-only warmup stores the returned JIT Executor in the owner
-  cache. Runtime derives the same key and calls `_get_or_compile(...)`; monitor
-  mode determines whether a miss is rejected, warned and compiled, or silently
-  compiled.
+- CuTeDSL compile-only warmup stores the returned JIT Executor in the kernel
+  wrapper's cache. Runtime derives the same key and calls `_get_or_compile(...)`;
+  monitor mode determines whether a miss is rejected, warned and compiled, or
+  silently compiled.
 
 ### Kernel Activation
 
-The kernel contract defines which compile keys an owner needs. The per-runner
-`JitWarmupRegistry` separately records which owners were actually selected by
-the current engine configuration.
+The kernel contract defines which compile keys a kernel wrapper needs. The
+per-runner `JitWarmupRegistry` separately records which wrappers were actually
+selected by the current engine configuration.
 
-Register an owner from the component or backend construction path where its
-runtime implementation is selected:
+Register a kernel wrapper from the component or backend construction path where
+its runtime implementation is selected:
 
 ```python
 MY_KERNEL.register_warmup()
@@ -107,15 +110,15 @@ MY_KERNEL.register_warmup()
 infrastructure setup. Registration outside that scope is a no-op. When
 `enable_jit_warmup` is enabled, `kernel_warmup()` expands collected
 registrations: calls without arguments receive `vllm_config`, explicit
-arguments are forwarded unchanged, and repeated owner/key pairs are compiled
+arguments are forwarded unchanged, and repeated wrapper/key pairs are compiled
 once. Registration itself only records metadata; it never compiles or launches.
 
 Register at the narrowest stable selection point. Shared components should
-register their own owners rather than relying on a global model-name list.
+register their own wrappers rather than relying on a global model-name list.
 Repeated registration from equivalent layers is allowed and is
 deduplicated by the registry.
 
-If an owner uses a nonstandard `get_warmup_keys(...)` signature, pass those
+If a kernel wrapper uses a nonstandard `get_warmup_keys(...)` signature, pass those
 arguments explicitly:
 
 ```python
@@ -182,9 +185,14 @@ def dispatch(
     )
 ```
 
-Do not put loops, statement-level `if` blocks, mutation, side effects, or
-backend imports inside `dispatch(...)`. Put environment and model gating in
-`get_warmup_keys(...)` or the outer warmup entry point.
+Conditional expressions (`x if condition else y`) are supported, but
+statement-level `if` blocks are currently not. The tracer expects a straight-line
+sequence of local assignments followed by one `return self.CompileKey(...)`;
+supporting `if` blocks would require tracing and merging multiple control-flow
+paths. Keep branching in conditional expressions or small, pure helper functions.
+Do not put loops, mutation, side effects, or backend imports inside
+`dispatch(...)`. Put environment and model gating in `get_warmup_keys(...)` or
+the outer warmup entry point.
 
 ### Expression Features
 
@@ -200,7 +208,7 @@ assignments and `CompileKey(...)` fields:
 | Tuple/list literals | Build structured compile-key fields such as shapes, strides, and small descriptors. |
 | Conditional expressions | Select fields with `x if condition else y` without statement-level branching. |
 | Boolean expressions | Combine predicates with `and`, `or`, and `not`. |
-| Comparisons | Use equality, ordering, identity, and membership comparisons. |
+| Comparisons | Use `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in`, `is`, and `is not`. |
 | Arithmetic | Use `+`, `-`, `*`, `//`, `%`, and `**` for bucket and tile calculations. |
 | Unary minus | Build negative sentinel values or signed descriptors. |
 | Helper calls | Call small helper functions with positional arguments and explicit keyword arguments. |
@@ -217,8 +225,29 @@ def dispatch(self, *, num_tokens: int, block_size: int) -> CompileKey:
 The tracer supports Python builtins such as `min(...)`, `max(...)`, and
 `len(...)`, unless that name is overridden locally or globally.
 
-Helper calls cannot use `**kwargs`, and `CompileKey(...)` cannot be constructed
-from `**kwargs`. This keeps traced fields explicit.
+For dispatch methods with many direct pass-through fields, the dispatch
+`**kwargs` parameter may be unpacked directly into `CompileKey(...)`:
+
+```python
+def dispatch(
+    self,
+    *,
+    num_tokens: int,
+    **compile_key_fields: int,
+) -> CompileKey:
+    return self.CompileKey(
+        **compile_key_fields,
+        block_size=next_power_of_2(num_tokens),
+    )
+```
+
+All unmatched dispatch arguments are then compile-key fields and warmup inputs.
+Named parameters remain explicit when dispatch transforms them. The unpacking
+must use the dispatch method's `**kwargs` parameter directly and may
+appear only once. The fully explicit form remains supported and is clearer for
+dispatch methods with non-trivial field mappings. Unpacking another mapping or
+expression, or unpacking the parameter more than once, is rejected. Helper
+calls also cannot use `**kwargs`.
 
 Unsupported constructs currently include loops, statement-level `if`,
 comprehensions, lambda expressions, mutation, slices, dict/set literals, and
@@ -232,13 +261,14 @@ The tracer only expands inputs that affect the returned `CompileKey`.
 ```python
 return self._trace_dispatch(self.dispatch)(
     num_tokens=WarmupIntRange(1, max_tokens + 1),
-    debug_probe=WarmupIntRange(0, 100),
+    unused_input=WarmupIntRange(0, 100),
 )
 ```
 
-If `debug_probe` is not referenced by `dispatch(...)`, it is ignored. This
-allows callers to pass broad context without accidentally multiplying the warmup
-space.
+Here, `unused_input` is an arbitrary example; the name has no special meaning.
+Because it is not referenced by `dispatch(...)`, it is ignored. This lets
+dispatch accept runtime context that does not affect compilation without adding
+unnecessary axes to the warmup search space.
 
 Default dispatch arguments are honored. If a field depends on a parameter with a
 default and `get_warmup_keys(...)` does not pass that parameter, the default is

@@ -140,7 +140,14 @@ class _CompileKeyDispatchTrace:
     field_exprs: tuple[tuple[str, ast.AST], ...]
     globals: Mapping[str, Any]
     input_names: frozenset[str]
+    # Named parameters are excluded from direct **kwargs forwarding.
+    named_parameters: frozenset[str] | None
     defaults: Mapping[str, Any]
+
+    def input_names_for(self, available_names: set[str]) -> frozenset[str]:
+        if self.named_parameters is None:
+            return self.input_names
+        return self.input_names | (available_names - self.named_parameters)
 
     def compile_key(
         self,
@@ -150,12 +157,20 @@ class _CompileKeyDispatchTrace:
         dispatch_values = _eval_local_exprs(
             self.local_exprs, {**self.defaults, **kwargs}, self.globals
         )
-        return compile_key_type(
-            **{
-                field: _eval_dispatch_expr(expr, dispatch_values, self.globals)
-                for field, expr in self.field_exprs
+        named_parameters = self.named_parameters
+        # Materialize direct fields before evaluating named AST expressions.
+        fields: dict[str, Any] = {}
+        if named_parameters is not None:
+            fields = {
+                name: value
+                for name, value in kwargs.items()
+                if name not in named_parameters
             }
-        )
+        for field, expr in self.field_exprs:
+            if field in fields:
+                raise TypeError(f"CompileKey field '{field}' is specified twice")
+            fields[field] = _eval_dispatch_expr(expr, dispatch_values, self.globals)
+        return compile_key_type(**fields)
 
 
 @dataclass(frozen=True)
@@ -460,13 +475,37 @@ def _trace_compile_key_dispatch(
 
     field_exprs: list[tuple[str, ast.AST]] = []
     defaults, candidate_names = _function_trace_inputs(fn)
+    # Fields captured by dispatch **kwargs are forwarded, not AST-evaluated.
+    signature = inspect.signature(fn)
+    variadic_keyword = next(
+        (
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.kind is inspect.Parameter.VAR_KEYWORD
+        ),
+        None,
+    )
+    candidate_names.discard(variadic_keyword)
     input_names: set[str] = set()
     local_names = {name for name, _ in local_exprs}
     for _, expr in local_exprs:
         input_names.update(_collect_input_names(expr, candidate_names))
+    named_parameters: frozenset[str] | None = None
     for keyword in return_expr.keywords:
+        # CompileKey may unpack only that **kwargs parameter, once.
         if keyword.arg is None:
-            raise ValueError(f"{fn.__name__} cannot use **kwargs in CompileKey")
+            if (
+                named_parameters is not None
+                or variadic_keyword is None
+                or not isinstance(keyword.value, ast.Name)
+                or keyword.value.id != variadic_keyword
+            ):
+                raise ValueError(
+                    f"{fn.__name__} may unpack only its own **kwargs parameter "
+                    "once in CompileKey"
+                )
+            named_parameters = frozenset(candidate_names)
+            continue
         field_exprs.append((keyword.arg, keyword.value))
         input_names.update(
             _collect_input_names(keyword.value, candidate_names, local_names)
@@ -477,6 +516,7 @@ def _trace_compile_key_dispatch(
         tuple(field_exprs),
         globals_,
         frozenset(input_names),
+        named_parameters,
         defaults,
     )
 
@@ -511,14 +551,11 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
     CompileKey: type[CompileKeyT]
 
     def __init__(self) -> None:
-        self.compile_key_dispatch_trace = _trace_compile_key_dispatch(self.dispatch)
+        self._dispatch_trace = _trace_compile_key_dispatch(self.dispatch)
         self._compiled_cache: dict[Any, Any] = {}
 
     def compile_key(self, kwargs: Mapping[str, Any]) -> CompileKeyT:
-        return self.compile_key_dispatch_trace.compile_key(self.CompileKey, kwargs)
-
-    def _compiled_cache_contains(self, compile_key: CompileKeyT) -> bool:
-        return compile_key in self._compiled_cache
+        return self._dispatch_trace.compile_key(self.CompileKey, kwargs)
 
     def _get_or_compile(
         self,
@@ -527,7 +564,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         runtime_context: Mapping[str, Any] | None = None,
     ) -> Any:
         """Return a cached executor, compiling it on a monitored cache miss."""
-        if not self._compiled_cache_contains(compile_key):
+        if compile_key not in self._compiled_cache:
             self.compile(compile_key)
 
         try:
@@ -560,7 +597,11 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             predicate_trace = (
                 _trace_warmup_predicate(_when) if _when is not None else None
             )
-            input_names = compile_key_dispatch_trace.input_names
+            # Unmatched **kwargs fields also belong to the expansion space.
+            available_names = set(kwargs).union(
+                *(group.rows[0] for group in input_groups)
+            )
+            input_names = compile_key_dispatch_trace.input_names_for(available_names)
             if predicate_trace is not None:
                 input_names = input_names | predicate_trace.input_names
             expanded_input_groups = tuple(
@@ -687,7 +728,7 @@ class JitWarmupRegistry:
         return sum(len(registrations) for registrations in self._registrations.values())
 
     def warmup(self) -> None:
-        """Expand registrations and compile each owner/key pair once."""
+        """Expand registrations and compile each wrapper/key pair once."""
         from tqdm import tqdm
 
         from vllm.distributed import is_global_first_rank

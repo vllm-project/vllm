@@ -437,8 +437,6 @@ class Worker(WorkerBase):
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
-            # captures kernel registrations made by model modules during construction.
-            self.model_runner.jit_warmup_registry.activate(),
             # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
             self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
