@@ -630,8 +630,7 @@ class SpeculativeConfig:
             hf_config.model_type = "inkling_mtp"
             hf_config.update(
                 {
-                    # Inkling currently exposes only the first checkpoint depth.
-                    "n_predict": 1,
+                    "n_predict": checkpoint_depths,
                     "num_nextn_predict_layers": checkpoint_depths,
                     "chain_hidden_post_norm": mtp_config.get(
                         "chain_hidden_post_norm", False
@@ -1081,14 +1080,6 @@ class SpeculativeConfig:
                     raise ValueError(
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
-                    )
-
-                if (
-                    self.draft_model_config.hf_config.model_type == "inkling_mtp"
-                    and self.num_speculative_tokens != 1
-                ):
-                    raise ValueError(
-                        "Inkling MTP currently supports exactly one speculative token"
                     )
 
                 if self.dspark_draft_topk is not None and self.method != "dspark":
