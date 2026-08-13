@@ -62,7 +62,7 @@ COPY requirements/common.txt requirements/common.txt
 COPY requirements/test/cuda.in requirements/test/zen.in
 
 RUN sed -i '/mamba_ssm/d'                  requirements/test/zen.in && \
-    sed -i 's/^torch==.*/torch==2.11.0/g'  requirements/test/zen.in && \
+    sed -i 's/^torch==.*/torch==2.13.0/g'  requirements/test/zen.in && \
     sed -i 's/torchaudio.*/torchaudio/g'   requirements/test/zen.in && \
     sed -i 's/torchvision.*/torchvision/g' requirements/test/zen.in && \
     # zentorch parity: keep sentence-transformers pinned where vllm-test-deps did.
@@ -72,7 +72,7 @@ RUN sed -i '/mamba_ssm/d'                  requirements/test/zen.in && \
        --index-strategy unsafe-best-match --torch-backend cpu
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/test/zen.txt
+    uv pip install -r requirements/test/zen.txt --torch-backend cpu
 
 # Reassert zentorch's torch in case test-deps moved it.
 RUN --mount=type=cache,target=/root/.cache/uv \
