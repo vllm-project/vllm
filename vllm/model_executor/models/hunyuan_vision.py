@@ -28,6 +28,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
+import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -728,15 +729,21 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        # HunYuanVLProcessor requires image placeholders wrapped with start/end tokens.
+        # HunYuanVLProcessor requires image placeholders wrapped with
+        # start/end tokens. Wrap only bare occurrences so already-wrapped
+        # ones (e.g. from prior turns in multi-turn prompts) are left
+        # untouched instead of being re-wrapped into duplicates.
         if mm_data.get("images") is not None and prompt:
-            img_tok = hf_processor.image_token
-            wrapped = (
-                f"{hf_processor.image_start_token}{img_tok}"
-                f"{hf_processor.image_end_token}"
+            img_tok = re.escape(hf_processor.image_token)
+            start_tok = re.escape(hf_processor.image_start_token)
+            end_tok = re.escape(hf_processor.image_end_token)
+            bare_image_token = re.compile(f"(?<!{start_tok}){img_tok}(?!{end_tok})")
+            prompt = bare_image_token.sub(
+                f"{hf_processor.image_start_token}"
+                f"{hf_processor.image_token}"
+                f"{hf_processor.image_end_token}",
+                prompt,
             )
-            if img_tok in prompt and wrapped not in prompt:
-                prompt = prompt.replace(img_tok, wrapped)
         return self.info.ctx.call_hf_processor(
             hf_processor,
             dict(text=prompt, **mm_data),
