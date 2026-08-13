@@ -16,6 +16,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
+    supports_encoder_cudagraph,
 )
 from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
@@ -51,6 +52,29 @@ class BudgetGraphMetadata:
     output_buffer: torch.Tensor
 
 
+def create_encoder_cudagraph_manager(
+    vllm_config: VllmConfig,
+    device: torch.device,
+    dtype: torch.dtype,
+    model: object,
+) -> "EncoderCudaGraphManager | None":
+    """Create a manager when the model enables at least one graph modality."""
+    if not supports_encoder_cudagraph(model):
+        return None
+
+    config = model.get_encoder_cudagraph_config()
+    if not config.modalities:
+        return None
+
+    return EncoderCudaGraphManager(
+        vllm_config=vllm_config,
+        device=device,
+        dtype=dtype,
+        model=model,
+        config=config,
+    )
+
+
 class EncoderCudaGraphManager:
     """Budget-based CUDA graph capture/replay for vision encoders."""
 
@@ -60,6 +84,7 @@ class EncoderCudaGraphManager:
         device: torch.device,
         dtype: torch.dtype,
         model: SupportsEncoderCudaGraph,
+        config: EncoderCudaGraphConfig | None = None,
     ):
         """Initialize CUDA graph manager with provided token budgets
         and max batch size."""
@@ -67,7 +92,7 @@ class EncoderCudaGraphManager:
         self.device = device
         self.dtype = dtype
         self.model = model
-        self.config: EncoderCudaGraphConfig = model.get_encoder_cudagraph_config()
+        self.config = config or model.get_encoder_cudagraph_config()
 
         comp_config = vllm_config.compilation_config
         user_budgets = comp_config.encoder_cudagraph_token_budgets
@@ -284,7 +309,11 @@ class EncoderCudaGraphManager:
         )
 
     def _find_smallest_fitting_budget_given_tokens(
-        self, total_tokens: int, budgets: list[int] | None = None
+        self,
+        total_tokens: int,
+        budgets: list[int] | None = None,
+        *,
+        require_exact_match: bool = False,
     ) -> int | None:
         """Find smallest budget >= total_tokens.
 
@@ -294,6 +323,8 @@ class EncoderCudaGraphManager:
         budgets = budgets if budgets is not None else self.token_budgets
         for budget in budgets:
             if budget >= total_tokens:
+                if require_exact_match and budget != total_tokens:
+                    return None
                 return budget
         return None
 
@@ -402,7 +433,11 @@ class EncoderCudaGraphManager:
                     0
                     if current_tokens[path] == 0
                     else self._find_smallest_fitting_budget_given_tokens(
-                        current_tokens[path], self.path_token_budgets[path]
+                        current_tokens[path],
+                        self.path_token_budgets[path],
+                        require_exact_match=self.config.paths[
+                            path
+                        ].require_exact_token_budget_match,
                     )
                 )
                 for path in paths

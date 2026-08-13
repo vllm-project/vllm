@@ -6745,23 +6745,16 @@ class GPUModelRunner(
         # Use get_model() to unwrap CUDAGraphWrapper/UBatchWrapper, because
         # @runtime_checkable Protocol isinstance() checks do not work through
         # __getattr__ forwarding.
-        from vllm.model_executor.models.interfaces import (
-            SupportsEncoderCudaGraph,
-            supports_encoder_cudagraph,
-        )
         from vllm.v1.worker.encoder_cudagraph import (
-            EncoderCudaGraphManager,
+            create_encoder_cudagraph_manager,
         )
 
         raw_model = self.get_model()
-        if not supports_encoder_cudagraph(raw_model):
-            return None
-
-        return EncoderCudaGraphManager(
+        return create_encoder_cudagraph_manager(
             vllm_config=self.vllm_config,
             device=self.device,
             dtype=self.dtype,
-            model=cast(SupportsEncoderCudaGraph, raw_model),
+            model=raw_model,
         )
 
     @torch.inference_mode()

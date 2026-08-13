@@ -74,7 +74,54 @@ def ernie45_vl_chat_template(content: str) -> str:
     )
 
 
+def cosmos3_edge_chat_template(content: str) -> str:
+    return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+
+
+def cosmos3_edge_dummy_hf_overrides(hf_config):
+    hf_config = dummy_hf_overrides(
+        hf_config,
+        model_arch="Cosmos3EdgeForConditionalGeneration",
+    )
+    if text_config := getattr(hf_config, "text_config", None):
+        text_config.update(
+            {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "*-",
+            }
+        )
+    return hf_config
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
+    "cosmos3_edge": VitCudagraphTestConfig(
+        model="nvidia/Cosmos3-Edge",
+        image_prompt=cosmos3_edge_chat_template(
+            "<|vision_start|><|image_pad|><|vision_end|>\nWhat is in this image?"
+        ),
+        video_prompt=cosmos3_edge_chat_template(
+            "<|vision_start|><|video_pad|><|vision_end|>\n"
+            "Describe this video in one sentence."
+        ),
+        needs_video_metadata=True,
+        compilation_config_overrides={
+            # The two fixtures produce 1,107 and 2,035 merged output tokens.
+            # Cosmos requires exact graph-budget matches and one item/replay.
+            "encoder_cudagraph_token_budgets": [1107, 2035],
+            "encoder_cudagraph_max_vision_items_per_batch": 1,
+        },
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": cosmos3_edge_dummy_hf_overrides,
+        },
+        marks=[
+            pytest.mark.core_model,
+            pytest.mark.skipif(
+                not current_platform.is_cuda(),
+                reason="Cosmos3-Edge encoder CUDA graphs are only validated on CUDA",
+            ),
+        ],
+    ),
     "gemma3": VitCudagraphTestConfig(
         model="google/gemma-3-4b-it",
         modalities=["image"],
@@ -356,6 +403,13 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
 
         # Ensure the output is a string
         assert isinstance(output_text, str)
+
+        if model_id == "cosmos3_edge":
+            runner = vllm_model.llm.llm_engine.model_executor.driver_worker.model_runner
+            manager = runner.encoder_cudagraph_manager
+            assert manager is not None
+            assert manager.graph_hits == 2
+            assert manager.graph_misses == 0
 
 
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
