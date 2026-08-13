@@ -61,14 +61,14 @@ def test_explicit_ep_owns_half_of_global_experts() -> None:
     local_count, expert_map, _ = determine_expert_map(
         ep_size=2,
         ep_rank=1,
-        global_num_experts=3584,
+        global_num_experts=896,
     )
 
-    assert local_count == 1792
+    assert local_count == 448
     assert expert_map is not None
-    assert torch.count_nonzero(expert_map >= 0).item() == 1792
-    assert torch.all(expert_map[:1792] == -1)
-    assert torch.equal(expert_map[1792:], torch.arange(1792, dtype=torch.int32))
+    assert torch.count_nonzero(expert_map >= 0).item() == 448
+    assert torch.all(expert_map[:448] == -1)
+    assert torch.equal(expert_map[448:], torch.arange(448, dtype=torch.int32))
 
 
 def test_weight_filter_uses_explicit_ep_ownership(monkeypatch) -> None:
@@ -94,11 +94,11 @@ def test_weight_filter_uses_explicit_ep_ownership(monkeypatch) -> None:
     )
     loader = DefaultModelLoader.__new__(DefaultModelLoader)
     loader.local_expert_ids = None
-    model_config = SimpleNamespace(is_moe=True, get_num_experts=lambda: 3584)
+    model_config = SimpleNamespace(is_moe=True, get_num_experts=lambda: 896)
 
     loader._init_ep_weight_filter(model_config)
 
-    assert loader.local_expert_ids == set(range(1792, 3584))
+    assert loader.local_expert_ids == set(range(448, 896))
 
 
 def test_hybrid_ep_keeps_late_tp_reduction(monkeypatch) -> None:
