@@ -78,7 +78,7 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
-def _use_model_wide_sequence_parallel(vllm_config: VllmConfig) -> bool:
+def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     config = vllm_config.model_config.hf_text_config
     parallel_config = vllm_config.parallel_config
     return (
@@ -434,7 +434,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             config.num_experts > 0
             and (self.layer_idx + 1) % config.decoder_sparse_step == 0
         )
-        self.use_attn_reduce_scatter_for_moe = _use_model_wide_sequence_parallel(
+        self.use_attn_reduce_scatter_for_moe = _should_use_sequence_parallel(
             vllm_config
         )
 
