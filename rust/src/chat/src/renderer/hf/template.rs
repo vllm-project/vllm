@@ -25,12 +25,31 @@ use crate::renderer::hf::{TemplateMessage, TemplateTool};
 
 type Result<T> = std::result::Result<T, TemplateError>;
 
+/// Evaluation budget for rendering a chat template, in minijinja "fuel" units
+/// (roughly one unit per executed instruction).
+///
+/// Chat templates can be supplied by an (unauthenticated) request or by the
+/// model, and rendering cost is `O(N^depth)` in caller-controlled loop bounds.
+/// minijinja's per-`range()` limit is walked around by nesting, so without a
+/// total budget a tiny template can occupy a request-runtime worker thread for
+/// tens of seconds. A legitimate chat template only iterates over the messages,
+/// tools and documents in the request and needs a negligible fraction of this,
+/// so the budget bounds hostile templates while leaving real ones unaffected.
+/// For reference, minijinja already refuses a single `range()` above ~1M
+/// elements; this total budget is ~20x that, well above any real chat template.
+/// See <https://github.com/vllm-project/vllm/issues/52025>.
+const CHAT_TEMPLATE_FUEL: u64 = 20_000_000;
+
 /// Build a pre-configured environment with the given template string.
 fn build_environment(template: String) -> Result<Environment<'static>> {
     let mut env = Environment::new();
 
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
+
+    // Bound total evaluation work so a caller- or model-supplied template cannot
+    // exhaust a request-runtime worker thread (see `CHAT_TEMPLATE_FUEL`).
+    env.set_fuel(Some(CHAT_TEMPLATE_FUEL));
 
     env.add_template_owned("chat".to_owned(), template)?;
 
@@ -331,5 +350,51 @@ mod tests {
         let template = load_chat_template(&path).unwrap();
 
         assert_eq!(template.as_deref(), Some("{{ messages }}"));
+    }
+
+    /// A template whose evaluation cost is `O(N^depth)` in caller-controlled loop
+    /// bounds must be rejected by the fuel budget rather than running unbounded.
+    /// See <https://github.com/vllm-project/vllm/issues/52025>.
+    #[test]
+    fn test_chat_template_evaluation_is_bounded() {
+        // `range(999)^3` would run ~10^9 iterations (tens of CPU-seconds) without a
+        // budget; every individual `range()` here is small and individually legal.
+        let bomb = "{% for x0 in range(999) %}{% for x1 in range(999) %}\
+             {% for x2 in range(999) %}{% endfor %}{% endfor %}{% endfor %}ok";
+        let template =
+            CompiledChatTemplate::new(bomb.to_string(), ChatTemplateContentFormatOption::Auto)
+                .unwrap();
+
+        let start = std::time::Instant::now();
+        let result = template.apply(TemplateContext::default());
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "a template that exceeds the evaluation budget must be rejected"
+        );
+        // The budget must fire well before the unbounded ~55s cost. The bound is
+        // generous so the test stays robust on slow CI while still proving the cap.
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "bounded rendering should fail fast, took {elapsed:?}"
+        );
+    }
+
+    /// A template performing a legitimate, non-trivial amount of work (the kind a
+    /// real chat template does while iterating messages/tools) must still render
+    /// well within the fuel budget.
+    #[test]
+    fn test_chat_template_within_budget_renders() {
+        let template = CompiledChatTemplate::new(
+            "{% for i in range(50000) %}{% endfor %}ok".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let result = template
+            .apply(TemplateContext::default())
+            .expect("a template within the evaluation budget must render");
+        assert_eq!(result, "ok");
     }
 }
