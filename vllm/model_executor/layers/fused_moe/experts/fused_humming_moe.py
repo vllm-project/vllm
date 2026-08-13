@@ -108,6 +108,10 @@ def _cap_tuning_config_k_block(tuning_config: list, max_k_block: int = 128) -> N
         block_shape = config.get("block_shape")
         if block_shape and len(block_shape) == 3 and block_shape[2] > max_k_block:
             config["block_shape"] = [block_shape[0], block_shape[1], max_k_block]
+            warp_shape = config.get("warp_shape")
+            block_m, block_n, block_k = block_shape
+            if warp_shape and len(warp_shape) == 3 and block_n % 32 == 0:
+                config["warp_shape"] = [warp_shape[0], 32, warp_shape[2]]
 
 
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
