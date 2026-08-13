@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from vllm.logger import init_logger
 
@@ -17,8 +17,10 @@ logger = init_logger(__name__)
 
 class ParserManager:
     """
-    Provides a unified Parser by composing individual reasoning and tool
-    parsers from their respective registries.
+    Provides a unified Parser from the reasoning and tool parser registries.
+
+    Parser engine adapters backed by the same engine are collapsed back into
+    that engine. Other parser pairs are composed through ``DelegatingParser``.
     """
 
     @classmethod
@@ -84,8 +86,8 @@ class ParserManager:
         """
         Get a Parser that handles both reasoning and tool parsing.
 
-        Composes individual reasoning and tool parsers into a single
-        DelegatingParser subclass.
+        Reuses a shared parser engine when possible, otherwise composes the
+        individual parsers into a ``DelegatingParser`` subclass.
 
         Args:
             tool_parser_name: The name of the tool parser.
@@ -115,6 +117,19 @@ class ParserManager:
             HarmonyParser.reasoning_parser_cls = reasoning_parser_cls
             HarmonyParser.tool_parser_cls = tool_parser_cls
             return HarmonyParser
+
+        reasoning_engine_cls = getattr(reasoning_parser_cls, "_parser_engine_cls", None)
+        tool_engine_cls = getattr(tool_parser_cls, "_parser_engine_cls", None)
+        if reasoning_engine_cls is not None and reasoning_engine_cls is tool_engine_cls:
+            unified_parser_cls = type(
+                f"Unified{reasoning_engine_cls.__name__}",
+                (reasoning_engine_cls,),
+                {
+                    "reasoning_parser_cls": reasoning_parser_cls,
+                    "tool_parser_cls": tool_parser_cls,
+                },
+            )
+            return cast("type[Parser]", unified_parser_cls)
 
         if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
             from vllm.parser.kimi_k3 import KimiK3Parser

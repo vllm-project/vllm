@@ -33,6 +33,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.parser_manager import ParserManager
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -890,6 +891,38 @@ _CombinedReasoningAdapter, _CombinedToolAdapter = make_adapters(_CombinedTestEng
 class _CombinedDelegating(DelegatingParser):
     reasoning_parser_cls = _CombinedReasoningAdapter
     tool_parser_cls = _CombinedToolAdapter
+
+
+def test_parser_manager_uses_shared_engine_directly(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: _CombinedReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: _CombinedToolAdapter),
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="combined",
+        reasoning_parser_name="combined",
+        enable_auto_tools=True,
+    )
+
+    assert parser_cls is not None
+    assert issubclass(parser_cls, _CombinedTestEngine)
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    request = _make_delegating_request()
+    reasoning, content, _ = parser.parse(
+        "ab</think>c",
+        request,
+        model_output_token_ids=[ord("a"), ord("b"), 201, ord("c")],
+    )
+    assert reasoning == "ab"
+    assert content == "c"
+    assert parser.count_reasoning_tokens([]) == 2
 
 
 def _make_delegating_request():
