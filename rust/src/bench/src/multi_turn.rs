@@ -23,6 +23,7 @@ use crate::output::console::print_multi_turn_results;
 use crate::output::json::{
     append_result, build_multi_turn_result_json, compute_result_filename, save_result,
 };
+use crate::ready_checker::{get_first_model, wait_for_endpoint};
 
 /// Output from a single turn within a conversation.
 #[derive(Debug, Clone)]
@@ -74,7 +75,13 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         (m.clone(), config.model_name.clone())
     } else {
         tracing::info!(base_url = %config.base_url, "fetching first model from server");
-        let (name, id) = get_first_model(&config.base_url, &client, &config.extra_headers).await?;
+        let (name, id) = get_first_model(
+            &config.base_url,
+            &client,
+            &config.extra_headers,
+            config.ready_check_timeout_sec,
+        )
+        .await?;
         tracing::info!(
             model_name = name,
             model_id = id,
@@ -83,15 +90,17 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         (id, Some(name))
     };
 
-    crate::ready_checker::run_initial_ready_check(config, &client, &model_id, &model_name).await?;
-
     // Load tokenizer
     let tokenizer = if config.skip_tokenizer_init {
         None
     } else {
         let tid = config.tokenizer_id.as_deref().unwrap_or(&model_id);
         tracing::info!(tokenizer = tid, "loading tokenizer");
-        let server_info = Some((config.base_url.as_str(), model_id.as_str()));
+        let server_info = Some((
+            config.base_url.as_str(),
+            model_id.as_str(),
+            config.ready_check_timeout_sec,
+        ));
         let t =
             crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info).await?;
         Some(t)
@@ -244,6 +253,42 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         println!("  Total turns: {total_turns}");
         println!("  Total user message tokens: {total_user_tokens}");
         return Ok(serde_json::json!({"dry_run": true, "mode": "multi_turn"}));
+    }
+
+    // Ready check with a simple single request
+    if config.ready_check_timeout_sec > 0 {
+        let first_turn = &conversations[0].turns[0];
+        let test_input = RequestFuncInput {
+            prompt: first_turn.user_message.clone(),
+            api_url: config.api_url.clone(),
+            prompt_len: first_turn.user_message_len,
+            output_len: first_turn.expected_output_len,
+            model: model_id.clone(),
+            model_name: model_name.clone(),
+            logprobs: config.logprobs,
+            extra_headers: config.extra_headers.clone(),
+            extra_body: config.extra_body.clone(),
+            ignore_eos: config.ignore_eos,
+            request_id: None,
+            ..Default::default()
+        };
+
+        tracing::info!("starting initial single-prompt test run");
+        let test_output = wait_for_endpoint(
+            config.backend,
+            &client,
+            &test_input,
+            config.ready_check_timeout_sec,
+            5,
+        )
+        .await?;
+        if !test_output.success {
+            return Err(BenchError::Backend(format!(
+                "Initial test run failed: {}",
+                test_output.error
+            )));
+        }
+        tracing::info!("initial single-prompt test run completed");
     }
 
     // For random datasets in multi-turn mode, auto-set min_tokens to enforce
@@ -712,39 +757,6 @@ async fn run_conversation(
         total_duration_ms,
         all_success,
     }
-}
-
-/// Fetch the first model from the server's /v1/models endpoint.
-async fn get_first_model(
-    base_url: &str,
-    client: &reqwest::Client,
-    extra_headers: &Option<HashMap<String, String>>,
-) -> Result<(String, String)> {
-    let url = format!("{base_url}/v1/models");
-    let mut request = client.get(&url);
-    if let Some(headers) = extra_headers {
-        for (k, v) in headers {
-            request = request.header(k, v);
-        }
-    }
-    if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        request = request.header("Authorization", format!("Bearer {api_key}"));
-    }
-
-    let response = request.send().await?;
-    let data: serde_json::Value = response.json().await?;
-
-    if let Some(models) = data.get("data").and_then(|d| d.as_array())
-        && let Some(first) = models.first()
-    {
-        let id = first.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let root = first.get("root").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
-        return Ok((id, root));
-    }
-
-    Err(BenchError::Config(format!(
-        "No models found on the server at {base_url}"
-    )))
 }
 
 #[cfg(test)]
