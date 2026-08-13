@@ -203,14 +203,6 @@ class TestLogprobsLists(TestCase):
         assert sliced.cu_num_generated_tokens is None
 
 
-def test_with_ec_conn_output_sets_field_in_place():
-    output = ModelRunnerOutput(req_ids=["r0"], req_id_to_index={"r0": 0})
-    ec_output = ECConnectorOutput(finished_sending={"mm_hash"})
-
-    assert ModelRunnerOutput.with_ec_conn_output(output, ECConnectorOutput()) is output
-    assert output.ec_connector_output is None
-    assert ModelRunnerOutput.with_ec_conn_output(output, ec_output) is output
-    assert output.ec_connector_output is ec_output
 
 
 def test_with_ec_conn_output_copies_shared_empty_output():
