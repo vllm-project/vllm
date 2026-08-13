@@ -202,7 +202,7 @@ class GenerateResponseChoice(BaseModel):
     token_ids: list[int] | None = None
     # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
     # (numpy serialization). Shape after decode:
-    #   (num_tokens - 1, num_layers, num_experts_per_tok)  dtype uint8/uint16
+    #   (num_tokens - 1, num_layers, num_experts_per_tok) dtype uint8/uint16/int32
     # ``num_tokens - 1`` because the last sampled token has not been
     # forwarded yet and therefore has no routing data.
     # Decode:

@@ -1074,6 +1074,14 @@ class VllmConfig:
                     "--enable-return-routed-experts is incompatible with "
                     "pipeline parallelism (PP > 1)."
                 )
+            if (
+                self.parallel_config.decode_context_parallel_size > 1
+                or self.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "--enable-return-routed-experts is incompatible with context "
+                    "parallelism (DCP > 1 or PCP > 1)."
+                )
 
             # Incompatible with any KV connector — covers both PD disaggregation
             # (kv_producer/kv_consumer: routing captured on P can't reach D) and
