@@ -22,6 +22,7 @@ from cutlass.utils import get_smem_capacity_in_bytes
 
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
 from vllm.distributed import get_tp_group
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
 
 @dsl_user_op
@@ -702,8 +703,12 @@ class GemmRS:
         torch.accelerator.synchronize(device)
         tp_group.barrier()
 
-    def can_run(self, w: torch.Tensor) -> bool:
+    def can_run(self, linear: LinearBase) -> bool:
         # Validate projection-invariant requirements once during model init.
+        # only supports BF16 for now
+        if not isinstance(linear.quant_method, UnquantizedLinearMethod):
+            return False
+        w = linear.weight
         if w.ndim != 2:
             return False
         K = w.shape[1]
@@ -720,11 +725,13 @@ class GemmRS:
         return x.shape[0] >= 128
 
     def __call__(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        assert self.can_run(w)
         assert x.ndim == 2
         M, K = x.shape
         assert 0 < M <= self.max_M
-        assert w.shape[1] == K
+        assert w.shape == (self.N, K) and K % 64 == 0
+        assert w.dtype == torch.bfloat16
+        assert w.device == self.device
+        assert w.is_contiguous()
         assert x.dtype == torch.bfloat16
         assert x.device == self.device
         assert x.is_contiguous()

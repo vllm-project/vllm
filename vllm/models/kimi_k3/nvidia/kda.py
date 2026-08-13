@@ -475,7 +475,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if self.run_gemm_rs:
             from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
 
-            self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj.weight)
+            self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj)
             if not self.run_gemm_rs:
                 logger.warning_once(
                     "GEMM-RS is disabled for %s due to an incompatible projection.",
