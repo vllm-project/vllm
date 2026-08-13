@@ -190,6 +190,53 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
     return wrapper
 
 
+@with_nvml_context
+def _nvml_confidential_compute_enabled() -> bool:
+    state = pynvml.nvmlSystemGetConfComputeState()
+    # ccFeature != 0 means Confidential Computing is enabled (ON or devtools
+    # mode).
+    return int(getattr(state, "ccFeature", 0)) != 0
+
+
+@cache
+def _detect_confidential_compute() -> bool:
+    """Whether the GPU is running in NVIDIA Confidential Computing mode.
+
+    Under bounce-buffer Confidential Computing, device<->host copies are
+    forced synchronous even with ``non_blocking=True``, which stalls the
+    thread that issues them (see vllm.v1.conf_compute_utils). Detected once
+    via NVML and cached.
+
+    Returns:
+        True if Confidential Computing is enabled (``ccFeature != 0``).
+        Overridable via ``VLLM_CONFIDENTIAL_COMPUTE=1/0``; on any NVML
+        failure, returns False.
+    """
+    forced = envs.VLLM_CONFIDENTIAL_COMPUTE
+    if forced is not None:
+        enabled = forced == "1"
+        logger.info(
+            "NVIDIA Confidential Computing detection overridden by "
+            "VLLM_CONFIDENTIAL_COMPUTE=%r: %s",
+            forced,
+            "enabled" if enabled else "disabled",
+        )
+        return enabled
+    if not torch.cuda.is_available():
+        logger.info("NVIDIA Confidential Computing not detected: CUDA unavailable")
+        return False
+    try:
+        enabled = _nvml_confidential_compute_enabled()
+    except Exception as e:
+        logger.info("NVIDIA Confidential Computing not detected: NVML failed: %r", e)
+        return False
+    logger.info(
+        "NVIDIA Confidential Computing %s via NVML",
+        "detected" if enabled else "not detected",
+    )
+    return enabled
+
+
 @cache
 def _get_wsl_kernel_version() -> tuple[int, ...] | None:
     """Return the WSL2 kernel version as a tuple, or None on parse failure.
@@ -216,6 +263,10 @@ class CudaPlatformBase(Platform):
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
+
+    @classmethod
+    def is_confidential_compute(cls) -> bool:
+        return _detect_confidential_compute()
 
     @classmethod
     def import_kernels(cls) -> None:
