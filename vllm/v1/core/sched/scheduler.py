@@ -1346,6 +1346,16 @@ class Scheduler(SchedulerInterface):
             request.is_prefill_chunk = request.num_computed_tokens < (
                 request.num_tokens + request.num_output_placeholders
             )
+            if (
+                self.use_v2_model_runner
+                and self.use_pp
+                and self.vllm_config.speculative_config is not None
+                and not request.is_prefill_chunk
+            ):
+                request.next_decode_eligible_step = (
+                    self.current_step
+                    + self.parallel_config.pipeline_parallel_size
+                )
             scheduler_output.has_structured_output_requests |= (
                 request.use_structured_output and not request.is_prefill_chunk
             )

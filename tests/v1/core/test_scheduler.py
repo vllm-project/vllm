@@ -1304,6 +1304,53 @@ def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
     assert scheduler.schedule().num_scheduled_tokens == {"0": 10, "1": 4}
 
 
+def test_v2_pp_spec_decode_waits_for_sampled_token_relay():
+    pp_size = 2
+    scheduler = create_scheduler(
+        async_scheduling=False,
+        num_speculative_tokens=3,
+        use_v2_model_runner=True,
+    )
+    # Emulate PP at the scheduler level without requiring multiple GPUs.
+    scheduler.use_pp = True
+    scheduler.parallel_config.pipeline_parallel_size = pp_size
+
+    (request,) = create_requests(num_requests=1, num_tokens=1)
+    scheduler.add_request(request)
+
+    prefill_output = scheduler.schedule()
+    prefill_step = scheduler.current_step
+    assert not request.is_prefill_chunk
+    assert request.next_decode_eligible_step == prefill_step + pp_size
+
+    # The drafter output can reach the base scheduler before the sampled anchor
+    # from this final prefill step has traversed the PP sampled-token FIFO.
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [[1, 2, 3]])
+    )
+
+    next_output = scheduler.schedule()
+    assert scheduler.current_step == prefill_step + 1
+    assert request.request_id not in next_output.num_scheduled_tokens
+
+    scheduler.update_from_output(
+        prefill_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[42]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    eligible_output = scheduler.schedule()
+    assert scheduler.current_step == prefill_step + pp_size
+    assert request.request_id in eligible_output.num_scheduled_tokens
+    assert eligible_output.num_scheduled_tokens[request.request_id] == 4
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
