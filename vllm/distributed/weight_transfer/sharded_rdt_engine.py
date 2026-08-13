@@ -23,7 +23,6 @@ here.
 """
 
 import time
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from math import prod
 from typing import TYPE_CHECKING, Any, cast
@@ -1820,19 +1819,6 @@ class ShardedRDTWeightTransferEngine(
         # Release the receive arenas (their NIXL registration is pinned for the
         # process lifetime; freeing the tensors just drops our strong refs).
         self._dest_arenas = [{} for _ in range(self._ring_depth)]
-
-    @staticmethod
-    def trainer_send_weights(
-        iterator: Iterator[tuple[str, torch.Tensor]],
-        trainer_args: dict[str, Any] | Any,
-    ) -> None:
-        """No-op for the pull-based sharded RDT backend.
-
-        Workers initiate the transfer themselves via the trainer's
-        ``@ray.method(tensor_transport="nixl")`` batched accessor.
-        Retained to satisfy the abstract base class.
-        """
-        del iterator, trainer_args
 
 
 def _dtype_from_name(name: str) -> torch.dtype:

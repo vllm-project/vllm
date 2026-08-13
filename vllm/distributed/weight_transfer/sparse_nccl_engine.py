@@ -17,7 +17,7 @@ MVP limitations:
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from typing_extensions import Self
@@ -37,8 +37,10 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
-    trainer_init,
     worker_init_process_group,
+)
+from vllm.distributed.weight_transfer.nccl_common import (
+    trainer_init as open_trainer_endpoint,
 )
 
 __all__ = [
@@ -225,22 +227,6 @@ class SparseNCCLWeightTransferEngine(
         if self.model_update_group is not None:
             self.model_update_group = None
 
-    @staticmethod
-    def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
-        """Removed. Use the stateful `SparseNCCLTrainerWeightTransferEngine`.
-
-        Transitional stub kept only to satisfy the (still abstract)
-        `WeightTransferEngine.trainer_send_weights`; that member is dropped from
-        the worker ABC once every backend has migrated to the trainer engine.
-        """
-        raise NotImplementedError(
-            "The static sparse NCCL trainer path has been replaced by "
-            "SparseNCCLTrainerWeightTransferEngine. Build it via "
-            "WeightTransferTrainerFactory.trainer_init("
-            "SparseNCCLTrainerInitInfo(...), client=..., source=...) and drive "
-            "it with send_weights()."
-        )
-
 
 class SparseNCCLTrainerWeightTransferEngine(
     TrainerWeightTransferEngine[SparseNCCLTrainerInitInfo]
@@ -269,8 +255,14 @@ class SparseNCCLTrainerWeightTransferEngine(
         source: WeightSource | None = None,
         is_sender: bool = True,
     ) -> None:
-        # `source` is unused (sparse takes per-round patches via send_weights);
-        # accepted only to match the base/factory signature.
+        # Sparse is a delta backend: it takes per-round patches via
+        # send_weights, so a `source` would silently never be sent. The
+        # parameter exists only to match the base/factory signature.
+        if source is not None:
+            raise ValueError(
+                "Sparse NCCL weight transfer takes no WeightSource; pass each "
+                "round's patches to send_weights(patches) instead."
+            )
         super().__init__(client=client, source=source, is_sender=is_sender)
         self.model_update_group: PyNcclCommunicator | None = None
 
@@ -304,14 +296,8 @@ class SparseNCCLTrainerWeightTransferEngine(
                 engine.client.init_weight_transfer_engine, asdict(worker_init_info)
             )
             # Open the trainer endpoint as NCCL rank 0 on the current device
-            # (the shared helper accepts the rendezvous fields as a dict).
-            engine.model_update_group = trainer_init(
-                {
-                    "master_address": init_info.master_address,
-                    "master_port": init_info.master_port,
-                    "world_size": init_info.world_size,
-                }
-            )
+            # (the init info satisfies the helper's rendezvous protocol).
+            engine.model_update_group = open_trainer_endpoint(init_info)
             future.result()  # surface any inference-side init error
 
         return engine
@@ -334,6 +320,7 @@ class SparseNCCLTrainerWeightTransferEngine(
                     "SparseWeightPatch.full_shape must be set to send via the "
                     f"trainer engine: {patch.name}"
                 )
+            self._validate_patch(patch)
             shapes.append(list(patch.full_shape))
 
         update_info = SparseNCCLWeightTransferUpdateInfo(
@@ -349,7 +336,8 @@ class SparseNCCLTrainerWeightTransferEngine(
         self.client.start_weight_update()
         # update_weights (workers receive) must run concurrently with the
         # trainer-side broadcasts — both rendezvous inside the same NCCL calls.
-        with ThreadPoolExecutor(max_workers=1) as exe:
+        exe = ThreadPoolExecutor(max_workers=1)
+        try:
             future = exe.submit(self.client.update_weights, asdict(update_info))
             # Cheap best-effort: if update_weights already failed (e.g. a bad
             # request rejected before any NCCL call), surface it now instead of
@@ -361,7 +349,45 @@ class SparseNCCLTrainerWeightTransferEngine(
                 self.model_update_group.broadcast(patch.indices, src=0, stream=stream)
                 self.model_update_group.broadcast(patch.values, src=0, stream=stream)
             future.result()  # surface inference-side errors
+        finally:
+            # Never wait for the RPC thread here: if a broadcast raised, the
+            # worker is still blocked in the matching NCCL call and will never
+            # return, so joining would turn the error into a permanent hang.
+            # See NCCLTrainerWeightTransferEngine.send_weights.
+            exe.shutdown(wait=False)
         self.client.finish_weight_update()
+        self._post_send_sync()
+
+    @staticmethod
+    def _validate_patch(patch: SparseWeightPatch) -> None:
+        """Reject a malformed patch before any NCCL call.
+
+        The worker checks the same invariants in `_apply_patch`, but by then the
+        broadcasts are already under way: a mismatch surfaces as a size mismatch
+        mid-transfer, which wedges both sides instead of raising. Checking here
+        keeps the failure on the trainer, before `start_weight_update`.
+        """
+        if patch.indices.dtype != torch.int32:
+            raise ValueError(
+                f"Sparse weight updates require int32 indices: {patch.name}"
+            )
+        if patch.indices.ndim != 1 or patch.values.ndim != 1:
+            raise ValueError(
+                f"Sparse weight patches must be 1D flattened updates: {patch.name}"
+            )
+        if patch.indices.numel() != patch.values.numel():
+            raise ValueError(
+                f"`indices` and `values` must have matching lengths for {patch.name}"
+            )
+
+    def _post_send_sync(self) -> None:
+        """Wait for the broadcasts to land before returning, so a caller may
+        rebuild or free the patch tensors as soon as `send_weights` returns
+        rather than relying on same-stream ordering. See
+        `NCCLTrainerWeightTransferEngine._post_send_sync` for why there is no
+        cross-rank barrier (and sparse is single-rank on the trainer anyway)."""
+        if torch.cuda.is_available():
+            torch.cuda.current_stream().synchronize()
 
     def shutdown(self) -> None:
         self.model_update_group = None

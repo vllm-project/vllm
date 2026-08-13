@@ -16,7 +16,7 @@ async fn reset_prefix_cache(base_url: &str) -> Result<()> {
         .await
         .map_err(|e| BenchError::Backend(format!("Failed to reset prefix cache: {e}")))?;
     if resp.status().is_success() {
-        println!("Prefix cache reset successfully.");
+        tracing::info!(url = %url, "reset prefix cache");
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();

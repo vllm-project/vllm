@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NCCL-based (dense) weight transfer engine."""
 
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from typing_extensions import Self
@@ -15,6 +16,8 @@ if TYPE_CHECKING:
 
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
+    ParamMeta,
+    TrainerInitInfo,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
@@ -22,10 +25,11 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
-    NCCLTrainerInitInfo,
     NCCLWeightTransferInitInfo,
-    trainer_init,
     worker_init_process_group,
+)
+from vllm.distributed.weight_transfer.nccl_common import (
+    trainer_init as open_trainer_endpoint,
 )
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -34,8 +38,8 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     packed_nccl_broadcast_producer,
 )
 
-# NCCLWeightTransferInitInfo / NCCLTrainerInitInfo are re-exported here for
-# convenience; their canonical home is nccl_common.
+# NCCLWeightTransferInitInfo is re-exported here for convenience; its canonical
+# home is nccl_common, shared with the sparse backend.
 __all__ = [
     "NCCLWeightTransferInitInfo",
     "NCCLTrainerInitInfo",
@@ -43,6 +47,30 @@ __all__ = [
     "NCCLWeightTransferEngine",
     "NCCLTrainerWeightTransferEngine",
 ]
+
+
+@dataclass
+class NCCLTrainerInitInfo(TrainerInitInfo):
+    """Trainer-side init info for the dense NCCL weight transfer backend.
+
+    The sender opens its endpoint as NCCL rank 0, so it needs no `rank_offset`.
+    `world_size` is the full trainer+worker NCCL group size. `rank` (from
+    `TrainerInitInfo`) identifies this trainer process; rank 0 is the sender.
+
+    `packed` / buffer sizes are the transfer's wire params. The trainer
+    propagates them to the worker at `trainer_init` so the two sides cannot
+    disagree. Note this defaults to packed, unlike the worker-side
+    `NCCLWeightTransferInitInfo`, whose default only applies when no trainer
+    ships a value. `backend` is the factory dispatch key."""
+
+    backend: ClassVar[str] = "nccl"
+
+    master_address: str
+    master_port: int
+    world_size: int
+    packed: bool = True
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
+    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
 
 
 @dataclass
@@ -157,56 +185,46 @@ class NCCLWeightTransferEngine(
                 "Call init_transfer_engine() first."
             )
 
-        if self.packed:
-            # Build iterator of (name, (shape, dtype)) from update_info
-            def state_dict_info_iterator():
+        from vllm.model_executor.model_loader.mtp_validation import (
+            disable_mtp_completeness_check,
+        )
+
+        with disable_mtp_completeness_check():
+            if self.packed:
+                # Build iterator of (name, (shape, dtype)) from update_info
+                def state_dict_info_iterator():
+                    for name, dtype_name, shape in zip(
+                        update_info.names, update_info.dtype_names, update_info.shapes
+                    ):
+                        dtype = getattr(torch, dtype_name)
+                        yield (name, (shape, dtype))
+
+                packed_nccl_broadcast_consumer(
+                    iterator=state_dict_info_iterator(),
+                    group=self.model_update_group,
+                    src=0,
+                    post_unpack_func=self.model.load_weights,
+                    buffer_size_bytes=self.packed_buffer_size_bytes,
+                    num_buffers=self.packed_num_buffers,
+                    device=self.device,
+                )
+            else:
+                # Use simple one-by-one broadcasting
                 for name, dtype_name, shape in zip(
                     update_info.names, update_info.dtype_names, update_info.shapes
                 ):
                     dtype = getattr(torch, dtype_name)
-                    yield (name, (shape, dtype))
-
-            packed_nccl_broadcast_consumer(
-                iterator=state_dict_info_iterator(),
-                group=self.model_update_group,
-                src=0,
-                post_unpack_func=self.model.load_weights,
-                buffer_size_bytes=self.packed_buffer_size_bytes,
-                num_buffers=self.packed_num_buffers,
-                device=self.device,
-            )
-        else:
-            # Use simple one-by-one broadcasting
-            for name, dtype_name, shape in zip(
-                update_info.names, update_info.dtype_names, update_info.shapes
-            ):
-                dtype = getattr(torch, dtype_name)
-                weight = torch.empty(shape, dtype=dtype, device=self.device)
-                self.model_update_group.broadcast(
-                    weight, src=0, stream=torch.cuda.current_stream()
-                )
-                self.model.load_weights([(name, weight)])
-                del weight
+                    weight = torch.empty(shape, dtype=dtype, device=self.device)
+                    self.model_update_group.broadcast(
+                        weight, src=0, stream=torch.cuda.current_stream()
+                    )
+                    self.model.load_weights([(name, weight)])
+                    del weight
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
             # Clean up the communicator by removing the reference
             self.model_update_group = None
-
-    @staticmethod
-    def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
-        """Removed. Use the stateful `NCCLTrainerWeightTransferEngine` instead.
-
-        Transitional stub kept only to satisfy the (still abstract)
-        `WeightTransferEngine.trainer_send_weights`; that member is dropped from
-        the worker ABC once every backend has migrated to the trainer engine.
-        """
-        raise NotImplementedError(
-            "The static NCCL trainer path has been replaced by "
-            "NCCLTrainerWeightTransferEngine. Build it via "
-            "WeightTransferTrainerFactory.trainer_init(NCCLTrainerInitInfo(...), "
-            "client=..., source=...) and drive it with send_weights()."
-        )
 
 
 class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerInitInfo]):
@@ -285,7 +303,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             future = exe.submit(
                 engine.client.init_weight_transfer_engine, asdict(worker_init_info)
             )
-            engine.model_update_group = trainer_init(init_info)
+            engine.model_update_group = open_trainer_endpoint(init_info)
             future.result()  # surface any inference-side init error
 
         return engine
@@ -300,7 +318,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
 
         if not self.is_sender:
             # Non-sender ranks only join the trainer-side gather collective.
-            self._broadcast(source)
+            self._broadcast(source, meta)
+            self._post_send_sync()
             return
 
         update_info = NCCLWeightTransferUpdateInfo(
@@ -312,43 +331,122 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         self.client.start_weight_update()
         # update_weights (workers receive) must run concurrently with the
         # trainer-side broadcast — both rendezvous inside the same NCCL calls.
-        with ThreadPoolExecutor(max_workers=1) as exe:
+        exe = ThreadPoolExecutor(max_workers=1)
+        try:
             future = exe.submit(self.client.update_weights, asdict(update_info))
             # Cheap best-effort: if update_weights already failed (e.g. a bad
             # request rejected before any NCCL call), surface it now instead of
             # hanging in broadcast waiting for a peer that will never arrive.
             if future.done():
                 future.result()
-            self._broadcast(source)
+            self._broadcast(source, meta)
             future.result()  # surface inference-side errors
+        finally:
+            # Never wait for the RPC thread here. If the broadcast raised, the
+            # worker is still blocked in the matching NCCL call and will never
+            # return, so joining would turn the error into a permanent hang.
+            # Let the exception out instead; the transfer group is unusable
+            # either way and the caller has to tear it down. (The orphaned
+            # thread is still joined at interpreter exit, so a caller that wants
+            # to exit cleanly after such a failure must not wait on it.)
+            exe.shutdown(wait=False)
         self.client.finish_weight_update()
+        self._post_send_sync()
 
-    def _broadcast(self, source: WeightSource) -> None:
+    def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
         """Iterate the source (materializing each tensor — a collective on all
         ranks) and, on the sender, broadcast from rank 0, packed or one-by-one.
         Non-sender ranks only replay the iteration to stay in the collective."""
+        if not self.is_sender:
+            for _ in source:
+                pass
+            return
+
+        assert self.model_update_group is not None, (
+            "trainer_init() must be called before _broadcast()."
+        )
+        pairs = self._checked_iter(source, meta)
         if self.packed:
-            if self.is_sender:
-                assert self.model_update_group is not None, (
-                    "trainer_init() must be called before _broadcast()."
-                )
-                packed_nccl_broadcast_producer(
-                    iterator=iter(source),
-                    group=self.model_update_group,
-                    src=0,
-                    post_iter_func=lambda item: item[1],
-                    buffer_size_bytes=self.packed_buffer_size_bytes,
-                    num_buffers=self.packed_num_buffers,
-                )
-            else:
-                for _ in source:
-                    pass
+            packed_nccl_broadcast_producer(
+                iterator=pairs,
+                group=self.model_update_group,
+                src=0,
+                post_iter_func=lambda item: item[1],
+                buffer_size_bytes=self.packed_buffer_size_bytes,
+                num_buffers=self.packed_num_buffers,
+            )
         else:
             stream = torch.cuda.current_stream()
-            for _name, tensor in source:
-                if self.is_sender:
-                    assert self.model_update_group is not None
-                    self.model_update_group.broadcast(tensor, src=0, stream=stream)
+            for _name, tensor in pairs:
+                # NCCL sends `numel` elements straight from `data_ptr()`, so a
+                # non-contiguous view would ship whatever follows its base
+                # pointer. Keep the copy referenced until the broadcast is
+                # enqueued. (The packed path linearizes in `pack_tensors`.)
+                send = tensor if tensor.is_contiguous() else tensor.contiguous()
+                self.model_update_group.broadcast(send, src=0, stream=stream)
+
+    @staticmethod
+    def _checked_iter(
+        source: WeightSource, meta: list[ParamMeta]
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        """Yield the source's pairs, checking each against what the worker was
+        told to expect.
+
+        The worker sizes its receive buffers — and in packed mode cuts its chunk
+        boundaries — from the update info, which is built from `metadata()`. If
+        iteration disagrees with it, the two sides split the stream differently
+        and the transfer hangs in NCCL or loads garbage. Checking here costs one
+        comparison per parameter and turns that into an error naming the first
+        divergent parameter. Sender-only: under pipeline parallelism a
+        non-sender's yielded tensor is not meaningful.
+        """
+        sent = 0
+        for name, tensor in source:
+            if sent >= len(meta):
+                raise ValueError(
+                    f"WeightSource yielded more parameters than metadata() "
+                    f"declared ({len(meta)}); first extra is {name!r}."
+                )
+            expected = meta[sent]
+            if (
+                name != expected.name
+                or tensor.dtype != expected.dtype
+                or tuple(tensor.shape) != expected.shape
+            ):
+                raise ValueError(
+                    "WeightSource metadata() disagrees with iteration at index "
+                    f"{sent}: declared {expected.name!r} "
+                    f"{expected.dtype} {tuple(expected.shape)}, got {name!r} "
+                    f"{tensor.dtype} {tuple(tensor.shape)}. Both channels must "
+                    "enumerate the same parameters in the same order."
+                )
+            sent += 1
+            yield name, tensor
+        if sent != len(meta):
+            raise ValueError(
+                f"WeightSource yielded {sent} parameters but metadata() "
+                f"declared {len(meta)}; the worker is waiting for the rest."
+            )
+
+    def _post_send_sync(self) -> None:
+        """Wait for this rank's transfer work to land before returning.
+
+        Broadcasts are only *enqueued* by `send_weights`: the unpacked path on
+        the current stream, the packed path on the producer's own streams (which
+        it drains itself). Waiting here lets a caller mutate parameters, or
+        start the next step on another stream, as soon as `send_weights`
+        returns, instead of silently depending on same-stream ordering. Every
+        rank waits: a non-sender's `full_tensor()` gathers feed the sender's
+        broadcast, so they must have landed before it may touch its shards.
+
+        Unlike IPC there is no cross-rank barrier here. Nothing in this backend
+        outlives the collective it travelled in (IPC's barrier keeps shared
+        buffers alive until every consumer has opened them), so a barrier would
+        only add a dependency on the default process group that this backend
+        otherwise does not have.
+        """
+        if torch.cuda.is_available():
+            torch.cuda.current_stream().synchronize()
 
     def shutdown(self) -> None:
         self.model_update_group = None

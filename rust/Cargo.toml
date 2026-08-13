@@ -13,6 +13,7 @@ members = [
     "src/server",
     "src/text",
     "src/tokenizer",
+    "src/tracing",
 ]
 resolver = "3"
 
@@ -58,10 +59,10 @@ indexmap = "2.13.0"
 indicatif = "0.18.4"
 itertools = "0.14.0"
 libc = "0.2.177"
-llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "5390032d6dc8a3e6fdc83acd320260367eb4b9b5", default-features = false, features = ["native-tls"] }
+llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "15adba5e025d8636ba4a334fb379b1371f6196a1", default-features = false, features = ["native-tls"] }
 mimalloc = "0.1.52"
-minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
-minijinja-contrib = { version = "2.0", features = ["pycompat"] }
+minijinja = { version = "2.22", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
+minijinja-contrib = { version = "2.22", features = ["pycompat"] }
 native-tls-vendored = { package = "native-tls", version = "0.2.18", features = ["vendored"] }
 ndarray = { version = "0.17", features = ["serde"] }
 openai-harmony = { package = "oss-harmony", git = "https://github.com/oss-harmony/harmony", tag = "v0.0.11", default-features = false }
@@ -118,10 +119,11 @@ tokio = { version = "1.47.1", features = [
 tokio-openssl = "0.6"
 tokio-stream = "0.1"
 tokio-util = { version = "0.7.18", features = ["rt"] }
-tonic = "0.14.5"
-tonic-build = "0.14.5"
-tonic-prost = "0.14.5"
-tonic-prost-build = "0.14.5"
+tonic = "0.14.6"
+tonic-build = "0.14.6"
+tonic-health = "0.14.6"
+tonic-prost = "0.14.6"
+tonic-prost-build = "0.14.6"
 tool-parser = "1.2.0"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6.8", features = ["cors", "trace"] }
@@ -142,6 +144,7 @@ vllm-parser = { path = "src/parser" }
 vllm-server = { path = "src/server" }
 vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
+vllm-tracing = { path = "src/tracing" }
 winnow = { version = "1.0.2", features = ["simd"] }
 xgrammar-structural-tag = "0.2.0"
 zeromq = { version = "0.6.0", default-features = false, features = [

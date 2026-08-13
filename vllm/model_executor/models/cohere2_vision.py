@@ -416,7 +416,7 @@ class Cohere2VisionForConditionalGeneration(
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig
+        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back

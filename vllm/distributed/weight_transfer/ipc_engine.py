@@ -13,9 +13,6 @@ from typing_extensions import Self
 
 from vllm import envs
 from vllm.config.weight_transfer import WeightTransferConfig
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
     TrainerWeightTransferEngine,
@@ -26,8 +23,11 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
 )
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    PackedBufferImporter,
     packed_ipc_consumer,
     packed_ipc_producer,
 )
@@ -62,12 +62,7 @@ class IPCTrainerInitInfo(TrainerInitInfo):
 
 @dataclass
 class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
-    """Per-round update info for the IPC weight transfer backend.
-
-    Whether the transfer is packed is a must-agree wire param carried on the
-    init info (`IPCTrainerInitInfo` / `IPCWeightTransferInitInfo`), not here;
-    this carries only per-round metadata and the IPC handles.
-    """
+    """Per-round update info for the IPC weight transfer backend."""
 
     names: list[str]
     dtype_names: list[str]
@@ -149,6 +144,9 @@ class IPCWeightTransferEngine(
         # Set from the trainer-supplied init info at the handshake; defaults are
         # only for the (unreachable) receive-before-init case.
         self.packed = False
+        # Shared across all chunks of every packed transfer this engine
+        # receives; see PackedBufferImporter for the refcount contract.
+        self._packed_importer = PackedBufferImporter()
 
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """
@@ -176,6 +174,12 @@ class IPCWeightTransferEngine(
         )
 
         finalize_layerwise_reload(self.model, self.model_config)
+        # Every reduce_tensor call is a fresh export with its own refcount
+        # slot, so releasing once per update always balances this update's
+        # export and lets the trainer reclaim its staging buffer. Callers
+        # that skip finish are still covered by the replace-on-next-export
+        # path inside the importer.
+        self._packed_importer.close()
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """
@@ -208,6 +212,7 @@ class IPCWeightTransferEngine(
                 dtype_names=update_info.dtype_names,
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
+                importer=self._packed_importer,
             )
         else:
             assert isinstance(update_info.ipc_handles, list)
@@ -234,25 +239,15 @@ class IPCWeightTransferEngine(
                 weight = rebuild_cuda_tensor(*list_args)
                 weights.append((name, weight))
 
-        self.model.load_weights(weights)
+        from vllm.model_executor.model_loader.mtp_validation import (
+            disable_mtp_completeness_check,
+        )
+
+        with disable_mtp_completeness_check():
+            self.model.load_weights(weights)
 
     def shutdown(self) -> None:
-        pass
-
-    @staticmethod
-    def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
-        """Removed. Use the stateful `IPCTrainerWeightTransferEngine` instead.
-
-        Transitional stub kept only to satisfy the (still abstract)
-        `WeightTransferEngine.trainer_send_weights`; that member is dropped from
-        the worker ABC once every backend has migrated to the trainer engine.
-        """
-        raise NotImplementedError(
-            "The static IPC trainer path has been replaced by "
-            "IPCTrainerWeightTransferEngine. Build it via "
-            "WeightTransferTrainerFactory.trainer_init(IPCTrainerInitInfo(...), "
-            "client=..., source=...) and drive it with send_weights()."
-        )
+        self._packed_importer.close()
 
 
 class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitInfo]):
@@ -314,32 +309,37 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         source = self.source
         if self.is_sender:
             self.client.start_weight_update()
-        self._send(source)
+        # Unpacked returns strong refs to its IPC-shared copies; they must stay
+        # alive across `finish_weight_update` too.
+        weight_refs = self._send(source)
         if self.is_sender:
             self.client.finish_weight_update()
         self._post_send_sync()
+        del weight_refs
 
     # ---- data plane (runs on all ranks; only the sender ships) ----
 
-    def _send(self, source: WeightSource) -> None:
+    def _send(self, source: WeightSource) -> list[torch.Tensor] | None:
         if self.packed:
             self._send_packed(source)
-        else:
-            self._send_unpacked(source)
+            return None
+        return self._send_unpacked(source)
 
-    @staticmethod
     def _all_gather_and_merge_handles(
+        self,
         handles: list[dict[str, tuple]],
     ) -> list[dict[str, tuple]]:
         """All-gather and merge IPC handle dicts across ranks in one call.
 
         Each rank contributes a list of {gpu_uuid: ipc_args} dicts (one
         per parameter or one per chunk). A single all_gather_object
-        collects every rank's full list, then rank 0 merges per-index so
+        collects every rank's full list, then the sender merges per-index so
         each dict maps every GPU UUID to its args.
 
-        Non-rank-0 returns a list of empty dicts.
-        No-op (returns handles unchanged) when no distributed group exists.
+        The all-gather runs over the *default* process group; this assumes the
+        default group is exactly the set of colocated trainer ranks and that the
+        sender is a member. No-op (returns handles unchanged) when no distributed
+        group exists.
         """
         if (
             not torch.distributed.is_initialized()
@@ -353,7 +353,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         torch.distributed.barrier()
         torch.cuda.synchronize()
 
-        if torch.distributed.get_rank() == 0:
+        if self.is_sender:
             merged: list[dict[str, tuple]] = []
             for param_idx in range(len(handles)):
                 m: dict[str, tuple] = {}
@@ -374,18 +374,19 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             torch.distributed.barrier()
         torch.cuda.ipc_collect()
 
-    def _send_unpacked(self, source: WeightSource) -> None:
+    def _send_unpacked(self, source: WeightSource) -> list[torch.Tensor]:
         """Iterate the source, build one IPC handle per param, all-gather the
-        handles across ranks, and (sender) ship them in one update call."""
+        handles across ranks, and (sender) ship them in one update call.
+
+        Returns the strong refs to every contiguous copy. reduce_tensor's args
+        do NOT keep storage alive, and non-contiguous inputs allocate fresh
+        storage in .contiguous(); the caller must keep these alive until the
+        post-send barrier (past `finish`) so the consumer's IPC views stay valid.
+        """
         names: list[str] = []
         dtype_names: list[str] = []
         shapes: list[list[int]] = []
         ipc_handles: list[dict[str, tuple]] = []
-        # Hold strong refs to every contiguous copy until the send + post-send
-        # sync completes. reduce_tensor's returned args do NOT keep storage
-        # alive, and non-contiguous inputs allocate fresh storage in
-        # .contiguous() that would otherwise be GC'd before the consumer opens
-        # the IPC handle.
         weight_refs: list[torch.Tensor] = []
 
         for name, tensor in source:
@@ -406,6 +407,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             shapes=shapes,
             ipc_handles=ipc_handles,
         )
+        return weight_refs
 
     def _send_packed(self, source: WeightSource) -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
