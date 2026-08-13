@@ -393,6 +393,7 @@ def sparse_attn_indexer(
             slot_mapping,
             num_decode_tokens,
             use_pcp,
+            shard_decode_requests=dcp_world_size == 1,
         )
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None

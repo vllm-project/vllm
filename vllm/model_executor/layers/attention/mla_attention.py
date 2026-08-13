@@ -699,6 +699,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     if attn_metadata is not None
                     else None,
                     self.use_pcp,
+                    shard_decode_requests=self.impl.dcp_world_size == 1,
                 )
             )
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
@@ -1279,6 +1280,7 @@ def unified_mla_kv_cache_update(
             layer_slot_mapping,
             attn_metadata.num_decode_tokens if attn_metadata is not None else None,
             attn_layer.use_pcp,
+            shard_decode_requests=attn_layer.impl.dcp_world_size == 1,
         )
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
