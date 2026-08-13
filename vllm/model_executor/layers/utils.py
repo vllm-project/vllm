@@ -116,6 +116,19 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
+    if envs.VLLM_BATCH_INVARIANT:
+        # Every branch below picks its kernel from the token count, so the
+        # result of a row depends on how many rows it was launched with.
+        # UnquantizedLinearMethod.apply short-circuits before reaching here, but
+        # models and fusion passes call this op directly -- gpt-oss routes its
+        # MoE router through it, where a perturbed logit changes which experts
+        # a token is sent to.
+        from vllm.model_executor.layers.batch_invariant import (
+            linear_batch_invariant,
+        )
+
+        return linear_batch_invariant(x, weight, bias)
+
     from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250
 
     n = x.numel() // x.size(-1)

@@ -4,12 +4,13 @@
 
 import pytest
 import torch
-from utils import skip_if_not_cuda, skip_unsupported
 
 from vllm.model_executor.layers.batch_invariant import (
     rms_norm_batch_invariant,
 )
 from vllm.platforms import current_platform
+
+from .utils import skip_if_not_cuda_alike, skip_unsupported
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -27,7 +28,7 @@ def _rms_norm_reference(
     return (output * weight.float()).to(input_tensor.dtype)
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("batch_size", [1, 4, 64, 300])
 @pytest.mark.parametrize("hidden_size", [512, 2048, 4096, 8192])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -77,7 +78,7 @@ def test_rms_norm_batch_invariant_vs_reference(
     )
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("hidden_size", [512, 4096])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("eps", [1e-6])
@@ -192,7 +193,7 @@ def _assert_rows_bit_identical(small, large, msg):
         torch.testing.assert_close(small, large, rtol=0.0, atol=0.0, msg=msg)
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("hidden_size", [512, 4096])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("seed", list(range(4)))
@@ -224,7 +225,7 @@ def test_rms_norm_batch_invariant_nonresidual_kernel(
     )
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("hidden_size", [512, 4096])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("seed", list(range(4)))
@@ -270,7 +271,7 @@ def test_rms_norm_static_fp8_quant_batch_invariant(
     )
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("hidden_size", [512, 4096])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("seed", list(range(4)))
@@ -306,7 +307,7 @@ def test_rms_norm_per_block_quant_batch_invariant(
     )
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("batch_size", [1, 16, 128])
 @pytest.mark.parametrize("seq_len", [1, 32, 512])
 @pytest.mark.parametrize("hidden_size", [2048, 4096])
@@ -347,7 +348,7 @@ def test_rms_norm_3d_input(
     )
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 def test_rms_norm_numerical_stability(default_vllm_config):
     """
     Test RMS norm numerical stability with extreme values.
@@ -437,7 +438,7 @@ def test_rms_norm_formula(default_vllm_config):
     )
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("hidden_size", [128, 1024, 4096, 16384])
 def test_rms_norm_different_hidden_sizes(default_vllm_config, hidden_size: int):
     """

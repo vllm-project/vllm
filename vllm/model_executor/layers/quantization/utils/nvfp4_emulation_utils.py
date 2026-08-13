@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
@@ -478,5 +479,17 @@ def run_nvfp4_emulations(
     )
 
     # matmul
+    if envs.VLLM_BATCH_INVARIANT:
+        # Call the kernel directly, the same way UnquantizedLinearMethod.apply
+        # does, rather than relying on the aten::matmul override. The override
+        # does now hold inside a compiled region -- Inductor dispatches the
+        # ``.out`` overloads, which batch-invariant mode registers -- so this is
+        # belt and braces, but it keeps the emulation path independent of which
+        # overloads a future Inductor emits.
+        from vllm.model_executor.layers.batch_invariant import (
+            matmul_batch_invariant,
+        )
+
+        return matmul_batch_invariant(x_dq, w_dq.t())
     out = torch.matmul(x_dq, w_dq.t())
     return out

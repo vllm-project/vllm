@@ -100,7 +100,18 @@ if is_aiter_found_and_supported():
                 x_q.shape[0], weight.shape[0], device=x_q.device, dtype=out_dtype
             )
 
-            gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
+            config = None
+            if envs.VLLM_BATCH_INVARIANT:
+                # The tuned config asks for a four-way split-K at M <= 8 and
+                # none above it, which changes the order an output element's K
+                # contributions are summed in. Keep the tuned tile, drop the
+                # split. _get_config takes the packed K, as gemm_afp4wfp4 does.
+                from aiter.ops.triton.gemm_afp4wfp4 import _get_config
+
+                config, _ = _get_config(M, N, K)
+                config = dict(config, NUM_KSPLIT=1)
+
+            gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y, config)
             return y
 
     def gemm_with_dynamic_quant_fake(

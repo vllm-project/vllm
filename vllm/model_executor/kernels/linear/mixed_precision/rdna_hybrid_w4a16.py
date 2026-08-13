@@ -17,6 +17,7 @@ from contextlib import nullcontext
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     unpack_quantized_values_into_int32,
 )
@@ -465,6 +466,18 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
 
         if not _on_gfx1x():
             return False, "RDNAHybridW4A16LinearKernel only targets gfx11/gfx12"
+
+        if envs.VLLM_BATCH_INVARIANT:
+            # Precautionary, not measured -- no gfx11/gfx12 hardware was
+            # available. This kernel switches between two independent
+            # implementations on the batch size: a HIP skinny GEMM at
+            # M <= MAX_SKINNY_BATCH_SIZE and a Triton fused-dequant GEMM above
+            # it. Note that is only weak evidence on its own: the ROCm fp8
+            # kernel makes the same wvSplitKQ-versus-library switch at M <= 4
+            # and was measured bitwise invariant across it. Excluding this
+            # kernel falls through to TritonW4A16LinearKernel, which was
+            # measured invariant on gfx950, so the cost of being wrong is low.
+            return False, "batch invariance not supported"
 
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (

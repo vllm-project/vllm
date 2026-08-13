@@ -2504,18 +2504,9 @@ steps:
 
 #------------------------------------------------------------  mi300 · v1  -------------------------------------------------------------#
 
-# Replaces the former `Batch Invariance (H100-MI250)` step. gfx90a is dropped
-# rather than extended: the batch-invariance work being staged targets gfx942
-# and gfx950, and the step it replaces has been reporting green while skipping
-# every test in the suite -- ROCm matched no entry in the determinism suite's
-# DEVICE_BACKENDS until this series.
-#
-# `optional: true`, and expected to be red before it is green. This stages the
-# suite on the hardware ahead of the enablement rather than reporting a property
-# that holds; the tag comes off, and the group moves to a test_areas mirror,
-# once the enablement lands and it passes. No multi-GPU steps here: the modules
-# that need them arrive with the PR that makes their property true, and that PR
-# adds the step.
+# Replaces the former `Batch Invariance (H100-MI250)` step: gfx90a is dropped
+# rather than extended because every MX module skips there. `optional: true`
+# until ROCm advertises batch-invariance support.
 - label: Batch Invariance (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -2526,6 +2517,7 @@ steps:
   source_file_dependencies:
   - vllm/v1/attention
   - vllm/model_executor/layers
+  - vllm/model_executor/kernels
   - tests/v1/determinism/
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
@@ -2536,6 +2528,7 @@ steps:
   - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
   - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
   - pytest -v -s v1/determinism/test_online_batch_invariance.py
+  - pytest -v -s v1/determinism/test_moe_row_permutation_batch_invariant.py
 
 - label: Acceptance Length Test (Large Models) # TBD
   timeout_in_minutes: 180
@@ -3755,6 +3748,9 @@ steps:
 
 #------------------------------------------------------------  mi355 · v1  -------------------------------------------------------------#
 
+# gfx950 mirrors of the `Batch Invariance` steps in test_areas/misc.yaml; the
+# multi-GPU ones have no AMD `test_areas` mirror yet, and all are
+# `optional: true` for the reason given on the mi300 step.
 - label: Batch Invariance (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3765,6 +3761,7 @@ steps:
   source_file_dependencies:
   - vllm/v1/attention
   - vllm/model_executor/layers
+  - vllm/model_executor/kernels
   - tests/v1/determinism/
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
@@ -3775,6 +3772,30 @@ steps:
   - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
   - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
   - pytest -v -s v1/determinism/test_online_batch_invariance.py
+  - pytest -v -s v1/determinism/test_moe_row_permutation_batch_invariant.py
+  # MX is gfx950 only; this self-skips elsewhere.
+  - pytest -v -s v1/determinism/test_mx_linear_batch_invariant.py
+
+- label: Batch Invariance (4xH100-4xMI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention
+  - vllm/model_executor/layers
+  - vllm/distributed
+  - tests/v1/determinism/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pip install pytest-timeout pytest-forked
+  - pytest -v -s v1/determinism/test_tp_all_reduce_batch_invariant.py -m 'distributed(num_gpus=4)'
+  - pytest -v -s v1/determinism/test_tp_reduce_scatter_batch_invariant.py -m 'distributed(num_gpus=4)'
 
 - label: V1 attention (B200-MI355) %N # TBD
   timeout_in_minutes: 180

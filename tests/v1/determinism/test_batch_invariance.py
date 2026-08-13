@@ -5,7 +5,12 @@ import random
 
 import pytest
 import torch
-from utils import (
+
+import vllm.envs as envs
+from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
+
+from .utils import (
     BACKENDS,
     TEST_MODEL,
     _extract_step_logprobs,
@@ -14,10 +19,6 @@ from utils import (
     skip_if_not_cuda,
     skip_unsupported,
 )
-
-import vllm.envs as envs
-from vllm import LLM, SamplingParams
-from vllm.platforms import current_platform
 
 
 @skip_unsupported

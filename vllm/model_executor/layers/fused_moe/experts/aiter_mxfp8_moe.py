@@ -89,6 +89,14 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         return True
 
     @staticmethod
+    def _supports_batch_invariance() -> bool:
+        # TritonExperts declares True, but this subclass runs aiter's FlyDSL
+        # two-stage grouped GEMM, whose tuned table picks the stage-2 kernel
+        # (reduce vs. atomic) by token count and is not even run-to-run
+        # reproducible at a fixed token count.
+        return False
+
+    @staticmethod
     def is_supported_config(
         cls, moe_config, weight_key, activation_key, activation_format
     ):

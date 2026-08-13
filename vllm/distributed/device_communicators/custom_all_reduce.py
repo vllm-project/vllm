@@ -452,7 +452,10 @@ class CustomAllreduce:
         return out
 
     def should_custom_reduce_scatter(self, inp: torch.Tensor) -> bool:
-        if self.disabled or not current_platform.is_cuda():
+        # cross_device_reduce_scatter is portable code in the same translation
+        # unit as the all-reduce kernels ROCm already serves, and CMake has
+        # always built it for HIP; the CUDA-only gate was an oversight.
+        if self.disabled or not current_platform.is_cuda_alike():
             return False
         if self.world_size == 16 and not self.mnnvl_only:
             return False

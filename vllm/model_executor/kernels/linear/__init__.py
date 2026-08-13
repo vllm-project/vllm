@@ -211,6 +211,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+    BatchInvariantFP8ScaledMMLinearKernel,
     TritonFp8BlockScaledMMKernel,
     TritonInt8ScaledMMLinearKernel,
 )
@@ -680,6 +681,11 @@ def init_fp8_linear_kernel(
     )
 
     if activation_quant_key.scale.group_shape.is_per_group():
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
+            # AiterFp8BlockScaledMMKernel is first in the ROCm priority list and
+            # is not batch invariant; the Triton block kernel is.
+            force_kernel = TritonFp8BlockScaledMMKernel  # type: ignore[assignment]
+
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
             possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
@@ -711,6 +717,16 @@ def init_fp8_linear_kernel(
         )
 
     else:
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
+            # The stock ROCm fp8 path is batch invariant in eager but not once
+            # Inductor has it: RedHatAI/Qwen3-1.7B-FP8-dynamic is 16/16 eager
+            # and 8/16 compiled, while torch._scaled_mm and the per-token
+            # activation quant are each invariant when measured on their own.
+            # A Triton kernel invoked by name is opaque to Inductor, so it keeps
+            # the property. CUDA reaches for the batch-invariant CUTLASS
+            # epilogue here; ROCm has no equivalent.
+            force_kernel = BatchInvariantFP8ScaledMMLinearKernel
+
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
             possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[arg-type]
