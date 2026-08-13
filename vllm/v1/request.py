@@ -74,6 +74,7 @@ class Request:
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
+        session_id: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
@@ -100,6 +101,8 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        # E/P/D: Connector-specific encoder-cache transfer parameters.
+        self.ec_transfer_params: dict[str, Any] | None = None
 
         if pooling_params is not None:
             # Pooling models.
@@ -115,6 +118,14 @@ class Request:
                 self.kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
                 )
+                self.ec_transfer_params = sampling_params.extra_args.get(
+                    "ec_transfer_params"
+                )
+                self.kv_cache_report_mode = sampling_params.extra_args.get(
+                    "kv_cache_report_mode", "incremental"
+                )
+            else:
+                self.kv_cache_report_mode = "incremental"
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
 
@@ -139,7 +150,12 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
-        self.async_tokens_to_discard = 0
+        # Tokens of output in flight when the request was preempted: delivered
+        # on return, but must not mutate the reset counters.
+        self.num_stale_output_tokens = 0
+        # Drop the stale output instead, for same-step preempt + resume
+        # (reset_prefix_cache).
+        self.drop_stale_output = False
 
         # Tokens of steps whose output is not yet processed (async scheduling
         # and PP run ahead of the GPU); `num_computed_tokens` counts them
@@ -168,9 +184,15 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
+        self.session_id = session_id
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
+
+        # Block-aligned token position of a proven shared prefix worth pinning
+        # in the (sparse) prefix cache; 0 means none. Set at admission for
+        # hybrid/Mamba models when a shared prefix is detected (Marconi-style).
+        self.shared_prefix_boundary = 0
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
@@ -221,6 +243,7 @@ class Request:
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
             resumable=request.resumable,
+            session_id=request.session_id,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,

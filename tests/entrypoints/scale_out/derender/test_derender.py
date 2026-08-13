@@ -10,7 +10,6 @@ import pytest_asyncio
 from tests.utils import (
     RemoteLaunchRenderServer,
     download_url_to_file,
-    get_vllm_test_cache_dir,
 )
 from vllm.tokenizers import get_tokenizer
 
@@ -310,6 +309,25 @@ async def test_derender_chat_unknown_model(client):
         },
     )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_model_omitted_resolves_served_name(client):
+    """Omitting `model` resolves the served name rather than rejecting.
+
+    Mirrors test_serving_chat.py's "full name is returned when no model is
+    specified" assertion for the derender path. Asserts the resolved value,
+    not just the status, so the fallback is proven to have fired.
+    """
+    gen_req = await _render_chat(client)
+    synthetic_ids = gen_req["token_ids"][:3]
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={"generate_response": _make_generate_response(synthetic_ids)},
+    )
+    assert response.status_code == 200
+    assert response.json()["model"] == MODEL_NAME
 
 
 # ---------------------------------------------------------------------------
@@ -993,40 +1011,25 @@ def _ensure_harmony_vocab():
     """Pre-cache the o200k_base BPE file needed by openai-harmony.
 
     The Rust tiktoken-rs backend downloads from Azure Blob Storage, which
-    may be unreachable in some environments.  When the cache is cold we
-    fetch the file into the persistent vLLM test cache, then expose it at
-    ``/tmp/tiktoken-rs-cache/`` using the SHA-1(URL) filename that
-    tiktoken-rs expects.
+    may be unreachable in some environments. When the cache is cold, fetch
+    the file atomically into ``TIKTOKEN_RS_CACHE_DIR`` (or its default
+    location) using the SHA-1(URL) filename that tiktoken-rs expects.
     """
     import hashlib
     import os
-    import shutil
+    import tempfile
     from pathlib import Path
 
     url = "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
     cache_key = hashlib.sha1(url.encode()).hexdigest()
 
-    persistent_cache_file = download_url_to_file(
-        url, get_vllm_test_cache_dir("tiktoken-rs") / cache_key
-    ).resolve()
-
-    runtime_cache_dir = Path("/tmp/tiktoken-rs-cache")
-    runtime_cache_file = runtime_cache_dir / cache_key
-    if runtime_cache_file.is_file() and runtime_cache_file.stat().st_size > 0:
-        return
-
-    if runtime_cache_file.exists() or runtime_cache_file.is_symlink():
-        runtime_cache_file.unlink()
-
-    runtime_cache_dir.mkdir(parents=True, exist_ok=True)
-    tmp_cache_file = runtime_cache_file.with_name(
-        f".{runtime_cache_file.name}.{os.getpid()}.tmp"
+    runtime_cache_dir = Path(
+        os.environ.get(
+            "TIKTOKEN_RS_CACHE_DIR",
+            str(Path(tempfile.gettempdir()) / "tiktoken-rs-cache"),
+        )
     )
-    try:
-        shutil.copy2(persistent_cache_file, tmp_cache_file)
-        tmp_cache_file.replace(runtime_cache_file)
-    finally:
-        tmp_cache_file.unlink(missing_ok=True)
+    download_url_to_file(url, runtime_cache_dir / cache_key)
 
 
 @pytest.fixture(scope="module")

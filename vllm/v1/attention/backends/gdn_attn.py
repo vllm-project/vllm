@@ -21,7 +21,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -80,18 +80,18 @@ class GDNAttentionMetadata:
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
+    kv_cache_spec: MambaSpec
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     reorder_batch_threshold: int = 1
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: MambaSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        assert isinstance(kv_cache_spec, MambaSpec)
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
@@ -177,7 +177,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
-        context_lens_tensor = m.compute_num_computed_tokens()
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         block_table_tensor = mamba_get_block_table_tensor(
             m.block_table_tensor,
@@ -331,7 +330,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
         if num_prefills > 0:
-            from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
+            from vllm.third_party.flash_linear_attention.ops.utils import (
+                FLA_CHUNK_SIZE,
+            )
 
             # In a mixed non-spec batch, decodes are peeled off to the recurrent
             # kernel (decode-first front slice), so build chunk metadata from the
@@ -371,7 +372,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 # Only prefill batches use FLA chunk ops.
                 # Pre-compute on CPU and async-copy to GPU to avoid
                 # GPU→CPU sync (.tolist()) in prepare_chunk_indices.
-                from vllm.model_executor.layers.fla.ops.index import (
+                from vllm.third_party.flash_linear_attention.ops.index import (
                     prepare_chunk_indices,
                     prepare_chunk_offsets,
                 )
@@ -387,6 +388,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
         if num_prefills > 0:
+            context_lens_tensor = m.compute_num_computed_tokens()
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks_cpu is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
