@@ -548,6 +548,10 @@ class RocmPlatform(Platform):
             import vllm._rocm_C  # noqa: F401
 
     @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
+
+    @classmethod
     def is_pin_memory_available(cls) -> bool:
         if in_wsl():
             version = _get_wsl_kernel_version()
