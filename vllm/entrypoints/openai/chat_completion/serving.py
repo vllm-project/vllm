@@ -155,6 +155,7 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_log_deltas = enable_log_deltas
 
         self.enable_auto_tools: bool = enable_auto_tools
+        self._include_reasoning_tokens_details = reasoning_parser is not None
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -549,6 +550,8 @@ class OpenAIServingChat(GenerateBaseServing):
                                 total_tokens=num_prompt_tokens,
                                 completion_tokens_details=(
                                     _make_completion_tokens_details(0)
+                                    if self._include_reasoning_tokens_details
+                                    else None
                                 ),
                             )
 
@@ -588,6 +591,8 @@ class OpenAIServingChat(GenerateBaseServing):
                                         total_tokens=num_prompt_tokens,
                                         completion_tokens_details=(
                                             _make_completion_tokens_details(0)
+                                            if self._include_reasoning_tokens_details
+                                            else None
                                         ),
                                     )
 
@@ -780,6 +785,8 @@ class OpenAIServingChat(GenerateBaseServing):
                                 _make_completion_tokens_details(
                                     previous_reasoning_tokens[i]
                                 )
+                                if self._include_reasoning_tokens_details
+                                else None
                             ),
                         )
 
@@ -796,7 +803,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     total_tokens=num_prompt_tokens + completion_tokens,
                     completion_tokens_details=_make_completion_tokens_details(
                         sum(previous_reasoning_tokens)
-                    ),
+                    )
+                    if self._include_reasoning_tokens_details
+                    else None,
                 )
                 final_usage.prompt_tokens_details = _make_prompt_tokens_details(
                     self.enable_prompt_tokens_details,
@@ -843,7 +852,9 @@ class OpenAIServingChat(GenerateBaseServing):
                 total_tokens=num_prompt_tokens + num_completion_tokens,
                 completion_tokens_details=_make_completion_tokens_details(
                     sum(previous_reasoning_tokens)
-                ),
+                )
+                if self._include_reasoning_tokens_details
+                else None,
             )
 
             # Log complete streaming response if output logging is enabled
@@ -1097,7 +1108,9 @@ class OpenAIServingChat(GenerateBaseServing):
             total_tokens=num_prompt_tokens + num_generated_tokens,
             completion_tokens_details=_make_completion_tokens_details(
                 total_reasoning_tokens
-            ),
+            )
+            if self._include_reasoning_tokens_details
+            else None,
         )
         usage.prompt_tokens_details = _make_prompt_tokens_details(
             self.enable_prompt_tokens_details,

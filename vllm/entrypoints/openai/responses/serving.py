@@ -487,6 +487,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         response_parser=response_parser,
                     )
 
+            reasoning_parser_kwargs = None
             if (
                 context.response_parser is not None
                 and context.response_parser.reasoning_parser is not None
@@ -518,9 +519,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
                 session_id=session_id,
-                reasoning_parser_kwargs=reasoning_parser_kwargs
-                if self.parser and self.parser.reasoning_parser_cls is not None
-                else None,
+                reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
             generators.append(generator)
 

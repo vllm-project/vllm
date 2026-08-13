@@ -627,6 +627,7 @@ def _build_minimal_metrics_serving_chat(
     serving.response_role = "assistant"
     serving.parser_cls = None
     serving.enable_auto_tools = False
+    serving._include_reasoning_tokens_details = False
     serving.enable_prompt_tokens_details = False
     serving.enable_log_outputs = False
     serving.enable_log_deltas = False
@@ -725,6 +726,7 @@ async def test_chat_per_request_metrics_follow_server_flag():
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
     assert disabled_response.metrics is None
+    assert disabled_response.usage.completion_tokens_details is None
 
     enabled_serving = _build_minimal_metrics_serving_chat(
         enable_per_request_metrics=True

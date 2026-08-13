@@ -64,7 +64,10 @@ class TokenIDScanner:
 
     def _decode_token(self, token_id: int) -> str:
         if token_id not in self._token_text_cache:
-            self._token_text_cache[token_id] = self.tokenizer.decode([token_id])
+            token_text = self.tokenizer.decode([token_id])
+            self._token_text_cache[token_id] = (
+                token_text if isinstance(token_text, str) else ""
+            )
         return self._token_text_cache[token_id]
 
     def _decode_tokens(self, token_ids: Sequence[int]) -> tuple[str, ...]:
