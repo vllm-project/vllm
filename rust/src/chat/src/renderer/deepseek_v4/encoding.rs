@@ -153,10 +153,10 @@ fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, &'st
             reasoning_effort_prompt = "";
         }
         None => {
-            if enable_thinking.is_none() {
+            if thinking_mode == ThinkingMode::Thinking {
                 DEFAULT_REASONING_EFFORT_WARNING.call_once(|| {
                     warn!(
-                        "DeepSeek-V4 request omitted both thinking/enable_thinking and \
+                        "DeepSeek-V4 request enables thinking mode without setting \
                          reasoning_effort; this now defaults to thinking mode with \
                          reasoning_effort=\"high\", which renders a reasoning-effort prompt \
                          prefix that was previously omitted by default. Pass \

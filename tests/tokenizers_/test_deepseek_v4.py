@@ -101,12 +101,30 @@ def test_deepseek_v4_warns_when_defaulting_reasoning_effort(caplog, disable_log_
     )
 
 
+@pytest.mark.parametrize("kwargs", [{"thinking": True}, {"enable_thinking": True}])
+def test_deepseek_v4_warns_when_thinking_explicit_without_reasoning_effort(
+    kwargs, caplog, disable_log_dedup
+):
+    with caplog.at_level("WARNING"):
+        _tokenizer().apply_chat_template(
+            [{"role": "user", "content": "Hello"}],
+            tokenize=False,
+            **kwargs,
+        )
+
+    assert any(
+        "defaults to thinking mode with reasoning_effort" in record.message
+        for record in caplog.records
+    )
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"thinking": True},
-        {"enable_thinking": True},
         {"reasoning_effort": "high"},
+        {"thinking": True, "reasoning_effort": "low"},
+        {"thinking": False},
+        {"enable_thinking": False},
     ],
 )
 def test_deepseek_v4_does_not_warn_when_explicit(kwargs, caplog, disable_log_dedup):

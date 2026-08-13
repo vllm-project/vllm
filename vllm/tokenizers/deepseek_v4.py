@@ -40,10 +40,10 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 thinking_enabled = True
             thinking_mode = "thinking" if thinking_enabled else "chat"
 
-            if thinking_unset and not isinstance(kwargs.get("reasoning_effort"), str):
+            if thinking_enabled and not isinstance(kwargs.get("reasoning_effort"), str):
                 logger.warning_once(
-                    "DeepSeek-V4 request omitted both `thinking`/`enable_thinking` "
-                    "and `reasoning_effort`; this now defaults to thinking mode "
+                    "DeepSeek-V4 request enables thinking mode without setting "
+                    "`reasoning_effort`; this now defaults to thinking mode "
                     'with reasoning_effort="high", which renders a '
                     "reasoning-effort prompt prefix that was previously omitted "
                     'by default. Pass reasoning_effort="low" explicitly to '
