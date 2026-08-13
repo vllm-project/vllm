@@ -202,7 +202,6 @@ steps:
       - build-wheels
       - build-additional-wheels
       - generate-wheel-indices
-      - publish-xpu-triton-shim
     allow_dependency_failure: true
     agents:
       queue: cpu_queue_release
