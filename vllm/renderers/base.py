@@ -89,15 +89,13 @@ class BaseRenderer(ABC, Generic[_T]):
         # multimodal processor receives a deep-copied tokenizer (see #36557)
         # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
-        self._executor = self._resources.enter_context(
-            ThreadPoolExecutor(max_workers=pool_workers)
-        )
+        self._executor = ThreadPoolExecutor(max_workers=pool_workers)
+        self._resources.callback(self._executor.shutdown, wait=False)
 
         # Separate single-worker executor so tokenization never queues behind
         # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
-        self._mm_executor = self._resources.enter_context(
-            ThreadPoolExecutor(max_workers=1)
-        )
+        self._mm_executor = ThreadPoolExecutor(max_workers=1)
+        self._resources.callback(self._mm_executor.shutdown, wait=False)
 
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
@@ -132,8 +130,6 @@ class BaseRenderer(ABC, Generic[_T]):
                 )
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
-            if mm_processor_cache is not None:
-                self._resources.callback(self.mm_processor_cache.close)
 
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
@@ -144,6 +140,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
             if mm_processor_cache:
                 self._mm_cache_stats = MultiModalCacheStats()
+                self._resources.callback(mm_processor_cache.close)
 
             # A second processor with its own processor-only cache.
             # Used by the tokenize endpoint so that tokenize-only
