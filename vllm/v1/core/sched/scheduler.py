@@ -30,7 +30,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
@@ -46,7 +45,6 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     ScheduledEncoderInputStats,
     SchedulerOutput,
-    strip_covered_mm_data,
 )
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
@@ -1434,7 +1432,6 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
         resumed_req_ids = set()
-        resumed_mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
 
         num_running_reqs = len(running_reqs)
         for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
@@ -1458,13 +1455,6 @@ class Scheduler(SchedulerInterface):
                 new_token_ids.append(token_ids)
             if idx >= num_running_reqs:
                 resumed_req_ids.add(req_id)
-                if req.mm_features:
-                    # Preemption may have evicted blocks that covered mm items
-                    # whose data was stripped at admission; re-ship them,
-                    # re-stripped against the current computed-token count.
-                    resumed_mm_features[req_id] = strip_covered_mm_data(
-                        req.mm_features, req.num_computed_tokens
-                    )
             if not self.use_v2_model_runner:  # noqa: SIM102
                 if req_id not in self.prev_step_scheduled_req_ids:
                     all_token_ids[req_id] = req.all_token_ids.copy()
@@ -1484,7 +1474,6 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
-            resumed_mm_features=resumed_mm_features,
         )
 
     def _try_schedule_encoder_inputs(

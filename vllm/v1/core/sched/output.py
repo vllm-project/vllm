@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -38,8 +38,7 @@ def strip_covered_mm_data(
     """Drop the tensor data of mm items whose placeholder span is fully inside
     the prefix-cache-covered region: no encoder run can be scheduled for them,
     so the workers never consume the data. The scheduler-side ``Request`` keeps
-    the full features; requests resumed from preemption re-ship any
-    newly-uncovered items via ``CachedRequestData.resumed_mm_features``."""
+    the full features."""
     return [
         f
         if f.data is None
@@ -148,12 +147,6 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
-    # For requests resumed from preemption: the mm features to re-ship, since
-    # eviction may have uncovered items whose data was stripped at admission
-    # (see strip_covered_mm_data). Keyed by request id.
-    resumed_mm_features: "dict[str, list[MultiModalFeatureSpec]]" = field(
-        default_factory=dict
-    )
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
@@ -204,7 +197,6 @@ class CachedRequestData:
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
-            resumed_mm_features={},
         )
 
 
