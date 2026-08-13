@@ -14,7 +14,7 @@ ARG MORI_REPO="https://github.com/ROCm/mori.git"
 # TheRock configuration
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL=https://repo.amd.com/rocm/whl-multi-arch/ # For pre-built GPU images, packages, etc.
-ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL=https://rocm.nightlies.amd.com/whl-multi-arch/torch/ # For torch, triton, etc. wheels with latest fixes.
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL=https://rocm.nightlies.amd.com/whl-multi-arch/ # For torch, triton, etc. wheels with latest fixes.
 ARG ROCM_SDK_VERSION=7.14.0
 
 # Build configuration
