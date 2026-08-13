@@ -77,8 +77,8 @@ def assign_loras_to_tokens(num_tokens: int, num_sequences: int, max_loras: int):
 
 
 def assign_experts_to_tokens(num_tokens: int, num_experts: int, top_k_num: int):
-    """For each token, randomly select `top_k_num` distinct experts out of `num_experts`,
-    and assign normalized random weights that sum to 1.
+    """For each token, randomly select `top_k_num` distinct experts out of
+    `num_experts`, and assign normalized random weights that sum to 1.
 
     Args:
         num_tokens (int): Total number of tokens.

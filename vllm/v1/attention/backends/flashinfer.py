@@ -1193,8 +1193,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs: int,
         page_size: int,
     ) -> torch.Tensor:
-        """Compute paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len for FlashInfer
-        attention.
+        """Compute paged_kv_indptr, paged_kv_indices and paged_kv_last_page_len.
 
         Results are stored in self.paged_kv_indptr,
         self.paged_kv_indices, self.paged_kv_last_page_len buffers.

@@ -194,7 +194,7 @@ def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
 
 
 def create_dummy_base_model(repo: str, model_arch: str) -> PreTrainedModel:
-    """Create weights from a dummy meta deserialized hf base model with name conversion."""
+    """Create weights from a dummy meta-deserialized HF base model, with renaming."""
     config = AutoConfig.from_pretrained(repo)
     with torch.device("meta"):
         model = AutoModel.from_config(config)

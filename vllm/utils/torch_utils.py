@@ -872,7 +872,7 @@ def weak_ref_tensors(
 
 
 def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
-    """Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA)."""
+    """Get an accelerator view of a CPU tensor via Unified Virtual Addressing."""
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():

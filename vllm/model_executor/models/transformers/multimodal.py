@@ -578,8 +578,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             yield
 
     def _decorate_for_torch_compile(self):
-        """Decorate the model's decoder and encoder classes to indicate to vLLM that they
-        support torch compile if `can_enable_torch_compile` and
+        """Decorate the model's decoder and encoder classes to indicate to vLLM that
+        they support torch compile if `can_enable_torch_compile` and
         `should_torch_compile_mm_encoder` are True respectively.
         """
         super()._decorate_for_torch_compile()

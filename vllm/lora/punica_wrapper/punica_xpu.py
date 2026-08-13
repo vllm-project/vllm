@@ -447,7 +447,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         token_lora_mapping: torch.Tensor | None = None,
         add_inputs: bool = True,
     ):
-        """Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer."""
+        """Perform a fused forward computation for a LoRA MoE layer."""
         (
             token_lora_mapping_meta,
             _,

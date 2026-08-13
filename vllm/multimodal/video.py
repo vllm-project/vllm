@@ -1785,7 +1785,7 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         frame_sample_mode: str,
         candidate_target_fps: list[float],
     ) -> float | None:
-        """Get the target fps that best spans the videoand has the most frames sampled."""
+        """Get the target fps that best spans the video with the most frames."""
         num_frames_sampled = 0
         selected_target_fps = None
         for target_fps in candidate_target_fps:

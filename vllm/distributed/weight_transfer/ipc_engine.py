@@ -123,7 +123,7 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 class IPCWeightTransferEngine(
     WeightTransferEngine[IPCWeightTransferInitInfo, IPCWeightTransferUpdateInfo]
 ):
-    """Weight transfer engine using CUDA IPC for communication between trainer and workers.
+    """Weight transfer engine using CUDA IPC between trainer and workers.
 
     This implementation uses CUDA IPC to transfer weights from the trainer (rank 0)
     to all inference workers in a process group. IPC handles are used to share

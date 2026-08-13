@@ -1560,7 +1560,7 @@ def remap_moe_expert_weights(
     weights: Iterable[tuple[str, torch.Tensor]],
     params_dict: dict[str, torch.nn.Parameter],
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Wrapper generator that remaps MoE expert parameter names for backward compatibility.
+    """Wrapper generator remapping MoE expert parameter names for compatibility.
 
     This allows models with custom weight loading to automatically handle both old
     and new checkpoint formats without needing model-specific remapping code.

@@ -223,8 +223,8 @@ def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
 
 
 def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
-    """Harmony models expect the analysis messages (representing raw chain of thought) to
-    be dropped after an assistant message to the final channel is produced from the
+    """Harmony models expect the analysis messages (representing raw chain of thought)
+    to be dropped after an assistant message to the final channel is produced from the
     reasoning of those messages.
 
     The openai-harmony library does this if the very last assistant message is to the

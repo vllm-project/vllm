@@ -51,8 +51,8 @@ def replace_parameter(
     new_tensor: torch.Tensor | None,
     prefer_copy: bool = False,
 ):
-    """Replace a parameter of a layer while maintaining the ability to reload the weight.
-    Called within implementations of the `process_weights_after_loading` method.
+    """Replace a parameter of a layer while maintaining the ability to reload the
+    weight. Called within implementations of the `process_weights_after_loading` method.
 
     Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
     ``is_shuffled``) are carried over to the replacement parameter, except

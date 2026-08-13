@@ -94,7 +94,7 @@ async def stream_openai_response(
 
 
 def stream_api_response(audio_path: str, model: str, openai_api_base: str):
-    """Perform streaming transcription using raw HTTP requests to the vLLM API server."""
+    """Stream a transcription using raw HTTP requests to the vLLM API server."""
     import json
     import os
 

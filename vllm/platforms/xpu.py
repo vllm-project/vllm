@@ -31,7 +31,7 @@ logger = init_logger(__name__)
 def get_mem_info_wrapper(
     device: int | str | torch.device | None = None,
 ) -> tuple[int, int]:
-    """Get memory info for a device, compatible with torch.accelerator.get_memory_info API.
+    """Get memory info for a device, matching `torch.accelerator.get_memory_info`.
 
     Args:
         device: Device specification. Can be:

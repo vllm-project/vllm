@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FileSystemTierManager: Pure-Python file system secondary tier for KV cache offloading.
+"""FileSystemTierManager: pure-Python filesystem tier for KV cache offloading.
 
 Store path:
     Data is written to a temp file (<dest_path.tmp>) via os.write,

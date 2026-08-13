@@ -621,8 +621,8 @@ class SingleTypeKVCacheManager(ABC):
         processed_computed_tokens: int,
         num_prompt_tokens: int | None = None,
     ) -> None:
-        """Remove and free the blocks that are no longer needed for attention computation.
-        The removed blocks should be replaced by null_block.
+        """Remove and free the blocks that are no longer needed for attention
+        computation. The removed blocks should be replaced by null_block.
 
         This function depends on `get_num_skipped_tokens`, which need to be implemented
         differently for each attention type.

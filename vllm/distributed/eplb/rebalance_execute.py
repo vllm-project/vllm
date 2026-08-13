@@ -351,8 +351,8 @@ def move_from_buffer(
     new_indices: np.ndarray,
     ep_rank: int,
 ) -> None:
-    """Copies expert weights from communication buffers back to the target weight tensors
-    after EPLB rebalancing.
+    """Copies expert weights from communication buffers back to the target weight
+    tensors after EPLB rebalancing.
 
     Args:
         expert_weights: List of the actual MoE layer weights used in the execution.

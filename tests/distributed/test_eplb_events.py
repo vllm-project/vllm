@@ -57,8 +57,8 @@ def test_reuse_across_multiple_cycles():
 
 
 def test_producer_consumer():
-    """This test uses the CpuGpuEvent to synchronize reads and writes to/from a shared GPU
-    tensor on multiple CPU threads.
+    """This test uses the CpuGpuEvent to synchronize reads and writes to/from a shared
+    GPU tensor on multiple CPU threads.
     """
     worker_stream = torch.cuda.Stream()
     # Create a single element counter that will be shared between two threads

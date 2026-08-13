@@ -419,7 +419,7 @@ class IrOp:
 
     @contextlib.contextmanager
     def set_priority(self, priority: list[str]):
-        """Context manager to set the dispatch priority for implementations for this op."""
+        """Context manager setting the dispatch priority for this op's impls."""
         old_priority_impls = self._priority_impls
         try:
             self._priority_impls = self._filter_priority_impls(priority)
@@ -626,9 +626,10 @@ class IrOpImpl:
 
     @weak_cache
     def uuid(self):
-        """Compile-time hash to uniquely determine whether the implementation has changed.
-        Used by vllm-compile hash mechanism and torch.compile lowering pass uuid to
-        control the vLLM compile cache and AOTAutograd/Inductor caches respectively.
+        """Compile-time hash to uniquely determine whether the implementation has
+        changed. Used by vllm-compile hash mechanism and torch.compile lowering pass
+        uuid to control the vLLM compile cache and AOTAutograd/Inductor caches
+        respectively.
 
         Source file contents do not change so we cache uuid.
         TODO(luka): Cache the file hash as multiple impls are likely in the same file.

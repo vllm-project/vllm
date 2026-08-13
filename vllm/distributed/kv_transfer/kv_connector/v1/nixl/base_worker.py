@@ -2268,7 +2268,7 @@ class NixlBaseConnectorWorker:
         self.xfer_stats.record_failed_transfer()
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
-        """Send heartbeat notifications to remote engines, extending lease on KV blocks."""
+        """Send heartbeats to remote engines, extending the lease on KV blocks."""
         for engine_id, hb_info in metadata.heartbeat_by_engine.items():
             # Proactive handshake (this request may still be in waiting queue) so
             # the **next** heartbeat for this remote can go through.

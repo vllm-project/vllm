@@ -157,7 +157,7 @@ else:
 
 
 class BaseRouter(FusedMoERouter):
-    """Base router class that provides common functionality for all router implementations.
+    """Base class providing common functionality for all router implementations.
 
     This class implements the template method pattern where select_experts() handles
     common pre-processing and post-processing, delegating the actual routing logic

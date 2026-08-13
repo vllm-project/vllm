@@ -51,7 +51,7 @@ class DummyConfig:
 def make_video_embedding(
     t, h, w, interleave_text_tokens: tuple[int, int], video_pruning_rate: float = 0.0
 ):
-    """Helper function to make a video embedding for a given video size and pruning rate.
+    """Make a video embedding for a given video size and pruning rate.
 
     Args:
         t: Number of frames.

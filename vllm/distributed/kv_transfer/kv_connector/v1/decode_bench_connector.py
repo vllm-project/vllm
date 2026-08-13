@@ -354,7 +354,7 @@ class DecodeBenchConnectorWorker:
             )
 
     def _fill_blocks(self, group_idx: int, block_ids: list[int], num_tokens: int):
-        """Fill specified blocks with dummy non-zero values for a specific KV cache group.
+        """Fill blocks with dummy non-zero values for one KV cache group.
 
         Args:
             group_idx: The KV cache group index to fill

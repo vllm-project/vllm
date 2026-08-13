@@ -230,8 +230,8 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
 
 
 class FireRedASR2Processor(ProcessorMixin):
-    r"""Constructs a FireRedASR2 processor which wraps a FireRedASR2 feature extractor and
-    a FireRedASR2 tokenizer into a single processor.
+    r"""Constructs a FireRedASR2 processor which wraps a FireRedASR2 feature extractor
+    and a FireRedASR2 tokenizer into a single processor.
 
     [`FireRedASR2Processor`] offers all the functionalities of
     [`FireRedASR2FeatureExtractor`] and [`Qwen2Tokenizer`]. See the
