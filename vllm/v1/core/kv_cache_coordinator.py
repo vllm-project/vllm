@@ -110,8 +110,6 @@ class KVCacheCoordinator(ABC):
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
-        # Ensure that all draft KV cache block sizes are at least the number of
-        # prefill lookahead tokens.
         # During chunked prefill with EAGLE, the single next prefill lookahead
         # token past the chunk boundary is combined with the final hidden state
         # and written to the KV cache. Therefore, the final chunk token must be
@@ -119,19 +117,20 @@ class KVCacheCoordinator(ABC):
         # KV cache slot polluted with the next prefill token, which may or may not
         # be present after the matching prefix. The last-block drop handles this
         # edge case. During multi-module MTP, the issue generalizes to a prefill
-        # lookahead of num_speculative_tokens, so a single dropped block must be
-        # large enough to contain them.
-        if enable_caching:
-            for group_id in self.eagle_group_ids:
-                block_size = kv_cache_config.kv_cache_groups[
-                    group_id
-                ].kv_cache_spec.block_size
-                if block_size < num_prefill_lookahead:
-                    raise ValueError(
-                        f"Multi-module MTP with prefix caching requires block_size"
-                        f" (={block_size}) >= num_speculative_tokens"
-                        f" (={num_prefill_lookahead})."
-                    )
+        # lookahead of num_speculative_tokens, so the dropped tail must be large
+        # enough to contain them. Hits land on scheduler-block boundaries (see
+        # `_cache_hit_alignment_tokens`), so the excluded tail is
+        # scheduler_block_size, not the group's own block size.
+        if (
+            enable_caching
+            and self.eagle_group_ids
+            and scheduler_block_size < num_prefill_lookahead
+        ):
+            raise ValueError(
+                f"Multi-module MTP with prefix caching requires scheduler_block_size"
+                f" (={scheduler_block_size}) >= num_speculative_tokens"
+                f" (={num_prefill_lookahead})."
+            )
 
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
