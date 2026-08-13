@@ -4,6 +4,7 @@
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import torch
 
@@ -201,3 +202,74 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     output = mrv2.GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]
+
+
+def test_v2_sample_tokens_propagates_k0_and_hides_stale_drafts(monkeypatch):
+    runner = _make_runner(num_speculative_steps=2, _draft_workspace_lane=0)
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        req_ids=["req-0", "req-1"],
+        idx_mapping=torch.arange(2),
+        query_start_loc=torch.arange(3),
+    )
+    runner.execute_model_state = SimpleNamespace(
+        input_batch=input_batch,
+        attn_metadata={},
+        slot_mappings_by_layer={},
+        hidden_states=torch.zeros(2, 3),
+        aux_hidden_states=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        routed_experts=None,
+        num_spec_tokens_to_schedule=0,
+    )
+    runner.pcp_manager = None
+    runner.pp_handler = None
+    runner.sample = Mock(
+        return_value=(
+            SimpleNamespace(sampled_token_ids=torch.zeros(2, dtype=torch.int64)),
+            torch.ones(2, dtype=torch.int32),
+            torch.zeros(2, dtype=torch.int32),
+        )
+    )
+    runner.prompt_logprobs_worker = SimpleNamespace(
+        compute_prompt_logprobs=Mock(return_value={})
+    )
+    runner.model = SimpleNamespace(compute_logits=Mock())
+    runner.req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=torch.zeros(2, 1, dtype=torch.int64)),
+        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int32)),
+        prompt_len=SimpleNamespace(np=None),
+        last_sampled_tokens=torch.zeros(2, dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(2, dtype=torch.int64),
+        draft_tokens=torch.tensor([[91, 92], [93, 94]]),
+    )
+    runner.main_stream = None
+    runner.output_copy_stream = None
+    runner.check_ep_fault = False
+    runner.postprocess_sampled = Mock()
+    runner.sampler = SimpleNamespace(
+        sampling_states=SimpleNamespace(
+            temperature=SimpleNamespace(gpu=torch.zeros(2)),
+            seeds=SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int64)),
+        )
+    )
+    runner.speculator = SimpleNamespace(
+        supports_mm_inputs=False,
+        propose=Mock(return_value=torch.empty((2, 0), dtype=torch.int64)),
+    )
+    runner.adaptive_verification = None
+    runner.draft_tokens_handler = SimpleNamespace(set_draft_tokens=Mock())
+
+    monkeypatch.setattr(
+        mrv2.pcp,
+        "maybe_restore_pcp_for_sampling",
+        lambda _, hidden_states, batch: (hidden_states, batch),
+    )
+    monkeypatch.setattr(mrv2, "AsyncOutput", lambda **kwargs: kwargs)
+
+    mrv2.GPUModelRunner.sample_tokens(runner, None)
+
+    assert runner.speculator.propose.call_args.kwargs["num_speculative_tokens"] == 0
+    handled_drafts = runner.draft_tokens_handler.set_draft_tokens.call_args.args[1]
+    assert handled_drafts.shape == (2, 0)

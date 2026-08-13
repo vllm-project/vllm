@@ -334,6 +334,86 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     assert run_fullgraph.call_count == expected_graph_replays
 
 
+def test_propose_k0_runs_prefill_without_draft_decode(monkeypatch):
+    speculator = object.__new__(_TestSpeculator)
+    speculator.num_speculative_steps = 2
+    speculator.max_model_len = 32
+    speculator.max_num_reqs = 2
+    speculator.dp_size = 1
+    speculator.dp_rank = 0
+    speculator.supports_mm_inputs = False
+    speculator.hidden_states = torch.zeros(2, 3)
+    speculator.draft_tokens = torch.tensor([[11, 12], [21, 22]])
+    speculator.last_token_indices = torch.zeros(2, dtype=torch.int64)
+    speculator.current_draft_step = torch.tensor(0)
+    speculator.input_buffers = SimpleNamespace()
+    speculator.prefill_cudagraph_manager = None
+    speculator.decode_cudagraph_manager = None
+    speculator.use_fused_multi_step_decode = False
+    speculator._copy_request_inputs = Mock()
+    speculator._prepare_eplb_forward = Mock()
+    speculator.on_prefill_begin = Mock()
+    speculator.on_prefill_end = Mock()
+    speculator.on_multi_step_decode_begin = Mock()
+    speculator.on_multi_step_decode_end = Mock()
+    speculator._prefill = Mock()
+    speculator._multi_step_decode = Mock()
+    speculator._fused_multi_step_decode = Mock()
+
+    prepare_prefill = Mock()
+    prepare_decode = Mock()
+    monkeypatch.setattr(spec_module, "prepare_prefill_inputs", prepare_prefill)
+    monkeypatch.setattr(spec_module, "prepare_decode_inputs", prepare_decode)
+    monkeypatch.setattr(spec_module, "get_uniform_decode_token_count", Mock())
+    monkeypatch.setattr(
+        spec_module,
+        "dispatch_cg_and_sync_dp",
+        Mock(
+            return_value=(
+                BatchExecutionDescriptor(
+                    cg_mode=CUDAGraphMode.NONE,
+                    num_tokens=2,
+                    num_reqs=2,
+                ),
+                None,
+            )
+        ),
+    )
+
+    input_batch = SimpleNamespace(
+        num_tokens=2,
+        num_tokens_after_padding=2,
+        num_reqs=2,
+        num_scheduled_tokens=torch.ones(2, dtype=torch.int32),
+        seq_lens=torch.ones(2, dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.ones(2, dtype=torch.int32),
+        idx_mapping=torch.arange(2),
+        has_prefill=False,
+    )
+    output = speculator.propose(
+        input_batch,
+        attn_metadata={},
+        slot_mappings={},
+        last_hidden_states=torch.ones(2, 3),
+        aux_hidden_states=None,
+        num_sampled=torch.ones(2, dtype=torch.int32),
+        num_rejected=torch.zeros(2, dtype=torch.int32),
+        last_sampled=torch.zeros(2, dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(2, dtype=torch.int64),
+        temperature=torch.zeros(2),
+        seeds=torch.zeros(2, dtype=torch.int64),
+        num_speculative_tokens=0,
+    )
+
+    assert output.shape == (2, 0)
+    speculator._prefill.assert_called_once()
+    speculator.on_prefill_begin.assert_called_once_with(2)
+    speculator.on_prefill_end.assert_called_once_with(2)
+    prepare_decode.assert_not_called()
+    speculator._multi_step_decode.assert_not_called()
+    speculator._fused_multi_step_decode.assert_not_called()
+
+
 def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
     monkeypatch,
 ):
