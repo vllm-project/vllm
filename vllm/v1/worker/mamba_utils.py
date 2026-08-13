@@ -607,7 +607,7 @@ class MambaSpecDecodeGPUContext:
 
     # Per-state metadata tensors (shape: [num_layers * num_state_types])
     # These are populated from forward_context during the first forward pass
-    state_base_addrs: torch.Tensor  # int64: base address of each state tensor
+    state_base_addrs: torch.Tensor  # uint64: base address of each state tensor
     state_block_strides: torch.Tensor  # int64: bytes per block
     state_elem_sizes: torch.Tensor  # int32: element size in bytes
     state_inner_sizes: torch.Tensor  # int64: elements in inner dimensions
@@ -627,7 +627,7 @@ class MambaSpecDecodeGPUContext:
     # Output buffer for num_accepted_tokens updates
     num_accepted_tokens_out: torch.Tensor
 
-    # Per-group block-table base addresses: int64[num_groups]. Populated in
+    # Per-group block-table base addresses: uint64[num_groups]. Populated in
     # initialize_from_forward_context from the persistent per-group block
     # table tensors (whose data_ptr is stable across steps).
     block_table_ptrs: torch.Tensor
@@ -668,7 +668,7 @@ class MambaSpecDecodeGPUContext:
 
         return cls(
             state_base_addrs=torch.zeros(
-                total_states, dtype=torch.int64, device=device
+                total_states, dtype=torch.uint64, device=device
             ),
             state_block_strides=torch.zeros(
                 total_states, dtype=torch.int64, device=device
@@ -700,7 +700,7 @@ class MambaSpecDecodeGPUContext:
                 max_num_reqs, dtype=torch.int32, device=device
             ),
             block_table_ptrs=torch.zeros(
-                len(mamba_group_ids), dtype=torch.int64, device=device
+                len(mamba_group_ids), dtype=torch.uint64, device=device
             ),
             mamba_state_idx_buf=make_buffer(max_num_reqs, dtype=torch.int32),
             num_scheduled_tokens_buf=make_buffer(max_num_reqs, dtype=torch.int32),
@@ -755,6 +755,13 @@ class MambaSpecDecodeGPUContext:
         if self.is_initialized:
             return
 
+        # Collect pointer values into lists first, then create tensors in one
+        # shot. PyTorch's element-wise assignment (tensor[idx] = large_int)
+        # fails for data_ptr() values >= 2^63 on XPU because the scalar
+        # conversion path goes through C-level long() regardless of dtype.
+        # Creating the tensor from a list with dtype=torch.uint64 correctly
+        # handles large pointer values (same pattern as block_table.py).
+        state_base_addrs_list: list[int] = []
         idx = 0
         for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
             layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
@@ -763,8 +770,8 @@ class MambaSpecDecodeGPUContext:
                 kv_caches: list[torch.Tensor] = attention.kv_cache
 
                 for state_type_idx, state in enumerate(kv_caches):
-                    # Base address
-                    self.state_base_addrs[idx] = state.data_ptr()
+                    # Base address — collect for bulk tensor creation below
+                    state_base_addrs_list.append(state.data_ptr())
 
                     # Block stride (bytes between consecutive blocks)
                     # state shape: [num_blocks, ...], stride(0) = elements per block
@@ -851,8 +858,18 @@ class MambaSpecDecodeGPUContext:
             f"all mamba block tables must share stride(0), got {strides}"
         )
         self.block_table_stride_req = int(next(iter(strides)))
-        for i, bt in enumerate(block_tables):
-            self.block_table_ptrs[i] = bt.data_ptr()
+
+        # Bulk-create pointer tensors from collected lists to avoid
+        # element-wise assignment overflow on XPU (data_ptr >= 2^63).
+        device = self.state_block_strides.device
+        self.state_base_addrs = torch.tensor(
+            state_base_addrs_list, dtype=torch.uint64, device=device
+        )
+        self.block_table_ptrs = torch.tensor(
+            [bt.data_ptr() for bt in block_tables],
+            dtype=torch.uint64,
+            device=device,
+        )
 
         self.is_initialized = True
 
