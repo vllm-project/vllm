@@ -2652,6 +2652,32 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
 
     @staticmethod
+    def rms_norm(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+    ) -> torch.Tensor:
+        import aiter as rocm_aiter
+
+        return rocm_aiter.rmsnorm2d_fwd(x, weight, epsilon)
+
+    @staticmethod
+    def rms_norm2d_with_add(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        import aiter as rocm_aiter
+
+        out = torch.empty_like(x)
+        residual_out = torch.empty_like(x)
+        rocm_aiter.rmsnorm2d_fwd_with_add(
+            out, x, residual, residual_out, weight, epsilon
+        )
+        return out, residual_out
+
+    @staticmethod
     def gemm_a8wfp4(
         x: torch.Tensor,
         w: torch.Tensor,
