@@ -157,6 +157,14 @@ fn factory_new_resolves_default_patterns() {
         Some(names::HERMES)
     );
     assert_eq!(
+        factory.resolve_name_for_model("tencent/Hunyuan-A13B-Instruct"),
+        Some(names::HUNYUAN_A13B)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("tencent/Hunyuan_A13B-Instruct"),
+        Some(names::HUNYUAN_A13B)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("tencent/Hy3-preview"),
         Some(names::HY_V3)
     );

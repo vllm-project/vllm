@@ -7,10 +7,11 @@ use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-    Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser, HyV3ToolParser,
-    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
-    MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
+    HunyuanA13BToolParser, HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser,
+    Llama3JsonToolParser, MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser,
+    Phi4MiniJsonToolParser, Qwen3CoderToolParser, Qwen3XmlToolParser, SeedOssToolParser,
+    ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -28,6 +29,7 @@ pub mod names {
     pub const INKLING: &str = "inkling";
     pub const GRANITE4: &str = "granite4";
     pub const HERMES: &str = "hermes";
+    pub const HUNYUAN_A13B: &str = "hunyuan_a13b";
     pub const HY_V3: &str = "hy_v3";
     // Matches the Python CLI name `--tool-call-parser internlm`, which Python
     // also routes to `Internlm2ToolParser` despite the version-agnostic name.
@@ -76,6 +78,7 @@ impl ToolParserFactory {
             .register_unified_dummy(names::INKLING)
             .register_parser::<Granite4ToolParser>(names::GRANITE4)
             .register_parser::<HermesToolParser>(names::HERMES)
+            .register_parser::<HunyuanA13BToolParser>(names::HUNYUAN_A13B)
             .register_parser::<HyV3ToolParser>(names::HY_V3)
             .register_parser::<Internlm2ToolParser>(names::INTERNLM)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
@@ -98,6 +101,8 @@ impl ToolParserFactory {
             .register_pattern("qwen3.5", names::QWEN3_CODER)
             .register_pattern("qwen", names::QWEN3_XML)
             .register_pattern("hermes", names::HERMES)
+            .register_pattern("hunyuan-a13b", names::HUNYUAN_A13B)
+            .register_pattern("hunyuan_a13b", names::HUNYUAN_A13B)
             .register_pattern("hy3", names::HY_V3)
             .register_pattern("hy_v3", names::HY_V3)
             // Narrow to `internlm2` substring so it matches `internlm2-chat-7b`
