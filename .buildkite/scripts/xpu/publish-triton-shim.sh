@@ -20,7 +20,10 @@ fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
 
-work_dir=$(mktemp -d)
+# Keep temporary files under the repository so the Docker Python fallback,
+# which mounts the repository at /app, can access them.
+work_dir=$(mktemp -d "$PWD/.xpu-triton-index.XXXXXX")
+work_dir=${work_dir#"$PWD"/}
 trap 'rm -rf "$work_dir"' EXIT
 
 wheel_path="$work_dir/$WHEEL_FILENAME"
