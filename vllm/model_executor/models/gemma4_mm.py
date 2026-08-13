@@ -2205,11 +2205,7 @@ class Gemma4ForConditionalGeneration(
                 pixel_values_key = "pixel_values_videos"
                 max_soft_tokens = _VIDEO_MAX_SOFT_TOKENS
 
-            tower_tokens = (
-                max_soft_tokens * pooling_k2
-                if modality == "image"
-                else None
-            )
+            tower_tokens = max_soft_tokens * pooling_k2 if modality == "image" else None
             connector_tokens = num_mm_embeds
             if tower_tokens is None and mm_kwargs is not None:
                 field = mm_kwargs.get(pixel_values_key)
