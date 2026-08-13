@@ -507,21 +507,69 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def fetch_metadata_for_variant(
-        commit: str, variant: str | None, *, rocm: bool = False
+        commit: str,
+        variant: str | None,
+        *,
+        rocm: bool = False,
     ) -> tuple[list[dict], str]:
         """
         Fetches metadata for a specific variant of the precompiled wheel.
+
+        For non-ROCm, fetches vllm metadata.
+
+        For ROCm, discovers all first-level packages and combines their
+        metadata into a single list.
         """
-        variant_dir = f"{variant}/" if variant is not None else ""
-        commit_prefix = f"rocm/{commit}" if rocm else commit
-        repo_url = f"https://wheels.vllm.ai/{commit_prefix}/{variant_dir}vllm/"
-        meta_url = repo_url + "metadata.json"
-        print(f"Trying to fetch nightly build metadata from {meta_url}")
+        import json
+        from html.parser import HTMLParser
         from urllib.request import urlopen
 
-        with urlopen(meta_url) as resp:
-            # urlopen raises HTTPError on unexpected status code
-            wheels = json.loads(resp.read().decode("utf-8"))
+        variant_dir = f"{variant}/" if variant is not None else ""
+
+        if not rocm:
+            # Keep original behavior
+            repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
+            meta_url = repo_url + "metadata.json"
+            print(f"Trying to fetch nightly build metadata from {meta_url}")
+            with urlopen(meta_url) as resp:
+                wheels = json.loads(resp.read().decode("utf-8"))
+
+            return wheels, repo_url
+
+        # ROCm: discover all packages under the variant directory.
+        repo_url = f"https://wheels.vllm.ai/rocm/{commit}/{variant_dir}"
+
+        class LinkParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.links: list[str] = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "a":
+                    href = dict(attrs).get("href")
+                    if href:
+                        self.links.append(href)
+
+        with urlopen(repo_url) as resp:
+            parser = LinkParser()
+            parser.feed(resp.read().decode("utf-8"))
+
+        packages = [
+            href.rstrip("/")
+            for href in parser.links
+            if href.endswith("/")
+            and href not in ("../", "./", "/")
+            and "/" not in href.rstrip("/")
+        ]
+
+        wheels: list[dict] = []
+
+        for package in packages:
+            meta_url = f"{repo_url}{package}/metadata.json"
+            print(f"Trying to fetch nightly build metadata from {meta_url}")
+            with urlopen(meta_url) as resp:
+                package_wheels = json.loads(resp.read().decode("utf-8"))
+            wheels.extend(package_wheels)
         return wheels, repo_url
 
     @staticmethod
@@ -814,7 +862,7 @@ class precompiled_wheel_utils:
                     print(f"Found precompiled wheel metadata: {wheel}")
                     if "path" not in wheel:
                         raise ValueError(f"Wheel metadata missing path: {wheel}")
-                    wheel_url = urljoin(repo_url, wheel["path"])
+                    wheel_url = urljoin(f"{repo_url}vllm/", wheel["path"])
                     download_filename = wheel.get("filename")
                     print(f"Using precompiled wheel URL: {wheel_url}")
                     return wheel_url, download_filename
