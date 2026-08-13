@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.queues import Queue
 from threading import Thread
-from typing import Any, Protocol, TypeAlias, TypeVar
+from typing import Any, TypeAlias, TypeVar
 
 import msgspec
 import msgspec.msgpack
@@ -402,11 +402,6 @@ class InprocClient(EngineCoreClient):
         return False
 
 
-class Shutdownable(Protocol):
-    def shutdown(self):
-        raise NotImplementedError
-
-
 @dataclass
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
@@ -425,19 +420,10 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
-    resources: list[Shutdownable | None] | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
     engine_dead: bool = False
-
-    def append(self, resource: Shutdownable | None):
-        if resource is None:
-            return
-
-        if self.resources is None:
-            self.resources = []
-        self.resources.append(resource)
 
     def __call__(self):
         """Clean up background resources."""
@@ -498,12 +484,6 @@ class BackgroundResources:
                     shutdown_sender.connect(self.shutdown_path)
                     # Send shutdown signal.
                     shutdown_sender.send(b"")
-
-        if self.resources is not None:
-            for resource in self.resources:
-                if resource is not None:
-                    with contextlib.suppress(Exception):
-                        resource.shutdown()
 
         logger.debug_once("[shutdown] MPClient: background resource cleanup complete")
 

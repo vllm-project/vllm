@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
@@ -154,6 +155,7 @@ class BaseRenderer(ABC, Generic[_T]):
             self._mm_timing_registry = MultiModalTimingRegistry(
                 config.observability_config
             )
+            self._finalizer = weakref.finalize(self, self.shutdown)
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
@@ -304,6 +306,8 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_executor := getattr(self, "_mm_executor", None)
         ) is not None and mm_executor is not executor:
             mm_executor.shutdown(wait=False)
+        self._pshm_tensor_ipc.shutdown()
+        logger.debug("[shutdown] BaseRenderer")
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:

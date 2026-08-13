@@ -3,6 +3,7 @@
 import contextlib
 import json
 import multiprocessing as mp
+import weakref
 from collections.abc import Callable
 from dataclasses import asdict
 from multiprocessing.synchronize import Event
@@ -256,7 +257,7 @@ def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
         if server is not None:
             with contextlib.suppress(Exception):
                 server.close()
-        logger.info("[shutdown] PagedShmServer stopped.")
+        logger.debug("[shutdown] PagedShmServer stopped")
 
 
 class PagedShmServerProc:
@@ -274,6 +275,7 @@ class PagedShmServerProc:
         self.address = ""
         self.stop_event = stop_event
         self.parent_conn = parent_conn
+        self._finalizer = weakref.finalize(self, self.shutdown)
 
     def start(self):
         self.proc.start()
