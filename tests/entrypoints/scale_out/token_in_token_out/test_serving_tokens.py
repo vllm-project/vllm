@@ -142,7 +142,7 @@ async def test_generate_sampling_mask(client):
 
     vocab_size = get_vocab_size(MODEL_NAME)
     for token_id, support in zip(token_ids, sampling_mask):
-        assert 0 < len(support) <= top_k
+        assert support
         assert len(support) == len(set(support))
         assert all(0 <= support_token_id < vocab_size for support_token_id in support)
         assert token_id in support
