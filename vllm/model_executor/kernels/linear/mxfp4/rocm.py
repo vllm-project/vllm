@@ -4,9 +4,13 @@
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.platforms import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
+
+logger = init_logger(__name__)
 
 _MXFP4_GROUP_SIZE = 32
 
@@ -44,6 +48,14 @@ class Rdna3MxFp4LinearKernel(MxFp4LinearKernel):
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        if config.activation_quant_key not in (None, kMxfp4Dynamic):
+            return False, "only supports MXFP4 dynamic or unquantized activations"
+        if config.activation_quant_key is not None:
+            logger.warning_once(
+                "Rdna3MxFp4LinearKernel is a weight-only (A16) kernel; "
+                "the requested activation quantization (%s) is ignored.",
+                config.activation_quant_key,
+            )
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
