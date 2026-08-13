@@ -64,10 +64,12 @@ def test_model_load_and_run(
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
+    kwargs = {}
     if force_marlin:
-        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+        kwargs["linear_backend"] = "marlin"
+        kwargs["moe_backend"] = "marlin"
 
-    with vllm_runner(model_id, enforce_eager=True) as llm:
+    with vllm_runner(model_id, enforce_eager=True, **kwargs) as llm:
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
         outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
@@ -98,8 +100,10 @@ def test_online_quantization(
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
+    kwargs = {}
     if force_marlin:
-        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+        kwargs["linear_backend"] = "marlin"
+        kwargs["moe_backend"] = "marlin"
 
     model_dtype = "auto"
     if kv_cache_dtype == "fp8" and current_platform.is_device_capability_family(90):
@@ -112,6 +116,7 @@ def test_online_quantization(
         dtype=model_dtype,
         enforce_eager=True,
         kv_cache_dtype=kv_cache_dtype,
+        **kwargs,
     ) as llm:
 
         def check_model(model):
