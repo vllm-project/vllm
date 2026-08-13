@@ -50,6 +50,8 @@ MY_KERNEL = MyKernel()
 
 The module-level singleton should be used by warmup and by the runtime call path. This keeps dispatch behavior shared instead of duplicated.
 
+`VllmJitKernel.warmup(...)` compiles every key returned by `get_warmup_keys(...)`; wrappers should not reimplement it.
+
 ### Choose Compile-Key Fields
 
 `CompileKey` must be frozen and hashable. Include only fields on which the backend specializes, such as tile sizes, head dimensions, dtypes, pointer alignment classes, or backend selectors; exclude runtime-only values. When unsure, inspect the backend cache key, specialization arguments, or verbose JIT-monitor output.
