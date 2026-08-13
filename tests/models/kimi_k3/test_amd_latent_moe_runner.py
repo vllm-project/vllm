@@ -276,6 +276,15 @@ def test_shards_under_the_kimi_k3_serving_config(build_runner) -> None:
     assert runner._up_proj_shard_size == HIDDEN_SIZE // 8
 
 
+def test_hybrid_ep_uses_physical_tp_for_the_latent_tail(build_runner) -> None:
+    # Explicit EP2 preserves the physical TP4 shard instead of flattening
+    # TP into expert ownership.
+    runner = build_runner(tp_size=4)
+
+    assert runner._tail_shardable
+    assert runner._up_proj_shard_size == HIDDEN_SIZE // 4
+
+
 @pytest.mark.parametrize(
     "override",
     [
