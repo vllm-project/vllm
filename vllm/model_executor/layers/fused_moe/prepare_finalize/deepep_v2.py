@@ -17,6 +17,13 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
+    dbo_enabled,
+    dbo_get_previous_event,
+    dbo_switch_to_comm,
+    dbo_switch_to_compute,
+    dbo_switch_to_compute_sync,
+    dbo_yield_and_switch_from_comm_to_compute,
+    dbo_yield_and_switch_from_compute_to_comm,
 )
 
 
@@ -140,6 +147,16 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 n = tokens.shape[0]
             num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
 
+        # Capture a DeepEP event on the compute stream before yielding.
+        # This must happen before the yield so the event only covers this
+        # ubatch's compute work. If captured after, the compute stream tail
+        # may include the other ubatch's work, preventing overlap.
+        previous_event = dbo_get_previous_event(self.buffer.capture)
+
+        # Yield to the other ubatch here so that it can queue its compute
+        # and overlap it with this dispatch.
+        dbo_yield_and_switch_from_compute_to_comm()
+
         (
             recv_x,
             recv_topk_idx,
@@ -154,11 +171,15 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             do_expand=do_expand,
             do_cpu_sync=do_cpu_sync,
+            previous_event=previous_event,
+            allocate_on_comm_stream=previous_event is not None,
             async_with_compute_stream=False,
         )
 
         a2a_idx = dbo_current_ubatch_id()
         self.handles[a2a_idx] = handle
+
+        dbo_switch_to_compute_sync()
 
         return lambda: self._receiver(
             event,
@@ -374,13 +395,32 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"got {fused_expert_output.dtype}"
             )
 
+        previous_event = dbo_get_previous_event(self.buffer.capture)
+        dbo_yield_and_switch_from_compute_to_comm()
+
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,
             handle=handle,
             topk_weights=None,
+            previous_event=previous_event,
+            allocate_on_comm_stream=previous_event is not None,
             async_with_compute_stream=False,
         )
 
+        dbo_switch_to_compute()
+
+        if do_async:
+
+            def _receiver():
+                if event.event is not None:
+                    event.current_stream_wait()
+                dbo_switch_to_comm()
+                output.copy_(combined_x, non_blocking=True)
+                dbo_yield_and_switch_from_comm_to_compute()
+
+            return _receiver
+
+        assert not dbo_enabled()
         output.copy_(combined_x, non_blocking=True)
         return None
 
@@ -393,16 +433,17 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> Callable:
-        self._finalize(
+        receiver = self._finalize(
             output,
             fused_expert_output,
             topk_weights,
             topk_ids,
             apply_router_weight_on_input,
             weight_and_reduce_impl,
-            False,
+            do_async=True,
         )
-        return lambda: None
+        assert receiver is not None
+        return receiver
 
     def finalize(
         self,
@@ -420,7 +461,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             topk_ids,
             apply_router_weight_on_input,
             weight_and_reduce_impl,
-            False,
+            do_async=False,
         )
 
 
