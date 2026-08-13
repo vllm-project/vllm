@@ -2120,6 +2120,97 @@ def test_speculators_format_preserves_explicit_shorthand_method():
     }
 
 
+def _spec_model_declaration_configs():
+    return {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        "draft/model": {
+            "speculators_model_type": "dflash",
+            "transformer_layer_config": {},
+            "speculators_config": {
+                "proposal_methods": [{"speculative_tokens": 15}],
+                "verifier": {"name_or_path": "target/model"},
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("explicit", "expected"),
+    [
+        pytest.param(
+            {"model": "draft/model"},
+            {"method": "dflash", "model": "draft/model", "num_speculative_tokens": 15},
+            id="declaration-populates-method-and-tokens",
+        ),
+        pytest.param(
+            {"model": "draft/model", "num_speculative_tokens": 3},
+            {"method": "dflash", "model": "draft/model", "num_speculative_tokens": 3},
+            id="explicit-tokens-take-precedence",
+        ),
+    ],
+)
+def test_spec_model_declaration_resolves_method(explicit, expected):
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    configs = _spec_model_declaration_configs()
+
+    with patch(
+        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+        side_effect=lambda model, **kwargs: (configs[model], {}),
+    ):
+        model, tokenizer, speculative_config = maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config=explicit,
+        )
+
+    assert (model, tokenizer) == ("target/model", None)
+    assert speculative_config == expected
+
+
+def test_spec_model_with_explicit_method_skips_declaration():
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    configs = {"target/model": {"architectures": ["LlamaForCausalLM"]}}
+    explicit = {"model": "draft/model", "method": "draft_model"}
+
+    with patch(
+        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+        side_effect=lambda model, **kwargs: (configs[model], {}),
+    ):
+        _, _, speculative_config = maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config=explicit,
+        )
+
+    assert speculative_config == explicit
+
+
+def test_spec_model_without_declaration_stays_unresolved():
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    configs = {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        "draft/model": {"architectures": ["LlamaForCausalLM"]},
+    }
+
+    with patch(
+        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+        side_effect=lambda model, **kwargs: (configs[model], {}),
+    ):
+        _, _, speculative_config = maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config={"model": "draft/model"},
+        )
+
+    assert speculative_config == {"model": "draft/model"}
+
+
 @pytest.fixture
 def deepseek_v4_dspark_config():
     return PretrainedConfig(
