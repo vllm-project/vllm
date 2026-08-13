@@ -56,6 +56,10 @@ SPINLOOP_TIMEOUT_SECONDS = 0.1
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
 
+from vllm.utils.debug.debug_stat import get_vllm_debug_stat
+
+worker_debug_stat = get_vllm_debug_stat()
+
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
@@ -189,23 +193,28 @@ class SpinCondition:
         Otherwise, enters idle mode and awaits a socket ping for at most
         `timeout_ms` milliseconds, or indefinitely if timeout_ms is None.
         """
+        worker_debug_stat.set_call_step(2, 1)
         assert self.is_reader, "Only readers can wait"
 
         current_time = time.monotonic()
         if current_time <= self.last_read + self.busy_loop_s:
+            worker_debug_stat.set_call_step(2, 4)
             sched_yield()
         else:
+            worker_debug_stat.set_call_step(2, 5)
             events = dict(self.poller.poll(timeout=timeout_ms))
-
+            worker_debug_stat.set_call_step(2, 6)
             if self.read_cancel_socket in events:
                 logger.debug("Poller received cancel event")
             elif self.local_notify_socket in events:
                 logger.debug("Poller received notify event")
                 # Since zmq.CONFLATE is set, there will only be one notification
                 # to read from the socket
+                worker_debug_stat.set_call_step(2, 10)
                 self.local_notify_socket.recv(flags=zmq.NOBLOCK, copy=False)
             else:
                 logger.debug("Poller timed out")
+        worker_debug_stat.set_call_step(2, 12)
 
     def notify(self):
         """Notifies all readers to wake up"""
@@ -667,6 +676,7 @@ class MessageQueue:
         timeout: float | None = None,
         indefinite: bool = False,
     ):
+        worker_debug_stat.set_call_step(1, 3)
         assert self._is_local_reader, "Only readers can acquire read"
         read_timeout = self.ReadTimeoutWithWarnings(
             timeout=timeout, should_warn=not indefinite
@@ -680,6 +690,7 @@ class MessageQueue:
                     written_flag = metadata_buffer[0]
                     return not (not written_flag or read_flag)
 
+                worker_debug_stat.set_call_step(1, 7)
                 if SPINLOOP_EXT_ENABLED and not check():
                     spinloop(
                         metadata_buffer[0 : self.local_reader_rank + 1],
@@ -687,6 +698,7 @@ class MessageQueue:
                         timeout=SPINLOOP_TIMEOUT_SECONDS,
                     )
 
+                worker_debug_stat.set_call_step(1, 8)
                 if not check():
                     # this block is either
                     # (1) not written
@@ -695,8 +707,9 @@ class MessageQueue:
                     # for readers, `self.current_idx` is the next block to read
                     # if this block is not ready,
                     # we need to wait until it is written
+                    worker_debug_stat.set_call_step(1, 11)
                     self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
-
+                    worker_debug_stat.set_call_step(1, 12)
                     if self.shutting_down:
                         raise RuntimeError("cancelled")
 
@@ -709,7 +722,9 @@ class MessageQueue:
                     continue
                 # found a block that is not read by this reader
                 # let caller read from the buffer
+                worker_debug_stat.set_call_step(1, 15)
                 with self.buffer.get_data(self.current_idx) as buf:
+                    worker_debug_stat.set_call_step(1, 16)
                     yield buf
 
                 # caller has read from the buffer
@@ -719,6 +734,7 @@ class MessageQueue:
                 # Without this, writer may not see our read completion and
                 # could wait indefinitely for all readers to finish.
                 memory_fence()
+                worker_debug_stat.set_call_step(1, 18)
                 self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
 
                 self._spin_condition.record_read()
@@ -776,7 +792,9 @@ class MessageQueue:
     ):
         """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
+            worker_debug_stat.set_call_step(1, 2)
             with self.acquire_read(timeout, indefinite) as buf:
+                worker_debug_stat.set_call_step(1, 20)
                 overflow = buf[0] == 1
                 if not overflow:
                     offset = 3
@@ -788,12 +806,16 @@ class MessageQueue:
                         offset = buf_offset + buf_len
                         all_buffers.append(buf[buf_offset:offset])
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
+            worker_debug_stat.set_call_step(1, 30)
             if overflow:
+                worker_debug_stat.set_call_step(1, 31)
                 obj = MessageQueue.recv(self.local_socket, timeout)
         elif self._is_remote_reader:
+            worker_debug_stat.set_call_step(1, 33)
             obj = MessageQueue.recv(self.remote_socket, timeout)
         else:
             raise RuntimeError("Only readers can dequeue")
+        worker_debug_stat.set_call_step(1, 35)
         return obj
 
     @staticmethod
