@@ -1741,7 +1741,10 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         # Ernie only uses the single "default" encoder path.
         output = outputs["default"]
         grid_thw = batch_mm_kwargs["image_grid_thw"].to(output.device)
-        num_valid = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum())
+        # The valid token count slices the graph output for the eager
+        # resampler call, so it has to come back to the host.
+        with gpu_sync_allowed():
+            num_valid = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum())
         image_embeds = self.resampler_model(output[:num_valid], grid_thw)
         scatter_output_slices(image_embeds, indices, per_item_out_tokens, dest, clone)
 

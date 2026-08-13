@@ -697,19 +697,19 @@ class KeyeSiglipVisionTransformer(nn.Module):
 
         last_hidden_state = self.post_layernorm(last_hidden_state)
 
-        sample_hidden_state = list()
         if cu_seqlens is None:
             raise ValueError(
                 "cu_seqlens cannot be None for "
                 "SiglipVisionTransformer output processing."
             )
-        for i in range(cu_seqlens.shape[0] - 1):
-            start = cu_seqlens[i]
-            end = cu_seqlens[i + 1]
-            tensor = last_hidden_state[:, start:end, :].squeeze(0)
-            sample_hidden_state.append(tensor)
-
-        return sample_hidden_state
+        # `cu_seqlens` is the running sum of the per-image `t * h * w`, so the
+        # split sizes are known on the host and slicing needs no device read.
+        split_sizes = [
+            int(np.prod(thw)) for thw in self.encoder.flatten_list(image_grid_thw)
+        ]
+        return [
+            tensor.squeeze(0) for tensor in last_hidden_state.split(split_sizes, dim=1)
+        ]
 
 
 class KeyeSiglipVisionModel(nn.Module):
