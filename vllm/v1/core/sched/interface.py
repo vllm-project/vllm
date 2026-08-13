@@ -3,6 +3,7 @@
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -33,6 +34,18 @@ class PauseState(enum.IntEnum):
     UNPAUSED = 0
     PAUSED_NEW = 1
     PAUSED_ALL = 2
+
+
+@dataclass(frozen=True)
+class PrefillAlignmentTelemetry:
+    """Scheduler-local telemetry from the most recent scheduling walk."""
+
+    schedule_sequence: int = 0
+    candidate_deferred: bool = False
+    force_allow: bool = False
+    running_batch: int = 0
+    max_prefill_batch: int = 0
+    max_running_requests: int = 0
 
 
 class SchedulerInterface(ABC):
@@ -246,6 +259,12 @@ class SchedulerInterface(ABC):
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return 0.0
+
+    def get_prefill_alignment_telemetry(
+        self,
+    ) -> "PrefillAlignmentTelemetry | None":
+        """Returns telemetry from the most recent scheduler walk."""
+        return None
 
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":

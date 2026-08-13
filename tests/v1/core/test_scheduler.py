@@ -40,6 +40,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -433,6 +434,7 @@ def test_schedule_partial_requests():
 
 
 @pytest.mark.parametrize("has_running", [True, False])
+@pytest.mark.skip_global_cleanup
 def test_schedule_prefills_gating(has_running: bool):
     """DP prefill-balancing gate: when `throttle_prefills` is True, a new
     WAITING (prefill) request is deferred ONLY if this rank has running work to
@@ -478,6 +480,56 @@ def test_schedule_prefills_gating(has_running: bool):
     # No running work to protect (or cadence now open): the prefill is admitted.
     assert "new0" in output.num_scheduled_tokens
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
+    assert scheduler.get_prefill_alignment_telemetry() is None
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_adaptive_prefill_alignment_records_real_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+    async_scheduling: bool,
+) -> None:
+    # This generic CPU fixture intentionally uses dense OPT with DP=1. Bypass
+    # only the production scope check to isolate the real Scheduler.schedule
+    # behavior; production scope has separate tests.
+    monkeypatch.setattr(
+        VllmConfig, "_verify_adaptive_prefill_alignment", lambda self: None
+    )
+    scheduler = create_scheduler(
+        enable_adaptive_prefill_alignment=True,
+        async_scheduling=async_scheduling,
+    )
+    assert isinstance(scheduler, AsyncScheduler) is async_scheduling
+    requests = create_requests(3, num_tokens=8, req_ids=["a", "b", "c"])
+    for request in requests:
+        scheduler.add_request(request)
+
+    throttled = scheduler.schedule(throttle_prefills=True)
+    assert throttled.num_scheduled_tokens == {}
+    telemetry = scheduler.get_prefill_alignment_telemetry()
+    assert telemetry is not None
+    assert telemetry.schedule_sequence == 1
+    assert telemetry.candidate_deferred
+    assert telemetry.max_prefill_batch == 0
+
+    released = scheduler.schedule()
+    assert released.num_scheduled_tokens == {"a": 8, "b": 8, "c": 8}
+    telemetry = scheduler.get_prefill_alignment_telemetry()
+    assert telemetry is not None
+    assert telemetry.schedule_sequence == 2
+    assert not telemetry.candidate_deferred
+    assert telemetry.max_prefill_batch == 3
+
+    last = create_requests(1, num_tokens=8, req_ids=["d"])[0]
+    scheduler.add_request(last)
+    last_output = scheduler.schedule()
+    # AsyncScheduler may also schedule placeholder-backed decode tokens for
+    # a/b/c, but the newly admitted prefill remains identical.
+    assert last_output.num_scheduled_tokens["d"] == 8
+    telemetry = scheduler.get_prefill_alignment_telemetry()
+    assert telemetry is not None
+    assert telemetry.schedule_sequence == 3
+    assert telemetry.max_prefill_batch == 3
 
 
 def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):

@@ -74,6 +74,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.prefill_alignment import EnginePrefillAlignment
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -1843,6 +1844,19 @@ class EngineCoreProc(EngineCore):
                     else:
                         request = generic_decoder.decode(data_frames)
 
+                        if (
+                            request_type
+                            == EngineCoreRequestType.PREFILL_ALIGNMENT_RELEASE
+                        ):
+                            alignment = getattr(
+                                cast("DPEngineCoreProc", self),
+                                "prefill_alignment",
+                                None,
+                            )
+                            if alignment is not None:
+                                alignment.enqueue(request)
+                            continue
+
                         if request_type == EngineCoreRequestType.ABORT:
                             # Aborts are added to *both* queues, allows us to eagerly
                             # process aborts while also ensuring ordering in the input
@@ -2084,6 +2098,13 @@ class DPEngineCoreProc(EngineCoreProc):
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
         self.dp_sync_interval = vllm_config.parallel_config.dp_sync_interval
+        self.enable_adaptive_prefill_alignment = (
+            scheduler_config.enable_adaptive_prefill_alignment
+        )
+        if self.enable_adaptive_prefill_alignment:
+            # Coordinator releases bypass regular request ingress, preserving
+            # their measured S+2 activation timing under load.
+            self.prefill_alignment = EnginePrefillAlignment()
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
@@ -2159,6 +2180,8 @@ class DPEngineCoreProc(EngineCoreProc):
         if self.has_coordinator and request_wave != self.current_wave:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
+                if self.enable_adaptive_prefill_alignment:
+                    self._reset_prefill_alignment()
             elif (
                 not self.engines_running
                 and self.scheduler.pause_state == PauseState.UNPAUSED
@@ -2211,6 +2234,11 @@ class DPEngineCoreProc(EngineCoreProc):
             if exclude_eng_index != self.engine_index and (
                 new_wave >= self.current_wave
             ):
+                if (
+                    self.enable_adaptive_prefill_alignment
+                    and new_wave > self.current_wave
+                ):
+                    self._reset_prefill_alignment()
                 self.current_wave = new_wave
                 if not self.engines_running:
                     logger.debug(
@@ -2218,8 +2246,58 @@ class DPEngineCoreProc(EngineCoreProc):
                         new_wave,
                     )
                     self.engines_running = True
+        elif request_type == EngineCoreRequestType.PREFILL_ALIGNMENT_RELEASE:
+            if self.enable_adaptive_prefill_alignment:
+                self.prefill_alignment.enqueue(request)
         else:
             super()._handle_client_request(request_type, request)
+
+    def _reset_prefill_alignment(self) -> None:
+        telemetry = self.scheduler.get_prefill_alignment_telemetry()
+        sequence = telemetry.schedule_sequence if telemetry is not None else 0
+        self.prefill_alignment.reset(sequence)
+
+    def _prepare_prefill_alignment_step(self) -> None:
+        if not self.enable_adaptive_prefill_alignment or not self.has_coordinator:
+            return
+        if self.prefill_alignment.prepare(
+            self.current_wave, self.step_counter, self.dp_rank
+        ):
+            self._publish_prefill_alignment_ack_only()
+
+    def _publish_prefill_alignment_observation(self) -> None:
+        if not self.enable_adaptive_prefill_alignment or not self.has_coordinator:
+            return
+        observation = self.prefill_alignment.observe(
+            self.current_wave,
+            self.step_counter,
+            self.scheduler.get_prefill_alignment_telemetry(),
+            self.scheduler.has_requests(),
+        )
+        self.output_queue.put_nowait(
+            (-1, EngineCoreOutputs(prefill_alignment_observation=observation))
+        )
+
+    def _publish_prefill_alignment_ack_only(self) -> None:
+        observation = self.prefill_alignment.ack_observation(
+            self.current_wave, self.step_counter
+        )
+        if observation is None:
+            return
+        self.output_queue.put_nowait(
+            (-1, EngineCoreOutputs(prefill_alignment_observation=observation))
+        )
+
+    def _publish_prefill_alignment_final_ack(self) -> None:
+        if not self.enable_adaptive_prefill_alignment or not self.has_coordinator:
+            return
+        observation = self.prefill_alignment.finish(
+            self.current_wave, self.step_counter
+        )
+        if observation is not None:
+            self.output_queue.put_nowait(
+                (-1, EngineCoreOutputs(prefill_alignment_observation=observation))
+            )
 
     def _maybe_publish_request_counts(self):
         if not self.publish_dp_lb_stats:
@@ -2239,6 +2317,9 @@ class DPEngineCoreProc(EngineCoreProc):
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
     def _should_throttle_prefills(self) -> bool:
+        if self.enable_adaptive_prefill_alignment and self.has_coordinator:
+            return not self.prefill_alignment.allows_prefill
+
         # Throttle new prefills to cadence-aligned steps for DP balancing.
         # step_counter is identical across DP ranks. On a fresh wave the
         # counter is 0, so prefills are admitted immediately after idle.
@@ -2257,6 +2338,9 @@ class DPEngineCoreProc(EngineCoreProc):
             self._process_input_queue()
             # Publish request counts before and after GPU step to ensure freshness.
             self._maybe_publish_request_counts()
+            if self.enable_adaptive_prefill_alignment:
+                self._publish_prefill_alignment_observation()
+                self._prepare_prefill_alignment_step()
 
             if self.eep_scaling_state is not None:
                 state = self.eep_scaling_state
@@ -2284,6 +2368,12 @@ class DPEngineCoreProc(EngineCoreProc):
                 elif not self.model_executor.is_sleeping:
                     with self.capture_iteration_details(None) as iteration_details:
                         self.execute_dummy_batch()
+                    if (
+                        self.enable_adaptive_prefill_alignment
+                        and self.prefill_alignment.allows_prefill
+                        and not local_unfinished_reqs
+                    ):
+                        self.prefill_alignment.consume_idle_release()
                     if iteration_details is not None and not self.has_coordinator:
                         stats = self._make_iteration_details_stats(iteration_details)
                         self.output_queue.put_nowait(
@@ -2296,6 +2386,8 @@ class DPEngineCoreProc(EngineCoreProc):
             )
 
             if not self.engines_running:
+                if self.enable_adaptive_prefill_alignment:
+                    self._publish_prefill_alignment_final_ack()
                 if self.dp_rank == 0 or not self.has_coordinator:
                     # Notify client that we are pausing the loop.
                     logger.debug(
@@ -2314,6 +2406,8 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Increment wave count and reset step counter.
                 self.current_wave += 1
                 self.step_counter = 0
+                if self.enable_adaptive_prefill_alignment:
+                    self._reset_prefill_alignment()
             elif (
                 not was_running
                 and self.has_coordinator

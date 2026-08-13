@@ -13,7 +13,14 @@ from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
-from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
+from vllm.v1.engine import (
+    EngineCoreOutputs,
+    EngineCoreRequestType,
+)
+from vllm.v1.engine.prefill_alignment import (
+    PrefillAlignmentCoordinator,
+    PrefillAlignmentRelease,
+)
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
@@ -77,7 +84,10 @@ class DPCoordinator:
             zmq_addr_pipe.close()
 
     def __init__(
-        self, parallel_config: ParallelConfig, enable_wave_coordination: bool = True
+        self,
+        parallel_config: ParallelConfig,
+        enable_wave_coordination: bool = True,
+        enable_prefill_alignment: bool = False,
     ):
         dp_size = parallel_config.data_parallel_size
         assert dp_size > 1, "Coordinator only used for data parallel"
@@ -108,6 +118,7 @@ class DPCoordinator:
                 "back_publish_address": back_publish_address,
                 "zmq_addr_pipe": child_zmq_addr_pipe,
                 "enable_wave_coordination": enable_wave_coordination,
+                "enable_prefill_alignment": enable_prefill_alignment,
             },
             daemon=True,
         )
@@ -149,6 +160,7 @@ class DPCoordinatorProc:
         engine_count: int,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
+        enable_prefill_alignment: bool = False,
     ):
         set_process_title("DPCoordinator")
         self.ctx = zmq.Context()
@@ -157,6 +169,51 @@ class DPCoordinatorProc:
 
         self.stats_update_interval_ms = min_stats_update_interval_ms
         self.enable_wave_coordination = enable_wave_coordination
+        self.prefill_alignment = (
+            PrefillAlignmentCoordinator(engine_count)
+            if enable_prefill_alignment
+            else None
+        )
+
+    @staticmethod
+    def _legacy_stats_poll_timeout_ms(
+        *,
+        now_ms: int,
+        last_publish_time: int,
+        stats_changed: bool,
+        has_step_snapshot: bool,
+        enable_wave_coordination: bool,
+        stats_update_interval_ms: int,
+    ) -> int:
+        """Return the feature-disabled poll timeout using the legacy policy."""
+        elapsed = now_ms - last_publish_time
+        wait_for = stats_update_interval_ms if stats_changed else 5000
+        min_timeout = 50 if enable_wave_coordination and not has_step_snapshot else 0
+        return max(min_timeout, wait_for - elapsed)
+
+    @staticmethod
+    def _stats_publish_deadline_ms(
+        *,
+        last_publish_time: int,
+        stats_changed: bool,
+        stats_changed_at: int | None,
+        has_step_snapshot: bool,
+        enable_wave_coordination: bool,
+        stats_update_interval_ms: int,
+    ) -> int:
+        deadline = last_publish_time + (
+            stats_update_interval_ms if stats_changed else 5000
+        )
+        if (
+            stats_changed
+            and enable_wave_coordination
+            and not has_step_snapshot
+            and stats_changed_at is not None
+        ):
+            # Preserve the existing 50ms window for other ranks from the
+            # current lockstep iteration to arrive.
+            deadline = max(deadline, stats_changed_at + 50)
+        return deadline
 
     @staticmethod
     def run_coordinator(
@@ -167,11 +224,13 @@ class DPCoordinatorProc:
         zmq_addr_pipe=None,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
+        enable_prefill_alignment: bool = False,
     ):
         coordinator = DPCoordinatorProc(
             engine_count=engine_count,
             min_stats_update_interval_ms=min_stats_update_interval_ms,
             enable_wave_coordination=enable_wave_coordination,
+            enable_prefill_alignment=enable_prefill_alignment,
         )
         try:
             coordinator.process_input_socket(
@@ -204,6 +263,7 @@ class DPCoordinatorProc:
         last_stats_step = -1
         last_stats_wave = -1
         last_step_counts: list[list[int | float]] | None = None
+        stats_changed_at: int | None = None
 
         with (
             make_zmq_socket(
@@ -255,22 +315,36 @@ class DPCoordinatorProc:
             poller.register(output_back, zmq.POLLIN)
             last_publish_time = 0
             while True:
-                elapsed = int(time.time() * 1000) - last_publish_time
-                # Send at stats_update_interval_ms interval if the stats have
-                # changed, or otherwise every 5 seconds.
-                wait_for = self.stats_update_interval_ms if stats_changed else 5000
-
-                # Wait at least 50ms to ensure we've received all stats for
-                # the current step. Only applicable to lockstep (MoE) DP;
-                # non-lockstep engines have no synchronized step boundaries.
-                if self.enable_wave_coordination and last_step_counts is None:
-                    min_timeout = 50
+                now_ms = int(time.time() * 1000)
+                if self.prefill_alignment is None:
+                    # Preserve the pre-feature poll and quiet-window behavior
+                    # exactly when adaptive prefill alignment is disabled.
+                    poll_timeout = self._legacy_stats_poll_timeout_ms(
+                        now_ms=now_ms,
+                        last_publish_time=last_publish_time,
+                        stats_changed=stats_changed,
+                        has_step_snapshot=last_step_counts is not None,
+                        enable_wave_coordination=self.enable_wave_coordination,
+                        stats_update_interval_ms=self.stats_update_interval_ms,
+                    )
                 else:
-                    min_timeout = 0
+                    publish_deadline = self._stats_publish_deadline_ms(
+                        last_publish_time=last_publish_time,
+                        stats_changed=stats_changed,
+                        stats_changed_at=stats_changed_at,
+                        has_step_snapshot=last_step_counts is not None,
+                        enable_wave_coordination=self.enable_wave_coordination,
+                        stats_update_interval_ms=self.stats_update_interval_ms,
+                    )
+                    poll_timeout = max(0, publish_deadline - now_ms)
+                    alignment_wait = self.prefill_alignment.seconds_until_deadline()
+                    if alignment_wait is not None:
+                        poll_timeout = min(poll_timeout, int(alignment_wait * 1000))
+                events = poller.poll(timeout=poll_timeout)
 
-                events = poller.poll(timeout=max(min_timeout, wait_for - elapsed))
-                if not events:
-                    # Poller timeout - publish current stats to front-ends.
+                if not events and self.prefill_alignment is None:
+                    # Feature-disabled path: retain the legacy timeout-only
+                    # request-count publication semantics.
                     if last_step_counts is not None:
                         engine_req_counts_list = last_step_counts
                         last_step_counts = None
@@ -278,7 +352,11 @@ class DPCoordinatorProc:
                         engine_req_counts_list = self._get_engine_counts()
                         stats_changed = False
 
-                    to_publish = (engine_req_counts_list, current_wave, engines_running)
+                    to_publish = (
+                        engine_req_counts_list,
+                        current_wave,
+                        engines_running,
+                    )
                     publish_front.send(msgspec.msgpack.encode(to_publish))
                     last_publish_time = int(time.time() * 1000)
                     continue
@@ -342,6 +420,8 @@ class DPCoordinatorProc:
                                 current_count,
                                 new_engine_count,
                             )
+                        if self.prefill_alignment is not None:
+                            self.prefill_alignment.resize(new_engine_count)
                         continue  # Skip normal engine notification processing
 
                     # Wave coordination: handle new-request messages from front-end.
@@ -377,10 +457,14 @@ class DPCoordinatorProc:
 
                     eng_index = outputs.engine_index
                     scheduler_stats = outputs.scheduler_stats
+                    alignment_observation = outputs.prefill_alignment_observation
+                    # Elastic EP stats may arrive while the engine list changes.
+                    if (
+                        scheduler_stats is not None or alignment_observation is not None
+                    ) and eng_index >= len(self.engines):
+                        continue
+
                     if scheduler_stats:
-                        # Elastic EP stats may arrive while the engine list changes.
-                        if eng_index >= len(self.engines):
-                            continue
                         # 1. Updated request load stats - update our local
                         # state with these.
                         stats = self.engines[eng_index].request_counts
@@ -416,7 +500,19 @@ class DPCoordinatorProc:
                         stats[0] = scheduler_stats.num_waiting_reqs
                         stats[1] = scheduler_stats.num_running_reqs
                         stats[2] = scheduler_stats.kv_cache_usage
+                        if self.prefill_alignment is not None and not stats_changed:
+                            stats_changed_at = int(time.time() * 1000)
                         stats_changed = True
+
+                    if (
+                        alignment_observation is not None
+                        and self.prefill_alignment is not None
+                    ):
+                        release = self.prefill_alignment.update(
+                            eng_index, alignment_observation
+                        )
+                        if release is not None:
+                            self._send_prefill_alignment_release(publish_back, release)
 
                     # Wave coordination: handle wave completion and start notifications
                     # Only process these when wave coordination is enabled
@@ -435,6 +531,8 @@ class DPCoordinatorProc:
                                 current_wave = new_wave
                                 engines_running = False
                                 wave_state_changed = True
+                                if self.prefill_alignment is not None:
+                                    self.prefill_alignment.reset_wave(new_wave)
                         elif (wave := outputs.start_wave) is not None and (
                             wave > current_wave
                             or (wave == current_wave and not engines_running)
@@ -456,6 +554,43 @@ class DPCoordinatorProc:
                     message = (None, current_wave, engines_running)
                     publish_front.send(msgspec.msgpack.encode(message))
 
+                if self.prefill_alignment is not None:
+                    timed_release = self.prefill_alignment.deadline_action_due()
+                    if timed_release is not None:
+                        self._send_prefill_alignment_release(
+                            publish_back, timed_release
+                        )
+
+                    # Publication is deadline-driven, not timeout-driven: a
+                    # continuously readable alignment socket must not starve
+                    # normal request-count updates to frontends.
+                    now_ms = int(time.time() * 1000)
+                    publish_deadline = self._stats_publish_deadline_ms(
+                        last_publish_time=last_publish_time,
+                        stats_changed=stats_changed,
+                        stats_changed_at=stats_changed_at,
+                        has_step_snapshot=last_step_counts is not None,
+                        enable_wave_coordination=self.enable_wave_coordination,
+                        stats_update_interval_ms=self.stats_update_interval_ms,
+                    )
+                    if now_ms >= publish_deadline:
+                        if last_step_counts is not None:
+                            engine_req_counts_list = last_step_counts
+                            last_step_counts = None
+                            stats_changed_at = now_ms
+                        else:
+                            engine_req_counts_list = self._get_engine_counts()
+                            stats_changed = False
+                            stats_changed_at = None
+
+                        to_publish = (
+                            engine_req_counts_list,
+                            current_wave,
+                            engines_running,
+                        )
+                        publish_front.send(msgspec.msgpack.encode(to_publish))
+                        last_publish_time = now_ms
+
     @staticmethod
     def _send_start_wave(
         socket: zmq.Socket, wave: int, exclude_engine_index: int | None
@@ -467,6 +602,23 @@ class DPCoordinatorProc:
         """
         wave_encoded = msgspec.msgpack.encode((wave, exclude_engine_index))
         socket.send_multipart((EngineCoreRequestType.START_DP_WAVE.value, wave_encoded))
+
+    @staticmethod
+    def _send_prefill_alignment_release(
+        socket: zmq.Socket, release: PrefillAlignmentRelease
+    ) -> None:
+        logger.debug(
+            "Broadcasting prefill alignment release wave=%d release_id=%d "
+            "target_step=%d reason=%s.",
+            release.wave,
+            release.release_id,
+            release.target_step,
+            release.reason,
+        )
+        payload = msgspec.msgpack.encode(release.payload)
+        socket.send_multipart(
+            (EngineCoreRequestType.PREFILL_ALIGNMENT_RELEASE.value, payload)
+        )
 
     def _get_engine_counts(self, do_copy=False) -> list[list[int | float]]:
         """Return list of [waiting, running] count lists for each engine."""

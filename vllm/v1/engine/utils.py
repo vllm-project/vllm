@@ -1107,6 +1107,19 @@ def launch_core_engines(
     local_engines_only = parallel_config.local_engines_only
 
     offline_mode = local_start_index is not None
+    enable_prefill_alignment = (
+        vllm_config.scheduler_config.enable_adaptive_prefill_alignment
+    )
+    if enable_prefill_alignment and (
+        dp_size <= 1
+        or not vllm_config.model_config.is_moe
+        or offline_mode
+        or not vllm_config.needs_dp_coordinator
+    ):
+        raise ValueError(
+            "Adaptive prefill alignment requires online MoE data parallel "
+            "execution with the DP coordinator."
+        )
 
     # Create a single tensor IPC queue for sharing multimodal tensors between
     # API servers and engine core. Returns a single queue since we only support
@@ -1128,6 +1141,7 @@ def launch_core_engines(
         coordinator = DPCoordinator(
             parallel_config,
             enable_wave_coordination=vllm_config.model_config.is_moe,
+            enable_prefill_alignment=enable_prefill_alignment,
         )
 
         addresses.coordinator_input, addresses.coordinator_output = (

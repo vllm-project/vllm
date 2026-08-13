@@ -253,6 +253,25 @@ class UtilityOutput(
     result: UtilityResult | None = None
 
 
+class PrefillAlignmentObservation(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    """Compact engine-to-coordinator prefill alignment observation."""
+
+    wave: int
+    step: int
+    release_id: int
+    candidate_deferred: bool
+    force_allow: bool
+    running_batch: int
+    max_prefill_batch: int
+    max_running_requests: int
+    ack_release_id: int = -1
+    ack_only: bool = False
+
+
 class EngineCoreOutputs(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -278,6 +297,9 @@ class EngineCoreOutputs(
     # In DP case, used to signal that a request was received for an
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
+    # Optional DP coordinator control-plane observation. Keep this field last
+    # so older array-like payloads decode with the default value.
+    prefill_alignment_observation: PrefillAlignmentObservation | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:
@@ -297,6 +319,7 @@ class EngineCoreRequestType(enum.Enum):
     EXECUTOR_FAILED = b"\x04"
     # Sentinel to wake up input_queue.get() during shutdown.
     WAKEUP = b"\x05"
+    PREFILL_ALIGNMENT_RELEASE = b"\x06"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):

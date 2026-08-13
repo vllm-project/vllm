@@ -200,6 +200,10 @@ class SchedulerConfig:
     once every N engine steps, aligned across DP ranks, to better balance
     per-step forward-pass times."""
 
+    enable_adaptive_prefill_alignment: bool = False
+    """Use coordinator-driven adaptive prefill alignment for data-parallel
+    deployments."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
@@ -281,6 +285,21 @@ class SchedulerConfig:
         return None if value is None else handler(value)
 
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
+        if self.enable_adaptive_prefill_alignment and self.scheduler_cls is not None:
+            raise ValueError(
+                "Adaptive prefill alignment requires the automatically selected "
+                "built-in scheduler; do not set --scheduler-cls."
+            )
+
+        if (
+            self.enable_adaptive_prefill_alignment
+            and self.prefill_schedule_interval != 1
+        ):
+            raise ValueError(
+                "Adaptive prefill alignment cannot be combined with "
+                "prefill_schedule_interval > 1."
+            )
+
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.
             self.disable_chunked_mm_input = True

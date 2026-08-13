@@ -667,6 +667,9 @@ class EngineArgs:
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
+    enable_adaptive_prefill_alignment: bool = (
+        SchedulerConfig.enable_adaptive_prefill_alignment
+    )
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1671,6 +1674,10 @@ class EngineArgs:
             **scheduler_kwargs["prefill_schedule_interval"],
         )
         scheduler_group.add_argument(
+            "--enable-adaptive-prefill-alignment",
+            **scheduler_kwargs["enable_adaptive_prefill_alignment"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2492,6 +2499,7 @@ class EngineArgs:
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
+            enable_adaptive_prefill_alignment=(self.enable_adaptive_prefill_alignment),
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
