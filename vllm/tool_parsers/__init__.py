@@ -22,6 +22,10 @@ Example:
 
 
 _TOOL_PARSERS_TO_REGISTER = {
+    "dots": (
+        "dots_tool_parser",
+        "DotsToolParser",
+    ),
     "deepseek_v3": (  # name
         "deepseekv3_tool_parser",  # filename
         "DeepSeekV3ToolParser",  # class_name
@@ -57,6 +61,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "glm47": (
         "glm47_moe_tool_parser",
         "Glm47MoeModelToolParser",
+    ),
+    "ling3": (
+        "ling3_tool_parser",
+        "Ling3ToolParser",
     ),
     "granite-20b-fc": (
         "granite_20b_fc_tool_parser",
