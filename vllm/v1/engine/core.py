@@ -1641,7 +1641,9 @@ class EngineCoreProc(EngineCore):
                 else None
             ),
             enable_sleep_mode=self.vllm_config.model_config.enable_sleep_mode,
-            supports_draft_weight_updates=self.use_spec_decode,
+            supports_draft_weight_updates=(
+                self.model_executor.supports_draft_weight_updates()
+            ),
         )
 
     def process_input_sockets(

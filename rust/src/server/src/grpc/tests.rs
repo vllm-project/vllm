@@ -1560,7 +1560,7 @@ async fn control_reports_server_and_model_info() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn control_rejects_weight_update_while_serving() {
+async fn control_forwards_weight_update_without_pause_guard() {
     let mut ready = default_ready_response();
     ready.weight_transfer_backend = Some("nccl".to_string());
     let (inference_service, control_service, engine_health, engine_task) =
@@ -1575,8 +1575,9 @@ async fn control_rejects_weight_update_while_serving() {
                     let payload = decode_value(&frames[1]).expect("decode utility payload");
                     let fields = payload.as_array().expect("utility payload array");
                     let call_id = fields[1].as_u64().expect("utility call id");
-                    assert_eq!(fields[2].as_str(), Some("is_scheduler_paused"));
-                    assert_eq!(fields[3], Value::Array(Vec::new()));
+                    assert_eq!(fields[2].as_str(), Some("collective_rpc"));
+                    let args = fields[3].as_array().expect("collective_rpc arguments");
+                    assert_eq!(args[0].as_str(), Some("update_weights"));
                     send_outputs(
                         push,
                         UtilityCallOutput {
@@ -1584,7 +1585,7 @@ async fn control_rejects_weight_update_while_serving() {
                                 call_id: call_id.into(),
                                 failure_message: None,
                                 result: Some(UtilityResultEnvelope::without_type_info(
-                                    Value::Boolean(false),
+                                    Value::Array(vec![Value::Nil]),
                                 )),
                             },
                             ..Default::default()
@@ -1603,14 +1604,14 @@ async fn control_rejects_weight_update_while_serving() {
         tokio_util::sync::CancellationToken::new(),
     )
     .await;
+    let mut client = ControlClient::new(channel);
 
-    let error = ControlClient::new(channel)
+    client
         .update_weights(pb::UpdateWeightsRequest {
             update_info_json: br#"{"names":["model.weight"]}"#.to_vec(),
         })
         .await
-        .expect_err("unpaused weight update should fail");
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        .expect("forward weight update without a pause probe");
 
     engine_task.await.expect("mock engine task");
     server_task.abort();

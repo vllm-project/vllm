@@ -94,17 +94,6 @@ impl ControlServiceImpl {
             )
         })
     }
-
-    async fn require_paused(&self) -> Result<(), Status> {
-        let paused = self
-            .client()
-            .is_scheduler_paused()
-            .await
-            .map_err(|error| utility_status("is_scheduler_paused", error))?;
-        paused
-            .then_some(())
-            .ok_or_else(|| Status::failed_precondition("pause generation before updating weights"))
-    }
 }
 
 const GRPC_API_VERSION: &str = "vllm";
@@ -292,7 +281,6 @@ impl pb::control_server::Control for ControlServiceImpl {
         &self,
         _request: Request<pb::IsSleepingRequest>,
     ) -> Result<Response<pb::IsSleepingResponse>, Status> {
-        self.require_sleep_mode()?;
         let sleeping = self
             .client()
             .is_sleeping()
@@ -321,7 +309,6 @@ impl pb::control_server::Control for ControlServiceImpl {
     ) -> Result<Response<pb::StartWeightUpdateResponse>, Status> {
         self.require_weight_transfer()?;
         let _guard = self.rl_lock.lock().await;
-        self.require_paused().await?;
         self.client()
             .start_weight_update()
             .await
@@ -340,7 +327,6 @@ impl pb::control_server::Control for ControlServiceImpl {
             ));
         }
         let _guard = self.rl_lock.lock().await;
-        self.require_paused().await?;
         self.client()
             .start_draft_weight_update()
             .await
@@ -355,7 +341,6 @@ impl pb::control_server::Control for ControlServiceImpl {
         self.require_weight_transfer()?;
         let update_info = json_object(&request.into_inner().update_info_json, "update_info_json")?;
         let _guard = self.rl_lock.lock().await;
-        self.require_paused().await?;
         self.client()
             .update_weights(update_info)
             .await
@@ -370,7 +355,6 @@ impl pb::control_server::Control for ControlServiceImpl {
         self.require_weight_transfer()?;
         let version = request.into_inner().weight_version.map(weight_version).transpose()?;
         let _guard = self.rl_lock.lock().await;
-        self.require_paused().await?;
         self.client()
             .finish_weight_update()
             .await
