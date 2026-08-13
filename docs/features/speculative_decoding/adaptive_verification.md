@@ -45,3 +45,17 @@ Step costs are profiled against a synthetic KV context, 8192 tokens by default. 
 ```bash
 export VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN=131072
 ```
+
+The full cost profile is hardware- and configuration-specific. To reuse an exact
+profile across otherwise identical engine starts, enable its persistent cache:
+
+```bash
+export VLLM_ENABLE_ADAPTIVE_VERIFICATION_PROFILE_CACHE=1
+```
+
+Profiles are stored under `$VLLM_CACHE_ROOT/adaptive_verification/`. A cache hit
+must match the model revision, GPU, software stack, parallel configuration,
+resolved kernels and attention/KV backends, speculative width, scheduler limits,
+CUDA graph configuration, and profile context. It is then checked with two GPU
+sentinel replays. An unreadable, stale, or anomalous entry is ignored and the
+full profile is regenerated.

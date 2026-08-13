@@ -168,13 +168,18 @@ class AdaptiveVerificationManager:
         self._pending_resets.append(req_idx)
         self._confidence_probs[req_idx].fill_(1.0)
 
+    def configure_profile(self, capture_sizes: list[int]) -> None:
+        """Record the graph boundary used when turning curves into tables."""
+        self._cudagraph_limit = capture_sizes[-1] if capture_sizes else 0
+
     def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
         """Dummy-run kwargs whose step timings seed the cost tables.
 
         Run these inside StepTimingCollector.collect(), then hand the block's
         timings to set_initial_cost_curves."""
         max_num_tokens = self.req_states.max_num_batched_tokens
-        size = self._cudagraph_limit = capture_sizes[-1] if capture_sizes else 0
+        self.configure_profile(capture_sizes)
+        size = self._cudagraph_limit
         # Also profile beyond the capture limit: real steps run there
         # (piecewise/eager) and linear extrapolation badly underestimates
         # them. These runs double as JIT warmup for the piecewise shapes.
@@ -192,7 +197,9 @@ class AdaptiveVerificationManager:
                     "context_len": envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN,
                 }
 
-    def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
+    def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> tuple[
+        list[tuple[int, float]], list[tuple[int, float]]
+    ]:
         def median_curve(
             points: Iterable[tuple[int, float]],
         ) -> list[tuple[int, float]]:
@@ -211,13 +218,13 @@ class AdaptiveVerificationManager:
         verify_curve = median_curve(
             (s.num_target_tokens, s.forward_ms) for s in samples
         )
-        self.set_cost_curves(draft_curve, verify_curve)
+        return self.set_cost_curves(draft_curve, verify_curve)
 
     def set_cost_curves(
         self,
         draft_curve: list[tuple[int, float]],
         verify_curve: list[tuple[int, float]],
-    ) -> None:
+    ) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
         draft_curve, verify_curve = get_tp_group().broadcast_object(
             (draft_curve, verify_curve), src=0
         )
@@ -235,6 +242,7 @@ class AdaptiveVerificationManager:
             self._cudagraph_limit,
         )
         logger.debug("DSpark cost tables: %s", self.cost_tables)
+        return draft_curve, verify_curve
 
     def record_confidences(
         self,

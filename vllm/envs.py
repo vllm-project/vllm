@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
+    VLLM_ENABLE_ADAPTIVE_VERIFICATION_PROFILE_CACHE: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -1077,6 +1078,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Clamped to max_model_len - query_len. Default: 8192 tokens
     "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN": lambda: int(
         os.getenv("VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", "8192")
+    ),
+    # Persist adaptive-verification timing curves. A strict runtime fingerprint
+    # and a two-replay GPU sentinel gate every cache hit; any discrepancy falls
+    # back to the normal full calibration. Default: disabled.
+    "VLLM_ENABLE_ADAPTIVE_VERIFICATION_PROFILE_CACHE": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_ADAPTIVE_VERIFICATION_PROFILE_CACHE", "0"))
     ),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
@@ -2212,6 +2219,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CACHE_ROOT",
         # Runtime memory-plan persistence; does not affect compiled graphs.
         "VLLM_ENABLE_STARTUP_PLAN",
+        # Runtime adaptive-profile persistence; does not affect compiled graphs.
+        "VLLM_ENABLE_ADAPTIVE_VERIFICATION_PROFILE_CACHE",
         # Location-only derived paths: where a cache/config directory lives
         # cannot affect compiled artifacts, and hashing them means relocating
         # HOME or the XDG roots silently invalidates every compile cache
