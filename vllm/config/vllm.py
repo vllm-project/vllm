@@ -1035,6 +1035,31 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
+    def _verify_sampling_replay_config(self) -> None:
+        model_config = self.model_config
+        if model_config is None or not model_config.return_sampling_mask:
+            return
+        if not self.use_v2_model_runner:
+            raise ValueError("sampling distribution replay requires Model Runner V2")
+        if self.speculative_config is not None:
+            raise ValueError(
+                "sampling distribution replay does not support speculative decoding"
+            )
+        if model_config.is_diffusion:
+            raise ValueError(
+                "sampling distribution replay does not support diffusion models"
+            )
+        if model_config.logits_processors:
+            raise ValueError(
+                "sampling distribution replay does not support custom logits processors"
+            )
+        if model_config.logprobs_mode != "processed_logprobs":
+            raise ValueError(
+                "sampling distribution replay requires "
+                "logprobs_mode='processed_logprobs' so that returned logprobs "
+                "are normalized over the same nucleus as the sampling mask"
+            )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
         # To give each torch profile run a unique instance name.
@@ -1074,6 +1099,8 @@ class VllmConfig:
                     "--enable-return-routed-experts is incompatible with KV "
                     "connectors (PD disaggregation, KV cache offload)."
                 )
+
+        self._verify_sampling_replay_config()
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)

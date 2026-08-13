@@ -1,9 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
+import numpy as np
 import pytest
 
-from vllm.model_executor.models.nano_nemotron_vl import NemotronH_Nano_VL_V2
+from vllm import envs
+from vllm.model_executor.models.nano_nemotron_vl import (
+    NanoNemotronVLMultiModalProcessor,
+    NemotronH_Nano_VL_V2,
+)
+from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
 
 
 class _TextOnlyMultiModalConfig:
@@ -126,3 +134,52 @@ def test_nano_nemotron_vl_requires_sound_encoder_for_sound_weights():
 
     with pytest.raises(AssertionError):
         model.load_weights([("sound_encoder.encoder.weight", object())])
+
+
+def _make_mm_items_with_video_bytes(
+    video_bytes: bytes,
+) -> MultiModalDataItems:
+    """Build a minimal MultiModalDataItems with one video entry."""
+    items = MultiModalDataItems()
+    items["video"] = VideoProcessorItems(
+        data=[None],
+        metadata=[{"original_video_bytes": video_bytes}],
+    )
+    return items
+
+
+def test_extract_audio_from_videos_passes_max_duration():
+    """_extract_audio_from_videos must forward VLLM_MAX_AUDIO_DECODE_DURATION_S
+    to load_audio_pyav so decompression-bomb audio is rejected.
+    """
+    dummy_audio = (np.zeros(16000, dtype=np.float32), 16000.0)
+    mm_items = _make_mm_items_with_video_bytes(b"\x00" * 64)
+
+    processor = object.__new__(NanoNemotronVLMultiModalProcessor)
+
+    target = "vllm.model_executor.models.nano_nemotron_vl.load_audio_pyav"
+    with patch(target, return_value=dummy_audio) as mock_load:
+        processor._extract_audio_from_videos(mm_items)
+
+    mock_load.assert_called_once()
+    _, kwargs = mock_load.call_args
+    assert kwargs["max_duration_s"] == envs.VLLM_MAX_AUDIO_DECODE_DURATION_S
+
+
+def test_extract_audio_from_videos_rejects_oversized_audio():
+    """When load_audio_pyav raises due to duration limit the video is
+    marked as having no audio instead of crashing the server.
+    """
+    mm_items = _make_mm_items_with_video_bytes(b"\x00" * 64)
+
+    processor = object.__new__(NanoNemotronVLMultiModalProcessor)
+
+    target = "vllm.model_executor.models.nano_nemotron_vl.load_audio_pyav"
+    with patch(
+        target,
+        side_effect=ValueError("Audio exceeds maximum allowed duration"),
+    ):
+        _, audio_items, has_audio = processor._extract_audio_from_videos(mm_items)
+
+    assert audio_items == []
+    assert has_audio == [False]

@@ -17,7 +17,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplingMaskLists
 from vllm.v1.serial_utils import UtilityResult
 
 # Type for pause_generation mode parameter.
@@ -215,6 +215,8 @@ class EngineCoreOutput(
     # from its sender cache and the request is resent with the data. Appended last
     # so `array_like` positional serialization stays backward compatible.
     mm_cache_miss_hashes: list[str] | None = None
+
+    new_sampling_mask: SamplingMaskLists | None = None
 
     @property
     def finished(self) -> bool:

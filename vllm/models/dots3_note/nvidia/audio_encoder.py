@@ -345,16 +345,25 @@ class WhisperEncoderLayer(nn.Module):
         output_attentions: bool = False,
         rotary_cos: torch.Tensor | None = None,
         rotary_sin: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[Any, ...]:
         """Args:
-        hidden_states (`torch.FloatTensor`): input to the layer of shape `(seq_len, batch, embed_dim)`
-        attention_mask (`torch.FloatTensor`): attention mask of size
-            `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
-        layer_head_mask (`torch.FloatTensor`): mask for attention heads in a given layer of size
-            `(encoder_attention_heads,)`.
-        output_attentions (`bool`, *optional*):
-            Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-            returned tensors for more detail.
+            hidden_states: Input to the layer of shape `(batch, seq_len,
+                embed_dim)`, or `(total_tokens, embed_dim)` when `cu_seqlens_q`
+                is given.
+            cu_seqlens_q: Cumulative query sequence lengths for packed
+                variable-length input. If `None`, the input is treated as a
+                padded batch.
+            cu_seqlens_kv: Cumulative key/value sequence lengths for packed
+                variable-length input.
+            max_seqlen_q: Longest query sequence in the packed batch.
+            max_seqlen_kv: Longest key/value sequence in the packed batch.
+            output_attentions: Whether to also return the attention weights.
+            rotary_cos: Cosine component of the rotary position embedding.
+            rotary_sin: Sine component of the rotary position embedding.
+
+        Returns:
+            A tuple of the output hidden states, followed by the attention
+            weights if `output_attentions` is `True`.
 
         """
         residual = hidden_states

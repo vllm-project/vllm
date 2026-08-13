@@ -19,6 +19,17 @@ logger = init_logger(__name__)
 
 
 @dataclass
+class SamplingMask:
+    """Per-token sampling support sets aligned with completion token IDs.
+
+    Each inner list contains the vocabulary token IDs that survived
+    top-k / top-p / min-p filtering for the corresponding generated token.
+    """
+
+    token_ids: list[list[int]]
+
+
+@dataclass
 class CompletionOutput:
     """The output data of one completion output of a request.
 
@@ -30,6 +41,8 @@ class CompletionOutput:
             output text.
         logprobs: The log probabilities of the top probability words at each
             position if the logprobs are requested.
+        sampling_mask: The post-processing token support set for each generated
+            token, if requested.
         finish_reason: The reason why the sequence is finished.
         stop_reason: The stop string or token id that caused the completion
             to stop, None if the completion finished for some other reason
@@ -47,6 +60,7 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    sampling_mask: SamplingMask | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -57,6 +71,7 @@ class CompletionOutput:
             f"text={self.text!r}, "
             f"token_ids={self.token_ids}, "
             f"routed_experts={self.routed_experts}, "
+            f"sampling_mask={self.sampling_mask}, "
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
