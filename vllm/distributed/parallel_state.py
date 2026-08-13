@@ -1748,6 +1748,28 @@ def init_distributed_environment(
             _INNER_DP_WORLD = _WORLD
 
 
+def _get_ep_group_ranks(
+    all_ranks: torch.Tensor,
+    *,
+    data_parallel_size: int,
+    prefill_context_model_parallel_size: int,
+    tensor_model_parallel_size: int,
+    expert_parallel_size: int | None,
+) -> list[list[int]]:
+    if expert_parallel_size is not None:
+        # Preserve each TP group and form EP groups across DP ranks at the
+        # same TP lane. TP4/DP2 yields [0,4], [1,5], [2,6], [3,7].
+        group_ranks = all_ranks.transpose(1, 4).reshape(-1, expert_parallel_size)
+    else:
+        group_ranks = all_ranks.transpose(1, 2).reshape(
+            -1,
+            data_parallel_size
+            * prefill_context_model_parallel_size
+            * tensor_model_parallel_size,
+        )
+    return [ranks.tolist() for ranks in group_ranks.unbind(0)]
+
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -1924,17 +1946,13 @@ def initialize_model_parallel(
     assert _EP is None, "expert parallel group is already initialized"
     # Don't create EP group for dense models.
     if config.model_config is None or config.model_config.is_moe:
-        group_ranks = (
-            all_ranks.transpose(1, 2)
-            .reshape(
-                -1,
-                data_parallel_size
-                * prefill_context_model_parallel_size
-                * tensor_model_parallel_size,
-            )
-            .unbind(0)
+        group_ranks = _get_ep_group_ranks(
+            all_ranks,
+            data_parallel_size=data_parallel_size,
+            prefill_context_model_parallel_size=(prefill_context_model_parallel_size),
+            tensor_model_parallel_size=tensor_model_parallel_size,
+            expert_parallel_size=parallel_config.expert_parallel_size,
         )
-        group_ranks = [x.tolist() for x in group_ranks]
         use_all2all = parallel_config.use_all2all
         if enable_elastic_ep:
             _EP = _init_stateless_group(

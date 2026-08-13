@@ -164,6 +164,13 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    expert_parallel_size: int | None = None
+    """Experimental explicit expert-parallel size.
+
+    When unset, EP retains the standard flattened ``TP * PCP * DP`` size.
+    The initial explicit topology supports ``EP == DP`` with ``PCP == PP == 1``
+    and preserves tensor parallelism within each expert.
+    """
     enable_ep_weight_filter: bool = False
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
@@ -682,6 +689,7 @@ class ParallelConfig:
                 "nixl_ep",
             )
             and self.enable_expert_parallel
+            and self.expert_parallel_size is None
             and self.tensor_parallel_size > 1
             and self.data_parallel_size > 1
         )
@@ -903,6 +911,38 @@ class ParallelConfig:
                 )
 
         self.data_parallel_index = self.data_parallel_rank
+
+        if self.expert_parallel_size is not None:
+            if not self.enable_expert_parallel:
+                raise ValueError(
+                    "expert_parallel_size requires enable_expert_parallel=True."
+                )
+            if self.pipeline_parallel_size != 1:
+                raise ValueError(
+                    "Explicit expert_parallel_size does not yet support "
+                    "pipeline parallelism."
+                )
+            if self.prefill_context_parallel_size != 1:
+                raise ValueError(
+                    "Explicit expert_parallel_size does not yet support "
+                    "prefill context parallelism."
+                )
+            if self.expert_parallel_size != self.data_parallel_size:
+                raise ValueError(
+                    "The initial hybrid TP x EP implementation requires "
+                    "expert_parallel_size == data_parallel_size, but got "
+                    f"{self.expert_parallel_size} and {self.data_parallel_size}."
+                )
+            if self.all2all_backend != "allgather_reducescatter":
+                raise ValueError(
+                    "Explicit expert_parallel_size initially supports only "
+                    "allgather_reducescatter."
+                )
+            if self.enable_eplb or self.enable_elastic_ep:
+                raise ValueError(
+                    "Explicit expert_parallel_size does not yet support EPLB "
+                    "or elastic EP."
+                )
 
         if self.distributed_executor_backend == "external_launcher":
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
