@@ -1851,10 +1851,7 @@ class ModelConfig:
         if not self._model_info.is_hybrid:
             return False
         # Handle granite-4.0-micro case which uses hybrid config but does not
-        # actually contain any non-attention layers. `layer_types` spells
-        # pure-attention entries as "attention" pre-transformers-5.13 and
-        # "full_attention" from 5.13 onwards (see granitemoehybrid.py's
-        # ALL_DECODER_LAYER_TYPES).
+        # actually contain any non-attention layers.
         layer_types = getattr(self.hf_config, "layer_types", None)
         return layer_types is None or not all(
             layer in ("attention", "full_attention") for layer in layer_types
