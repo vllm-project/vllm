@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
@@ -71,15 +71,43 @@ class CachePolicy(ABC):
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:
         """
-        Evict exactly n blocks, skipping any in protected.
+        Evict exactly ``n`` blocks.
 
-        Returns a list of (key, block) for the evicted blocks,
-        or None if n evictions cannot be satisfied. The operation is atomic:
-        if None is returned, no state changes are made.
-
-        For ARC: ghost list cleanup (trimming to cache_capacity) is performed
-        at the end of a successful eviction.
+        Legacy extension point — external policy subclasses override this
+        method.  Built-in policies (LRU, ARC) override both ``evict`` and
+        ``evict_until``.
         """
+
+    def evict_until(
+        self,
+        can_fit: Callable[[list[tuple[OffloadKey, BlockStatus]]], bool],
+        protected: set[OffloadKey],
+    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
+        """
+        Yield eviction candidates in exact policy order, calling ``can_fit``
+        after each candidate.
+
+        The default implementation raises :class:`NotImplementedError` because
+        variable-size compact eviction requires concrete policy support.
+        Built-in policies (LRU, ARC) override this method.
+
+        Protected keys and entries with a non-zero ``ref_cnt`` are never
+        selected.
+
+        Args:
+            can_fit:  Predicate called with the current (key, block) list
+                      after each candidate is added.  Return True to commit
+                      the collected prefix.
+            protected:  Keys that must never be evicted.
+
+        Returns:
+            The committed list of (key, block) pairs, or None if the
+            predicate never accepted and eviction is impossible.
+        """
+        raise NotImplementedError(
+            "variable-size compact eviction requires policy support; "
+            "override evict_until"
+        )
 
     @abstractmethod
     def clear(self) -> None:

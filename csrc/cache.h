@@ -13,7 +13,8 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
 void swap_blocks_batch(const torch::Tensor& src_ptrs,
                        const torch::Tensor& dst_ptrs,
                        const torch::Tensor& sizes,
-                       bool is_src_access_order_any);
+                       bool is_src_access_order_any,
+                       bool use_batch_api = true);
 
 void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
                        torch::Tensor& key_cache, torch::Tensor& value_cache,

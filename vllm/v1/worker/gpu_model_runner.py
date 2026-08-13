@@ -193,6 +193,7 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
 from vllm.v1.spec_decode.dflash import DFlashProposer
+from vllm.v1.spec_decode.dspark import DSparkProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
@@ -676,6 +677,9 @@ class GPUModelRunner(
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
+            elif self.speculative_config.use_dspark():
+                self.drafter = DSparkProposer(self.vllm_config, self.device, self)
+                self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
@@ -920,6 +924,7 @@ class GPUModelRunner(
         # KVCacheConfig of the scheduler.
         self.runner_only_attn_layers: set[str] = set()
 
+        self._drafter_gate_off_logged = 0
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
         self._draft_probs: torch.Tensor | None = None
@@ -3618,8 +3623,18 @@ class GPUModelRunner(
         is_encoder_decoder = self.model_config.is_encoder_decoder
 
         # Clamp speculative scheduler placeholders (-1) before embedding lookup.
+        #
+        # Bound the top as well, not just the bottom. A draft token id is data,
+        # not a loop bound, and this clamp is the last thing standing between a
+        # speculator and every downstream gather. The DSv4 hash-MoE router
+        # indexes tid2eid[token_id * 6 + lane] on a [vocab_size, 6] table with no
+        # bound of its own, so a single out-of-vocab draft id is an illegal
+        # access that takes down every TP rank. Cheap: one extra bound on a
+        # kernel that already runs.
         if self.speculative_config is not None:
-            self.input_ids.gpu[:num_input_tokens].clamp_(min=0)
+            self.input_ids.gpu[:num_input_tokens].clamp_(
+                min=0, max=self.model_config.get_vocab_size() - 1
+            )
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
@@ -4640,6 +4655,17 @@ class GPUModelRunner(
     def _input_fits_in_drafter(
         self, common_attn_metadata: CommonAttentionMetadata | None
     ) -> bool:
+        # INVARIANT (do not weaken): every input here must be identical on all
+        # TP ranks. max_seq_len derives from optimistic_seq_lens_cpu =
+        # scheduler-broadcast num_computed_tokens + scheduler-broadcast
+        # scheduled counts; the rank-local acceptance correction
+        # (valid_sampled_token_count_gpu) is applied ONLY to the GPU
+        # num_computed_tokens buffer and must never be written back to the CPU
+        # tensor. If a rank-local value ever leaks into this gate, TP ranks
+        # can disagree near the max_model_len ceiling and launch mismatched
+        # drafter collectives -- the wedge / corrupt-and-continue class of
+        # vllm-project/vllm#49027. Pinned by
+        # tests/v1/worker/test_drafter_gate_determinism.py.
         if common_attn_metadata is None:
             return False
         assert self.speculative_config is not None
@@ -4647,10 +4673,28 @@ class GPUModelRunner(
         num_drafter_query_tokens = self.num_spec_tokens + (
             1 if self.speculative_config.use_dflash() else 0
         )
-        return (
+        fits = (
             common_attn_metadata.max_seq_len + num_drafter_query_tokens
             <= self.effective_drafter_max_model_len
         )
+        if (
+            not fits
+            and self.parallel_config.tensor_parallel_size > 1
+            and self._drafter_gate_off_logged < 8
+        ):
+            # Boundary sentinel: gate-off steps only occur within
+            # num_drafter_query_tokens of the ceiling, so this is quiet in
+            # normal serving. Per-rank lines allow offline cross-rank
+            # comparison if the determinism invariant is ever broken.
+            self._drafter_gate_off_logged += 1
+            logger.warning(
+                "[drafter-gate] off at max_seq_len=%d (+%d > %d); "
+                "scheduler-derived, must match on all TP ranks",
+                common_attn_metadata.max_seq_len,
+                num_drafter_query_tokens,
+                self.effective_drafter_max_model_len,
+            )
+        return fits
 
     @torch.inference_mode
     def sample_tokens(
@@ -4738,6 +4782,7 @@ class GPUModelRunner(
             # TP/EP/DP collectives), independent of padded-batch timing.
             drafter_runs_model_forward = (
                 spec_config.use_eagle()
+                or spec_config.use_dspark()
                 or spec_config.uses_draft_model()
                 or spec_config.uses_extract_hidden_states()
             )
@@ -5102,6 +5147,10 @@ class GPUModelRunner(
 
         if not draft_probs_rows:
             return None
+        if len(draft_probs_rows) == 1 and draft_probs_rows[0].is_contiguous():
+            # Rejection sampling consumes this view in the same step; the
+            # persistent draft-probs buffer may be reused by the next proposal.
+            return draft_probs_rows[0]
         return torch.cat(draft_probs_rows, dim=0).contiguous()
 
     def propose_draft_token_ids(
@@ -5250,6 +5299,7 @@ class GPUModelRunner(
         elif (
             spec_config.use_eagle()
             or spec_config.use_dflash()
+            or spec_config.use_dspark()
             or spec_config.uses_draft_model()
         ):
             assert isinstance(
@@ -5609,6 +5659,16 @@ class GPUModelRunner(
 
         layer_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None)
         if not layer_ids:
+            dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
+            if dspark_layer_ids:
+                # dspark_target_layer_ids name the layers whose OUTPUT the
+                # drafter was trained on, but the capture hook fires on
+                # `idx + 1 in aux_hidden_state_layers` (the input of layer L).
+                # Convert like the DFlash branch below and the V2 runner
+                # (eagle3_utils.py); passing them raw shifts every aux hidden
+                # state down one layer and silently degrades acceptance.
+                layer_ids = [i + 1 for i in dspark_layer_ids]
+        if not layer_ids:
             dflash_config = getattr(hf_config, "dflash_config", None)
             eagle_config = getattr(hf_config, "eagle_config", None)
 
@@ -5930,6 +5990,7 @@ class GPUModelRunner(
         skip_eplb: bool = False,
         is_profile: bool = False,
         create_mixed_batch: bool = False,
+        create_single_prefill: bool = False,
         remove_lora: bool = True,
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
@@ -5956,6 +6017,8 @@ class GPUModelRunner(
             is_profile: If True, this is a profile run.
             create_mixed_batch: If True, create a mixed batch with both decode
                 (1 token) and prefill (multiple tokens) requests.
+            create_single_prefill: If True, create one prefill request with
+                ``num_tokens`` prompt tokens.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
             num_active_loras: Number of distinct active LoRAs to capture for.
                 LoRA is activated when num_active_loras > 0.
@@ -5994,7 +6057,13 @@ class GPUModelRunner(
         # has num_tokens in total.
         assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        if create_mixed_batch:
+        if create_single_prefill:
+            assert not uniform_decode
+            assert not create_mixed_batch
+            num_reqs = 1
+            num_scheduled_tokens_list = [num_tokens]
+            max_query_len = num_tokens
+        elif create_mixed_batch:
             assert not uniform_decode
             # Create mixed batch:
             # first half decode tokens, second half one prefill
@@ -6008,6 +6077,7 @@ class GPUModelRunner(
             max_query_len = num_prefill_tokens
         elif uniform_decode:
             assert not create_mixed_batch
+            assert not create_single_prefill
             num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
@@ -6261,6 +6331,7 @@ class GPUModelRunner(
 
             if self.speculative_config and (
                 self.speculative_config.use_eagle()
+                or self.speculative_config.use_dspark()
                 or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
             ):
@@ -6538,7 +6609,23 @@ class GPUModelRunner(
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
+    def _reserve_profile_scratch(self) -> None:
+        # Mirror of the V2 runner hook: pre-reserve any per-module scratch
+        # (e.g. DeepSeek-V4 padded-Q) during the memory-profiling peak so the
+        # KV-cache sizing accounts for it. Without this, buffers materialized
+        # lazily after profiling (notably the ubatch-1 padded-Q scratch when
+        # enable_dbo=True) would be charged against already-claimed KV memory.
+        seen: set[int] = set()
+        for module in self.compilation_config.static_forward_context.values():
+            if id(module) in seen:
+                continue
+            seen.add(id(module))
+            reserve = getattr(module, "reserve_profile_scratch", None)
+            if reserve is not None:
+                reserve()
+
     def profile_run(self) -> None:
+        self._reserve_profile_scratch()
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
             mm_config = self.model_config.multimodal_config
@@ -7268,6 +7355,7 @@ class GPUModelRunner(
         # Initialize drafter attention backend
         if self.speculative_config and (
             self.speculative_config.use_eagle()
+            or self.speculative_config.use_dspark()
             or self.speculative_config.uses_draft_model()
         ):
             assert isinstance(
@@ -7322,6 +7410,7 @@ class GPUModelRunner(
         # Initialize drafter's cudagraph dispatcher if using spec decode.
         if self.speculative_config and (
             self.speculative_config.use_eagle()
+            or self.speculative_config.use_dspark()
             or self.speculative_config.uses_draft_model()
             or self.speculative_config.uses_extract_hidden_states()
         ):

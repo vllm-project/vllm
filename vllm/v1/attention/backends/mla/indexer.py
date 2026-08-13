@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from dataclasses import dataclass
 
 import torch
 
-import vllm.envs as envs
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
@@ -33,11 +34,32 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
+    sparse_short_extend_tiering,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
+
+
+def sparse_indexer_max_logits_bytes(is_sm12x: bool | None = None) -> int:
+    if is_sm12x is None:
+        is_sm12x = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(120)
+        )
+    if "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB" in os.environ:
+        return envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    default_mb = 256 if is_sm12x else 512
+    return default_mb * 1024 * 1024
+
+
+def _uses_deep_gemm_scheduler_metadata() -> bool:
+    return (
+        current_platform.is_cuda()
+        and has_deep_gemm()
+        and not current_platform.is_device_capability_family(120)
+    )
 
 
 @triton.jit
@@ -816,8 +838,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
+                # Each side changed a different argument here. Upstream #47808
+                # relaxed require_uniform when varlen paged-MQA logits are
+                # available; our tiering gate on treat_short_extends_as_decodes
+                # matches the three other call sites in this fork
+                # (sparse_swa.py, sparse_mla.py). Taking one side would drop
+                # the other's change silently.
                 require_uniform=not (self.use_flattening or self.supports_varlen),
-                treat_short_extends_as_decodes=not self.use_pcp,
+                treat_short_extends_as_decodes=sparse_short_extend_tiering(
+                    common_attn_metadata
+                )
+                and not self.use_pcp,
             )
         )
 
@@ -861,7 +892,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
-            max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            max_logits_bytes = sparse_indexer_max_logits_bytes()
             # Upper bound is exact for prefill rows (the `[num_decodes:]`
             # slice below).
             assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
@@ -991,8 +1022,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
 
-            # DeepGEMM is required for the paged MQA logits on CUDA devices
-            if current_platform.is_cuda() and has_deep_gemm():
+            if _uses_deep_gemm_scheduler_metadata():
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.storage_block_size,

@@ -21,7 +21,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.backends.utils import (
+    sparse_short_extend_tiering,
+    split_decodes_and_prefills,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 # Pad C128A topk width to this alignment. 128 covers both h_q=64 (B_TOPK=64) and
@@ -125,6 +128,10 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     c128a_decode_topk_lens: torch.Tensor | None = None
     # Prefill: local topk indices (used by combine_topk_swa_indices).
     c128a_prefill_topk_indices: torch.Tensor | None = None
+    # SM120 packed prefill lazily maps local C128A indices to global slot ids
+    # once per step and reuses them across layers.
+    c128a_global_prefill_topk_indices: torch.Tensor | None = None
+    c128a_prefill_topk_lens: torch.Tensor | None = None
 
 
 class DeepseekV4SparseMLAMetadataBuilder(
@@ -176,18 +183,17 @@ class DeepseekV4SparseMLAMetadataBuilder(
             # into adjacent rows (present in both decode and prefill branches of
             # _build_c128a_topk_metadata_kernel).
             self.c128a_max_compressed = c128a_max_compressed
-            self.c128a_global_decode_buffer = torch.empty(
+            # Decode rows and prefill rows partition the same per-step token
+            # batch, so a single backing matrix is enough. Decode writes the
+            # leading num_decode_tokens rows and prefill writes the following
+            # num_prefill_tokens rows.
+            self.c128a_topk_buffer = torch.empty(
                 (max_num_batched_tokens, c128a_max_compressed),
                 dtype=torch.int32,
                 device=device,
             )
             self.c128a_decode_lens_buffer = torch.empty(
                 max_num_batched_tokens, dtype=torch.int32, device=device
-            )
-            self.c128a_prefill_buffer = torch.empty(
-                (max_num_batched_tokens, c128a_max_compressed),
-                dtype=torch.int32,
-                device=device,
             )
 
     def build(
@@ -231,6 +237,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
             ),
             c128a_decode_topk_lens=c128a_fields.get("c128a_decode_topk_lens"),
             c128a_prefill_topk_indices=c128a_fields.get("c128a_prefill_topk_indices"),
+            c128a_prefill_topk_lens=c128a_fields.get("c128a_prefill_topk_lens"),
         )
 
     def _build_c128a_metadata(
@@ -247,6 +254,9 @@ class DeepseekV4SparseMLAMetadataBuilder(
             split_decodes_and_prefills(
                 cm,
                 decode_threshold=self.reorder_batch_threshold or 1,
+                # Must match SWA and the indexer -- see
+                # sparse_short_extend_tiering().
+                treat_short_extends_as_decodes=sparse_short_extend_tiering(cm),
             )
         )
 
@@ -257,13 +267,13 @@ class DeepseekV4SparseMLAMetadataBuilder(
         assert cm.positions is not None, (
             "positions is required for C128A metadata build"
         )
-        active_topk_width = min(
-            max(
-                triton.next_power_of_2(max(cm.max_seq_len // self.compress_ratio, 1)),
-                _C128A_TOPK_ALIGNMENT,
-            ),
-            self.c128a_max_compressed,
-        )
+        # FULL-cudagraph decode kernels bake this layout's row stride at
+        # capture time (capture builds with max_seq_len = max_model_len), so
+        # the stride must not depend on the batch. A narrower runtime layout
+        # makes the captured kernels read decode rows r >= 1 from stale bytes:
+        # in a mixed batch, prefill row 0 is written at exactly the offset the
+        # captured kernel reads as decode row 1.
+        active_topk_width = self.c128a_max_compressed
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
         global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
             cm.positions[:num_total],
@@ -273,9 +283,8 @@ class DeepseekV4SparseMLAMetadataBuilder(
             cm.block_table_tensor[:num_decodes],
             block_size,
             cm.slot_mapping,
-            self.c128a_global_decode_buffer,
+            self.c128a_topk_buffer,
             self.c128a_decode_lens_buffer,
-            self.c128a_prefill_buffer,
             max_compressed_tokens=active_topk_width,
         )
 
@@ -287,6 +296,9 @@ class DeepseekV4SparseMLAMetadataBuilder(
             result["c128a_decode_topk_lens"] = decode_lens
         if num_prefill_tokens > 0:
             result["c128a_prefill_topk_indices"] = prefill_local
+            result["c128a_prefill_topk_lens"] = self.c128a_decode_lens_buffer[
+                num_decode_tokens:num_total
+            ]
         return result
 
 
@@ -312,9 +324,8 @@ def build_c128a_topk_metadata(
     block_table: torch.Tensor,
     block_size: int,
     slot_mapping: torch.Tensor,
-    global_decode_buffer: torch.Tensor,
+    topk_buffer: torch.Tensor,
     decode_lens_buffer: torch.Tensor,
-    prefill_buffer: torch.Tensor,
     max_compressed_tokens: int = 8192,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Single kernel for all C128A tokens (decode + prefill).
@@ -322,29 +333,32 @@ def build_c128a_topk_metadata(
     Decode tokens: position → block_table lookup → global slot ids + topk_lens.
     Prefill tokens: position → local indices [0, ..., n-1, -1, ...].
 
-    Writes into packed views of pre-allocated buffers for CUDA graph stability.
+    Writes into packed views of a pre-allocated buffer for CUDA graph stability.
+    Decode rows and prefill rows partition the same per-step token batch, so one
+    backing matrix is enough: decode takes the leading ``num_decode_tokens``
+    rows of the packed view and prefill the following ``num_prefill_tokens``.
     """
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
 
-    # view(-1) as 1-d array and then expanded to
-    # [num_decode_tokens, max_compressed_tokens]
-    global_decode = global_decode_buffer.view(-1)[
-        : num_decode_tokens * max_compressed_tokens
-    ].view(num_decode_tokens, max_compressed_tokens)
+    # view(-1) as a 1-d array, then carve out the two packed row ranges.
+    flat = topk_buffer.view(-1)
+    decode_end = num_decode_tokens * max_compressed_tokens
+    total_end = num_tokens * max_compressed_tokens
+    global_decode = flat[:decode_end].view(num_decode_tokens, max_compressed_tokens)
     decode_lens = decode_lens_buffer[:num_decode_tokens]
-    prefill_local = prefill_buffer.view(-1)[
-        : num_prefill_tokens * max_compressed_tokens
-    ].view(num_prefill_tokens, max_compressed_tokens)
+    prefill_local = flat[decode_end:total_end].view(
+        num_prefill_tokens, max_compressed_tokens
+    )
 
     if num_tokens == 0:
         return global_decode, decode_lens, prefill_local
 
     _build_c128a_topk_metadata_kernel[(num_tokens,)](
-        global_decode_buffer,
+        global_decode,
         max_compressed_tokens,
         decode_lens_buffer,
-        prefill_buffer,
+        prefill_local,
         max_compressed_tokens,
         positions,
         compress_ratio,
@@ -372,7 +386,7 @@ def _build_c128a_topk_metadata_kernel(
     # Inputs
     positions_ptr,
     compress_ratio,
-    max_compressed_tokens,
+    effective_topk,
     num_decode_tokens,
     token_to_req_indices_ptr,
     block_table_ptr,
@@ -384,7 +398,7 @@ def _build_c128a_topk_metadata_kernel(
     token_idx = tl.program_id(0)
     position = tl.load(positions_ptr + token_idx)
     num_compressed = (position + 1) // compress_ratio
-    num_compressed = tl.minimum(num_compressed, max_compressed_tokens)
+    num_compressed = tl.minimum(num_compressed, effective_topk)
     is_decode = token_idx < num_decode_tokens
 
     if is_decode:
@@ -392,9 +406,9 @@ def _build_c128a_topk_metadata_kernel(
         is_valid_token = tl.load(slot_mapping_ptr + token_idx) >= 0
         req_idx = tl.load(token_to_req_indices_ptr + token_idx)
         count = tl.zeros((), dtype=tl.int32)
-        for i in range(0, max_compressed_tokens, BLOCK_SIZE):
+        for i in range(0, effective_topk, BLOCK_SIZE):
             offset = i + tl.arange(0, BLOCK_SIZE)
-            mask = offset < max_compressed_tokens
+            mask = offset < effective_topk
             is_valid = offset < num_compressed
 
             block_indices = offset // block_size
@@ -419,9 +433,9 @@ def _build_c128a_topk_metadata_kernel(
     else:
         # --- Prefill: write local indices ---
         pfx_idx = token_idx - num_decode_tokens
-        for i in range(0, max_compressed_tokens, BLOCK_SIZE):
+        for i in range(0, effective_topk, BLOCK_SIZE):
             offset = i + tl.arange(0, BLOCK_SIZE)
-            mask = offset < max_compressed_tokens
+            mask = offset < effective_topk
             tl.store(
                 prefill_local_ptr + pfx_idx * prefill_local_stride + offset,
                 tl.where(offset < num_compressed, offset, -1),

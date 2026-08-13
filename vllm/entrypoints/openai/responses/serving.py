@@ -245,13 +245,22 @@ class OpenAIServingResponses(GenerateBaseServing):
     def _effective_chat_template_kwargs(
         self, request: ResponsesRequest
     ) -> dict[str, Any]:
-        return (
+        chat_template_kwargs = (
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
             )
             .with_defaults(self.chat_template_kwargs)
             .chat_template_kwargs
+        )
+        # Mirrors OpenAIServingChat._effective_chat_template_kwargs. Omitting
+        # this is what let the tokenizer and the reasoning parser disagree
+        # about whether DeepSeek-V4 was thinking: the tokenizer defaults it on,
+        # the parser defaults it off, and the reasoning then arrived inside
+        # output_text with a bare </think>.
+        return request.apply_chat_template_kwargs(
+            chat_template_kwargs,
+            model_config=self.model_config,
         )
 
     def _make_response_parser(

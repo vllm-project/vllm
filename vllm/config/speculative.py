@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 from pydantic import Field, SkipValidation, field_validator, model_validator
 from typing_extensions import Self
 
+import vllm.envs as envs
 from vllm.config import LoadConfig
 from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
@@ -33,6 +34,7 @@ else:
     )
 
 logger = init_logger(__name__)
+
 
 MTPModelTypes = Literal[
     "deepseek_mtp",
@@ -64,7 +66,12 @@ NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
 DSparkModelTypes = Literal["dspark"]
 EagleModelTypes = Literal[
-    "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
+    "eagle",
+    "eagle3",
+    "extract_hidden_states",
+    MTPModelTypes,
+    DFlashModelTypes,
+    DSparkModelTypes,
 ]
 SpeculativeMethod = Literal[
     "ngram",
@@ -295,6 +302,30 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
+    dspark_materialized_attention: bool = True
+    """Use DSpark's materialized local attention path."""
+    dspark_triton_attention: bool = True
+    """Use DSpark's Triton materialized attention path."""
+    dspark_triton_qkv_postprocess: bool = True
+    """Use fused DSpark QKV postprocessing."""
+    dspark_triton_context_kv_store: bool = True
+    """Use Triton DSpark context KV stores."""
+    dspark_markov_inplace_add: bool = True
+    """Use in-place DSpark Markov residual adds."""
+    dspark_fused_markov_sampler: bool = True
+    """Use fused probabilistic Markov sampling for DSpark."""
+    dspark_forward_cudagraph: bool = Field(
+        default_factory=lambda: envs.env_bool("VLLM_DSPARK_FORWARD_CUDAGRAPH")
+    )
+    """DSpark-only opt-in for the draft forward CUDA graph prototype."""
+    dspark_forward_cudagraph_allow_tp: bool = Field(
+        default_factory=lambda: envs.env_bool("VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP")
+    )
+    """Allow the DSpark draft forward CUDA graph under tensor parallelism."""
+    dspark_fused_o_proj_quant: bool = True
+    """Use fused DSpark output-projection activation quantization."""
+    dspark_fused_shared_experts_quant: bool = True
+    """Use fused DSpark shared-expert activation quantization."""
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
@@ -331,9 +362,30 @@ class SpeculativeConfig:
                 "eagle_aux_hidden_state_layer_ids",
                 None,
             )
+            if layer_ids is None:
+                layer_ids = getattr(
+                    self.draft_model_config.hf_config,
+                    "dspark_target_layer_ids",
+                    None,
+                )
             if layer_ids is not None:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
+        if self.method == "dspark":
+            factors.append(
+                (
+                    self.dspark_materialized_attention,
+                    self.dspark_triton_attention,
+                    self.dspark_triton_qkv_postprocess,
+                    self.dspark_triton_context_kv_store,
+                    self.dspark_markov_inplace_add,
+                    self.dspark_fused_markov_sampler,
+                    self.dspark_forward_cudagraph,
+                    self.dspark_forward_cudagraph_allow_tp,
+                    self.dspark_fused_o_proj_quant,
+                    self.dspark_fused_shared_experts_quant,
+                )
+            )
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -932,8 +984,14 @@ class SpeculativeConfig:
                         draft_hf.vocab_size = target_vocab
                         draft_hf.truncated_vocab_size = target_vocab
 
-                # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
+                # Automatically detect the method. An explicitly requested method
+                # is never overridden: DeepSeek-V4-Flash-0731 folded the DSpark
+                # draft into the main checkpoint, so `dspark_block_size` is now
+                # present for every DSv4 config. Without "mtp" in this tuple the
+                # chain below reaches the dspark branch, silently rewrites
+                # method="mtp" to "dspark", and then fails validation with a
+                # DSpark message the user never asked for.
+                if self.method in ("eagle", "eagle3", "dflash", "dspark", "mtp"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -950,6 +1008,11 @@ class SpeculativeConfig:
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
+                    or getattr(
+                        self.draft_model_config.hf_config,
+                        "dspark_block_size",
+                        0,
+                    )
                 ):
                     self.method = "dspark"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
@@ -1006,6 +1069,13 @@ class SpeculativeConfig:
                         )
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
+
+                if self.method == "dspark" and self.num_speculative_tokens is None:
+                    self.num_speculative_tokens = getattr(
+                        self.draft_model_config.hf_config,
+                        "dspark_block_size",
+                        None,
+                    )
 
                 if self.method == "dspark" and (
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
@@ -1096,29 +1166,55 @@ class SpeculativeConfig:
 
                 dspark_draft_topk = None
                 if self.method == "dspark":
-                    # DSpark is a semi-autoregressive *block* drafter. A
-                    # speculative length smaller than the checkpoint's block
-                    # feeds the block / Markov-head machinery an unsupported
-                    # layout and yields incorrect (garbled) output rather than
-                    # merely lower acceptance. Require num_speculative_tokens to
-                    # be at least the block size (e.g. 5 or 7 for DeepSeek-V4).
+                    # Upstream removed its own nst-vs-block assertion in #50869
+                    # ("invalid assertion added erroneously"), and it was right
+                    # that erroring on nst > block_size is wrong: two users on
+                    # vllm-project/vllm#41834 run nst=7 against block_size=5 and
+                    # it demonstrably works -- b0bh00d's /metrics shows a normal
+                    # accept curve. Our previous `==` guard would have rejected
+                    # their configs at startup.
+                    #
+                    # But the two directions are not symmetric, so this keeps the
+                    # half that upstream's deletion also drops:
+                    #   nst < block  -- the drafter emits one block per pass;
+                    #                   fewer tokens feed the block / Markov-head
+                    #                   machinery an unsupported layout and
+                    #                   garble output. Still an error.
+                    #   nst > block  -- works, but drafts tokens that are never
+                    #                   accepted. Measured on 2x GB10 (SM121a),
+                    #                   DeepSeek-V4-Flash-0731, block_size=5:
+                    #                     probabilistic  nst=5: 2.19  nst=7: 2.03
+                    #                     greedy         nst=5: 2.11  nst=7: 1.75
+                    #                   positions 5 and 6 accepted 0.000 in every
+                    #                   sample. A warning, not an error.
                     dspark_block_size = getattr(
                         self.draft_model_config.hf_config,
                         "dspark_block_size",
                         None,
                     )
-                    if (
-                        dspark_block_size is not None
-                        and self.num_speculative_tokens < dspark_block_size
-                    ):
-                        raise ValueError(
-                            "DSpark requires num_speculative_tokens >= "
-                            f"dspark_block_size ({dspark_block_size}); got "
-                            f"{self.num_speculative_tokens}. Smaller values "
-                            "produce incorrect output. Use "
-                            f"num_speculative_tokens={dspark_block_size} or "
-                            "larger (e.g. 7)."
-                        )
+                    if dspark_block_size is not None:
+                        if self.num_speculative_tokens < dspark_block_size:
+                            raise ValueError(
+                                "DSpark requires num_speculative_tokens >= "
+                                f"dspark_block_size ({dspark_block_size}); got "
+                                f"{self.num_speculative_tokens}. Smaller values "
+                                "produce incorrect output, not merely lower "
+                                f"acceptance. Use "
+                                f"num_speculative_tokens={dspark_block_size}."
+                            )
+                        if self.num_speculative_tokens > dspark_block_size:
+                            logger.warning_once(
+                                "DSpark drafts exactly one block of %d tokens "
+                                "per pass, so num_speculative_tokens=%d drafts "
+                                "%d token(s) that can never be accepted. On "
+                                "2x GB10 this lowered mean acceptance length "
+                                "(2.19 -> 2.03 probabilistic, 2.11 -> 1.75 "
+                                "greedy). Consider num_speculative_tokens=%d.",
+                                dspark_block_size,
+                                self.num_speculative_tokens,
+                                self.num_speculative_tokens - dspark_block_size,
+                                dspark_block_size,
+                            )
 
                     hf_config = self.draft_model_config.hf_config
                     dspark_draft_topk = self.dspark_draft_topk
@@ -1407,6 +1503,9 @@ class SpeculativeConfig:
                 "synthetic_acceptance_rates / synthetic_acceptance_length "
                 "are only valid with rejection_sample_method='synthetic'."
             )
+
+        if self.method == "dspark" and self.rejection_sample_method == "standard":
+            self.draft_sample_method = "probabilistic"
 
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(

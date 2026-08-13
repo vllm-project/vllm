@@ -139,6 +139,13 @@ def test_dflash_drafter_window_reserves_bonus_token():
         num_spec_tokens=NUM_SPECULATIVE_TOKENS,
         effective_drafter_max_model_len=100,
         speculative_config=_dflash_speculative_config(NUM_SPECULATIVE_TOKENS),
+        # This fork's _input_fits_in_drafter reads two attributes upstream's
+        # does not: parallel_config, for the per-rank gate-off sentinel added
+        # with the TP drafter-gate work, and its log counter. Upstream's stub
+        # models only upstream's reads, so our behaviour broke their mock --
+        # our change, our stub update.
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        _drafter_gate_off_logged=0,
     )
     # window = 4, so 96 fits (96 + 4 == 100) but 97 does not (97 + 4 == 101)
     assert input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=96))
@@ -150,5 +157,7 @@ def test_dflash_drafter_window_reserves_bonus_token():
         num_spec_tokens=NUM_SPECULATIVE_TOKENS,
         effective_drafter_max_model_len=100,
         speculative_config=SimpleNamespace(use_dflash=lambda: False),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        _drafter_gate_off_logged=0,
     )
     assert input_fits_in_drafter(plain_runner, SimpleNamespace(max_seq_len=97))

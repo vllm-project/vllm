@@ -168,6 +168,13 @@ class CacheConfig:
     for hybrid models where requests occupy multiple KV cache groups."""
     kv_cache_max_concurrency: float | None = field(default=None, init=False)
     """Per-DP-engine maximum concurrency at max_model_len tokens."""
+    requested_block_size: int | None = field(default=None, init=False)
+    """The resolved block size before engine init reduces ``block_size`` to
+    the minimum KV-cache-group granularity. On hybrid models the groups have
+    different block sizes (DeepSeek-V4: 256 attention / 64 SWA / 8 and 4
+    compressor state), so ``block_size`` in metrics can be far smaller than
+    the value the user passed while the attention group still honors it;
+    this field preserves that value. None until KV cache initialization."""
 
     kv_sharing_fast_prefill: bool = False
     """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
@@ -229,6 +236,7 @@ class CacheConfig:
             "num_cpu_blocks",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
+            "requested_block_size",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
         }

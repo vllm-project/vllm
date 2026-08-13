@@ -4,190 +4,116 @@
 
 Ported from lucifer1004/vllm-jasl with the two env-var knobs removed
 (`VLLM_ENABLE_DEEPSEEK_V4_MHC_WARMUP`, `VLLM_DEEPSEEK_V4_MHC_WARMUP_TOKEN_SIZES`).
-Gating is intrinsic: non-DSv4 models and layers without hc_* attributes
-return early, so the warmup is a no-op except where it's needed.
+
+Every decision below is a pure function of ``vllm_config``. The warmup drives
+``runner._dummy_run``, whose forward pass issues TP collectives, so every rank
+must take the same branch; per-rank module state (layer attributes, parameter
+devices) must not be consulted. The ported version gated on ``hc_pre``/
+``hc_post`` attributes only the AMD and XPU layers expose, making it a silent
+no-op on every CUDA build. One residual per-rank input remains: ``n_splits``
+depends on the local GPU's SM count, so ranks on heterogeneous GPUs would
+derive different ladders — homogeneous GPUs per TP group are assumed, as the
+kernels themselves already do.
 """
 
 import time
-from collections.abc import Iterable
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
 _AUTO_WARMUP_MAX_TOKENS = 16_384
-_DEFAULT_TOKEN_SIZE_CANDIDATES = (
-    1,
-    2,
-    4,
-    8,
-    16,
-    32,
-    64,
-    128,
-    256,
-    512,
-    1024,
-    2048,
-    4096,
-    8192,
-    16_384,
-)
+
+_MHC_HF_CONFIG_ATTRS = ("hc_mult", "hc_sinkhorn_iters", "hc_eps")
 
 
-def _normalize_token_sizes(
-    token_sizes: Iterable[int],
-    *,
-    max_tokens: int,
-) -> list[int]:
-    return sorted({size for size in token_sizes if 1 <= size <= max_tokens})
-
-
-def _select_mhc_warmup_token_sizes(
-    *,
-    max_tokens: int,
-    cudagraph_capture_sizes: list[int],
-) -> list[int]:
-    if max_tokens <= 0:
-        return []
-
-    max_auto_tokens = min(max_tokens, _AUTO_WARMUP_MAX_TOKENS)
-    candidates = list(_DEFAULT_TOKEN_SIZE_CANDIDATES)
-    candidates.extend(cudagraph_capture_sizes)
-    candidates.append(max_auto_tokens)
-    return _normalize_token_sizes(candidates, max_tokens=max_auto_tokens)
-
-
-def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
-    for module in model.modules():
-        if module.__class__.__name__ != "DeepseekV4DecoderLayer":
-            continue
-        if all(
-            hasattr(module, attr)
-            for attr in (
-                "hc_pre",
-                "hc_post",
-                "hc_attn_fn",
-                "hc_attn_scale",
-                "hc_attn_base",
-                "hc_ffn_fn",
-                "hc_ffn_scale",
-                "hc_ffn_base",
-            )
-        ):
-            return module
-    return None
-
-
-def _find_deepseek_v4_model(model: torch.nn.Module) -> torch.nn.Module | None:
-    for module in model.modules():
-        if module.__class__.__name__ != "DeepseekV4Model":
-            continue
-        if all(
-            hasattr(module, attr)
-            for attr in ("hc_head_fn", "hc_head_scale", "hc_head_base")
-        ):
-            return module
-    return None
-
-
-def _warmup_layer_mhc(
-    layer: torch.nn.Module,
-    token_sizes: list[int],
-) -> None:
-    max_tokens = max(token_sizes)
-    hidden_size = int(layer.hidden_size)
-    hc_mult = int(layer.hc_mult)
-    device = layer.hc_attn_fn.device
-    residual = torch.zeros(
-        max_tokens,
-        hc_mult,
-        hidden_size,
-        dtype=torch.bfloat16,
-        device=device,
+def _uses_mhc_tilelang(vllm_config) -> bool:
+    hf_config = vllm_config.model_config.hf_config
+    return (
+        current_platform.is_cuda_alike()
+        and getattr(hf_config, "model_type", None) == "deepseek_v4"
+        and all(hasattr(hf_config, attr) for attr in _MHC_HF_CONFIG_ATTRS)
     )
 
-    for size in token_sizes:
-        residual_slice = residual[:size]
-        for fn, scale, base in (
-            (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
-            (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base),
-        ):
-            layer_input, post_mix, comb_mix = layer.hc_pre(
-                residual_slice,
-                fn,
-                scale,
-                base,
-            )
-            layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
+
+def _compile_key(num_tokens: int, hidden_size: int, hc_mult: int) -> tuple[int, int]:
+    """The (n_splits, tile_n) constexpr pair a call at ``num_tokens`` compiles.
+
+    Mirrors the derivation in the mHC wrappers. ``num_tokens`` itself is a
+    ``T.dynamic`` dimension and never keys a compilation; only these two
+    constexprs do, so one cubin serves every token count that maps to the
+    same pair.
+    """
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import compute_num_split
+    from vllm.utils.math_utils import cdiv
+
+    if num_tokens <= 16:
+        tile_n = 2 if num_tokens < 8 else 3
+        n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
+        return (n_splits, tile_n)
+    return (compute_num_split(64, hc_mult * hidden_size, cdiv(num_tokens, 64)), 1)
 
 
-def _warmup_hc_head(
-    model: torch.nn.Module,
-    token_sizes: list[int],
-) -> None:
-    # Upstream a8887c208 ("[DSV4] aiter mhc support (ROCm)") refactored
-    # ``hc_head`` from a free function into the ``HCHeadOp`` CustomOp
-    # instance attached to the model as ``hc_head_op``. We call through
-    # that instance so the warmup exercises the same dispatched
-    # implementation as the inference path.
-    hc_head_op = getattr(model, "hc_head_op", None)
-    if hc_head_op is None:
-        return
+def _token_sizes_to_warm(
+    *,
+    max_tokens: int,
+    hidden_size: int,
+    hc_mult: int,
+    capture_sizes: list[int],
+) -> list[int]:
+    """One representative token count per compile key capture does not own.
 
-    max_tokens = max(token_sizes)
-    hidden_size = int(model.config.hidden_size)
-    hc_mult = int(model.hc_mult)
-    device = model.hc_head_fn.device
-    hidden_states = torch.zeros(
-        max_tokens,
-        hc_mult,
-        hidden_size,
-        dtype=torch.bfloat16,
-        device=device,
-    )
-
-    for size in token_sizes:
-        hc_head_op(
-            hidden_states[:size],
-            model.hc_head_fn,
-            model.hc_head_scale,
-            model.hc_head_base,
-            model.rms_norm_eps,
-            model.hc_eps,
-        )
+    ``n_splits`` follows a ``num_sms // ceil(tokens/64)`` staircase that a
+    power-of-two ladder samples unevenly; enumerating the keys directly cannot
+    miss a step. Filtering is by key, not by size: capture size 32 compiles
+    the same cubin as every token count in [17, 64], so that whole bucket
+    needs no dummy run even though none of its sizes is a capture size.
+    """
+    covered = {
+        _compile_key(size, hidden_size, hc_mult) for size in capture_sizes if size > 0
+    }
+    representative: dict[tuple[int, int], int] = {}
+    for num_tokens in range(1, max_tokens + 1):
+        key = _compile_key(num_tokens, hidden_size, hc_mult)
+        if key not in covered:
+            representative.setdefault(key, num_tokens)
+    return sorted(representative.values())
 
 
 @instrument(span_name="DeepSeek V4 mHC warmup")
 def deepseek_v4_mhc_warmup(
-    model: torch.nn.Module,
+    runner,
     *,
     max_tokens: int,
     cudagraph_capture_sizes: list[int] | None = None,
 ) -> None:
-    # Cheap model-type gate before walking ``model.modules()``. The class
-    # walk below is O(num_layers) and shows up in startup time on very
-    # large checkpoints; bail out for any model that is not DeepSeek V4.
-    config = getattr(model, "config", None)
-    model_type = getattr(config, "model_type", None) if config is not None else None
-    if model_type is not None and model_type != "deepseek_v4":
+    """Compile the mHC TileLang kernels at startup instead of mid-request.
+
+    Driven with real dummy forwards rather than direct kernel calls: which
+    TileLang variant a call resolves to depends on tensor shape (the first
+    local layer's 2-D residual selects the broadcast kernel), and the pre
+    kernels also JIT a prenorm GEMM (DeepGEMM/Triton) that direct TileLang
+    compilation would leave cold. A forward pass cannot get either wrong.
+
+    Args:
+        runner: the model runner, used for ``vllm_config`` and ``_dummy_run``.
+        max_tokens: scheduler ``max_num_batched_tokens``.
+        cudagraph_capture_sizes: sizes graph capture already compiles; any
+            compile key they own is skipped here.
+    """
+    if not _uses_mhc_tilelang(runner.vllm_config):
         return
 
-    layer = _find_first_mhc_layer(model)
-    if layer is None:
-        return
-
-    device = layer.hc_attn_fn.device
-    if device.type != "cuda":
-        return
-
-    deepseek_model = _find_deepseek_v4_model(model)
-    token_sizes = _select_mhc_warmup_token_sizes(
-        max_tokens=max_tokens,
-        cudagraph_capture_sizes=cudagraph_capture_sizes or [],
+    hf_config = runner.vllm_config.model_config.hf_config
+    token_sizes = _token_sizes_to_warm(
+        max_tokens=min(max_tokens, _AUTO_WARMUP_MAX_TOKENS),
+        hidden_size=int(hf_config.hidden_size),
+        hc_mult=int(hf_config.hc_mult),
+        capture_sizes=cudagraph_capture_sizes or [],
     )
     if not token_sizes:
         return
@@ -197,11 +123,9 @@ def deepseek_v4_mhc_warmup(
         "Warming up DeepSeek V4 mHC TileLang kernels for token sizes: %s",
         token_sizes,
     )
-    with torch.inference_mode():
-        _warmup_layer_mhc(layer, token_sizes)
-        if deepseek_model is not None:
-            _warmup_hc_head(deepseek_model, token_sizes)
-        torch.accelerator.synchronize()
+    for num_tokens in token_sizes:
+        runner._dummy_run(num_tokens)
+    torch.accelerator.synchronize()
     logger.info(
         "DeepSeek V4 mHC TileLang warmup finished in %.2f seconds.",
         time.perf_counter() - started,

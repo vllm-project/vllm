@@ -180,14 +180,22 @@ def has_flashinfer_comm() -> bool:
 
 @functools.cache
 def has_flashinfer_nvlink_two_sided() -> bool:
-    """Return `True` if FlashInfer mnnvl all2all is available."""
+    """Return `True` if FlashInfer mnnvl all2all is available.
+
+    Every entry is a symbol `all2all.py` imports under this gate, plus
+    `CommBackend`, which `mnnvl_compat` imports at module scope on a deferred
+    path the gate has already waved through. Probing a symbol the consumers do
+    not use, while missing one they do, is how a gate returns True and the
+    import still raises (see has_flashinfer_trtllm_sparse_mla_dsv4).
+    """
     if not has_flashinfer_comm():
         return False
 
-    # Check if all required functions are available
     required_functions = [
         ("flashinfer.comm", "Mapping"),
         ("flashinfer.comm.mnnvl", "MnnvlMemory"),
+        ("flashinfer.comm.mnnvl", "MnnvlConfig"),
+        ("flashinfer.comm.mnnvl", "CommBackend"),
         ("flashinfer.comm.trtllm_alltoall", "MnnvlMoe"),
         ("flashinfer.comm.trtllm_alltoall", "MoEAlltoallInfo"),
     ]
@@ -201,10 +209,29 @@ def has_flashinfer_nvlink_two_sided() -> bool:
 
 @functools.cache
 def has_flashinfer_nvlink_one_sided() -> bool:
-    """Return `True` if FlashInfer trtllm_moe_alltoall module is available."""
+    """Return `True` if FlashInfer trtllm_moe_alltoall is available.
+
+    `find_spec` on the module alone answered a question nobody asked: the
+    intersection between what it proved and what `all2all.py` imports under
+    this gate was empty, and `trtllm_moe_alltoall`'s public surface changed
+    after the module first shipped. Probe the symbols themselves.
+    """
     if not has_flashinfer_comm():
         return False
-    return importlib.util.find_spec("flashinfer.comm.trtllm_moe_alltoall") is not None
+
+    required_functions = [
+        ("flashinfer.comm", "Mapping"),
+        ("flashinfer.comm.mnnvl", "MnnvlConfig"),
+        ("flashinfer.comm.mnnvl", "CommBackend"),
+        ("flashinfer.comm.trtllm_moe_alltoall", "MoeAlltoAll"),
+        ("flashinfer.comm.trtllm_moe_alltoall", "moe_a2a_get_workspace_size_per_rank"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
 
 
 @functools.cache
@@ -216,7 +243,106 @@ def has_flashinfer_moe() -> bool:
     )
 
 
+def flashinfer_sm120_sparse_mla_unavailable_reason() -> str | None:
+    """Return why the SM120 packed sparse-MLA decode path cannot run, or None.
+
+    Two halves, both load-bearing (reported by alexbi29 on
+    vllm-project/vllm#41834):
+
+    - the symbol half (``has_flashinfer_trtllm_sparse_mla_dsv4``) — probes the
+      exact imports the consumer makes;
+    - the version half — flashinfer-python 0.6.13 exposes nearby sparse-MLA
+      APIs WITHOUT the SM120 module, and a flashinfer-cubin whose version
+      differs from flashinfer-python can still fail open on symbols alone
+      (the python side JIT-compiles against mismatched cubins at first call).
+    """
+    import importlib.metadata as _md
+
+    try:
+        py_ver = _md.version("flashinfer-python")
+    except _md.PackageNotFoundError:
+        return "flashinfer-python is not installed"
+    base = py_ver.split("+")[0]
+    parts = tuple(int(x) for x in base.split(".")[:3] if x.isdigit())
+    if parts < (0, 6, 14):
+        return (
+            f"flashinfer-python {py_ver} < 0.6.14 (SM120 packed sparse-MLA "
+            "ships from 0.6.14; 0.6.13 exposes nearby APIs without it)"
+        )
+    try:
+        cubin_ver = _md.version("flashinfer-cubin")
+    except _md.PackageNotFoundError:
+        cubin_ver = None
+    if cubin_ver is not None and cubin_ver.split("+")[0] != base:
+        return (
+            f"flashinfer-cubin {cubin_ver} does not match flashinfer-python "
+            f"{py_ver}; mismatched cubins fail at first kernel call"
+        )
+    if not has_flashinfer_trtllm_sparse_mla_dsv4():
+        return (
+            "flashinfer is installed but the SM120 packed sparse-MLA symbols "
+            "are missing (see has_flashinfer_trtllm_sparse_mla_dsv4)"
+        )
+    return None
+
+
 @functools.cache
+def has_flashinfer_trtllm_sparse_mla_dsv4() -> bool:
+    """Return ``True`` if FlashInfer's official SM120 packed sparse-MLA decode
+    kernel (``trtllm_batch_decode_sparse_mla_dsv4``, PR3395, merged in
+    flashinfer >= 0.6.13) is available.
+
+    Imports every symbol the decode path actually uses, not just the one the
+    kernel is named after. Reported by aldc-john-moran on
+    vllm-project/vllm#41834: this checked ``trtllm_batch_decode_sparse_mla_dsv4``
+    while ``flashinfer_sm120_decode`` imports ``_SparseMLAPagedAttentionRunner``
+    from ``flashinfer.mla._sparse_mla_sm120``. On FlashInfer 0.6.12 — the version
+    the harness Dockerfile pins — the first exists and the second does not, so
+    the gate returned True, the documented FlashMLA fallback never fired, and
+    both ranks died on ModuleNotFoundError right after a successful NCCL
+    rendezvous. An availability gate that tests a different symbol than the
+    caller imports is not a gate.
+    """
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.mla import (
+            trtllm_batch_decode_sparse_mla_dsv4,
+        )
+        from flashinfer.mla._sparse_mla_sm120 import (
+            _SparseMLAPagedAttentionRunner,
+        )
+    except ImportError:
+        return False
+    return callable(trtllm_batch_decode_sparse_mla_dsv4) and callable(
+        _SparseMLAPagedAttentionRunner
+    )
+
+
+@functools.cache
+def is_dsv4_sm120_fi_prefill_active() -> bool:
+    """Return ``True`` iff the DeepSeek-V4 FlashInfer SM120 sparse-MLA backend
+    (which owns the packed-prefill path) is the selected attention backend.
+
+    Mirrors the ``_select_dsv4_attn_cls`` gate (deepseek_v4/nvidia/model.py): that
+    backend is chosen only when SM120 decode is opted in, the device is SM12x, and
+    the FI SM120 sparse-MLA kernel (PR3395, flashinfer >= 0.6.13) is importable.
+    The shared ``DeepseekSparseSWAMetadataBuilder`` reads this to gate the
+    prefill-SWA index kernel that ONLY the packed path consumes -- launching it on
+    the default FlashMLA/Triton path faults (``cudaErrorLaunchFailure``). So this
+    must reflect "the packed prefill backend is active", not merely "the kernel is
+    importable".
+    """
+    import vllm.envs as envs
+    from vllm.platforms import current_platform
+
+    return bool(
+        envs.VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE
+        and current_platform.is_device_capability_family(120)
+        and has_flashinfer_trtllm_sparse_mla_dsv4()
+    )
+
+
 def has_flashinfer_sparse_mla_sm120() -> bool:
     """Return ``True`` if FlashInfer sparse MLA decode support is available."""
     if not has_flashinfer():

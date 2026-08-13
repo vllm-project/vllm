@@ -148,10 +148,15 @@ def encode_arguments_to_dsml(tool_call: Dict[str, Any]) -> str:
     p_dsml_template = '<{dsml_token}parameter name="{key}" string="{is_str}">{value}</{dsml_token}parameter>'
     P_dsml_strs = []
 
-    if isinstance(tool_call["arguments"], str):
-        arguments = json.loads(tool_call["arguments"])
+    raw_arguments = tool_call.get("arguments")
+    if raw_arguments is None or raw_arguments == "":
+        arguments = {}
+    elif isinstance(raw_arguments, str):
+        arguments = json.loads(raw_arguments)
+        if arguments is None:
+            arguments = {}
     else:
-        arguments = tool_call["arguments"]
+        arguments = raw_arguments
 
     for k, v in arguments.items():
         p_dsml_str = p_dsml_template.format(
@@ -391,6 +396,78 @@ def render_message(
 # Preprocessing
 # ============================================================
 
+def _merge_assistant_run(run: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Combine a run of consecutive assistant messages into one message."""
+    if len(run) == 1:
+        return run[0]
+    combined = copy.deepcopy(run[0])
+    contents = [m["content"] for m in run if m.get("content")]
+    reasonings = [m["reasoning"] for m in run if m.get("reasoning")]
+    tool_calls = [tc for m in run for tc in (m.get("tool_calls") or [])]
+    if contents:
+        combined["content"] = "\n\n".join(contents)
+    else:
+        combined.pop("content", None)
+    if reasonings:
+        combined["reasoning"] = "\n\n".join(reasonings)
+    else:
+        combined.pop("reasoning", None)
+    if tool_calls:
+        combined["tool_calls"] = tool_calls
+    else:
+        combined.pop("tool_calls", None)
+    # End-of-turn markers come from the last message of the run.
+    for key in ("task", "wo_eos", "mask"):
+        if key in run[-1]:
+            combined[key] = run[-1][key]
+        else:
+            combined.pop(key, None)
+    return combined
+
+
+def merge_consecutive_assistant_messages(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Merge runs of consecutive assistant messages into single assistant messages.
+
+    Some clients replay one logical assistant turn as several consecutive
+    assistant messages (e.g. a content-only message followed by a separate
+    tool_calls + reasoning message). DeepSeek-V4 renders one assistant turn as
+    a single unit: reasoning + content + tool calls. Rendering consecutive
+    assistant messages individually produces malformed prompts, because the
+    Assistant transition tokens are only emitted after user/developer messages:
+    the follow-up message is glued onto the previous one with no separator and
+    its reasoning renders as free text terminated by a stray thinking end token.
+
+    Merge rules for a run of consecutive assistant messages:
+    - content: non-empty parts joined with "\n\n" (order preserved)
+    - reasoning: non-empty parts joined with "\n\n" (order preserved)
+    - tool_calls: concatenated (order preserved)
+    - task / wo_eos / mask: taken from the last message of the run
+      (end-of-turn semantics, mirroring merge_tool_messages)
+
+    Args:
+        messages: Message list in OpenAI format.
+
+    Returns:
+        Message list with consecutive assistant messages merged.
+    """
+    merged: List[Dict[str, Any]] = []
+    run: List[Dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            run.append(msg)
+            continue
+        if run:
+            merged.append(_merge_assistant_run(run))
+            run = []
+        merged.append(msg)
+    if run:
+        merged.append(_merge_assistant_run(run))
+    return merged
+
+
 def merge_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Merge tool messages into the preceding user message using content_blocks format.
@@ -509,6 +586,7 @@ def encode_messages(
 
     This is the main entry point for encoding conversations. It handles:
     - BOS token insertion
+    - Consecutive assistant message merging (split turns)
     - Thinking mode with optional reasoning content dropping
     - Tool message merging into user messages
     - Multi-turn conversation context
@@ -528,10 +606,13 @@ def encode_messages(
     """
     context = context if context else []
 
-    # Preprocess: merge tool messages and sort tool results
+    # Preprocess: merge split assistant turns, merge tool messages,
+    # and sort tool results
+    messages = merge_consecutive_assistant_messages(messages)
     messages = merge_tool_messages(messages)
     messages = sort_tool_results_by_call_order(context + messages)[len(context):]
     if context:
+        context = merge_consecutive_assistant_messages(context)
         context = merge_tool_messages(context)
         context = sort_tool_results_by_call_order(context)
 

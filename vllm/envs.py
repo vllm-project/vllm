@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT: int | None = None
     VLLM_TRITON_USE_TD: bool | None = None
     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
@@ -194,6 +195,31 @@ if TYPE_CHECKING:
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
+    VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP: bool = True
+    VLLM_DEEPSEEK_V4_EAGER_SCRATCH_POOL: bool = False
+    VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL: bool = True
+    VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS: int = 4096
+    VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_WARMUP: bool = True
+    VLLM_DEEPSEEK_V4_INDEXED_D512_CHUNKED_PREFILL: bool = True
+    # Default ON (SM12x + FlashInfer >= 0.6.14 kernel present): route DSv4 sparse
+    # MLA through the FlashInfer SM120 packed path (prefill + decode). No effect
+    # elsewhere -- the selector still gates on SM12x + has_flashinfer_trtllm_
+    # sparse_mla_dsv4() and falls back to the Triton FlashMLA path otherwise.
+    # A/B on FI 0.6.14 (GB10 2-node, 616a5723ac): ~parity at 8-32k, and at long
+    # context FI leads clearly -- ctx_pp +12-18%, decode +45-81% at 128k/256k,
+    # both widening with context; arthur 434k 2/2 + GSM8K 0.975. Set =0 for the
+    # Triton FlashMLA path.
+    VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE: bool = True
+    # When the SM120 FlashInfer sparse-MLA backend is active, the packed prefill
+    # runner is used by default. Set =0 to force the FlashMLA indexed-D512 (Triton
+    # split/merge) prefill path. No effect unless that backend is active (see
+    # is_dsv4_sm120_fi_prefill_active).
+    VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL: bool = True
+    VLLM_TRITON_MLA_SPARSE: bool | None = None
+    VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE: int = 512
+    VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE: int = 256
+    VLLM_TRITON_MLA_SPARSE_HEAD_BLOCK_SIZE: int | None = None
+    VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE: bool | None = None
     VLLM_DCP_Q_REPLICATE: bool = False
     VLLM_USE_DIRECT_DCP_A2A: bool | None = None
     VLLM_USE_DIRECT_DCP_Q_GATHER: bool | None = None
@@ -265,6 +291,8 @@ if TYPE_CHECKING:
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
+    VLLM_DSPARK_FORWARD_CUDAGRAPH: bool = False
+    VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
@@ -336,6 +364,13 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in ("1", "true", "yes", "on")
 
 
 def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
@@ -617,6 +652,43 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Same-step ghost-block defer guard (upstream PR #42359, unmerged).
+    # A block's hash is published to the shared BlockPool at SCHEDULING time,
+    # before the forward pass writes its KV, so another request admitted in the
+    # same step can match it and read unwritten values. MambaManager has guarded
+    # against this since #29387; every other manager -- including the MLA ones
+    # DeepSeek-V4 uses -- does not. Defers such a reader by one scheduling step.
+    # 0 = off, 1 = upstream semantics (gated on use_eagle), 2 = every group.
+    #
+    # UNSET (None) means "let the engine decide": KVCacheCoordinator turns the
+    # guard on for any group when prefix caching AND speculative decoding are both
+    # active, which is the only configuration where the race can bite. An explicit
+    # 0/1/2 always wins, so `=0` remains a real escape hatch.
+    #
+    # It resolves to OFF for a manager constructed directly, which is what keeps
+    # the upstream suite green: 11 tests in
+    # tests/v1/core/test_prefix_caching.py call allocate_slots repeatedly to
+    # represent SUCCESSIVE scheduling steps without ever calling
+    # new_step_starts() (the whole file calls it once). With the guard on they
+    # are treated as one step and legitimately deferred, so they fail. The tests
+    # are step-agnostic rather than wrong, but flipping the default here would
+    # fork 11 upstream tests and break every future test written the same way.
+    # OUR DEPLOYMENT SETS 2 (see scripts/dgx_spark_start_mp_serve.sh).
+    #
+    # Measured on DeepSeek-V4 (2-node TP=2, DSpark, fp8 KV,
+    # prefix caching on), 4 fresh serves per arm, 3 arthur c=12 runs each:
+    #   guard off -> 3 of 4 serves lose long-context recall, 2 into single
+    #                digits; gate mean 11.5, min 3 of 24
+    #   guard on  -> 4 of 4 serves at 20-23; gate mean 22.0, min 20
+    #   Mann-Whitney U p = 0.0043
+    # It also lifts the default V1 runner from 20.7 to 23.0, so this is not a
+    # V2-only fix. Mode 1 is upstream's gate, which covers only 2 of 5 managers
+    # on this model and leaves the main MLA path unguarded -- hence 2.
+    "VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT": lambda: (
+        None
+        if os.getenv("VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT") is None
+        else int(os.environ["VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT"])
+    ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on
     # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
@@ -1552,6 +1624,71 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
     ),
+    "VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP", "1"))
+    ),
+    # Opt in to the DeepseekV4 eager scratch pool. OFF by default: it corrupts
+    # output under concurrent mixed prefill+decode. Each template family is
+    # shared across all layers, and the attention eager break runs the indexer
+    # and compressor on parallel aux streams, so layer N's consumer can be
+    # reading while layer N+1 writes. Bisected on vllm-project/vllm#41834:
+    # pool active 7/7 rounds corrupt, disabled 0/2. Removing the cross-template
+    # aliasing (sum() sizing) was necessary but NOT sufficient -- 1 corrupt
+    # round in 2 remained. Safe reuse needs per-layer buffers or stream-ordering
+    # events. On the default SM12x path the pool's 256 MiB Q buffer is not
+    # allocated anyway (attention writes Q in place), so OFF costs only ~36 MiB
+    # of pooling.
+    "VLLM_DEEPSEEK_V4_EAGER_SCRATCH_POOL": lambda: bool(
+        int(os.getenv("VLLM_DEEPSEEK_V4_EAGER_SCRATCH_POOL", "0"))
+    ),
+    "VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL", "1"))
+    ),
+    # Minimum prefill sequence length to admit a row to the indexed-D512 fast
+    # prefill path. Lower = more (shorter / early-chunk) prefills use the fast
+    # kernel. 4096 measured +9-59% short/medium-prefill tok/s (biggest at the
+    # 4-8k band), GSM8K-clean and KV-cache-neutral on SM12x; set 8192 to revert
+    # to the prior conservative threshold.
+    "VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS", "4096")
+    ),
+    # Pre-compile the D512-split sparse-MLA prefill Triton kernels at startup
+    # (one per 128-aligned combined_topk in [256, 1152]) so the first long
+    # prefill does not pay a first-use JIT compile that blocks the engine step.
+    "VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_WARMUP": lambda: bool(
+        int(os.getenv("VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_WARMUP", "1"))
+    ),
+    "VLLM_DEEPSEEK_V4_INDEXED_D512_CHUNKED_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_DEEPSEEK_V4_INDEXED_D512_CHUNKED_PREFILL", "1"))
+    ),
+    "VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE": lambda: bool(
+        int(os.getenv("VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE", "1"))
+    ),
+    "VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL", "1"))
+    ),
+    # Experimental sparse MLA fallback controls.
+    # ``VLLM_TRITON_MLA_SPARSE`` unset means auto-select where FlashMLA sparse
+    # is unavailable; set 0/1 to force-disable/force-enable the fallback.
+    "VLLM_TRITON_MLA_SPARSE": lambda: (
+        None
+        if os.getenv("VLLM_TRITON_MLA_SPARSE") is None
+        else bool(int(os.getenv("VLLM_TRITON_MLA_SPARSE", "0")))
+    ),
+    "VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE": lambda: int(
+        os.getenv("VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE", "512")
+    ),
+    "VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE": lambda: int(
+        os.getenv("VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE", "256")
+    ),
+    "VLLM_TRITON_MLA_SPARSE_HEAD_BLOCK_SIZE": lambda: maybe_convert_int(
+        os.getenv("VLLM_TRITON_MLA_SPARSE_HEAD_BLOCK_SIZE")
+    ),
+    "VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE": lambda: (
+        None
+        if os.getenv("VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE") is None
+        else bool(int(os.getenv("VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE", "0")))
+    ),
     # Opt-in MLA DCP query replication: skip the decode query all-gather.
     "VLLM_DCP_Q_REPLICATE": lambda: bool(int(os.getenv("VLLM_DCP_Q_REPLICATE", "0"))),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
@@ -1894,6 +2031,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Add optional nvtx scopes for profiling, disable to avoid overheads
     "VLLM_NVTX_SCOPES_FOR_PROFILING": lambda: bool(
         int(os.getenv("VLLM_NVTX_SCOPES_FOR_PROFILING", "0"))
+    ),
+    # DSpark branch-local CUDA graph controls. Stable DSpark fast-path kernels
+    # default on through SpeculativeConfig and are not environment-gated.
+    "VLLM_DSPARK_FORWARD_CUDAGRAPH": lambda: env_bool(
+        "VLLM_DSPARK_FORWARD_CUDAGRAPH"
+    ),
+    "VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP": lambda: env_bool(
+        "VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP"
     ),
     # Represent block hashes in KV cache events as 64-bit integers instead of
     # raw bytes. Defaults to True for backward compatibility.

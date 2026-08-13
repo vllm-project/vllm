@@ -363,9 +363,15 @@ constexpr int MOE_SUM_VEC = 16 / sizeof(scalar_t);
 template <typename idx_t>
 __device__ __forceinline__ bool moe_sum_pad_aware_skip(
     const idx_t* __restrict__ topk_ids, const int32_t* __restrict__ expert_map,
-    int64_t idx) {
+    int64_t idx, int32_t num_global_experts) {
   int64_t expert_id = static_cast<int64_t>(topk_ids[idx]);
-  if (expert_id < 0) return true;
+  // Padded rows of a CUDA-graph batch carry arbitrary data (torch.empty and
+  // the routers do not overwrite every slot) -- stale values observed in
+  // production were POSITIVE, so `< 0` alone is not a safe gate. Bound by
+  // the length of the map actually being indexed (the global expert count;
+  // the rank-local count is NOT a safe bound under EP). Same contract as
+  // get_local_expert_id() above, from which these sites had drifted.
+  if (expert_id < 0 || expert_id >= num_global_experts) return true;
   if (expert_map != nullptr && expert_map[expert_id] < 0) return true;
   return false;
 }
@@ -377,7 +383,7 @@ __global__ void moe_sum_vec_kernel(
     const int64_t num_tokens, const int d, const int64_t stride_token,
     const int64_t stride_topk, const idx_t* __restrict__ topk_ids,
     const int32_t* __restrict__ expert_map, const int64_t stride_tk_token,
-    const int64_t stride_tk_k) {
+    const int64_t stride_tk_k, const int32_t num_global_experts) {
   using vec_t = vllm::vec_n_t<scalar_t, MOE_SUM_VEC<scalar_t>>;  // 16-byte pack
   constexpr int VEC = MOE_SUM_VEC<scalar_t>;
   const int64_t n_vec = d / VEC;
@@ -399,7 +405,8 @@ __global__ void moe_sum_vec_kernel(
 #pragma unroll
     for (int k = 0; k < TOPK; ++k) {
       if constexpr (PAD_AWARE) {
-        if (moe_sum_pad_aware_skip(tk_tok, expert_map, k * stride_tk_k)) {
+        if (moe_sum_pad_aware_skip(tk_tok, expert_map, k * stride_tk_k,
+                                   num_global_experts)) {
           continue;
         }
       }
@@ -424,7 +431,8 @@ __global__ void moe_sum_vec_dynamic_kernel(
     const int64_t num_tokens, const int d, const int topk,
     const int64_t stride_token, const int64_t stride_topk,
     const idx_t* __restrict__ topk_ids, const int32_t* __restrict__ expert_map,
-    const int64_t stride_tk_token, const int64_t stride_tk_k) {
+    const int64_t stride_tk_token, const int64_t stride_tk_k,
+    const int32_t num_global_experts) {
   using vec_t = vllm::vec_n_t<scalar_t, MOE_SUM_VEC<scalar_t>>;
   constexpr int VEC = MOE_SUM_VEC<scalar_t>;
   const int64_t n_vec = d / VEC;
@@ -445,7 +453,8 @@ __global__ void moe_sum_vec_dynamic_kernel(
 
     for (int k = 0; k < topk; ++k) {
       if constexpr (PAD_AWARE) {
-        if (moe_sum_pad_aware_skip(tk_tok, expert_map, k * stride_tk_k)) {
+        if (moe_sum_pad_aware_skip(tk_tok, expert_map, k * stride_tk_k,
+                                   num_global_experts)) {
           continue;
         }
       }
@@ -470,7 +479,8 @@ __global__ void moe_sum_scalar_kernel(
     const int d, const int topk, const int64_t stride_token,
     const int64_t stride_topk, const int64_t stride_hidden,
     const idx_t* __restrict__ topk_ids, const int32_t* __restrict__ expert_map,
-    const int64_t stride_tk_token, const int64_t stride_tk_k) {
+    const int64_t stride_tk_token, const int64_t stride_tk_k,
+    const int32_t num_global_experts) {
   const int64_t token_idx = blockIdx.x;
   const scalar_t* in_tok = input + token_idx * stride_token;
   const idx_t* tk_tok = nullptr;
@@ -481,7 +491,8 @@ __global__ void moe_sum_scalar_kernel(
     float x = 0.f;
     for (int k = 0; k < topk; ++k) {
       if constexpr (PAD_AWARE) {
-        if (moe_sum_pad_aware_skip(tk_tok, expert_map, k * stride_tk_k)) {
+        if (moe_sum_pad_aware_skip(tk_tok, expert_map, k * stride_tk_k,
+                                   num_global_experts)) {
           continue;
         }
       }
@@ -787,19 +798,21 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
     const int64_t stride_tk_k = tk.stride(1);
 
     const int32_t* expert_map_ptr = nullptr;
+    int32_t num_global_experts = 0;
     if (expert_map.has_value()) {
       STD_TORCH_CHECK(
           expert_map->scalar_type() == torch::headeronly::ScalarType::Int,
           "moe_sum: expert_map must be int32");
       expert_map_ptr =
           reinterpret_cast<const int32_t*>(expert_map->const_data_ptr());
+      num_global_experts = static_cast<int32_t>(expert_map->numel());
     }
 
 #define LAUNCH_MOE_SUM_PAD_AWARE_VEC(TOPK)                                     \
   vllm::moe::moe_sum_vec_kernel<scalar_t, idx_t, TOPK, true>                   \
       <<<grid, dim3(block), 0, stream>>>(                                      \
           out_ptr, in_ptr, num_tokens, hidden_size, stride_token, stride_topk, \
-          topk_ids_ptr, expert_map_ptr, stride_tk_token, stride_tk_k)
+          topk_ids_ptr, expert_map_ptr, stride_tk_token, stride_tk_k, num_global_experts)
 
     VLLM_STABLE_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "moe_sum_pad_aware", [&] {
@@ -851,7 +864,7 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
                           <<<grid, dim3(block), 0, stream>>>(
                               out_ptr, in_ptr, num_tokens, hidden_size, topk,
                               stride_token, stride_topk, topk_ids_ptr,
-                              expert_map_ptr, stride_tk_token, stride_tk_k);
+                              expert_map_ptr, stride_tk_token, stride_tk_k, num_global_experts);
                       break;
                   }
                 } else {
@@ -861,7 +874,7 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
                       <<<grid, block, 0, stream>>>(
                           out_ptr, in_ptr, hidden_size, topk, stride_token,
                           stride_topk, stride_hidden, topk_ids_ptr,
-                          expert_map_ptr, stride_tk_token, stride_tk_k);
+                          expert_map_ptr, stride_tk_token, stride_tk_k, num_global_experts);
                 }
               });
         });
@@ -873,7 +886,7 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
   vllm::moe::moe_sum_vec_kernel<scalar_t, int32_t, TOPK, false>       \
       <<<grid, dim3(block), 0, stream>>>(out_ptr, in_ptr, num_tokens, \
                                          hidden_size, stride_token,   \
-                                         stride_topk, nullptr, nullptr, 0, 0)
+                                         stride_topk, nullptr, nullptr, 0, 0, 0)
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum", [&] {
     constexpr int VEC = vllm::moe::MOE_SUM_VEC<scalar_t>;
@@ -916,7 +929,7 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
           vllm::moe::moe_sum_vec_dynamic_kernel<scalar_t, int32_t, false>
               <<<grid, dim3(block), 0, stream>>>(
                   out_ptr, in_ptr, num_tokens, hidden_size, topk, stride_token,
-                  stride_topk, nullptr, nullptr, 0, 0);
+                  stride_topk, nullptr, nullptr, 0, 0, 0);
           break;
       }
     } else {
@@ -925,7 +938,7 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
       vllm::moe::moe_sum_scalar_kernel<scalar_t, int32_t, false>
           <<<grid, block, 0, stream>>>(out_ptr, in_ptr, hidden_size, topk,
                                        stride_token, stride_topk, stride_hidden,
-                                       nullptr, nullptr, 0, 0);
+                                       nullptr, nullptr, 0, 0, 0);
     }
   });
 #undef LAUNCH_MOE_SUM_VEC

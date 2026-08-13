@@ -11,11 +11,25 @@ torchvision==0.28.0 # Required for phi3v processor. See https://github.com/pytor
 torchcodec >= 0.14
 PyNvVideoCodec==2.0.4
 # FlashInfer should be updated together with the Dockerfile
+# NOTE (SM12x): 0.6.14 is load-bearing for DeepSeek-V4 on SM120 — 0.6.13 LACKS
+# the sparse-MLA kernel (flashinfer.mla._sparse_mla_sm120). Upstream now pins
+# 0.6.14 itself (#47669), so our fork override is retired; do NOT downgrade.
 # flashinfer-cubin is not on PyPI since 0.6.14; setup.py excludes it from
 # install_requires so the published wheel does not carry an unresolvable pin
+#
+# 0.6.17 is ahead of upstream, which is still on 0.6.16.post3. Taken for the
+# SM12x work in that release: the fused-MoE refresh with its NVFP4 accuracy fix,
+# MXFP4 W4A8/W4A16 through the unified MoE API, the SM120 gated-SwiGLU moe_gemm
+# path, trtllm_allreduce extended to SM12x, and a native qk_rope_head_dim=0
+# sparse-MLA decode. Dependency sets are byte-identical to 0.6.16.post3 -- this
+# is a clean version move, not a new transitive-dependency surface.
+#
+# apache-tvm-ffi stays pinned: 0.6.17 asks only for >=0.1.6,<0.2 (excluding
+# 0.1.8), which 0.1.13.post0 also satisfies -- and that version is ABI-
+# incompatible with the tilelang build here. An unpinned resolve would take it.
 --extra-index-url https://flashinfer.ai/whl/
-flashinfer-python==0.6.16.post3
-flashinfer-cubin==0.6.16.post3
+flashinfer-python==0.6.17
+flashinfer-cubin==0.6.17
 apache-tvm-ffi==0.1.11
 tilelang==0.1.12
 nvidia-cudnn-frontend>=1.19.1

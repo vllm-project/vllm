@@ -32,12 +32,21 @@ logger = init_logger(__name__)
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        hidden_states_size: int | None = None,
+        allocate_hidden_states: bool = True,
+    ):
         super().__init__(vllm_config, device)
 
-        self.hidden_states = torch.zeros(
-            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
-        )
+        hidden_states_size = hidden_states_size or self.hidden_size
+        self.hidden_states: torch.Tensor | None = None
+        if allocate_hidden_states:
+            self.hidden_states = torch.zeros(
+                self.max_num_tokens, hidden_states_size, dtype=self.dtype, device=device
+            )
 
         # Multimodal inputs not currently supported.
         self.supports_mm_inputs = False
@@ -344,15 +353,26 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
         else:
             hidden_states = last_hidden_states
-        self.hidden_states[:num_target_tokens].copy_(hidden_states[:num_target_tokens])
+        context_hidden_states = hidden_states[:num_target_tokens]
+        if self.hidden_states is not None:
+            self.hidden_states[:num_target_tokens].copy_(context_hidden_states)
+            context_hidden_states = self.hidden_states[:num_target_tokens]
 
         if dummy_run and skip_attn_for_dummy_run:
             # Memory profiling path: block_tables / kv_cache_config are not initialized.
             # Since DFlash needs to build its own attention metadata, we must skip the
             # preparation in this path and run a minimal forward pass.
+            precompute_kwargs: dict[str, Any] = {}
+            if getattr(self.model, "uses_query_start_loc_context_kv", False):
+                precompute_kwargs = {
+                    "query_start_loc": input_batch.query_start_loc,
+                    "batch_size": num_reqs,
+                    "num_rejected_tokens": num_rejected,
+                }
             self.model.precompute_and_store_context_kv(
-                self.hidden_states[:num_target_tokens],
+                context_hidden_states,
                 self.context_positions[:num_target_tokens],
+                **precompute_kwargs,
             )
             # DFlash processes all speculative tokens in one forward pass,
             # so the real token count is num_query_tokens.
@@ -413,10 +433,18 @@ class DFlashSpeculator(DraftModelSpeculator):
             ]
         else:
             context_slots = self._context_slot_mappings[0][:num_target_tokens]
+        precompute_kwargs = {}
+        if getattr(self.model, "uses_query_start_loc_context_kv", False):
+            precompute_kwargs = {
+                "query_start_loc": input_batch.query_start_loc,
+                "batch_size": num_reqs,
+                "num_rejected_tokens": num_rejected,
+            }
         self.model.precompute_and_store_context_kv(
-            self.hidden_states[:num_target_tokens],
+            context_hidden_states,
             self.context_positions[:num_target_tokens],
             context_slots,
+            **precompute_kwargs,
         )
 
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs

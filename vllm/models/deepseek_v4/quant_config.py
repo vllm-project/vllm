@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, cast
 
 from vllm.config import get_current_vllm_config
@@ -19,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
+_LAYER_INDEX_RE = re.compile(r"\blayers\.(\d+)\b")
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -50,6 +52,7 @@ class DeepseekV4FP8Config(Fp8Config):
         super().__init__(*args, **kwargs)
         self._resolved_expert_dtype: str | None = None
         self._resolved_moe_quant_algo: str | None = None
+        self._resolved_num_hidden_layers: int | None = None
         self._nvfp4_config: ModelOptNvFp4Config | None = None
         # ``is_scale_e8m0`` is a property that resolves on first read,
         # by which time the current vllm_config has been set.
@@ -98,6 +101,29 @@ class DeepseekV4FP8Config(Fp8Config):
     def moe_quant_algo(self) -> str:
         self._resolve_moe_overrides()
         return self._resolved_moe_quant_algo or ""
+
+    def _is_draft_module_prefix(self, prefix: str) -> bool:
+        """Whether ``prefix`` addresses a speculative draft-module layer.
+
+        NVFP4 conversions (modelopt ``cast_mxfp4_to_nvfp4``) quantize only the
+        main ``num_hidden_layers`` stack; the draft module (MTP/DSpark, runtime
+        layer ids >= num_hidden_layers) keeps the checkpoint's native MXFP4
+        experts. Routing those through the NVFP4 method decodes MXFP4 bits as
+        NVFP4 noise: the engine serves, but draft acceptance collapses to 0%.
+        """
+        m = _LAYER_INDEX_RE.search(prefix)
+        if m is None:
+            return False
+        if self._resolved_num_hidden_layers is None:
+            try:
+                hf_config = get_current_vllm_config().model_config.hf_config
+            except Exception:
+                return False
+            self._resolved_num_hidden_layers = getattr(
+                hf_config, "num_hidden_layers", None
+            )
+        n = self._resolved_num_hidden_layers
+        return n is not None and int(m.group(1)) >= n
 
     def _get_nvfp4_config(self) -> ModelOptNvFp4Config:
         if self._nvfp4_config is None:
@@ -179,7 +205,9 @@ class DeepseekV4FP8Config(Fp8Config):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.expert_dtype == "fp4":
-                if self.moe_quant_algo == "NVFP4":
+                if self.moe_quant_algo == "NVFP4" and not self._is_draft_module_prefix(
+                    prefix
+                ):
                     from vllm.model_executor.layers.quantization.modelopt import (
                         ModelOptNvFp4FusedMoE,
                     )
@@ -196,4 +224,6 @@ class DeepseekV4FP8Config(Fp8Config):
     def is_mxfp4_quant(self, prefix, layer):
         if not isinstance(layer, RoutedExperts) or self.expert_dtype != "fp4":
             return False
-        return self.moe_quant_algo != "NVFP4"
+        return self.moe_quant_algo != "NVFP4" or self._is_draft_module_prefix(
+            prefix
+        )

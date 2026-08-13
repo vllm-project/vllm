@@ -13,8 +13,6 @@ Differences from DFlash:
     token), so we sample at all N positions and ``sample_pos = query_pos + 1``
     (standard next-token), whereas DFlash's masks sit AT the predicted position.
     This is the ``sample_from_anchor`` path in the shared prepare-inputs kernel.
-    Speculators-format checkpoints instead use the DFlash ``1 + N`` fill-in
-    layout (anchor is the bonus token).
   * Sequential Markov sampling: instead of DFlash's single parallel sample, we
     sample left-to-right, adding a prefix-dependent Markov bias derived from the
     previously sampled token at each step.
@@ -41,7 +39,19 @@ class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        super().__init__(vllm_config, device)
+        # DSpark only stores the combined main_x hidden state, not the
+        # HC-multiplexed aux hidden state used by DFlash. Size the base
+        # class's buffer directly instead of re-allocating it after super().
+        assert vllm_config.speculative_config is not None
+        draft_hidden = (
+            vllm_config.speculative_config.draft_model_config.get_hidden_size()
+        )
+        super().__init__(
+            vllm_config,
+            device,
+            hidden_states_size=draft_hidden,
+            allocate_hidden_states=False,
+        )
 
         # Whether to sample from the anchor position. When True, uses anchor-as-first
         # (N slots, each position predicts the next token). When False, uses 1+N
@@ -54,22 +64,13 @@ class DSparkSpeculator(DFlashSpeculator):
         else:
             self.num_query_per_req = 1 + self.num_speculative_steps
 
-        # DSpark consumes mean-pooled target aux hidden states at the target
-        # layers, combined to hidden_size via main_proj. Store that combined
-        # main_x (hidden_size wide). DSpark does not use the same pre-allocated buffer
-        # that DeepSeek-V4's MTP uses.
-        draft_hidden = self.draft_model_config.get_hidden_size()
-        self.hidden_states = torch.zeros(
-            self.max_num_tokens, draft_hidden, dtype=self.dtype, device=device
+        self._anchor_idx = (
+            torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
+            * self.num_query_per_req
         )
 
         self._step_cols = torch.arange(
             self.num_speculative_steps, dtype=torch.int32, device=device
-        )
-
-        self._anchor_idx = (
-            torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
-            * self.num_query_per_req
         )
 
         # Reduced-vocab probabilistic drafting only; set in load_draft_model.
@@ -91,6 +92,15 @@ class DSparkSpeculator(DFlashSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
+        # Take upstream's body whole. The merge-base ALSO had the d2t scatter
+        # assignment; our line lost it in an earlier merge while keeping the
+        # reader at _apply_d2t_scatter, so `self._d2t_scatter_index` was
+        # declared, read, and never assigned -- the branch was dead rather than
+        # broken, which is why nothing failed. Restoring it also brings
+        # upstream #47808's confidence-head requirement for adaptive
+        # verification. Every symbol it needs exists here: draft_logits,
+        # draft_id_to_target_id, enable_adaptive_verification (speculative.py
+        # :248, set at __init__), and confidence_head (our dspark.py).
         model = load_dspark_model(target_model, self.vllm_config)
         # Reduced draft vocab: probabilistic rejection sampling indexes draft
         # logits by target id, so precompute the draft->target column map and a
@@ -108,7 +118,13 @@ class DSparkSpeculator(DFlashSpeculator):
                 dtype=self.draft_logits.dtype,
                 device=self.device,
             )
-        if self.enable_adaptive_verification and model.model.confidence_head is None:
+        # Upstream writes `model.model.confidence_head`, which assumes the draft
+        # model nests its layers under `.model` (qwen3_dspark, gemma4_dspark).
+        # This fork FLATTENED the DeepSeek-V4 DSpark class, so it holds the head
+        # directly and `model.model` raises AttributeError from nn.Module's
+        # __getattr__. Accept both shapes.
+        draft_inner = getattr(model, "model", model)
+        if self.enable_adaptive_verification and draft_inner.confidence_head is None:
             raise ValueError(
                 "Adaptive verification needs a DSpark checkpoint with a confidence "
                 "head, and this one has none. Pass "
@@ -159,8 +175,7 @@ class DSparkSpeculator(DFlashSpeculator):
         num_sample = num_reqs * n_spec
         # Per-(req, position) head hidden, ordered (req, step).
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
-        # Draft-vocab logits; sampled ids are remapped to target vocab below.
-        base_logits = self.model.compute_draft_logits(sample_hidden)
+        base_logits = self.model.compute_logits(sample_hidden)
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
 

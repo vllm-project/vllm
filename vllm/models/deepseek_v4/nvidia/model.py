@@ -15,12 +15,17 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
-    mhc_fused_post_pre_tilelang,
+    mhc_fused_post_pre_tilelang_reuse_residual,
+    mhc_post_hc_head_tilelang,
+    mhc_post_mean_hc_head_tilelang,
+    mhc_post_mean_tilelang,
     mhc_post_tilelang,
     mhc_pre_broadcast_tilelang,
     mhc_pre_tilelang,
@@ -79,11 +84,24 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.deepseek_v4.nvidia.ops.shared_experts import (
+    dspark_silu_mul_clamp_fp8_quant,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils import deep_gemm
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+logger = init_logger(__name__)
+
+
+def _dspark_linear_scale(layer: nn.Module) -> torch.Tensor | None:
+    scale = getattr(layer, "weight_scale_inv", None)
+    if scale is None:
+        scale = getattr(layer, "weight_scale", None)
+    return scale
 
 
 class DeepseekV4MLP(nn.Module):
@@ -96,9 +114,11 @@ class DeepseekV4MLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         is_sequence_parallel: bool = False,
+        dspark_fused_shared_experts_quant: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.prefix = prefix
 
         # If is_sequence_parallel, the input and output tensors are sharded
         # across the ranks within the tp_group. In this case the weights are
@@ -138,12 +158,77 @@ class DeepseekV4MLP(nn.Module):
             self.act_fn = SiluAndMulWithClamp(swiglu_limit)
         else:
             self.act_fn = SiluAndMul()
+        self._dspark_fused_shared_experts_quant_enabled = (
+            dspark_fused_shared_experts_quant
+        )
+
+    def _forward_dspark_fused_shared_experts_quant(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """gate_up GEMM -> fused (clamp+silu+mul+FP8-quant) -> down GEMM.
+
+        Eliminates the standalone ``per_token_group_quant_fp8`` kernel that
+        down_proj's block-scaled-mm input quantization launches right after
+        ``self.act_fn`` writes its BF16 output (see
+        ``ops/shared_experts.py``). Returns ``None`` on any unsupported
+        config so the caller falls back to the default unfused path.
+        """
+        if not isinstance(self.act_fn, (SiluAndMul, SiluAndMulWithClamp)):
+            return None
+        quant_method = getattr(self.down_proj, "quant_method", None)
+        kernel = getattr(quant_method, "w8a8_block_fp8_linear", None) or getattr(
+            quant_method, "fp8_linear", None
+        )
+        if kernel is None or not hasattr(kernel, "apply_block_scaled_mm"):
+            return None
+        down_weight = getattr(self.down_proj, "weight", None)
+        down_scale = _dspark_linear_scale(self.down_proj)
+        if down_weight is None or down_scale is None:
+            return None
+
+        gate_up, _ = self.gate_up_proj(x)
+
+        num_tokens = gate_up.shape[0]
+        d = gate_up.shape[-1] // 2
+        if d % 128 != 0:
+            return None
+        out_fp8 = torch.empty(
+            (num_tokens, d), dtype=torch.float8_e4m3fn, device=gate_up.device
+        )
+        out_scale = torch.empty(
+            (num_tokens, d // 128), dtype=torch.float32, device=gate_up.device
+        )
+        swiglu_limit = getattr(self.act_fn, "swiglu_limit", None)
+        alpha = getattr(self.act_fn, "alpha", 1.0)
+        beta = getattr(self.act_fn, "beta", 0.0)
+
+        dspark_silu_mul_clamp_fp8_quant(
+            gate_up, swiglu_limit, alpha, beta, out_fp8, out_scale
+        )
+        output = kernel.apply_block_scaled_mm(
+            A=out_fp8, B=down_weight, As=out_scale, Bs=down_scale
+        )
+        if get_tensor_model_parallel_world_size() > 1 and self.down_proj.reduce_results:
+            output = tensor_model_parallel_all_reduce(output)
+        logger.info_once(
+            "DSpark fused shared-expert activation+quant engaged: "
+            "out_fp8 shape=%s scale shape=%s",
+            tuple(out_fp8.shape),
+            tuple(out_scale.shape),
+        )
+        return output
 
     def forward(self, x):
+        if self._dspark_fused_shared_experts_quant_enabled:
+            output = self._forward_dspark_fused_shared_experts_quant(x)
+            if output is not None:
+                return output
+
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
+        activated = self.act_fn(gate_up)
+        output, _ = self.down_proj(activated)
+        return output
 
 
 def make_deepseek_v4_expert_params_mapping(
@@ -327,10 +412,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             return
 
         self._check_runtime_supported()
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-
         w13_scale = deep_gemm.transform_sf_into_required_layout(
             self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
             2 * self.intermediate_size,
@@ -363,10 +444,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.w2_weight_scale = None
 
     def get_symm_buffer(self):
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-
         group = get_ep_group().device_group
         device = torch.accelerator.current_device_index()
         key = (
@@ -457,10 +534,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
 
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
         is_padding = None
@@ -538,6 +611,22 @@ class DeepseekV4MoE(nn.Module):
         quant_config = vllm_config.quant_config
         self.prefix = prefix
         self.use_sequence_parallel = use_sequence_parallel
+        self._layer_idx = extract_layer_index(prefix)
+        # An extra layer (layer_idx >= num_hidden_layers) is a DSpark runtime
+        # draft layer ONLY when the DSpark speculator is active. The MTP block is
+        # also built at layer_idx == num_hidden_layers, so gate on the method to
+        # keep the fused DSpark shared-experts kernel off production MTP numerics.
+        self._is_dspark_runtime_layer = (
+            self._layer_idx >= config.num_hidden_layers
+            and getattr(vllm_config.speculative_config, "method", None) == "dspark"
+        )
+        self._dspark_fused_shared_experts_quant = bool(
+            getattr(
+                vllm_config.speculative_config,
+                "dspark_fused_shared_experts_quant",
+                True,
+            )
+        )
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
@@ -611,10 +700,15 @@ class DeepseekV4MoE(nn.Module):
                 swiglu_limit=self.swiglu_limit,
                 quant_config=quant_config,
                 reduce_results=self.use_mega_moe,
+                dspark_fused_shared_experts_quant=(
+                    self._dspark_fused_shared_experts_quant
+                    and self._is_dspark_runtime_layer
+                ),
                 is_sequence_parallel=use_sequence_parallel,
                 prefix=f"{prefix}.shared_experts",
             )
 
+        self.n_shared_experts = config.n_shared_experts or 0
         if self.use_mega_moe:
             self._init_mega_moe_experts(vllm_config, config, prefix)
         else:
@@ -633,7 +727,6 @@ class DeepseekV4MoE(nn.Module):
         eplb_config = vllm_config.parallel_config.eplb_config
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_routed_experts = config.n_routed_experts
-        self.n_shared_experts = config.n_shared_experts or 0
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         assert self.n_physical_experts % self.ep_size == 0, (
@@ -708,6 +801,43 @@ class DeepseekV4MoE(nn.Module):
             num_redundant_experts=eplb_config.num_redundant_experts,
             is_sequence_parallel=self.use_sequence_parallel,
         )
+        self._sync_fused_moe_metadata()
+
+    def _sync_fused_moe_metadata(self) -> None:
+        experts = self.experts
+        moe_config = getattr(experts, "moe_config", None)
+        routed_experts = getattr(experts, "routed_experts", experts)
+
+        def get_optional_attr(obj, name: str):
+            return None if obj is None else getattr(obj, name, None)
+
+        def first_defined(*values):
+            return next((value for value in values if value is not None), None)
+
+        self.n_logical_experts = first_defined(
+            get_optional_attr(experts, "logical_num_experts"),
+            get_optional_attr(moe_config, "num_logical_experts"),
+        )
+        self.n_physical_experts = first_defined(
+            get_optional_attr(routed_experts, "global_num_experts"),
+            get_optional_attr(experts, "global_num_experts"),
+            get_optional_attr(moe_config, "num_experts"),
+        )
+        self.n_local_physical_experts = first_defined(
+            get_optional_attr(routed_experts, "local_num_experts"),
+            get_optional_attr(experts, "local_num_experts"),
+            get_optional_attr(moe_config, "num_local_experts"),
+        )
+        if (
+            self.n_logical_experts is None
+            or self.n_physical_experts is None
+            or self.n_local_physical_experts is None
+        ):
+            raise AttributeError(
+                "DeepseekV4MoE FusedMoE metadata is incomplete after construction."
+            )
+        self.n_local_experts = self.n_local_physical_experts
+        self.n_redundant_experts = self.n_physical_experts - self.n_logical_experts
 
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
@@ -770,10 +900,20 @@ class DeepseekV4MoE(nn.Module):
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """Pick the CUDA sparse-MLA attention class for the configured backend.
 
-    The generic CUDA backend selector does not instantiate DSv4 layers directly,
-    so map generic sparse-MLA choices to the DSv4-specialized attention class.
-    Without an explicit backend, SM12 defaults to FlashInfer while the other
-    CUDA arches keep the FlashMLA path.
+    An explicit ``--attention-backend FLASHINFER_MLA_SPARSE_DSV4`` selects the
+    FlashInfer TRTLLM-gen path; the generic ``FLASHMLA_SPARSE*`` choices map to
+    the DSv4-specialized FlashMLA class. Without an explicit backend the FlashMLA
+    class is used; on SM12x it runs through the stock Triton sparse-MLA route, so
+    it serves on released deps without FlashInfer's unmerged SM120 sparse-MLA
+    fork.
+
+    When ``VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE`` is set and the runtime is
+    SM12x with FlashInfer's packed sparse-MLA decode kernel available, decode is
+    routed through the official ``trtllm_batch_decode_sparse_mla_dsv4`` SM120
+    kernel (FlashInfer PR3395, released in flashinfer >= 0.6.13) instead of the
+    FlashMLA decode kernel; everything else (packed ``fp8_ds_mla`` cache,
+    metadata, prefill) is unchanged. Availability-gated (silent FlashMLA fallback
+    when the kernel is absent). Default on.
     """
     backend = vllm_config.attention_config.backend
     device_capability = current_platform.get_device_capability()
@@ -796,9 +936,47 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     ):
         return DeepseekV4FlashMLAAttention
 
-    if device_capability is not None and device_capability.major == 12:
-        return DeepseekV4FlashInferSM120Attention
+    # Default-on: route SM12x decode through FlashInfer's official packed sparse-MLA
+    # decode kernel (PR3395, released in flashinfer >= 0.6.13) when present.
+    # Availability-gated, so stock installs without that kernel fall through to
+    # the FlashMLA/Triton-sparse default below instead of raising. We deliberately
+    # do NOT hard-default SM12 to the FlashInfer sparse-MLA class -- that path
+    # needs the unmerged FlashInfer SM120 sparse-MLA fork and raises on released
+    # deps (see #43477).
+    import vllm.envs as envs
+
+    if envs.VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE:
+        from vllm.utils.flashinfer import (
+            flashinfer_sm120_sparse_mla_unavailable_reason,
+        )
+
+        if device_capability is not None and device_capability.major == 12:
+            reason = flashinfer_sm120_sparse_mla_unavailable_reason()
+            if reason is None:
+                from vllm.models.deepseek_v4.nvidia.flashinfer_sm120_decode import (
+                    DeepseekV4FlashInferSM120DecodeAttention,
+                )
+
+                return DeepseekV4FlashInferSM120DecodeAttention
+            # The packed path is default-on for SM12x; a silent FlashMLA
+            # fallback hides broken installs until recall degrades. Fail
+            # loudly with the reason; opt into the fallback explicitly with
+            # VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE=0.
+            raise RuntimeError(
+                "DeepSeek-V4 SM120 packed sparse-MLA decode is enabled "
+                f"(VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE=1) but: {reason}"
+            )
+
     return DeepseekV4FlashMLAAttention
+
+
+def _needs_mtp_target_hidden_buffer(vllm_config: VllmConfig) -> bool:
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or spec_config.method != "mtp":
+        return False
+    draft_config = spec_config.draft_model_config
+    hf_config = getattr(draft_config, "hf_config", None)
+    return hasattr(hf_config, "compress_ratios") and hasattr(hf_config, "hc_mult")
 
 
 def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
@@ -940,7 +1118,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     norm_eps=attn_norm_eps,
                 )
         else:
-            residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
+            residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang_reuse_residual(
                 x,
                 residual,
                 post_mix,
@@ -968,7 +1146,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon
-        residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
+        residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang_reuse_residual(
             x,
             residual,
             post_mix,
@@ -1021,11 +1199,44 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
-        padded_heads = _select_dsv4_attn_cls(vllm_config).get_padded_num_q_heads(
+        n_local_heads = (
             config.num_attention_heads // get_tensor_model_parallel_world_size()
         )
+        padded_heads = _select_dsv4_attn_cls(vllm_config).get_padded_num_q_heads(
+            n_local_heads
+        )
+        # The eager scratch pool is OFF by default: it corrupts output under
+        # concurrent mixed prefill+decode.
+        #
+        # Reported with a clean bisect on vllm-project/vllm#41834 (tobymao,
+        # TP=4 SM12x, 1M context) -- leaked BOS tokens mid-sentence, multilingual
+        # token salad, terminal single-token repetition; pool active 7/7 rounds
+        # corrupt, pool disabled 0/2, pre-pool build 0/2, and it reproduces with
+        # speculative decoding both on and off.
+        #
+        # There are TWO races, and only one is fixed. The cross-TEMPLATE aliasing
+        # (all three families carved from offset 0) is gone -- see the sum()
+        # sizing in eager_scratch.py. But each template is still shared across all
+        # 43 layers: compressor_scratch()/indexer_q_outputs()/global_topk_outputs()
+        # hand every layer a view of the SAME buffer, keyed only by num_tokens. The
+        # attention eager break runs the indexer and compressor on parallel aux
+        # streams, so layer N's consumer can still be reading while layer N+1
+        # writes. The reporter tested the sum() fix specifically and still saw 1
+        # corrupt round in 2; with the pool disabled, 2/2 clean, which is what they
+        # now run in production.
+        #
+        # Making it safe needs per-layer buffers (43x the footprint) or explicit
+        # stream-ordering events. Until then the pool is opt-in.
+        #
+        # What OFF costs us: on the default SM12x path allocate_q is already False
+        # (attention writes Q in place), so the 256 MiB Q buffer this pool exists
+        # to manage is not allocated either way. Only the ~36 MiB of aux views stop
+        # being pooled -- allocator churn, not capacity.
         self.eager_scratch_pool: DeepseekV4EagerScratchPool | None = None
-        if not vllm_config.parallel_config.use_ubatching:
+        if (
+            not vllm_config.parallel_config.use_ubatching
+            and envs.VLLM_DEEPSEEK_V4_EAGER_SCRATCH_POOL
+        ):
             # TODO: support dbo if needed
             # this requires the buffer to have ubatch dim
             self.eager_scratch_pool = DeepseekV4EagerScratchPool(
@@ -1036,6 +1247,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 config.index_head_dim,
                 config.index_topk,
                 current_platform.device_type,
+                # Same predicate as DeepseekV4Attention._qnorm_rope_can_write_inplace,
+                # evaluated on the same two model-wide quantities: when Q needs no
+                # padding, attention writes it in place and the pool's Q buffer is
+                # never read. True on the default SM12x path (the FlashInfer-SM120
+                # decode class pads to {16,32,64,128}, so 64/TP maps to itself);
+                # false on the FlashMLA class, which pads everything to 64.
+                allocate_q=padded_heads != n_local_heads,
             )
 
         # Reserved topk indices buffer for all Indexer layers to reuse.
@@ -1091,11 +1309,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             torch.empty(1, dtype=torch.float32),
             requires_grad=False,
         )
-        spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
-        )
-        if get_pp_group().is_last_rank and needs_mtp_hidden_states:
+        # Pre-hc_head residual stream buffer for the MTP draft. Stable
+        # address (outside the cudagraph pool) so the copy_ in forward()
+        # refreshes it correctly across captured shapes. Allocated only when an
+        # MTP drafter can consume it: both readers of
+        # get_mtp_target_hidden_states() are gated on `method == "mtp"`, and the
+        # DFlash/DSpark speculators take aux hidden states instead. Upstream
+        # gates this on use_eagle() or uses_draft_model(), which also covers
+        # dspark/dflash/eagle and so reserves the buffer for drafters that never
+        # read it.
+        if get_pp_group().is_last_rank and _needs_mtp_target_hidden_buffer(vllm_config):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
@@ -1103,6 +1326,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
         else:
             self._mtp_hidden_buffer = None
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1159,10 +1383,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         residual, post_mix, res_mix = None, None, None
         aux_hidden_states: list[torch.Tensor] = []
         final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
+        final_aux_mean_pending = False
+        is_last_rank = get_pp_group().is_last_rank
+        ran_decoder_layer = False
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
+            ran_decoder_layer = True
             hidden_states, residual, post_mix, res_mix = layer(
                 hidden_states,
                 positions,
@@ -1172,42 +1400,113 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
             )
             if idx + 1 in self.aux_hidden_state_layers:
-                # Reconstruct the aux hidden state for draft models
-                aux_recon = mhc_post_tilelang(
-                    hidden_states, residual, post_mix, res_mix
-                )
-                aux_hidden_state = aux_recon.mean(dim=1)
-                if self.use_sequence_parallel:
-                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
-                aux_hidden_states.append(aux_hidden_state)
-                final_aux_recon = aux_recon
-        if layer is not None:
+                if (
+                    idx + 1 == self.end_layer
+                    and is_last_rank
+                    and self._mtp_hidden_buffer is None
+                    and not self.use_sequence_parallel
+                ):
+                    # Deferring the final mhc_post is incompatible with SP: the
+                    # tail gathers hidden_states while residual/post_mix/res_mix
+                    # stay sharded, so a deferred mhc_post_* would mix token
+                    # counts. Under SP fall through and materialize eagerly.
+                    final_aux_mean_pending = True
+                    final_aux_recon = None
+                elif idx + 1 == self.end_layer:
+                    # The final local layer may need the full post tensor for
+                    # PP handoff or the MTP target hidden buffer.
+                    aux_recon = mhc_post_tilelang(
+                        hidden_states, residual, post_mix, res_mix
+                    )
+                    aux_hidden_state = aux_recon.mean(dim=1)
+                    if self.use_sequence_parallel:
+                        aux_hidden_state = sp_all_gather(aux_hidden_state)[
+                            :full_num_tokens
+                        ]
+                    aux_hidden_states.append(aux_hidden_state)
+                    final_aux_recon = aux_recon
+                else:
+                    aux_hidden_state = mhc_post_mean_tilelang(
+                        hidden_states,
+                        residual,
+                        post_mix,
+                        res_mix,
+                    )
+                    if self.use_sequence_parallel:
+                        aux_hidden_state = sp_all_gather(aux_hidden_state)[
+                            :full_num_tokens
+                        ]
+                    aux_hidden_states.append(aux_hidden_state)
+                    final_aux_recon = None
+
+        final_post_materialized = not ran_decoder_layer
+        if ran_decoder_layer:
             # Reuse if the last layer was captured as an aux hidden state
-            if self.end_layer in self.aux_hidden_state_layers:
+            if final_aux_mean_pending:
+                pass
+            elif self.end_layer in self.aux_hidden_state_layers:
                 hidden_states = final_aux_recon
-            else:
+                final_post_materialized = True
+            elif (
+                not is_last_rank
+                or self._mtp_hidden_buffer is not None
+                or self.use_sequence_parallel
+            ):
                 hidden_states = mhc_post_tilelang(
                     hidden_states, residual, post_mix, res_mix
                 )
+                final_post_materialized = True
 
-        if not get_pp_group().is_last_rank:
+        if not is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
         if self.use_sequence_parallel:
+            # hidden_states must already be mhc_post-materialized here: the
+            # gather makes it full-length while residual/post_mix/res_mix stay
+            # sharded, so any later mhc_post_* call would mix token counts.
+            assert final_post_materialized
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         if self._mtp_hidden_buffer is not None:
+            assert final_post_materialized
+            # Stash pre-hc_head residual for the MTP draft (captured copy_).
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        hidden_states = hc_head_fused_kernel_tilelang(
-            hidden_states,
-            self.hc_head_fn,
-            self.hc_head_scale,
-            self.hc_head_base,
-            self.rms_norm_eps,
-            self.hc_eps,
-        )
+        if final_aux_mean_pending:
+            hidden_states, aux_mean = mhc_post_mean_hc_head_tilelang(
+                hidden_states,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_head_fn,
+                self.hc_head_scale,
+                self.hc_head_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+            )
+            aux_hidden_states.append(aux_mean)
+        elif ran_decoder_layer and not final_post_materialized:
+            hidden_states = mhc_post_hc_head_tilelang(
+                hidden_states,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_head_fn,
+                self.hc_head_scale,
+                self.hc_head_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+            )
+        else:
+            hidden_states = hc_head_fused_kernel_tilelang(
+                hidden_states,
+                self.hc_head_fn,
+                self.hc_head_scale,
+                self.hc_head_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+            )
         hidden_states = self.norm(hidden_states)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -1530,11 +1829,22 @@ class DeepseekV4ForCausalLM(
         )
         return hidden_states
 
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
+
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-hc_head residual stream buffer (max_num_batched_tokens,
         hc_mult * hidden_size) for the MTP draft model. Populated by
         forward(); valid after each target step."""
         return getattr(self.model, "_mtp_hidden_buffer", None)
+
+    def skip_weight_name_before_load(self, name: str) -> bool:
+        mapped = self.hf_to_vllm_mapper._map_name(name)
+        return mapped is None or "mtp." in mapped
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])

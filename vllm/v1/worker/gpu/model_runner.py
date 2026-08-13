@@ -729,9 +729,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # target returns a persistent buffer sized at max_num_batched_tokens;
             # slice to the active token count that propose() expects.
             spec_hidden_states = hidden_states
-            if hasattr(self.model, "get_mtp_target_hidden_states"):
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method == "mtp"
+                and hasattr(self.model, "get_mtp_target_hidden_states")
+            ):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+                if pre_hc_hidden_states is not None:
+                    spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]
             self.speculator.propose(
                 input_batch=input_batch,
                 attn_metadata=attn_metadata,
@@ -778,8 +783,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert self.pooling_runner is not None
         self.pooling_runner.dummy_pooler_run(hidden_states)
 
+    def _reserve_profile_scratch(self) -> None:
+        seen: set[int] = set()
+        for module in self.compilation_config.static_forward_context.values():
+            if id(module) in seen:
+                continue
+            seen.add(id(module))
+            reserve = getattr(module, "reserve_profile_scratch", None)
+            if reserve is not None:
+                reserve()
+
     @torch.inference_mode()
     def profile_run(self) -> None:
+        self._reserve_profile_scratch()
+        # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs and self.is_first_pp_rank:
             mm_config = self.model_config.multimodal_config
             if mm_config is not None and not mm_config.skip_mm_profiling:
@@ -1786,9 +1803,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # target returns a persistent buffer sized at max_num_batched_tokens;
             # slice to the active token count that propose() expects.
             spec_hidden_states = hidden_states
-            if hasattr(self.model, "get_mtp_target_hidden_states"):
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method == "mtp"
+                and hasattr(self.model, "get_mtp_target_hidden_states")
+            ):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+                if pre_hc_hidden_states is not None:
+                    spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]
             draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,

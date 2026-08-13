@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.utils import replace_parameter
 
 from ..base import (
@@ -19,6 +20,8 @@ from ..base import (
     MMLinearKernel,
 )
 from .ScaledMMLinearKernel import FP8ScaledMMLinearLayerConfig
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -45,6 +48,17 @@ class Fp8BlockScaledMMLinearKernel(
     # Set to False in subclasses that accept BF16 input directly (e.g. FlashInfer)
     # and therefore do not need the input quantization step in apply_weights.
     apply_input_quant: ClassVar[bool] = True
+
+    # Set to True in subclasses whose kernel cannot bind an E8M0 block-scale
+    # tensor and upcasts it to fp32 on every call. Such subclasses populate
+    # ``layer.<FP32_BLOCK_SCALE_ATTR>`` once in process_weights_after_loading;
+    # apply_weights then hands the kernel the cached fp32 copy instead of
+    # repeating the upcast per forward. The original E8M0 parameter is left in
+    # place because other consumers read it directly (e.g. DeepSeek-V4's fused
+    # o_proj and DSpark kernels read layer.weight_scale{,_inv}).
+    prefers_fp32_block_scale: ClassVar[bool] = False
+
+    FP32_BLOCK_SCALE_ATTR: ClassVar[str] = "_fp32_block_scale"
 
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
@@ -94,6 +108,42 @@ class Fp8BlockScaledMMLinearKernel(
         replace_parameter(layer, params.WEIGHT, new_weight.data)
         replace_parameter(layer, scale_attr_name, new_weight_scale.data)
 
+        self._maybe_cache_fp32_block_scale(layer)
+
+    def _maybe_cache_fp32_block_scale(self, layer: torch.nn.Module) -> None:
+        """Stash an fp32 copy of an E8M0 block scale alongside the original.
+
+        E8M0 is exponent-only, so the upcast is an exact bit shift; the cached
+        copy is numerically identical to what the kernel would compute per call.
+        """
+        if not self.prefers_fp32_block_scale:
+            return
+        e8m0 = getattr(torch, "float8_e8m0fnu", None)
+        if e8m0 is None:
+            return
+        params = self._get_layer_params(layer)
+        scale = (
+            params.weight_scale
+            if params.weight_scale_inv is None
+            else params.weight_scale_inv
+        )
+        if scale is None or scale.dtype != e8m0:
+            return
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            _upcast_e8m0_to_fp32,
+        )
+
+        layer.register_buffer(
+            self.FP32_BLOCK_SCALE_ATTR,
+            _upcast_e8m0_to_fp32(scale.data).contiguous(),
+            persistent=False,
+        )
+        logger.info_once(
+            "Caching fp32 copies of E8M0 block scales for %s; the per-call "
+            "upcast is skipped.",
+            type(self).__name__,
+        )
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -109,6 +159,10 @@ class Fp8BlockScaledMMLinearKernel(
             if params.weight_scale_inv is None
             else params.weight_scale_inv
         )
+        if self.prefers_fp32_block_scale:
+            cached = getattr(layer, self.FP32_BLOCK_SCALE_ATTR, None)
+            if cached is not None:
+                weight_scale = cached
         input_scale = params.input_scale
         scale_up = params.input_scale_ub
 

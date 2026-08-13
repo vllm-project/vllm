@@ -207,7 +207,11 @@ def _gumbel_sample_kernel(
         USE_FP64=USE_FP64,
         PER_TOKEN_COL=PER_TOKEN_COL,
     )
-    token_id = block_idx * BLOCK_SIZE + idx
+    # A fully degenerate tile (every in-vocab lane -inf/NaN) can settle the
+    # reduction on an out-of-vocab tail lane; nothing downstream bounds a
+    # sampled id and the hash-MoE router gathers tid2eid[token_id * topk]
+    # directly. Clamp: in a degenerate tile any index is equally arbitrary.
+    token_id = tl.minimum(block_idx * BLOCK_SIZE + idx, vocab_size - 1)
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
