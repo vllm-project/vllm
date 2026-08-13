@@ -252,6 +252,7 @@ RUN mkdir dist
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
+    --mount=type=cache,target=/root/.triton \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
         git clone --recurse-submodules "https://github.com/triton-lang/triton-cpu.git"; \
@@ -264,6 +265,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         fi; \
         uv build --wheel --out-dir=../dist; \
         if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi; \
+        cd ..; \
+        rm -rf triton-cpu; \
     fi
 
 ######################### TEST DEPS #########################
