@@ -75,12 +75,12 @@ and the API docs for [vllm.config.SpeculativeConfig][].
 ### Common keys
 
 These keys are commonly used across speculative decoding setups, though some
-only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
-`dflash`.
+only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`,
+`dflash`, and `dspark`.
 
 | Key | Type | Default | Allowed values / meaning |
 | --- | --- | --- | --- |
-| `method` | `string` | `None` | Speculation method. Required in explicit speculative configurations. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, and `dflash`. Known formats that explicitly declare their algorithm, such as speculators-format checkpoints, populate this field automatically. |
+| `method` | `string` | `None` | Speculation method. Required in explicit speculative configurations. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, `dflash`, and `dspark`. Known formats that explicitly declare their algorithm, such as speculators-format checkpoints, populate this field automatically. |
 | `model` | `string` | `None` | Draft model, EAGLE head, or auxiliary model identifier. For `ngram`, `ngram_gpu`, `suffix`, and `mtp`, this can often be omitted. |
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
