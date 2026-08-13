@@ -1638,7 +1638,7 @@ def fused_kda_gate(
     beta: float = 1.0,
     threshold: float = 20.0,
     safe_gate: bool = False,
-    lower_bound: float = -5.0,
+    lower_bound: float | None = -5.0,
 ) -> torch.Tensor:
     """
     Forward pass for KDA gate:
@@ -1672,7 +1672,7 @@ def fused_kda_gate(
         beta,
         threshold,
         safe_gate,
-        lower_bound,
+        lower_bound if lower_bound is not None else -5.0,
         T,
         H,
         head_k_dim,
