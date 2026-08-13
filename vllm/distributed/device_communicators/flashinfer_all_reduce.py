@@ -414,13 +414,9 @@ class FlashInferAllReduce:
             group=self.group,
         )
         assert workspace is not None
-        # The token-count bound above is derived from the whole workspace
-        # allocation budget, but a backend may use only a fraction of it per
-        # call.  mnnvl is Lamport-based and rotates through three buffers, so
-        # only ~1/3 of the budget is usable for any single all-reduce.  Ask the
-        # workspace directly so tensors sized between the real capacity and the
-        # budget do not reach the kernel and abort with "The buffer size in the
-        # given workspace is insufficient for the given problem size".
+        # The token bound above uses the full allocation budget, but mnnvl's
+        # Lamport buffers rotate through three slots, so only ~1/3 is usable per
+        # call. Asking the workspace directly to reject sizes the kernel can't fit.
         return workspace.is_buffer_size_sufficient(
             tp_size=self.world_size,
             num_tokens=num_tokens,
