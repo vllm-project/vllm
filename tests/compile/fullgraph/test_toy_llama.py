@@ -339,6 +339,8 @@ def run_model(llama_config, compile_config: CompilationConfig) -> torch.Tensor:
 def test_toy_llama(
     backend: str, use_inductor_graph_partition: bool, monkeypatch, tmp_path
 ):
+    from vllm.compilation.counter import compilation_counter
+
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("Inductor graph partition only supported in torch>=2.9")
 
