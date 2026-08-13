@@ -233,6 +233,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
         self.num_speculative_steps = vllm_config.num_speculative_tokens
+        self.sync_draft_tokens_across_pp = (
+            self.use_pp and self.speculative_config is not None
+        )
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
@@ -288,6 +291,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_reqs=self.max_num_reqs,
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
+                sync_draft_tokens=self.sync_draft_tokens_across_pp,
             )
 
         # Samplers and decode_query_len created in load_model() after
@@ -1352,6 +1356,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
+        draft_tokens: torch.Tensor | None = None,
+        draft_idx_mapping: torch.Tensor | None = None,
     ) -> None:
         # Update the number of computed tokens.
         if self.is_last_pp_rank:
@@ -1375,6 +1381,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_state.postprocess_state(
             idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
         )
+        if draft_tokens is not None:
+            assert draft_idx_mapping is not None
+            self.req_states.draft_tokens.index_copy_(0, draft_idx_mapping, draft_tokens)
+        else:
+            assert draft_idx_mapping is None
 
     @torch.inference_mode()
     def execute_model(
@@ -1715,7 +1726,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, input_batch, grammar_output
         )
 
-        if self.pp_handler is not None:
+        if self.pp_handler is not None and not self.sync_draft_tokens_across_pp:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
             self.pp_handler.broadcast(
                 sampler_output.sampled_token_ids,
@@ -1804,6 +1815,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+
+            if self.sync_draft_tokens_across_pp:
+                assert self.pp_handler is not None
+                self.pp_handler.broadcast(
+                    sampler_output.sampled_token_ids,
+                    num_sampled,
+                    num_rejected,
+                    input_batch,
+                    draft_tokens,
+                )
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
