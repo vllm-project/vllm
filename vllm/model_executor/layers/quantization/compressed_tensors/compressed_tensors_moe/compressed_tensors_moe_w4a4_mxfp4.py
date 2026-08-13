@@ -23,13 +23,13 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.rdna3_mxfp4_moe import (
     RDNA3Mxfp4Experts,
-    repack_experts_rdna3,
 )
 from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
     XPUExpertsMxFp4,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
+    convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
 )
@@ -199,18 +199,23 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         elif current_platform.is_xpu():
             pass
         elif self.mxfp4_backend == Mxfp4MoeBackend.RDNA3_MXFP4:
-            # Repack to the [E, K/8, N] uint32 + [E, K/32, N] layout the HIP
-            # kernel reads (no gate/up de-interleave for compressed-tensors).
-            b_q13, b_s13 = repack_experts_rdna3(
-                layer.w13_weight.data, layer.w13_weight_scale.data, False
+            # compressed-tensors keeps gate_proj/up_proj separate, so w13 is
+            # already contiguous after _load_w13.
+            w13, w2, w13_scale, w2_scale, _, _ = (
+                convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+                    mxfp4_backend=self.mxfp4_backend,
+                    layer=layer,
+                    w13_weight=layer.w13_weight,
+                    w2_weight=layer.w2_weight,
+                    w13_weight_scale=layer.w13_weight_scale,
+                    w2_weight_scale=layer.w2_weight_scale,
+                    gate_up_interleaved=False,
+                )
             )
-            b_q2, b_s2 = repack_experts_rdna3(
-                layer.w2_weight.data, layer.w2_weight_scale.data, False
-            )
-            layer.w13_weight = torch.nn.Parameter(b_q13, requires_grad=False)
-            layer.w13_weight_scale = torch.nn.Parameter(b_s13, requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(b_q2, requires_grad=False)
-            layer.w2_weight_scale = torch.nn.Parameter(b_s2, requires_grad=False)
+            layer.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
+            layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
+            layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
         else:
             logger.warning_once(
                 "Your GPU does not have native support for FP4 computation "
