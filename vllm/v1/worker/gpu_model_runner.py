@@ -907,11 +907,25 @@ class GPUModelRunner(
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
+        # NOTE: Profiling must not use the live processor cache (parity with
+        # the V2 runner, which profiles with `enable_cache=False`): the
+        # cache-aware processing path tokenizes the dummy prompt in a
+        # text-only pass with no multimodal items, which breaks processors
+        # that strictly validate placeholder counts against the provided
+        # items.
         self.mm_budget = (
-            MultiModalBudget(self.vllm_config, self.mm_registry)
+            MultiModalBudget(
+                self.vllm_config,
+                self.mm_registry,
+                enable_cache=False,
+            )
             if self.supports_mm_inputs
             else None
         )
+        # Memoized dummy items for `_get_mm_dummy_batch`, so that repeated
+        # dummy runs (e.g. during CUDA graph capture) do not re-process the
+        # dummy media now that the processor cache is not used.
+        self._mm_dummy_items: dict[str, MultiModalKwargsItem] = {}
 
         self.reorder_batch_threshold: int | None = None
 
@@ -1009,6 +1023,7 @@ class GPUModelRunner(
         """
         if self.mm_budget:
             self.mm_budget.reset_cache()
+        self._mm_dummy_items.clear()
         self.late_interaction_runner.clear()
 
     def reset_encoder_cache(self) -> None:
@@ -5898,17 +5913,18 @@ class GPUModelRunner(
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
 
-        # Don't use `max_items_per_batch` here to avoid redundant computation
-        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
-            self.model_config,
-            mm_counts={modality: 1},
-            cache=self.mm_budget.cache,
-        )
-        dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
-
-        # We use the cache so that the item is saved to the cache,
-        # but not read from the cache
-        assert dummy_mm_item is not None, "Item should not already be cached"
+        dummy_mm_item = self._mm_dummy_items.get(modality)
+        if dummy_mm_item is None:
+            # Don't use `max_items_per_batch` here to avoid redundant
+            # computation
+            dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
+                self.model_config,
+                mm_counts={modality: 1},
+                processor=self.mm_budget.processor,
+            )
+            dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+            assert dummy_mm_item is not None, "Dummy item should be generated"
+            self._mm_dummy_items[modality] = dummy_mm_item
 
         return next(
             mm_kwargs_batch
