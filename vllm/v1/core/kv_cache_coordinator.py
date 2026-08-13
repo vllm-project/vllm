@@ -16,6 +16,8 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    HiSparseHotManager,
+    HiSparseResidentManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
@@ -216,6 +218,7 @@ class KVCacheCoordinator(ABC):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        hisparse_host_import: bool = False,
     ) -> tuple[int, ...]:
         """Get allocation requirements independently for each block pool."""
         self.hisparse_coordinator.require_hot_if_needed(
@@ -229,7 +232,15 @@ class KVCacheCoordinator(ABC):
             if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
                 continue
             assert group.block_pool_id is not None
-            if isinstance(manager, CrossAttentionManager):
+            if hisparse_host_import and isinstance(manager, HiSparseResidentManager):
+                num_blocks = manager.get_num_host_import_blocks_to_allocate(
+                    request_id,
+                    num_local_computed_tokens,
+                    total_computed_tokens - num_local_computed_tokens,
+                )
+            elif hisparse_host_import and isinstance(manager, HiSparseHotManager):
+                num_blocks = manager.get_num_host_import_blocks_to_allocate(request_id)
+            elif isinstance(manager, CrossAttentionManager):
                 num_blocks = manager.get_num_blocks_to_allocate(
                     request_id,
                     num_encoder_tokens,
@@ -258,6 +269,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        hisparse_host_import: bool = False,
     ) -> None:
         """
         Add the new computed blocks to the request. Optionally allocate new
@@ -290,7 +302,24 @@ class KVCacheCoordinator(ABC):
                 num_local_computed_tokens,
                 num_external_computed_tokens,
             )
-        if num_external_computed_tokens > 0:
+        if hisparse_host_import:
+            assert num_external_computed_tokens > 0
+            for manager in self.single_type_managers:
+                if isinstance(manager, HiSparseHotManager):
+                    manager.require_hot(request_id)
+                elif isinstance(manager, HiSparseResidentManager):
+                    manager.allocate_host_import_blocks(
+                        request_id,
+                        num_local_computed_tokens,
+                        num_external_computed_tokens,
+                    )
+                else:
+                    manager.allocate_external_computed_blocks(
+                        request_id,
+                        num_local_computed_tokens,
+                        num_external_computed_tokens,
+                    )
+        elif num_external_computed_tokens > 0:
             for manager in self.single_type_managers:
                 manager.allocate_external_computed_blocks(
                     request_id,

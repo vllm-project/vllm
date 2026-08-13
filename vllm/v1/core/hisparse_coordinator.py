@@ -344,6 +344,15 @@ class HiSparseCoordinator:
                 after_forward=True,
             )
 
+    def complete_host_import(self, request_id: str, num_computed_tokens: int) -> None:
+        """Publish externally populated host pages after connector completion."""
+        if not self.resident_managers:
+            return
+        block_size = self.resident_managers[0].block_size
+        self.host_valid_pages[request_id] = set(
+            range(cdiv(num_computed_tokens, block_size))
+        )
+
     def _plan_spill(
         self,
         request_id: str,

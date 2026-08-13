@@ -101,6 +101,10 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        # HiSparse chooses the external-prefix landing tier once, during
+        # scheduler admission. Workers consume this decision; they must not
+        # derive it independently from rank-local memory state.
+        self.hisparse_host_import = False
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
 

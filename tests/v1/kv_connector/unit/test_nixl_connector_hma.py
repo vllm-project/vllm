@@ -1760,6 +1760,229 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
 
 
 @pytest.mark.cpu_test
+def test_hisparse_host_import_metadata_keeps_source_blocks_separate():
+    """The CPU destination IDs must not enter the ordinary GPU transfer list."""
+    from unittest.mock import MagicMock
+
+    from vllm.v1.kv_cache_interface import (
+        HiSparseHotSpec,
+        HiSparseResidentSpec,
+        KVCacheConfig,
+        KVCacheGroupRole,
+        KVCacheGroupSpec,
+    )
+
+    source_spec = make_kv_cache_config(block_size=16).kv_cache_groups[0].kv_cache_spec
+    sched = make_nixl_scheduler(heartbeat=True)
+    sched._is_hma_required = False
+    sched.kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        num_blocks_by_pool=[32],
+        hisparse_host_num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["source"],
+                source_spec,
+                block_pool_id=None,
+                enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+            KVCacheGroupSpec(
+                ["indexer"],
+                source_spec,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
+            ),
+            KVCacheGroupSpec(
+                ["resident"],
+                HiSparseResidentSpec(block_size=16, page_size=32),
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(block_size=16, page_size=32, blocks_per_request=2),
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    request = create_request(do_remote_prefill=True)
+    request.hisparse_host_import = True
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["remote_block_ids"] = ([1, 2],)
+    blocks = MagicMock()
+    blocks.get_unhashed_block_ids_all_groups.return_value = (
+        [5, 6],
+        [10, 11],
+        [20],
+        [30, 31],
+    )
+
+    sched.update_state_after_alloc(request, blocks, num_external_tokens=32)
+    metadata = sched.build_connector_meta(MagicMock())
+    req_meta = metadata.reqs_to_recv[request.request_id]
+
+    assert req_meta.hisparse_host_block_ids == [5, 6]
+    assert req_meta.local_block_ids == ([10, 11], [20])
+    assert not sched._hisparse_host_blocks_to_recv
+
+
+@pytest.mark.cpu_test
+def test_hisparse_host_import_subdivides_scheduler_blocks_for_staging():
+    """Two 4-way CPU blocks become eight kernel pages per NIXL region."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        RemoteMeta,
+        ReqMeta,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = False
+    worker.use_mla = True
+    worker.num_regions = 2
+    worker.region_group_ids = [0, 1]
+    worker.dst_region_split_ratios = {"prefill": [4, 4]}
+    worker.dst_region_num_blocks = {"prefill": [400, 400]}
+    worker.dst_num_blocks = {"prefill": 400}
+    worker._hisparse_host_regions = [
+        (1_000, 10, 64),
+        (2_000, 20, 64),
+    ]
+    worker.kv_cache_config = SimpleNamespace(hisparse_host_num_blocks=16)
+    worker.block_len_per_layer = [10, 20]
+    worker.kv_caches_base_addr = {"decode": {0: [10_000, 20_000]}}
+    worker.engine_id = "decode"
+    worker.tp_rank = 0
+    worker.region_strides = [100, 200]
+    worker.world_size = 1
+    worker._remote_agents = {"prefill": {(0, 0): "prefill-agent"}}
+    worker._pending_recv_notifs = {}
+    worker.dst_xfer_side_handles = {"prefill": {0: 77}}
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_physical_blocks_per_logical=4
+    )
+    worker.transfer_topo.tp_ratio.return_value = 1
+    stager = MagicMock()
+    worker._get_hisparse_host_stager = MagicMock(return_value=stager)
+    plan = SimpleNamespace(all_source_ranks=(0,))
+    meta = ReqMeta(
+        local_block_ids=([20, 21, 22, 23, 24, 25, 26, 27], [99]),
+        local_physical_block_ids=(
+            [20, 21, 22, 23, 24, 25, 26, 27],
+            [99],
+        ),
+        tp_size=1,
+        remote=RemoteMeta(
+            block_ids=([10, 11],),
+            engine_id="prefill",
+            request_id="remote-request",
+            host="prefill-host",
+            port=1234,
+        ),
+        hisparse_host_block_ids=[2, 3],
+    )
+
+    worker._read_hisparse_host_blocks("request", meta, plan, [0, 0])
+
+    call = stager.submit.call_args
+    assert call.args[1].tolist() == [*range(40, 48), *range(440, 448)]
+    assert call.kwargs["dst_addrs"].tolist() == [
+        *range(1_080, 1_160, 10),
+        *range(2_160, 2_320, 20),
+    ]
+    assert call.kwargs["desc_lens"].tolist() == [10] * 8 + [20] * 8
+    assert call.kwargs["mirror_addrs"].tolist() == [
+        *range(12_000, 12_800, 100),
+        *([0] * 7),
+        39_800,
+    ]
+
+
+@pytest.mark.cpu_test
+def test_host_stager_preserves_custom_destinations_and_mirrors():
+    """Custom mixed-tier geometry must survive descriptor-length grouping."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
+        HostReadStager,
+    )
+
+    stager = object.__new__(HostReadStager)
+    stager.desc_lens = np.array([10, 20, 10])
+    stager.host_addrs = np.array([1_000, 2_000, 3_000], dtype=np.uint64)
+    stager._pools = {
+        10: SimpleNamespace(descs_per_slot=2, free_slots=[]),
+        20: SimpleNamespace(descs_per_slot=2, free_slots=[]),
+    }
+    stager._reqs = {}
+
+    stager.submit(
+        "request",
+        np.array([7, 8, 9]),
+        np.arange(3),
+        77,
+        dst_addrs=np.array([100, 200, 300], dtype=np.uint64),
+        desc_lens=np.array([10, 20, 10]),
+        copy_kinds=np.array([2, 3, 2]),
+        mirror_addrs=np.array([0, 900, 800], dtype=np.uint64),
+    )
+
+    queued = stager._reqs["request"].queued
+    assert [entry[0].tolist() for entry in queued] == [[7, 9], [8]]
+    assert [entry[1].tolist() for entry in queued] == [[100, 300], [200]]
+    assert [entry[2].tolist() for entry in queued] == [[2, 2], [3]]
+    assert [entry[3].tolist() for entry in queued] == [[0, 800], [900]]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_host_stager_copies_to_host_and_gpu_mirror():
+    """A completed staged page must reach both final tiers before its event."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
+        HostReadStager,
+        _load_cudart,
+    )
+
+    page_bytes = 256
+    source = torch.arange(page_bytes, dtype=torch.uint8, device="cuda")
+    host_destination = torch.empty(page_bytes, dtype=torch.uint8, pin_memory=True)
+    gpu_mirror = torch.zeros_like(source)
+    pool = SimpleNamespace(
+        stage_ptrs=np.array([source.data_ptr()], dtype=np.uint64),
+        desc_len=page_bytes,
+    )
+    slot = SimpleNamespace(
+        pool=pool,
+        desc_ids=np.array([0], dtype=np.int64),
+        event=torch.cuda.Event(),
+    )
+    stager = object.__new__(HostReadStager)
+    stager._copy_stream = torch.cuda.Stream()
+    stager._cudart = _load_cudart()
+    assert stager._cudart is not None
+
+    stager._start_copy(
+        slot,
+        np.array([host_destination.data_ptr()], dtype=np.uint64),
+        np.array([2], dtype=np.int32),
+        np.array([gpu_mirror.data_ptr()], dtype=np.uint64),
+    )
+    slot.event.synchronize()
+
+    assert torch.equal(host_destination, source.cpu())
+    assert torch.equal(gpu_mirror, source)
+
+
+@pytest.mark.cpu_test
 def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     """Hybrid MLA+KDA registration: HMA tensors shared by both layer types
     must be flagged as MLA regions even when a KDA layer registers them

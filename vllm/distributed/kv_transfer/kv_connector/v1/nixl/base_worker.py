@@ -76,7 +76,10 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
-from vllm.v1.core.kv_cache_utils import HISPARSE_RESIDENT_SUFFIX
+from vllm.v1.core.kv_cache_utils import (
+    HISPARSE_INDEXER_SOURCE_SUFFIX,
+    HISPARSE_RESIDENT_SUFFIX,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseResidentSpec,
@@ -600,6 +603,10 @@ class NixlBaseConnectorWorker:
         # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
         self._region_is_mla = list[bool]()
+        # Alternate final destinations for a host-backed HiSparse import.
+        # Entries are (base, physical-page stride, physical-page capacity),
+        # aligned with the ordinary NIXL regions; None means GPU-only.
+        self._hisparse_host_regions: list[tuple[int, int, int] | None] = []
 
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
@@ -1110,6 +1117,7 @@ class NixlBaseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+        self._hisparse_host_regions = []
 
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
@@ -1255,6 +1263,31 @@ class NixlBaseConnectorWorker:
             self.region_names.append(transfer_layer_name(layer_name))
             self.region_num_blocks.append(num_blocks)
             self._region_is_mla.append(is_mla_region)
+            host_layer_name = None
+            if layer_name.endswith(HISPARSE_RESIDENT_SUFFIX):
+                host_layer_name = transfer_layer_name(layer_name)
+            elif group.role is KVCacheGroupRole.HISPARSE_INDEXER:
+                host_layer_name = f"{layer_name}{HISPARSE_INDEXER_SOURCE_SUFFIX}"
+            if host_layer_name is None:
+                self._hisparse_host_regions.append(None)
+            else:
+                host_cache = kv_caches.get(host_layer_name)
+                if host_cache is None:
+                    raise ValueError(
+                        "HiSparse host transfer cache is missing: "
+                        f"layer={layer_name}, source={host_layer_name}"
+                    )
+                assert host_cache.device.type == "cpu"
+                host_stride = host_cache.stride(0) * host_cache.element_size()
+                if host_stride < region_block_len:
+                    raise ValueError(
+                        "HiSparse host page is smaller than its transfer region: "
+                        f"layer={layer_name}, host_stride={host_stride}, "
+                        f"region_block_len={region_block_len}"
+                    )
+                self._hisparse_host_regions.append(
+                    (host_cache.data_ptr(), host_stride, host_cache.shape[0])
+                )
 
             # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
             # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
@@ -1318,6 +1351,7 @@ class NixlBaseConnectorWorker:
             == len(self.region_group_ids)
             == len(self.region_block_sizes)
             == len(self.region_names)
+            == len(self._hisparse_host_regions)
             == len(self.region_num_blocks)
         )
 
@@ -2398,6 +2432,11 @@ class NixlBaseConnectorWorker:
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
+            if meta.hisparse_host_block_ids is not None:
+                # The staging copy already populated stable host pages and all
+                # mandatory GPU mirrors at their final geometry.
+                continue
+
             # Post processing for heteroblocksize/layout, and for blocks the
             # transfer clipped. The latter happens either at remote-block
             # granularity (block_size_ratio > 1) or at kernel-block
@@ -2559,6 +2598,30 @@ class NixlBaseConnectorWorker:
                 "host reads (set VLLM_NIXL_HOST_STAGE_BYTES=0 to silence)"
             )
             self._host_stager = None
+        return self._host_stager
+
+    def _get_hisparse_host_stager(self) -> HostReadStager:
+        """Return the bounded GPU landing pipeline for host-backed imports."""
+        if self._host_stager is not None:
+            return self._host_stager
+        stage_bytes = envs.VLLM_NIXL_HOST_STAGE_BYTES
+        if stage_bytes <= 0:
+            raise RuntimeError(
+                "Host-backed HiSparse P/D imports require "
+                "VLLM_NIXL_HOST_STAGE_BYTES > 0"
+            )
+        lengths = np.asarray(self.block_len_per_layer, dtype=np.int64)
+        self._host_stager = HostReadStager(
+            desc_lens=lengths,
+            host_addrs=np.zeros(len(lengths), dtype=np.uint64),
+            device=torch.device(f"cuda:{self.device_id}"),
+            nixl_wrapper=self.nixl_wrapper,
+            memory_type=self.nixl_memory_type,
+            backends=self.nixl_backends,
+            stage_bytes=stage_bytes,
+            num_slots=max(envs.VLLM_NIXL_HOST_STAGE_SLOTS, 1),
+        )
+        self._host_stager_init_attempted = True
         return self._host_stager
 
     def _advance_host_staging(self) -> set[str]:

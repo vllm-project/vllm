@@ -364,6 +364,7 @@ class KVCacheManager:
         reserved_blocks: int | Sequence[int] = 0,
         reserved_host_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        allow_hisparse_host_import: bool = False,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -396,6 +397,8 @@ class KVCacheManager:
                 for other in-flight sequences.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
+            allow_hisparse_host_import: If a fully resident external prefix does
+                not fit, allow the fixed HiSparse host-backed allocation instead.
 
         Blocks layout:
         ```
@@ -479,6 +482,15 @@ class KVCacheManager:
         ):
             watermark_blocks = self.watermark_blocks_by_pool
 
+        if isinstance(reserved_blocks, int):
+            reserved_blocks_by_pool = (reserved_blocks,) * len(self.block_pools)
+        else:
+            reserved_blocks_by_pool = tuple(reserved_blocks)
+            assert len(reserved_blocks_by_pool) == len(self.block_pools)
+
+        hisparse_host_import = (
+            allow_hisparse_host_import and request.hisparse_host_import
+        )
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
@@ -493,6 +505,7 @@ class KVCacheManager:
                     num_local_computed_tokens=num_local_computed_tokens,
                     num_tokens_main_model=full_num_tokens,
                     apply_admission_cap=True,
+                    hisparse_host_import=hisparse_host_import,
                 )
             )
             host_blocks_to_allocate = 0
@@ -508,17 +521,66 @@ class KVCacheManager:
                         apply_admission_cap=True,
                     )
                 )
-            if (
+            host_lacks_capacity = (
                 self.hisparse_coordinator.has_host_cache
                 and not self.hisparse_coordinator.has_host_capacity(
                     host_blocks_to_allocate
                 )
-            ) or any(
-                required + watermark > pool.get_num_free_blocks()
-                for required, watermark, pool in zip(
-                    num_blocks_to_allocate, watermark_blocks, self.block_pools
+            )
+            full_resident_lacks_capacity = any(
+                required + watermark > pool.get_num_free_blocks() - reserved
+                for required, watermark, reserved, pool in zip(
+                    num_blocks_to_allocate,
+                    watermark_blocks,
+                    reserved_blocks_by_pool,
+                    self.block_pools,
                 )
-            ):
+            )
+            if full_resident_lacks_capacity:
+                if not allow_hisparse_host_import:
+                    return None
+                hisparse_host_import = True
+                request.hisparse_host_import = True
+                host_import_blocks = (
+                    self.coordinator.get_num_blocks_to_allocate_by_pool(
+                        request_id=request.request_id,
+                        num_tokens=full_num_tokens,
+                        new_computed_blocks=new_computed_block_list,
+                        num_encoder_tokens=num_encoder_tokens,
+                        total_computed_tokens=total_computed_tokens,
+                        num_local_computed_tokens=num_local_computed_tokens,
+                        num_tokens_main_model=full_num_tokens,
+                        apply_admission_cap=True,
+                        hisparse_host_import=True,
+                    )
+                )
+                host_import_lacks_capacity = any(
+                    required + watermark > pool.get_num_free_blocks() - reserved
+                    for required, watermark, reserved, pool in zip(
+                        host_import_blocks,
+                        watermark_blocks,
+                        reserved_blocks_by_pool,
+                        self.block_pools,
+                    )
+                )
+                if host_import_lacks_capacity:
+                    for pool_id, (required, watermark, reserved, pool) in enumerate(
+                        zip(
+                            host_import_blocks,
+                            watermark_blocks,
+                            reserved_blocks_by_pool,
+                            self.block_pools,
+                        )
+                    ):
+                        shortage = (
+                            required + watermark + reserved - pool.get_num_free_blocks()
+                        )
+                        if shortage > 0:
+                            self.hisparse_coordinator.reclaim_resident_blocks(
+                                pool_id, shortage
+                            )
+                    return None
+            if host_lacks_capacity:
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -550,6 +612,7 @@ class KVCacheManager:
             + num_external_computed_tokens,
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
+            hisparse_host_import=hisparse_host_import,
         )
         host_blocks_to_allocate = 0
         if self.hisparse_coordinator.has_host_cache:
@@ -565,19 +628,6 @@ class KVCacheManager:
                     num_tokens_main_model=num_tokens_main_model,
                 )
             )
-        if self.hisparse_coordinator.has_host_cache and not (
-            self.hisparse_coordinator.has_host_capacity(
-                host_blocks_to_allocate + reserved_host_blocks
-            )
-        ):
-            return None
-
-        if isinstance(reserved_blocks, int):
-            reserved_blocks_by_pool = (reserved_blocks,) * len(self.block_pools)
-        else:
-            reserved_blocks_by_pool = tuple(reserved_blocks)
-            assert len(reserved_blocks_by_pool) == len(self.block_pools)
-
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
         lacks_capacity = any(
@@ -589,6 +639,38 @@ class KVCacheManager:
                 self.block_pools,
             )
         )
+        if lacks_capacity and allow_hisparse_host_import and not hisparse_host_import:
+            host_import_blocks = self.coordinator.get_num_blocks_to_allocate_by_pool(
+                request_id=request.request_id,
+                num_tokens=num_tokens_need_slot,
+                new_computed_blocks=new_computed_block_list,
+                num_encoder_tokens=num_encoder_tokens,
+                total_computed_tokens=(
+                    num_local_computed_tokens + num_external_computed_tokens
+                ),
+                num_local_computed_tokens=num_local_computed_tokens,
+                num_tokens_main_model=num_tokens_main_model,
+                hisparse_host_import=True,
+            )
+            host_import_lacks_capacity = any(
+                required + watermark > pool.get_num_free_blocks() - reserved
+                for required, watermark, reserved, pool in zip(
+                    host_import_blocks,
+                    watermark_blocks,
+                    reserved_blocks_by_pool,
+                    self.block_pools,
+                )
+            )
+            hisparse_host_import = True
+            request.hisparse_host_import = True
+            num_blocks_to_allocate = host_import_blocks
+            lacks_capacity = host_import_lacks_capacity
+        if self.hisparse_coordinator.has_host_cache and not (
+            self.hisparse_coordinator.has_host_capacity(
+                host_blocks_to_allocate + reserved_host_blocks
+            )
+        ):
+            return None
         if lacks_capacity:
             for pool_id, (required, watermark, reserved, pool) in enumerate(
                 zip(
@@ -625,7 +707,10 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                hisparse_host_import=hisparse_host_import,
             )
+
+        request.hisparse_host_import = hisparse_host_import
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,

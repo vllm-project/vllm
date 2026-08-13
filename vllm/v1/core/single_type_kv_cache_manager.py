@@ -903,6 +903,12 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
             0,
         )
 
+    def get_num_host_import_blocks_to_allocate(self, request_id: str) -> int:
+        return max(
+            self.blocks_per_request - len(self.req_to_blocks.get(request_id, ())),
+            0,
+        )
+
     def add_local_computed_blocks(
         self,
         request_id: str,
@@ -950,6 +956,36 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         host_pages = cdiv(num_local_computed_tokens, self.block_size)
         required = cdiv(num_tokens, self.block_size)
         return max(required - max(existing, host_pages), 0)
+
+    def get_num_host_import_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> int:
+        """Return the hard resident footprint of a host-backed import."""
+        if num_external_computed_tokens <= 0:
+            return 0
+        num_tokens = num_local_computed_tokens + num_external_computed_tokens
+        tail_page = cdiv(num_tokens, self.block_size) - 1
+        blocks = self.req_to_blocks.get(request_id, ())
+        return int(tail_page >= len(blocks) or blocks[tail_page].is_null)
+
+    def allocate_host_import_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        """Represent CPU history with null pages and retain its writable tail."""
+        assert num_external_computed_tokens > 0
+        num_tokens = num_local_computed_tokens + num_external_computed_tokens
+        tail_page = cdiv(num_tokens, self.block_size) - 1
+        blocks = self.req_to_blocks[request_id]
+        if len(blocks) <= tail_page:
+            blocks.extend([self._null_block] * (tail_page + 1 - len(blocks)))
+        if blocks[tail_page].is_null:
+            blocks[tail_page] = self.block_pool.get_new_blocks(1)[0]
 
     def add_local_computed_blocks(
         self,

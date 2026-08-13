@@ -102,6 +102,7 @@ class NixlBaseConnectorScheduler:
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}
+        self._hisparse_host_blocks_to_recv: dict[ReqId, list[int]] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
@@ -450,6 +451,7 @@ class NixlBaseConnectorScheduler:
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
+                hisparse_host_block_ids=self._hisparse_host_blocks_to_recv.get(req_id),
             )
 
         if self.use_host_buffer:
@@ -472,6 +474,7 @@ class NixlBaseConnectorScheduler:
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
+        self._hisparse_host_blocks_to_recv.clear()
         self._reqs_in_batch = set()
         self._reqs_not_processed = set()
         self._reqs_need_send = {}

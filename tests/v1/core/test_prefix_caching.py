@@ -623,6 +623,214 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     assert external.request_id not in manager.hisparse_coordinator.host_valid_pages
 
 
+@pytest.mark.parametrize("ends_on_page_boundary", [False, True])
+def test_hisparse_external_import_falls_back_to_hard_gpu_footprint(
+    ends_on_page_boundary: bool,
+):
+    """An external prefix larger than resident capacity must remain admissible.
+
+    This guards the admission boundary where indexer + one writable resident
+    page + the fixed hot allocation fit, but indexer + full resident history do
+    not. Requiring one more resident page would silently strand long P/D inputs.
+    """
+    block_size = 16
+    full = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    num_prompt_blocks = 4
+    num_prompt_tokens = num_prompt_blocks * block_size
+    if not ends_on_page_boundary:
+        num_prompt_tokens -= 1
+    config = KVCacheConfig(
+        num_blocks=8,
+        num_blocks_by_pool=[8],
+        hisparse_host_num_blocks=9,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["source"],
+                full,
+                block_pool_id=None,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+            KVCacheGroupSpec(
+                ["indexer"],
+                full,
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
+            ),
+            KVCacheGroupSpec(
+                ["resident"],
+                HiSparseResidentSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                ),
+                block_pool_id=0,
+                enable_prefix_caching=False,
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                    blocks_per_request=2,
+                ),
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=128,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    request = make_request(
+        "host-import",
+        list(range(num_prompt_tokens)),
+        block_size,
+        sha256,
+    )
+
+    allocated = manager.allocate_slots(
+        request,
+        num_new_tokens=0,
+        num_external_computed_tokens=num_prompt_tokens,
+        delay_cache_blocks=True,
+        full_sequence_must_fit=True,
+        allow_hisparse_host_import=True,
+    )
+
+    assert allocated is not None
+    assert request.hisparse_host_import
+    source, indexer, resident, hot = manager.get_blocks(request.request_id).blocks
+    assert len(source) == num_prompt_blocks
+    assert len(indexer) == num_prompt_blocks
+    assert len(resident) == num_prompt_blocks
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
+    assert len(hot) == 2
+    assert manager.block_pools[0].get_num_free_blocks() == 0
+
+
+@pytest.mark.parametrize("host_num_blocks", [7, 9])
+def test_hisparse_host_import_decision_survives_capacity_retry(
+    host_num_blocks: int,
+):
+    """A waiting external import must not flip back to full residency.
+
+    A full-resident request can leave less than the fixed host-backed footprint
+    free. Once the next request selects host-backed landing, freeing the first
+    request must not make the retry consume a full prefix-sized GPU allocation.
+    """
+    block_size = 16
+    full = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    config = KVCacheConfig(
+        num_blocks=9,
+        num_blocks_by_pool=[9],
+        hisparse_host_num_blocks=host_num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["source"],
+                full,
+                block_pool_id=None,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+            KVCacheGroupSpec(
+                ["indexer"],
+                full,
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
+            ),
+            KVCacheGroupSpec(
+                ["resident"],
+                HiSparseResidentSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                ),
+                block_pool_id=0,
+                enable_prefix_caching=False,
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                    blocks_per_request=2,
+                ),
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=128,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    tokens = list(range(4 * block_size))
+    first = make_request("first", tokens, block_size, sha256)
+    second = make_request("second", tokens, block_size, sha256)
+
+    assert (
+        manager.allocate_slots(
+            first,
+            num_new_tokens=0,
+            num_external_computed_tokens=len(tokens),
+            delay_cache_blocks=True,
+            full_sequence_must_fit=True,
+            allow_hisparse_host_import=True,
+        )
+        is not None
+    )
+    assert not first.hisparse_host_import
+
+    assert (
+        manager.allocate_slots(
+            second,
+            num_new_tokens=0,
+            num_external_computed_tokens=len(tokens),
+            delay_cache_blocks=True,
+            full_sequence_must_fit=True,
+            allow_hisparse_host_import=True,
+        )
+        is None
+    )
+
+    manager.free(first)
+    assert (
+        manager.allocate_slots(
+            second,
+            num_new_tokens=0,
+            num_external_computed_tokens=len(tokens),
+            delay_cache_blocks=True,
+            full_sequence_must_fit=True,
+            allow_hisparse_host_import=True,
+        )
+        is not None
+    )
+    assert second.hisparse_host_import
+    _, _, resident, hot = manager.get_blocks(second.request_id).blocks
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
+    assert len(hot) == 2
+
+
 def make_kv_cache_config_hybrid_model(
     block_size: int,
     num_blocks: int,
