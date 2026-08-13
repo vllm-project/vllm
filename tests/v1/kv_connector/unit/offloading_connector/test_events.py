@@ -81,13 +81,18 @@ def _group_config(
     group_idx: int = 0,
     block_size: int = 4,
     blocks_per_chunk: int = 1,
+    tokens_per_hash: int | None = None,
     sliding_window_size_in_chunks: int | None = None,
 ) -> GroupOffloadConfig:
+    if tokens_per_hash is None:
+        tokens_per_hash = block_size
+    tokens_per_chunk = block_size * blocks_per_chunk
+    assert tokens_per_chunk % tokens_per_hash == 0
     return GroupOffloadConfig(
         group_idx=group_idx,
         tokens_per_block=block_size,
-        tokens_per_chunk=block_size * blocks_per_chunk,
-        hashes_per_chunk=blocks_per_chunk,
+        tokens_per_chunk=tokens_per_chunk,
+        hashes_per_chunk=tokens_per_chunk // tokens_per_hash,
         sliding_window_size_in_chunks=sliding_window_size_in_chunks,
         kv_event_group_spec=_FULL_ATTENTION_EVENT_SPEC,
     )
@@ -208,6 +213,58 @@ def test_take_events_forwards_locality_to_placeholder_store():
     assert events[0].locality == "REMOTE"
 
 
+def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
+    tracker = _tracker()
+    group_config = _group_config(block_size=16, blocks_per_chunk=1)._replace(
+        hashes_per_chunk=4
+    )
+    req = _request(block_hashes=[_hash(i) for i in range(8)], token_count=32)
+    key = make_offload_key(req.block_hashes[6], group_config.group_idx)
+
+    tracker.record_partial_store(req, group_config, 28, key)
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(i)) for i in range(4, 7)]
+    assert event.parent_block_hash == _wire_hash(_hash(3))
+    assert event.token_ids == list(range(17, 29))
+    assert event.block_size == 4
+
+
+def test_partial_tail_lookup_does_not_overwrite_store_metadata():
+    tracker = _tracker()
+    group_config = _group_config()
+    stored_req = _request(block_hashes=[_hash(0)], token_count=4)
+    lookup_req = _request(block_hashes=[_hash(0)], token_count=4)
+    lookup_req.all_token_ids = [9, 9, 9, 9]
+    key = make_offload_key(stored_req.block_hashes[0], group_config.group_idx)
+
+    tracker.record_partial_store(stored_req, group_config, 4, key)
+    tracker.record_partial_lookup(lookup_req, group_config, 4, key)
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.token_ids == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize(
+    "record_method", ["record_partial_store", "record_partial_lookup"]
+)
+def test_partial_tail_sliding_window_event_uses_placeholder(record_method):
+    tracker = _tracker()
+    group_config = _group_config(sliding_window_size_in_chunks=1)
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    key = make_offload_key(req.block_hashes[0], group_config.group_idx)
+
+    getattr(tracker, record_method)(req, group_config, 4, key)
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(0))]
+    assert event.token_ids == []
+    assert event.block_size == 0
+
+
 def test_take_events_forwards_locality_to_remove():
     tracker = _tracker()
     req = _request(block_hashes=[_hash(0)], token_count=4)
@@ -280,6 +337,36 @@ def test_promotion_emits_full_cpu_stored_event():
     assert event.group_idx == 0
     assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert event.kv_cache_spec_sliding_window is None
+
+
+@pytest.mark.parametrize(
+    ("blocks_per_chunk", "expected_hash_indices"),
+    [(1, [63]), (2, [63, 127])],
+)
+def test_event_hashes_use_group_block_size(
+    blocks_per_chunk: int, expected_hash_indices: list[int]
+):
+    tokens_per_hash = 4
+    block_size = 256
+    hashes_per_block = block_size // tokens_per_hash
+    tracker = _tracker()
+    group_config = _group_config(
+        block_size=block_size,
+        blocks_per_chunk=blocks_per_chunk,
+        tokens_per_hash=tokens_per_hash,
+    )
+    req = _request(
+        block_hashes=[_hash(i) for i in range(hashes_per_block * blocks_per_chunk)],
+        token_count=block_size * blocks_per_chunk,
+    )
+    [key] = _record_chunks(tracker, req, group_config, num_chunks=1)
+
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(i)) for i in expected_hash_indices]
+    assert event.block_size == block_size
+    assert len(event.token_ids) == block_size * blocks_per_chunk
 
 
 def test_lookup_promotion_factor_gt_1_store_and_remove():

@@ -111,12 +111,7 @@ SEPARATE_GROUPS = [
     "tests/v1/worker",
 ]
 
-# TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
-    r"vllm/model_executor/models/[aA]",
-    r"vllm/model_executor/models/[bB]",
-    r"vllm/model_executor/models/[cC]",
-    r"vllm/model_executor/models/[dD]",
     r"vllm/model_executor/models/[eE]",
     r"vllm/model_executor/models/[fF]",
     r"vllm/model_executor/models/[gG]",
