@@ -12,7 +12,7 @@ from vllm.distributed import (
 	get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -212,7 +212,7 @@ class KimiMoE(nn.Module):
 			self.routed_expert_up_proj = None
 			self.routed_output_transform = None
 
-		self.experts = FusedMoE(
+		self.experts = FusedMoEFactory(
 			shared_experts=self.shared_experts,
 			num_experts=num_experts,
 			top_k=num_experts_per_token,
