@@ -796,8 +796,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         capture_decoder = self.cudagraph_manager.needs_capture()
         if not capture_encoder and not capture_decoder:
             logger.warning(
-                "Skipping CUDA graph capture. To turn on CUDA graph capture, "
-                "ensure `cudagraph_mode` was not manually set to `NONE`"
+                "Skipping encoder and decoder CUDA graph capture. To enable "
+                "encoder capture, ensure `cudagraph_mm_encoder` is enabled; "
+                "to enable decoder capture, ensure `cudagraph_mode` is not `NONE`."
             )
             return 0
 
