@@ -129,6 +129,11 @@ class PagedShmTensorIPC:
         mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
         device: torch.types.Device,
     ):
+        if not self.is_paged_shm_enabled:
+            return None
+        if self.client_sync is None:
+            return None
+
         for modality, items in mm_kwargs:
             if "pixel_values" not in items:
                 continue
