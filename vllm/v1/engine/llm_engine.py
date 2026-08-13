@@ -15,6 +15,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -268,6 +269,19 @@ class LLMEngine:
 
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
+
+        # Validate incompatible feature combinations at request-admission time
+        # so the user gets a clear error before any GPU work begins.
+        if (
+            self.vllm_config.cache_config.kv_sharing_fast_prefill
+            and isinstance(params, SamplingParams)
+            and params.prompt_logprobs is not None
+        ):
+            raise VLLMValidationError(
+                "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                "prompt tokens, please disable it when the requests need "
+                "prompt logprobs"
+            )
 
         n = params.n if isinstance(params, SamplingParams) else 1
 

@@ -694,7 +694,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 )
 
         prompt_logprobs = self.prompt_logprobs
-        if prompt_logprobs is None and self.echo:
+        if prompt_logprobs is None and self.echo and self.logprobs:
             prompt_logprobs = self.top_logprobs
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
@@ -819,7 +819,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     value=field_value,
                 )
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
+            if data.get("stream"):
                 raise VLLMValidationError(
                     "`prompt_logprobs` are not available when `stream=True`.",
                     parameter="prompt_logprobs",

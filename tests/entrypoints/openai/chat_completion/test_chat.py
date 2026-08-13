@@ -1012,6 +1012,77 @@ def test_chat_completion_request_n_parameter_default():
     assert sampling_params.n == 1, f"Expected n=1 (default), got n={sampling_params.n}"
 
 
+# Unit tests for echo + prompt_logprobs interaction in
+# ChatCompletionRequest.to_sampling_params()
+def test_chat_completion_request_echo_without_logprobs_does_not_set_prompt_logprobs():
+    """echo=True alone must not implicitly enable prompt_logprobs.
+
+    ChatCompletionRequest.top_logprobs defaults to 0 (not None), so naively
+    inheriting it for echo would set prompt_logprobs=0 on every echo request,
+    even though 0 is itself a meaningful, "requested" value downstream.
+    """
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        echo=True,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+
+    assert sampling_params.prompt_logprobs is None
+
+
+def test_chat_completion_request_echo_with_logprobs_inherits_top_logprobs():
+    """echo=True with logprobs actually requested still inherits top_logprobs."""
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        echo=True,
+        logprobs=True,
+        top_logprobs=3,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+
+    assert sampling_params.prompt_logprobs == 3
+
+
+def test_chat_completion_request_explicit_prompt_logprobs_zero_is_preserved():
+    """An explicit prompt_logprobs=0 request must reach SamplingParams as 0,
+    not be dropped, so downstream admission guards can see it."""
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        prompt_logprobs=0,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+
+    assert sampling_params.prompt_logprobs == 0
+
+
+def test_chat_completion_request_rejects_prompt_logprobs_zero_with_stream():
+    """prompt_logprobs=0 is a meaningful, explicit request (not "unset"), so
+    it must be rejected under stream=True just like any other prompt_logprobs
+    value, per the documented "not available when stream=True" rule."""
+    with pytest.raises(VLLMValidationError, match="not available when `stream=True`"):
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Hello"}],
+            prompt_logprobs=0,
+            stream=True,
+        )
+
+
 def test_chat_completion_request_accepts_model_specific_reasoning_effort():
     request = ChatCompletionRequest(
         model="test-model",
