@@ -13,9 +13,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionBackendImpl,
     CPUAttentionMetadataBuilder,
+)
+
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cpu(), reason="CPU attention backend"
 )
 
 

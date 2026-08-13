@@ -159,9 +159,8 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         )
         self.head_dim = kv_cache_spec.head_size
         self.dtype = vllm_config.model_config.dtype
-        # Resolved from the layers on the first build(), once they exist.
-        self.window_size: int | None = None
-        self.extra_num_heads: set[int] | None = None
+        self.window_size = self._group_sliding_window()
+        self.extra_num_heads = self._group_extra_num_heads()
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
@@ -222,11 +221,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CPUAttentionMetadata:
-        if self.window_size is None:
-            self.window_size = self._group_sliding_window()
-        if self.extra_num_heads is None:
-            self.extra_num_heads = self._group_extra_num_heads()
-
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
