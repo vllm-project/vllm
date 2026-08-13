@@ -20,6 +20,7 @@ from vllm.multimodal.utils import (
 )
 from vllm.renderers.paged_shm.tensor_ipc import PagedShmTensorIPC
 from vllm.utils.time_utils import debug_spend_time
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
@@ -129,7 +130,7 @@ class EncoderRunner:
         debug_spend_time("after execute_mm_encoder")
 
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
-            mm_kwargs, device=self.device, pin_memory=True
+            mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
         ):
             batch_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
