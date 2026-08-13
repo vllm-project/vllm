@@ -92,13 +92,12 @@ POOLING_SIZE = 2
 
 
 class MolmoImageInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - bnc: Batch size * number of images * number of crops (dynamic)
-        - np: Number of patches
-        - tp: Token sequence positions
-        - pd: Patch dimension
+    """Dimensions:
+    - bn: Batch size * number of images
+    - bnc: Batch size * number of images * number of crops (dynamic)
+    - np: Number of patches
+    - tp: Token sequence positions
+    - pd: Patch dimension
     """
 
     images: Annotated[torch.Tensor, TensorShape("bnc", "np", "pd")]
@@ -381,8 +380,7 @@ class VisionTransformer(nn.Module):
     def forward(
         self, x: torch.Tensor, patch_num: int | None = None
     ) -> list[torch.Tensor]:
-        """
-        : param x: (batch_size, num_patch, n_pixels)
+        """: param x: (batch_size, num_patch, n_pixels)
         """
         if patch_num is None:
             patch_num = self.patch_num
@@ -724,8 +722,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         return self.image_vit.patch_embedding.weight.device
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        : param images: (batch_size, num_crops, num_patch, n_pixels)
+        """: param images: (batch_size, num_crops, num_patch, n_pixels)
         """
         B, T, N, D = images.shape
 
@@ -1447,8 +1444,7 @@ class MolmoForCausalLM(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="model",

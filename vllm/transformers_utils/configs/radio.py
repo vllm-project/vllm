@@ -21,8 +21,7 @@ OPENAI_CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
 
 class RadioConfig(PretrainedConfig):
-    r"""
-    This is the configuration class to store the configuration of a Radio
+    r"""This is the configuration class to store the configuration of a Radio
     vision model. It is used to instantiate a Radio model according to the
     specified arguments, defining the model architecture.
 
@@ -55,6 +54,7 @@ class RadioConfig(PretrainedConfig):
             dedicated video patch embedder (3*T*P*P -> hidden) separate from the
             image embedder (3*P*P -> hidden). When False, a single embedder with
             input size 3*T*P*P is used for both (images are duplicated T times).
+
     """
 
     model_type = "radio"

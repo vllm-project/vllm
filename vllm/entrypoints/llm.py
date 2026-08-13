@@ -172,6 +172,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     Note:
         This class is intended to be used for offline inference. For online
         serving, use the [AsyncLLMEngine][vllm.AsyncLLMEngine] class instead.
+
     """
 
     def __init__(
@@ -221,7 +222,6 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         **kwargs: Any,
     ) -> None:
         """LLM constructor."""
-
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
@@ -394,6 +394,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         Returns:
             The world size (tensor_parallel_size * pipeline_parallel_size),
             optionally multiplied by data_parallel_size if include_dp is True.
+
         """
         parallel_config = self.llm_engine.vllm_config.parallel_config
         if include_dp:
@@ -453,6 +454,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         Returns:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
+
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
@@ -503,6 +505,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         Returns:
             A list of request IDs for the enqueued requests.
+
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
@@ -554,6 +557,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         Returns:
             A list of output objects for all completed requests.
+
         """
         if output_type is None:
             output_type = (RequestOutput, PoolingRequestOutput)
@@ -567,8 +571,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
-        """
-        Execute an RPC call on all workers.
+        """Execute an RPC call on all workers.
 
         Args:
             method: Name of the worker method to execute, or a callable that
@@ -588,13 +591,12 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         Note:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
-        """
 
+        """
         return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        """
-        Run a function directly on the model inside each worker,
+        """Run a function directly on the model inside each worker,
         returning the result for each of them.
 
         !!! warning
@@ -621,8 +623,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[RequestOutput]:
-        """
-        Generate responses for a chat conversation.
+        """Generate responses for a chat conversation.
 
         The chat conversation is converted into a text prompt using the
         tokenizer and calls the [generate][vllm.LLM.generate] method to generate
@@ -670,6 +671,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         Returns:
             A list of `RequestOutput` objects containing the generated
             responses in the same order as the input messages.
+
         """
         model_config = self.model_config
         runner_type = model_config.runner_type
@@ -747,6 +749,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         Returns:
             A list of request IDs for the enqueued requests.
+
         """
         model_config = self.model_config
         runner_type = model_config.runner_type
@@ -783,6 +786,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             profile_prefix: Optional prefix for the trace file names. If provided,
                            trace files will be named as "<prefix>_dp<X>_pp<Y>_tp<Z>".
                            If not provided, default naming will be used.
+
         """
         self.llm_engine.start_profile(profile_prefix)
 
@@ -797,8 +801,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         )
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
-        """
-        Put the engine to sleep. The engine should not process any requests.
+        """Put the engine to sleep. The engine should not process any requests.
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
 
@@ -818,12 +821,12 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                            CPU memory pressure.
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
+
         """
         self.llm_engine.sleep(level=level, mode=mode)
 
     def wake_up(self, tags: list[str] | None = None):
-        """
-        Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
+        """Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
         method for more details.
 
         Args:
@@ -833,6 +836,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 is reallocated. wake_up should be called with all tags
                 (or None) before the engine is used again.
                 Use tags=["scheduling"] to resume from level 0 sleep.
+
         """
         self.llm_engine.wake_up(tags)
 
@@ -845,17 +849,18 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         Note:
             This method is only available with the V1 LLM engine.
+
         """
         return self.llm_engine.get_metrics()
 
     def init_weight_transfer_engine(
         self, request: WeightTransferInitRequest | dict
     ) -> None:
-        """
-        Initialize weight transfer for RL training.
+        """Initialize weight transfer for RL training.
 
         Args:
             request: Weight transfer initialization request with backend-specific info
+
         """
         init_info_dict = (
             request["init_info"] if isinstance(request, dict) else request.init_info
@@ -874,11 +879,11 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         self.llm_engine.collective_rpc("start_draft_weight_update")
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
-        """
-        Update the weights of the model.
+        """Update the weights of the model.
 
         Args:
             request: Weight update request with backend-specific update info
+
         """
         update_info_dict = (
             request["update_info"] if isinstance(request, dict) else request.update_info

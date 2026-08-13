@@ -401,8 +401,7 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
 
 
 def force_use_trtllm_attention() -> bool | None:
-    """
-    This function should only be called during initialization stage when vllm config
+    """This function should only be called during initialization stage when vllm config
     is set.
     Return `None` if --attention-config.use_trtllm_attention is not set,
     return `True` if TRTLLM attention is forced to be used,
@@ -440,7 +439,6 @@ def use_trtllm_attention(
     has_spec: bool = False,
 ) -> bool:
     """Return `True` if TRTLLM attention is used."""
-
     # CLI argument is set to 0 - respect it
     if force_use_trtllm is not None and not force_use_trtllm:
         return False
@@ -548,6 +546,7 @@ if has_flashinfer():
             k_nope: The nope part of k, shape [num_tokens, num_heads, nope_dim].
             k_pe: The rope part of k (shared), shape [num_tokens, 1, rope_dim].
                   This is broadcast to all heads.
+
         """
         from flashinfer.concat_ops import concat_mla_k
 

@@ -70,11 +70,10 @@ from .utils import (
 
 
 class AudioFlamingo3FeatureInputs(TensorSchema):
-    """
-    Dimensions:
-        - num_chunks: Number of audio chunks (flattened)
-        - nmb: Number of mel bins
-        - num_audios: Number of original audio files
+    """Dimensions:
+    - num_chunks: Number of audio chunks (flattened)
+    - nmb: Number of mel bins
+    - num_audios: Number of original audio files
     """
 
     type: Literal["audio_features"]
@@ -95,12 +94,11 @@ class AudioFlamingo3FeatureInputs(TensorSchema):
 
 
 class AudioFlamingo3EmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size
-        - naf: Number of audio features
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
+    """Dimensions:
+    - bn: Batch size
+    - naf: Number of audio features
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
     """
 
     type: Literal["audio_embeds"] = "audio_embeds"
@@ -153,8 +151,7 @@ class AudioFlamingo3Encoder(Qwen2AudioEncoder):
         return hidden_states
 
     def _get_feat_extract_output_lengths(self, input_lengths: torch.Tensor):
-        """
-        Computes the output length of the convolutional layers and the output length
+        """Computes the output length of the convolutional layers and the output length
         of the audio encoder
         """
         input_lengths = (input_lengths - 1) // 2 + 1
@@ -494,8 +491,7 @@ class AudioFlamingo3ForConditionalGeneration(
     }
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model.",

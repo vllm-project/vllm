@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-FireRedLID – Language Identification model adapted for vLLM.
+"""FireRedLID – Language Identification model adapted for vLLM.
 
 Architecture:  ConformerEncoder  +  TransformerDecoder (6-layer cross-attn)
 Vocabulary:    120 LID tokens  (dict.txt)
@@ -70,11 +69,10 @@ logger = init_logger(__name__)
 
 
 class FireRedLIDAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - t: Time frames  (variable across utterances)
-        - nmb: Number of mel bins (80)
+    """Dimensions:
+    - b: Batch size
+    - t: Time frames  (variable across utterances)
+    - nmb: Number of mel bins (80)
     """
 
     input_features: Annotated[

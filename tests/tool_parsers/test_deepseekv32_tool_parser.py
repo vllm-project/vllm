@@ -173,7 +173,8 @@ class TestExtractToolCalls:
 
     def test_string_attr_true_coerced_by_schema(self):
         """string="true" delivers a string, but the engine's schema-aware
-        type fixer coerces it to the schema type (integer)."""
+        type fixer coerces it to the schema type (integer).
+        """
         tool = ChatCompletionToolsParam(
             function=FunctionDefinition(
                 name="score",
@@ -287,7 +288,8 @@ class TestExtractToolCalls:
 
     def test_string_attr_true_coerced_by_composed_schema(self):
         """string="true" delivers a JSON string, but the engine's schema-aware
-        type fixer coerces it to the composed schema type (object)."""
+        type fixer coerces it to the composed schema type (object).
+        """
         tool = ChatCompletionToolsParam(
             function=FunctionDefinition(
                 name="set_timer",
@@ -321,7 +323,8 @@ class TestExtractToolCalls:
 
     def test_arguments_wrapper_repaired(self):
         """A single 'arguments' wrapper parameter must be unwrapped when it
-        is not part of the tool schema and the inner object matches schema fields."""
+        is not part of the tool schema and the inner object matches schema fields.
+        """
         tool = ChatCompletionToolsParam(
             function=FunctionDefinition(
                 name="get_weather",
@@ -492,7 +495,8 @@ class TestExtractToolCalls:
 
     def test_null_coerced_back_to_string_by_schema(self):
         """string="false" with 'null' is json-parsed to None, but the
-        engine's schema fixer coerces it back to "null" for string schemas."""
+        engine's schema fixer coerces it back to "null" for string schemas.
+        """
         tool = ChatCompletionToolsParam(
             function=FunctionDefinition(
                 name="echo",
@@ -655,7 +659,8 @@ class TestExtractToolCallsStreaming:
 
     def test_string_attr_true_coerced_by_schema_streaming(self):
         """Streaming: string='true' delivers a string but the engine's
-        schema fixer coerces it to the schema type (integer)."""
+        schema fixer coerces it to the schema type (integer).
+        """
         tool = ChatCompletionToolsParam(
             function=FunctionDefinition(
                 name="score",
@@ -971,7 +976,8 @@ class TestExtractToolCallsStreaming:
 
     def test_no_marker_leak_chunked(self, parser):
         """Chunked streaming must NOT leak DSML start-marker fragments
-        as content (GitHub #40801)."""
+        as content (GitHub #40801).
+        """
         full_text = build_tool_call("fn", {"k": "v"})
         deltas = self._stream_chunked(parser, full_text, chunk_size=5)
         content = "".join(d.content for d in deltas if d.content is not None)
@@ -981,7 +987,8 @@ class TestExtractToolCallsStreaming:
 
     def test_no_marker_leak_with_prefix_chunked(self, parser):
         """Content before a tool call must not include start-marker
-        fragments when chunked (GitHub #40801)."""
+        fragments when chunked (GitHub #40801).
+        """
         full_text = "Hello!" + build_tool_call("fn", {"a": "b"})
         deltas = self._stream_chunked(parser, full_text, chunk_size=5)
         content = "".join(d.content for d in deltas if d.content is not None)
@@ -993,7 +1000,8 @@ class TestExtractToolCallsStreaming:
 
     def test_no_marker_leak_char_by_char(self, parser):
         """Character-by-character streaming must not leak marker
-        fragments (GitHub #40801)."""
+        fragments (GitHub #40801).
+        """
         full_text = build_tool_call("fn", {"k": "v"})
         deltas = self._stream_chunked(parser, full_text, chunk_size=1)
         content = "".join(d.content for d in deltas if d.content is not None)
@@ -1003,7 +1011,8 @@ class TestExtractToolCallsStreaming:
 
     def test_no_marker_leak_all_split_points(self, parser):
         """Start token split at every possible boundary must not
-        leak (GitHub #40801)."""
+        leak (GitHub #40801).
+        """
         for chunk_size in range(1, len(FC_START) + 2):
             p = make_parser()
             full_text = build_tool_call("fn", {"k": "v"})
@@ -1015,7 +1024,8 @@ class TestExtractToolCallsStreaming:
 
     def test_false_partial_marker_emitted(self, parser):
         """Text ending with a prefix of the start token that turns out
-        NOT to be a marker must still be emitted as content."""
+        NOT to be a marker must still be emitted as content.
+        """
         full_text = "<｜DSM some regular text"
         deltas = self._stream_chunked(parser, full_text, chunk_size=3)
         content = "".join(d.content for d in deltas if d.content is not None)

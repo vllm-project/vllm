@@ -107,6 +107,7 @@ class EngineClient(ABC):
         Args:
             request_id: The unique id of the request,
                         or an iterable of such ids.
+
         """
         ...
 
@@ -202,6 +203,7 @@ class EngineClient(ABC):
             wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
                 after draining.
+
         """
         ...
 
@@ -239,7 +241,7 @@ class EngineClient(ABC):
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
-        """send fault tolerance instruction to the engine"""
+        """Send fault tolerance instruction to the engine"""
         raise NotImplementedError
 
     async def get_status(self):

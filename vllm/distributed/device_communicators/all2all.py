@@ -42,8 +42,7 @@ logger = init_logger(__name__)
 
 
 class AgRsAll2AllManager(All2AllManagerBase):
-    """
-    An implementation of all2all communication based on
+    """An implementation of all2all communication based on
     all-gather (dispatch) and reduce-scatter (combine).
     """
 
@@ -77,8 +76,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Gather hidden_states and router_logits from all dp ranks.
+        """Gather hidden_states and router_logits from all dp ranks.
         """
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
@@ -109,8 +107,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Gather hidden_states and router_logits from all dp ranks.
+        """Gather hidden_states and router_logits from all dp ranks.
         """
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
@@ -138,8 +135,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Reduce-scatter hidden_states across all dp ranks.
+        """Reduce-scatter hidden_states across all dp ranks.
         """
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(
@@ -154,8 +150,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
 
 class DeepEPAll2AllManagerBase(All2AllManagerBase):
-    """
-    All2All communication based on DeepEP High-Throughput kernels.
+    """All2All communication based on DeepEP High-Throughput kernels.
     """
 
     def __init__(self, cpu_group, tcp_store_group=None):
@@ -208,8 +203,7 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
 
 
 class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
-    """
-    All2All communication based on DeepEP High-Throughput kernels.
+    """All2All communication based on DeepEP High-Throughput kernels.
     """
 
     def __init__(self, cpu_group, tcp_store_group=None):
@@ -269,8 +263,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
 
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
-    """
-    All2All communication based on DeepEP Low-Latency kernels.
+    """All2All communication based on DeepEP Low-Latency kernels.
     """
 
     _buffer: Any = None
@@ -291,8 +284,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_global_experts: int,
         num_local_experts: int,
     ) -> dict[Any, Any]:
-        """
-        max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
+        """max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
           can dispatch all the ranks must hold the same value.
         token_hidden_size: the hidden dimension of each token.
         num_ep_ranks: the number of EP group ranks.
@@ -328,8 +320,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return kwargs
 
     def get_handle(self, kwargs):
-        """
-        The kwargs for DeepEPLLAll2AllManager is dictated by
+        """The kwargs for DeepEPLLAll2AllManager is dictated by
         _make_all2all_kwargs.
         """
         import deep_ep  # type: ignore[import-not-found]
@@ -382,8 +373,7 @@ class _NixlEPBufferState:
 
 
 class NixlEPAll2AllManager(All2AllManagerBase):
-    """
-    All2All communication based on NIXL EP kernels.
+    """All2All communication based on NIXL EP kernels.
     This backend supports elastic EP with dynamic rank connection/disconnection.
     """
 
@@ -592,8 +582,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
-    """
-    All2All communication based on flashinfer all2allv/two-sided NVLink kernels.
+    """All2All communication based on flashinfer all2allv/two-sided NVLink kernels.
     """
 
     # This type lint could be removed after all of the work in
@@ -699,8 +688,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
 
 
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
-    """
-    All2All communication based on FlashInfer's MoeAlltoAll/One-sided NVLink kernel.
+    """All2All communication based on FlashInfer's MoeAlltoAll/One-sided NVLink kernel.
     This is a newer kernel from trtllm that should perform better than the kernel
     used by flashinfer_nvlink_two_sided.
     """
@@ -1003,8 +991,7 @@ class MoriAll2AllManager(All2AllManagerBase):
 
 
 class DeepEPV2All2AllManager(All2AllManagerBase):
-    """
-    All2All communication based on DeepEP v2 ElasticBuffer (unified API).
+    """All2All communication based on DeepEP v2 ElasticBuffer (unified API).
     Uses NCCL Gin backend with analytical SM calculation.
     """
 

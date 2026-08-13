@@ -70,12 +70,11 @@ from .vision import (
 
 
 class SiglipImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -786,8 +785,9 @@ class SiglipVisionTransformer(nn.Module):
         """Apply the post layer norm and head if they are enabled,
         given the last hidden states tensor.
 
-        args:
+        Args:
             encoder_outputs: The last hidden states from the visual encoder.
+
         """
         if self.post_layernorm is not None:
             encoder_outputs = self.post_layernorm(encoder_outputs)

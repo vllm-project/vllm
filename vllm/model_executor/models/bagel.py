@@ -58,12 +58,11 @@ logger = init_logger(__name__)
 
 
 class BagelImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -175,12 +174,12 @@ class PositionEmbedding(nn.Module):
         return emb
 
     def forward(self, position_ids: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             position_ids: Flattened position IDs, shape (N,) where each ID
                          corresponds to a position in the flattened grid
         Returns:
             Position embeddings of shape (N, hidden_size)
+
         """
         # Ensure position_ids are on the same device as pos_embed
         position_ids = position_ids.to(self.pos_embed.device)
@@ -331,8 +330,7 @@ class BagelMultiModalProcessor(BaseMultiModalProcessor[BagelProcessingInfo]):
 class BagelForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP
 ):
-    """
-    BAGEL: A unified multimodal model for image understanding and generation.
+    """BAGEL: A unified multimodal model for image understanding and generation.
 
     For vLLM, we focus on the image understanding (vision-to-text) capabilities.
     The image generation part is not supported in vLLM.
@@ -521,6 +519,7 @@ class BagelForConditionalGeneration(
             positions: Flattened (concatenated) position ids corresponding to a batch.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None

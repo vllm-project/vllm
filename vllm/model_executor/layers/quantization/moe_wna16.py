@@ -206,6 +206,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
 
     Args:
         quant_config: The MOE WNA16 (W8A16/W4A16) quantization config.
+
     """
 
     def __init__(self, quant_config: MoeWNA16Config, moe: "FusedMoEConfig") -> None:

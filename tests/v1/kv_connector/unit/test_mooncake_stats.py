@@ -199,7 +199,8 @@ def _bare_worker() -> MooncakeConnectorWorker:
     """Construct a MooncakeConnectorWorker skipping __init__ (full init requires
     a live TransferEngine). Only the attributes touched by the methods under
     test are populated; role flags and async_zmq_ctx keep __del__'s shutdown
-    path a no-op."""
+    path a no-op.
+    """
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.xfer_stats = MooncakeKVConnectorStats()
     worker.engine = MagicMock()

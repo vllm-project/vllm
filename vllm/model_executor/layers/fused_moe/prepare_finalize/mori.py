@@ -13,8 +13,7 @@ logger = init_logger(__name__)
 
 
 class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    Prepare/Finalize using MoRI kernels.
+    """Prepare/Finalize using MoRI kernels.
     """
 
     def __init__(
@@ -60,8 +59,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
-        """
-        Returns a tuple of:
+        """Returns a tuple of:
         - quantized + dispatched a.
         - Optional quantized + dispatched a1_scales.
         - Optional ExpertTokensMetadata containing gpu/cpu tensors

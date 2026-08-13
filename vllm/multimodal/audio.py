@@ -38,6 +38,7 @@ def get_audio_duration(*, y: npt.NDArray[np.floating], sr: float = 22050) -> flo
 
     Returns:
         Duration of the audio in seconds.
+
     """
     n_samples = y.shape[-1]
     return float(n_samples) / sr
@@ -64,6 +65,7 @@ class AudioSpec:
             (no normalization). 1 = mono, 2 = stereo, etc.
         channel_reduction: Method to reduce channels when input has more
             channels than target. Only used when reducing channels.
+
     """
 
     target_channels: int | None = 1
@@ -112,6 +114,7 @@ def normalize_audio(
     Raises:
         ValueError: If audio has unsupported dimensions or channel expansion
             is requested (e.g., mono to stereo).
+
     """
     if not spec.needs_normalization:
         return audio
@@ -188,6 +191,7 @@ def resample_audio_pyav(
 
     Returns:
         Resampled audio with the same shape as the input (1D → 1D, 2D → 2D).
+
     """
     orig_sr_int = int(round(orig_sr))
     target_sr_int = int(round(target_sr))
@@ -361,6 +365,7 @@ def split_audio(
         ... )
         >>> len(chunks)
         3
+
     """
     if audio_data.ndim > 1:
         raise ValueError(
@@ -430,6 +435,7 @@ def find_split_point(
         ... )
         >>> 16000 <= split_idx <= 17600
         True
+
     """
     segment = wav[start_idx:end_idx]
 

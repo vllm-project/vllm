@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark and tuning script for the Mamba selective_state_update kernel.
+"""Benchmark and tuning script for the Mamba selective_state_update kernel.
 
 Mirrors the fused MoE tuning workflow: sweeps (BLOCK_SIZE_M, num_warps) across
 an effective_batch grid for a given (headdim, dstate, ngroups, cache_dtype) and
@@ -123,8 +122,7 @@ def benchmark_config(
     num_warmup: int = 20,
     graph_batch_size: int = 10,
 ) -> float | None:
-    """
-    Time one (BLOCK_SIZE_M, num_warps) config for selective_state_update.
+    """Time one (BLOCK_SIZE_M, num_warps) config for selective_state_update.
     Returns elapsed time in microseconds, or None on error.
 
     Uses CUDA graph capture-and-replay to isolate kernel time from Python
@@ -350,8 +348,7 @@ def validate_configs(
     rtol: float = 1e-2,
     state_dtype: torch.dtype | None = None,
 ) -> dict[int, bool]:
-    """
-    For every (effective_batch, batch, nheads) in *active* that has a tuned
+    """For every (effective_batch, batch, nheads) in *active* that has a tuned
     config, run the kernel with that config and compare against the reference.
     Returns {effective_batch: passed}.
     """

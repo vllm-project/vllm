@@ -41,8 +41,7 @@ class EEPNotificationType(enum.Enum):
 
 
 class FinishReason(enum.IntEnum):
-    """
-    Reason a request finished - stop, length, abort, error, or repetition.
+    """Reason a request finished - stop, length, abort, error, or repetition.
 
     Int rather than Str for more compact serialization.
 
@@ -266,8 +265,7 @@ class EngineCoreOutputs(
 
 
 class EngineCoreRequestType(enum.Enum):
-    """
-    Request types defined as hex byte strings, so it can be sent over sockets
+    """Request types defined as hex byte strings, so it can be sent over sockets
     without separate encoding step.
     """
 
@@ -292,8 +290,7 @@ class ReconfigureDistributedRequest(msgspec.Struct):
 
 
 class ReconfigureRankType(enum.IntEnum):
-    """
-    Rank type for reconfiguring distributed request.
+    """Rank type for reconfiguring distributed request.
     """
 
     KEEP_CURRENT_RANK = -1

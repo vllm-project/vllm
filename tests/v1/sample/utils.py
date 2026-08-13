@@ -53,9 +53,9 @@ def get_test_batch(
       batch_logprobs_composition: types of logprobs configs to include in batch
 
     Returns:
-
       list of (Optional[num_sample_logprobs], Optional[num_prompt_logprobs])
       tuples
+
     """
     if batch_logprobs_composition == BatchLogprobsComposition.NONE:
         # No requests with sample or prompt logprobs
@@ -120,6 +120,7 @@ def assert_incr_detok_str_matches_non_incr_detok_str(
       non_incremental_detokenization_str: non-incrementally-detokenized logprob
                                           tokens
       msg: error message if `assert` fails
+
     """
     rgx = r"[^a-zA-Z0-9]+"
     assert re.sub(rgx, "", incremental_detokenization_str) == re.sub(
@@ -135,6 +136,7 @@ def compute_correct_cumulative_logprob(completion_output: CompletionOutput) -> f
 
     Returns:
       Known-good cumulative logprob value
+
     """
     token_ids = completion_output.token_ids
     logprobs = completion_output.logprobs
@@ -186,6 +188,7 @@ class LogitsprocsTestFakes(NamedTuple):
 
         Returns:
           Iterator over logits processors
+
         """
         return (
             lp for lp in self.sampling_metadata.logitsprocs.all if isinstance(lp, cls)
@@ -201,7 +204,8 @@ def fake_update_logitsprocs_state(
     batch_update: BatchUpdate | None,
 ) -> None:
     """Imitate logits processors persistent batch state update
-    in engine core"""
+    in engine core
+    """
     for logitproc in test_fakes.get_logitsprocs():
         logitproc.update_state(batch_update)
     holder = test_fakes.sampling_metadata.thinking_budget_state_holder

@@ -72,8 +72,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
 
 
 def test_get_file_name_full_structure():
-    """
-    Path must match: <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
+    """Path must match: <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 
     Concretely:
       - The segment immediately after base_path must end with `_r3`

@@ -61,7 +61,8 @@ def _prepare_dflash_inputs_to_capture(
 
 class DFlashCudaGraphManager(CudaGraphManager):
     """DFlash CudaGraphManager for the parallel-drafting query forward,
-    building its own attention metadata from scratch."""
+    building its own attention metadata from scratch.
+    """
 
     def capture(
         self,

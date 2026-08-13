@@ -888,7 +888,6 @@ def test_parse_chat_messages_audio_embeds_with_string(
     audio_embeds_model_config,
 ):
     """Test audio_embeds with base64 string embedding data."""
-
     import torch
 
     # Create a sample audio embedding tensor
@@ -931,7 +930,6 @@ async def test_parse_chat_messages_audio_embeds_async(
     audio_embeds_model_config,
 ):
     """Test audio_embeds with async futures."""
-
     import torch
 
     # Create a sample audio embedding tensor

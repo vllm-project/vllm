@@ -192,8 +192,7 @@ class Base(
         )
 
     def _patch_config(self):
-        """
-        Patch the config to ensure that the model is created correctly:
+        """Patch the config to ensure that the model is created correctly:
 
         - Sets the attention implementation to "vllm" so the attention instances from
         `create_attention_instances` are used
@@ -207,7 +206,8 @@ class Base(
     def _mark_model_components(self, vllm_config: "VllmConfig"):
         """Mark language model and tower submodules as `self.model` is created.
 
-        Nothing to do in `Base`, `MultiModalMixin` will override."""
+        Nothing to do in `Base`, `MultiModalMixin` will override.
+        """
         yield
 
     @cached_property
@@ -252,8 +252,7 @@ class Base(
         enable_if: Callable[["VllmConfig"], bool],
         is_encoder: bool,
     ):
-        """
-        Decorate `cls` to indicate to vLLM that it supports torch compile.
+        """Decorate `cls` to indicate to vLLM that it supports torch compile.
 
         Args:
             cls: The PreTrainedModel class to decorate.
@@ -264,6 +263,7 @@ class Base(
             enable_if: A function which takes in the vLLM config and returns whether
                 torch compile should be enabled for this class.
             is_encoder: Whether the class being decorated is an encoder.
+
         """
         logger.debug(
             "Decorating `%s` as %s for torch compile with dynamic_arg_dims of %s",
@@ -280,7 +280,8 @@ class Base(
 
     def _decorate_for_torch_compile(self):
         """Decorate the model's decoder class to indicate to vLLM that it
-        supports torch compile if `can_enable_torch_compile` is True."""
+        supports torch compile if `can_enable_torch_compile` is True.
+        """
         self._decorate_cls_for_torch_compile(
             cls=self._pre_trained_model_classes.decoder,
             # Applied to a PreTrainedModel so the batch dimension will exist
@@ -294,8 +295,7 @@ class Base(
         )
 
     def _create_hf_to_vllm_mapper(self):
-        """
-        Create a WeightsMapper to map checkpoint weight names to module qualnames.
+        """Create a WeightsMapper to map checkpoint weight names to module qualnames.
 
         This handles:
 
@@ -346,8 +346,7 @@ class Base(
         self._maybe_apply_model_mapping()
 
     def _get_tie_word_embeddings(self):
-        """
-        Check if the model has tied word embeddings.
+        """Check if the model has tied word embeddings.
         """
         # Models created with Transformers v4 and v5 will store this in different places
         tie_word_embeddings_v4 = getattr(self.text_config, "tie_word_embeddings", False)
@@ -355,8 +354,7 @@ class Base(
         return tie_word_embeddings_v4 or tie_word_embeddings_v5
 
     def pipeline_parallel(self):
-        """
-        Apply the model's pipeline parallelization plan.
+        """Apply the model's pipeline parallelization plan.
         """
         if self.pp_group.world_size <= 1:
             return
@@ -524,8 +522,7 @@ class Base(
         _recursive_replace(self.model, prefix="model")
 
     def create_attention_instances(self) -> dict[int, Attention]:
-        """
-        Create `Attention` instances to inform KV cache allocation.
+        """Create `Attention` instances to inform KV cache allocation.
         """
         mla_fusers = {}
         attention_instances = {}
@@ -635,8 +632,7 @@ class Base(
         return Attention
 
     def init_parameters(self, module: nn.Module, dtype: torch.dtype | None = None):
-        """
-        If a `parameter` is on the `meta` device, then its parent
+        """If a `parameter` is on the `meta` device, then its parent
         `module` is the original module created by:
 
         ```python

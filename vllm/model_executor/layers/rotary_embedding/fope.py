@@ -185,7 +185,7 @@ class FourierRotaryEmbedding(RotaryEmbedding):
         return query, key
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
-        """load fope weights"""
+        """Load fope weights"""
         world_size = get_tensor_model_parallel_world_size()
         rank = get_tensor_model_parallel_rank()
         num_key_value_heads = loaded_weight.size(0)

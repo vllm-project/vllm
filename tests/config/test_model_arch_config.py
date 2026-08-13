@@ -374,7 +374,8 @@ class _HeterogeneousConfig(PretrainedConfig):
     """A heterogeneous config with no convertor of its own.
 
     Mirrors the parts vLLM uses: per-layer configs are shallow copies with the
-    varying attributes applied and heterogeneity stripped, so they do not recurse."""
+    varying attributes applied and heterogeneity stripped, so they do not recurse.
+    """
 
     is_heterogeneous = True
 

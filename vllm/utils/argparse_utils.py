@@ -34,6 +34,7 @@ def human_readable_int(value: str) -> int:
     - '1k' -> 1,000
     - '1K' -> 1,024
     - '25.6k' -> 25,600
+
     """
     value = value.strip()
 
@@ -82,6 +83,7 @@ def human_readable_int_or_auto(value: str) -> int:
     - '1K' -> 1,024
     - '25.6k' -> 25,600
     - '-1' or 'auto' -> -1 (special value for auto-detection)
+
     """
     value = value.strip()
 
@@ -95,8 +97,7 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpForma
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
-        """
-        1. Sentences split across lines have their single newlines removed.
+        """1. Sentences split across lines have their single newlines removed.
         2. Paragraphs and lists are split into separate lines.
         3. Each line is wrapped to the specified width (width of terminal).
         """
@@ -447,7 +448,7 @@ class FlexibleArgumentParser(ArgumentParser):
         The arguments in config file will be inserted between
         the argument list.
 
-        example:
+        Example:
         ```yaml
             port: 12323
             tensor-parallel-size: 4
@@ -473,6 +474,7 @@ class FlexibleArgumentParser(ArgumentParser):
         Please note how the config args are inserted after the sub command.
         this way the order of priorities is maintained when these are args
         parsed by super().
+
         """
         assert args.count("--config") <= 1, "More than one config file specified!"
 

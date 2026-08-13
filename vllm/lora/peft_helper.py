@@ -18,8 +18,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class PEFTHelper:
-    """
-    A helper class for PEFT configurations, specifically designed for LoRA.
+    """A helper class for PEFT configurations, specifically designed for LoRA.
     This class handles configuration validation, compatibility checks for
     various LoRA implementations.
     """
@@ -40,8 +39,7 @@ class PEFTHelper:
     vllm_max_position_embeddings: int | None = field(default=False)
 
     def _validate_features(self) -> list[str]:
-        """
-        Check if there are any unsupported LoRA features.
+        """Check if there are any unsupported LoRA features.
         """
         error_msg = []
         if self.modules_to_save:
@@ -116,8 +114,7 @@ class PEFTHelper:
         return cls.from_dict(config)
 
     def validate_legal(self, lora_config: LoRAConfig) -> None:
-        """
-        Validates the LoRA configuration settings against application
+        """Validates the LoRA configuration settings against application
         constraints and requirements.
         """
         error_msg = self._validate_features()

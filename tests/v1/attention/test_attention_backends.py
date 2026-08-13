@@ -139,6 +139,7 @@ def create_and_prepopulate_kv_cache(
 
     Returns:
         Tuple of (kv_cache, updated_block_table)
+
     """
     batch_size = len(k_contexts)
     seq_lens = common_attn_metadata.seq_lens.cpu()
@@ -253,7 +254,6 @@ def run_attention_backend(
     sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
-
     # Handle special case for FLEX_ATTENTION_SLOW
     actual_backend = backend
 
@@ -359,8 +359,7 @@ def _test_backend_correctness(
     kv_cache_dtype: str = "auto",
     use_sinks: bool = False,
 ):
-    """
-    Test that all backends produce similar outputs to a reference implementation
+    """Test that all backends produce similar outputs to a reference implementation
     using FlexAttention or an explicit attention-sink reference.
 
     This test works by:
@@ -1131,7 +1130,8 @@ def test_non_causal_backend_correctness(
     default_vllm_config, batch_spec_name: str, model: str
 ):
     """Test backend's correctness with non-causal (bidirectional) decoder
-    attention, as used by DFlash speculative decoding."""
+    attention, as used by DFlash speculative decoding.
+    """
 
     def bidirectional_mask_mod(
         b: torch.Tensor,

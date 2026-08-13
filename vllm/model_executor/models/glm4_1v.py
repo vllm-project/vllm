@@ -25,7 +25,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GLM-4.1V & GLM-4.6V-Flash, AutoGLM-Phone-9B model
-compatible with HuggingFace weights."""
+compatible with HuggingFace weights.
+"""
 
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -143,12 +144,11 @@ def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
 
 
 class Glm4vImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: Number of patches
-        - cpp: Number of channels * patch_size * patch_size
-        - ni: Number of images
-        - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
+    """Dimensions:
+    - np: Number of patches
+    - cpp: Number of channels * patch_size * patch_size
+    - ni: Number of images
+    - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -158,12 +158,11 @@ class Glm4vImagePixelInputs(TensorSchema):
 
 
 class Glm4vImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - f: Number of image features (varies based on image resolution)
-        - h: Hidden size (must match language model backbone)
-        - n: Number of images
-        - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
+    """Dimensions:
+    - f: Number of image features (varies based on image resolution)
+    - h: Hidden size (must match language model backbone)
+    - n: Number of images
+    - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -176,14 +175,13 @@ Glm4vImageInputs: TypeAlias = Glm4vImagePixelInputs | Glm4vImageEmbeddingInputs
 
 
 class Glm4vVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: Number of patches
-        - ctpp: Number of channels * temporal_patch_size *
-            patch_size * patch_size
-        - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
-          video, grid_h, grid_w)
+    """Dimensions:
+    - np: Number of patches
+    - ctpp: Number of channels * temporal_patch_size *
+        patch_size * patch_size
+    - f: Number of frames
+    - g: Grid dimensions (3 for grid_t which is usually 1 for processed
+      video, grid_h, grid_w)
     """
 
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
@@ -193,13 +191,12 @@ class Glm4vVideoPixelInputs(TensorSchema):
 
 
 class Glm4vVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - p: Number of video patches across all frames
-        - h: Hidden size (must match language model backbone)
-        - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
-          video, grid_h, grid_w)
+    """Dimensions:
+    - p: Number of video patches across all frames
+    - h: Hidden size (must match language model backbone)
+    - f: Number of frames
+    - g: Grid dimensions (3 for grid_t which is usually 1 for processed
+      video, grid_h, grid_w)
     """
 
     type: Literal["video_embeds"] = "video_embeds"
@@ -786,7 +783,6 @@ class Glm4vVisionTransformer(nn.Module):
         forward graph compatible with CUDA graph replay. Coordinate generation matches
         `rot_pos_emb` exactly to guarantee spatial alignment.
         """
-
         device = self.embeddings.position_embedding.weight.device
         dtype = self.dtype
         all_embeds = []
@@ -867,6 +863,7 @@ class Glm4vVisionTransformer(nn.Module):
                 instead of computing from cu_seqlens (needed for CUDA
                 graph capture to cover worst-case replay scenarios).
             device: Device to place tensors on. Defaults to self.device.
+
         """
         if device is None:
             device = self.device
@@ -2320,6 +2317,7 @@ class Glm4vForConditionalGeneration(
                 parallelism.
             inputs_embeds: Optional pre-computed input embeddings.
             **kwargs: Additional keyword arguments.
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -2343,8 +2341,7 @@ class Glm4vForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model.model",

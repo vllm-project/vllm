@@ -59,7 +59,8 @@ def test_with_env_set(monkeypatch, mode):
 @create_new_process_for_each_test()
 def test_other_threads_are_not_policed(monkeypatch):
     """A background thread that syncs deliberately must not be broken by the
-    check being armed on the thread running the decorated function."""
+    check being armed on the thread running the decorated function.
+    """
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
 
@@ -84,7 +85,8 @@ def test_other_threads_are_not_policed(monkeypatch):
 def test_allow_on_other_thread_does_not_disarm(monkeypatch):
     """`gpu_sync_allowed()` on one thread must not suppress the check on
     another. It is scoped by ContextVar rather than torch's process-global
-    sync debug mode, which a previous implementation mutated."""
+    sync debug mode, which a previous implementation mutated.
+    """
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
 
@@ -113,7 +115,8 @@ def test_allow_on_other_thread_does_not_disarm(monkeypatch):
 def test_suppressing_works_while_compiling(monkeypatch):
     """`_suppressing` wraps torch compile entry points, which run with
     `torch.compiler.is_compiling()` true. `gpu_sync_allowed()` deliberately
-    no-ops in that state, so `_suppressing` must not route through it."""
+    no-ops in that state, so `_suppressing` must not route through it.
+    """
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
     # Emulate being inside a torch compile, as inductor passes are.
@@ -127,7 +130,8 @@ def test_suppressing_works_while_compiling(monkeypatch):
 def test_sync_debug_mode_restored_after_checked_call(monkeypatch):
     """The mode is armed only for the duration of a checked call. Leaving it
     on process-wide made every sync outside a checked region emit a
-    `UserWarning` whenever our handler was not the installed one."""
+    `UserWarning` whenever our handler was not the installed one.
+    """
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
 

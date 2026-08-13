@@ -158,8 +158,7 @@ class SchedulerConfig:
 
     @staticmethod
     def default_factory(**kwargs):
-        """
-        Factory method to create `SchedulerConfig` with default values for `InitVar`s.
+        """Factory method to create `SchedulerConfig` with default values for `InitVar`s.
         """
         if "max_model_len" not in kwargs:
             kwargs["max_model_len"] = 8192
@@ -191,8 +190,7 @@ class SchedulerConfig:
         return resolve_obj_by_qualname(self.scheduler_cls)
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 

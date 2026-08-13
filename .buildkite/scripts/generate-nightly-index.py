@@ -18,8 +18,7 @@ import regex as re
 
 
 def normalize_package_name(name: str) -> str:
-    """
-    Normalize package name according to PEP 503.
+    """Normalize package name according to PEP 503.
     https://peps.python.org/pep-0503/#normalized-names
 
     Replace runs of underscores, hyphens, and periods with a single hyphen,
@@ -55,17 +54,18 @@ class WheelFileInfo:
 
 
 def parse_from_filename(file: str) -> WheelFileInfo:
-    """
-    Parse wheel file name to extract metadata.
+    """Parse wheel file name to extract metadata.
 
     The format of wheel names:
         {package_name}-{version}(-{build_tag})?-{python_tag}-{abi_tag}-{platform_tag}.whl
     All versions could contain a variant like '+cu129' or '.cpu' or `.rocm` (or not).
+
     Example:
         vllm-0.11.0-cp38-abi3-manylinux1_x86_64.whl
         vllm-0.10.2rc2+cu129-cp38-abi3-manylinux2014_aarch64.whl
         vllm-0.11.1rc8.dev14+gaa384b3c0-cp38-abi3-manylinux2014_aarch64.whl
         vllm-0.11.1rc8.dev14+gaa384b3c0.cu130-cp38-abi3-manylinux1_x86_64.whl
+
     """
     wheel_file_re = re.compile(
         r"^(?P<package_name>.+)-(?P<version>[^-]+?)(-(?P<build_tag>[^-]+))?-(?P<python_tag>[^-]+)-(?P<abi_tag>[^-]+)-(?P<platform_tag>[^-]+)\.whl$"
@@ -111,8 +111,7 @@ def parse_from_filename(file: str) -> WheelFileInfo:
 
 
 def generate_project_list(subdir_names: list[str], comment: str = "") -> str:
-    """
-    Generate project list HTML content linking to each project & variant subdirectory.
+    """Generate project list HTML content linking to each project & variant subdirectory.
     """
     href_tags = []
     for name in sorted(subdir_names):
@@ -127,8 +126,7 @@ def generate_package_index_and_metadata(
     index_base_dir: Path,
     comment: str = "",
 ) -> tuple[str, str]:
-    """
-    Generate package index HTML content for a specific package, linking to actual wheel files.
+    """Generate package index HTML content for a specific package, linking to actual wheel files.
     """
     href_tags = []
     metadata = []
@@ -156,8 +154,7 @@ def generate_index_and_metadata(
     alias_to_default: str | None = None,
     comment: str = "",
 ):
-    """
-    Generate index for all wheel files.
+    """Generate index for all wheel files.
 
     Args:
         whl_files (list[str]): List of wheel files (must be directly under `wheel_base_dir`).
@@ -216,8 +213,8 @@ def generate_index_and_metadata(
             },
             ...
         ]
-    """
 
+    """
     parsed_files = [parse_from_filename(f) for f in whl_files]
 
     if not parsed_files:

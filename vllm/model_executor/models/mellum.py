@@ -27,8 +27,7 @@ from .utils import PPMissingLayer, extract_layer_index, maybe_prefix
 
 
 class MellumAttention(Qwen3MoeAttention):
-    """
-    Differences from `Qwen3MoeAttention`:
+    """Differences from `Qwen3MoeAttention`:
     - Supports `per_layer_sliding_window` for `Attention`.
     """
 
@@ -116,8 +115,7 @@ class MellumAttention(Qwen3MoeAttention):
 
 
 class MellumDecoderLayer(Qwen3MoeDecoderLayer):
-    """
-    Differences from `Qwen3MoeDecoderLayer`:
+    """Differences from `Qwen3MoeDecoderLayer`:
     - Supports interleaved SWA and per-layer RoPE scaling.
     """
 
@@ -179,8 +177,7 @@ class MellumDecoderLayer(Qwen3MoeDecoderLayer):
 
 @support_torch_compile
 class MellumModel(Qwen3MoeModel):
-    """
-    Differences from `Qwen3MoeModel`:
+    """Differences from `Qwen3MoeModel`:
     - Uses `MellumDecoderLayer`.
     """
 
@@ -198,8 +195,7 @@ class MellumModel(Qwen3MoeModel):
 
 
 class MellumForCausalLM(Qwen3MoeForCausalLM):
-    """
-    Differences from `Qwen3MoeForCausalLM`:
+    """Differences from `Qwen3MoeForCausalLM`:
     - Uses `MellumModel`.
     """
 

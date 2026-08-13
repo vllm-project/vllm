@@ -75,8 +75,7 @@ def test_eplb_spec_decode(
     monkeypatch: pytest.MonkeyPatch,
     model_setup: tuple[str, str, str, int, float],
 ):
-    """
-    Test the correctness of EPLB speculative decoding with GSM8K dataset.
+    """Test the correctness of EPLB speculative decoding with GSM8K dataset.
     Applicable to MoE models with mtp or eagle spec decode.
     """
     method, model_name, spec_model_name, tp_size, expected_gsm8k_value = model_setup
@@ -109,10 +108,8 @@ def test_eplb_spec_decode(
 
 @large_gpu_mark(min_gb=80)
 def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
+    """Ensure async EPLB works with MTP speculative decoding for Qwen3-Next.
     """
-    Ensure async EPLB works with MTP speculative decoding for Qwen3-Next.
-    """
-
     TASK = "gsm8k"
     FILTER = "exact_match,strict-match"
     RTOL = 0.03

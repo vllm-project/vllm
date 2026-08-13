@@ -112,6 +112,7 @@ class All2AllManagerBase:
         Returns:
             An int32 device tensor where 0 marks a live rank and 1 marks a
             masked (dead/unreachable) rank.
+
         """
         raise NotImplementedError
 
@@ -159,8 +160,7 @@ class All2AllManagerBase:
 
 
 class DeviceCommunicatorBase:
-    """
-    Base class for device-specific communicator.
+    """Base class for device-specific communicator.
     It can use the `cpu_group` to initialize the communicator.
     If the device has PyTorch integration (PyTorch can recognize its
     communication backend), the `device_group` will also be given.
@@ -300,8 +300,7 @@ class DeviceCommunicatorBase:
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
     ) -> torch.Tensor | None:
-        """
-        NOTE: We assume that the input tensor is on the same device across
+        """NOTE: We assume that the input tensor is on the same device across
         all the ranks.
         NOTE: `dst` is the local rank of the destination rank.
         """
@@ -367,8 +366,7 @@ class DeviceCommunicatorBase:
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and router logits to the appropriate device.
+        """Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
         if extra_tensors is not None:
@@ -386,8 +384,7 @@ class DeviceCommunicatorBase:
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        """Dispatch the hidden states and topk weights/ids to the appropriate device.
         This is a no-op in the base class.
         """
         if extra_tensors is not None:
@@ -397,8 +394,7 @@ class DeviceCommunicatorBase:
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Combine the hidden states and router logits from the appropriate device.
+        """Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.
         """
         return hidden_states

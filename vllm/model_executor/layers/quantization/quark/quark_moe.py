@@ -1585,10 +1585,8 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         set_weight_attrs(w2_input_scale_2, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        """Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
-        Convert NVFP4 MoE weights into kernel format and setup the kernel.
-        """
-
         # Match existing NVFP4 MoE paths: fused w13 uses the w1 global scale.
         if self.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]

@@ -91,6 +91,7 @@ def register_model_loader(load_format: str):
         >>> load_config = LoadConfig(load_format="my_loader")
         >>> type(get_model_loader(load_config))
         <class 'MyModelLoader'>
+
     """  # noqa: E501
 
     def _wrapper(model_loader_cls):

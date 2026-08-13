@@ -104,11 +104,10 @@ MOSS_AUDIO_PROCESSOR_CONFIG_KEYS = {
 
 
 class MossAudioAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - nmb: Number of mel bins
-        - t: Time frames
+    """Dimensions:
+    - b: Batch size
+    - nmb: Number of mel bins
+    - t: Time frames
     """
 
     audio_data: Annotated[torch.Tensor, TensorShape("b", "nmb", "t")]
@@ -1044,6 +1043,7 @@ class MossAudioProcessor:
             -> audio_data has shape [1, mel_dim, max_time]
             -> mel_dim is the number of mel filter-bank bins, 128 by default
             -> audio_data_seqlens stores the unpadded mel length
+
         """
         del kwargs
 
@@ -1665,6 +1665,7 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             audio_data=[2, 128, 1200], audio_data_seqlens=[800, 1200]
             -> returns (audio0_embeds, audio1_embeds), split by token length
             -> DeepStack packs each item as [main, layer0, ...] on dim -1
+
         """
         audio_data = audio_input["audio_data"]
         audio_data_seqlens = audio_input["audio_data_seqlens"]

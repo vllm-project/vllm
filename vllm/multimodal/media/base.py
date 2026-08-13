@@ -14,8 +14,7 @@ _T = TypeVar("_T")
 
 @dataclass
 class MediaWithBytes(Generic[_T]):
-    """
-    Wrapper that couples a media object with its original encoded bytes.
+    """Wrapper that couples a media object with its original encoded bytes.
 
     This ensures the raw bytes and media object remain synchronized,
     preventing cache corruption from in-place modifications.
@@ -85,8 +84,7 @@ class MediaIO(ABC, Generic[_T]):
 
     @abstractmethod
     def load_base64(self, media_type: str, data: str) -> _T:
-        """
-        List of media types:
+        """List of media types:
         https://www.iana.org/assignments/media-types/media-types.xhtml
         """
         raise NotImplementedError

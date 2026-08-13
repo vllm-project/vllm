@@ -69,8 +69,7 @@ def restore_kv_cache_spec_registry():
 
 @dataclass(frozen=True)
 class _TrulyUnregisteredSpec(KVCacheSpec):
-    """
-    A spec that inherits directly from KVCacheSpec with no registered
+    """A spec that inherits directly from KVCacheSpec with no registered
     ancestor in the MRO.  Used to test that the registry correctly raises
     when no entry can be found.
     """
@@ -207,7 +206,6 @@ class TestKVCacheSpecRegistry:
 
     def test_custom_spec_register_requires_manager(self):
         """Invalid register decorator arguments fail early."""
-
         with pytest.raises(AssertionError, match="manager_class is required"):
 
             @register_kv_cache_spec(
@@ -218,8 +216,7 @@ class TestKVCacheSpecRegistry:
                 custom_param: int = 16
 
     def test_unregistered_spec_no_registered_parent_raises(self):
-        """
-        A spec whose entire MRO contains no registered class resolves to None.
+        """A spec whose entire MRO contains no registered class resolves to None.
         Runtime callers should use check_kv_cache_spec_registry to fail early.
         Subclasses of registered specs intentionally do not fail — they inherit
         their parent's manager via MRO walking.
@@ -238,8 +235,7 @@ class TestKVCacheSpecRegistry:
             UniformTypeKVCacheSpecs.is_uniform_type({"layer_0": spec})
 
     def test_unregistered_subclass_inherits_parent_manager(self):
-        """
-        An unregistered subclass of a registered spec resolves via MRO
+        """An unregistered subclass of a registered spec resolves via MRO
         to its parent's manager — this is intentional registry behaviour.
         """
 
@@ -346,8 +342,7 @@ class TestGetKVCacheSpecKind:
 
     @pytest.mark.parametrize("other_cls", [MLAAttentionSpec, SinkFullAttentionSpec])
     def test_mixed_kinds_sharing_full_attention_base(self, other_cls):
-        """
-        Members with differing kinds but a single registered
+        """Members with differing kinds but a single registered
         uniform_type_base_spec of FullAttentionSpec report FULL_ATTENTION.
 
         This is the shape produced by a model that pairs a main K/V cache with a
@@ -396,8 +391,7 @@ class TestGetKVCacheSpecKind:
         assert get_kv_cache_spec_kind(group) == KVCacheSpecKind.UNKNOWN
 
     def test_uniform_non_full_attention_base_reports_unknown(self):
-        """
-        The FULL_ATTENTION result is gated on the shared base spec being
+        """The FULL_ATTENTION result is gated on the shared base spec being
         FullAttentionSpec; a uniform base of any other type stays UNKNOWN.
         """
 

@@ -175,8 +175,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             kv_cache: shape =
                 [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_block_scale is not None:
             raise NotImplementedError(

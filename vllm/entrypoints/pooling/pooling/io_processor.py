@@ -32,7 +32,8 @@ class PluginWithoutIOProcessorPlugins(PoolingIOProcessor):
 
 class PluginWithIOProcessorPlugins(PoolingIOProcessor):
     """IO Processor plugins are a feature that allows pre- and post-processing
-    of the model input and output for pooling models."""
+    of the model input and output for pooling models.
+    """
 
     name = "plugin"
 

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Integration tests for RayExecutorV2 at the executor level.
+"""Integration tests for RayExecutorV2 at the executor level.
 Validates executor initialization, placement group support, RPC calls,
 and distributed execution with various TP/PP configurations.
 """
@@ -104,7 +103,8 @@ def assert_executor(executor, tp_size, pp_size):
 
 def test_select_tcpstore_port_seeds_disjoint_windows(monkeypatch):
     """Co-located DP engines scan distinct, adjacent port windows, so two
-    engines on a node cannot pick the same TCPStore port."""
+    engines on a node cannot pick the same TCPStore port.
+    """
     requested = []
 
     def fake_get_open_port(start_port, max_attempts):
@@ -279,7 +279,6 @@ def test_ray_v2_run_refs_stored_for_monitoring(executor):
 @pytest.mark.parametrize("tp_size, pp_size", [(2, 1), (2, 2)])
 def test_ray_v2_single_node_generation(tp_size, pp_size):
     """End-to-end LLM generation with RayExecutorV2."""
-
     llm = LLM(
         model=MODEL,
         tensor_parallel_size=tp_size,

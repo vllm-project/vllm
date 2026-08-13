@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Implementation of SiglipVisionModel intended to be only used
-within a vision language model."""
+within a vision language model.
+"""
 
 from collections.abc import Iterable
 
@@ -86,17 +87,16 @@ class Siglip2VisionEmbeddings(nn.Module):
         pixel_values: torch.FloatTensor,
         grid_thws: torch.LongTensor | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
-            pixel_values (`torch.FloatTensor`):
-                Pixel values of shape (
-                    num_patches,
-                    num_channels * temporal_patch_size * patch_size * patch_size
-                )
-            grid_thws: (`torch.LongTensor`):
-                grid shape (num_patches, 3)
-        """
+        """Args:
+        pixel_values (`torch.FloatTensor`):
+            Pixel values of shape (
+                num_patches,
+                num_channels * temporal_patch_size * patch_size * patch_size
+            )
+        grid_thws: (`torch.LongTensor`):
+            grid shape (num_patches, 3)
 
+        """
         # Apply patch embeddings to already patchified pixel values
         target_dtype = self.patch_embedding.weight.dtype
         if isinstance(self.patch_embedding, LinearBase):
@@ -237,7 +237,6 @@ class Siglip2Attention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Input shape: Batch x Time x Channel"""
-
         seq_length, embed_dim = hidden_states.shape
 
         qkv_states, _ = self.qkv_proj(hidden_states)
@@ -337,11 +336,11 @@ class Siglip2EncoderLayer(nn.Module):
         cu_seqlens: torch.Tensor,
         position_embeddings: torch.Tensor,
     ) -> tuple[torch.FloatTensor]:
-        """
-        Args:
-            hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
-            cu_seqlens: Cumulative sequence lengths tensor.
-            position_embeddings: Position embeddings tensor.
+        """Args:
+        hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
+        cu_seqlens: Cumulative sequence lengths tensor.
+        position_embeddings: Position embeddings tensor.
+
         """
         residual = hidden_states
 
@@ -361,12 +360,12 @@ class Siglip2EncoderLayer(nn.Module):
 
 
 class Siglip2Encoder(nn.Module):
-    """
-    Transformer encoder consisting of `config.num_hidden_layers`
+    """Transformer encoder consisting of `config.num_hidden_layers`
     self attention layers. Each layer is a [`Siglip2EncoderLayer`].
 
     Args:
         config: PretrainedConfig
+
     """
 
     def __init__(
@@ -485,15 +484,15 @@ class Siglip2Encoder(nn.Module):
         inputs_embeds: torch.Tensor,
         grid_thws: torch.Tensor,
     ) -> torch.Tensor:
-        r"""
-        Args:
-            inputs_embeds: Input tensor of shape
-                (batch_size, sequence_length, hidden_size).
-                Embedded representation of the input tokens.
-            grid_thws: Grid tensor of shape (num_patches, 3)
-                containing grid dimensions.
-                Whether or not to return a [`~utils.ModelOutput`] instead of
-                a plain tuple.
+        r"""Args:
+        inputs_embeds: Input tensor of shape
+            (batch_size, sequence_length, hidden_size).
+            Embedded representation of the input tokens.
+        grid_thws: Grid tensor of shape (num_patches, 3)
+            containing grid dimensions.
+            Whether or not to return a [`~utils.ModelOutput`] instead of
+            a plain tuple.
+
         """
         rotary_pos_emb = self.rot_pos_emb(grid_thws)
         window_index, cu_window_seqlens = self.get_window_index(grid_thws)
@@ -574,10 +573,9 @@ class Siglip2VisionTransformer(nn.Module):
         pixel_values: torch.FloatTensor,
         grid_thws: torch.LongTensor,
     ) -> torch.Tensor:
-        r"""
-        spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
-            Tensor containing the spatial dimensions (height, width)
-            of the input images.
+        r"""spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
+        Tensor containing the spatial dimensions (height, width)
+        of the input images.
         """
         hidden_states = self.embeddings(pixel_values, grid_thws)
 

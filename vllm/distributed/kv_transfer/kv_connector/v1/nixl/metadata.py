@@ -63,8 +63,7 @@ class NixlAgentMetadata:
 
 @dataclass
 class NixlHandshakePayload(KVConnectorHandshakeMetadata):
-    """
-    Wrapper for NIXL handshake sent over the wire.
+    """Wrapper for NIXL handshake sent over the wire.
 
     Enables two-phase decoding for graceful compatibility checking:
     1. Decode NixlHandshakePayload to get compatibility_hash
@@ -125,8 +124,7 @@ def _get_speculative_compatibility_factors(
 def compute_nixl_compatibility_hash(
     vllm_config: VllmConfig, attn_backend_name: str, cross_layers_blocks: bool
 ) -> str:
-    """
-    Compute compatibility hash for NIXL KV transfer.
+    """Compute compatibility hash for NIXL KV transfer.
 
     Hash only the factors that affect whether two NIXL instances can
     successfully transfer KV cache data.
@@ -147,6 +145,7 @@ def compute_nixl_compatibility_hash(
 
     Returns:
         SHA-256 hex digest
+
     """
     from vllm import __version__ as vllm_version
     from vllm.config.utils import hash_factors

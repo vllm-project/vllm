@@ -34,6 +34,7 @@ def make_operation_tracker(operation_name: str, original_func):
 
     Returns:
         A wrapper function that tracks the operation and calls the original
+
     """
 
     def wrapper(*args, **kwargs):

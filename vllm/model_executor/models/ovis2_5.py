@@ -49,12 +49,11 @@ IMAGE_PAD_TOKEN_ID = 151655
 
 
 class Ovis2_5ImagePatchInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of images * number of patches
-        - patch_size: patch_size_x * patch_size_y * num_channels
-        - patch_indicators: Batch size * (number of patches + 1)
-        - bn: Batch size * number of images
+    """Dimensions:
+    - bnp: Batch size * number of images * number of patches
+    - patch_size: patch_size_x * patch_size_y * num_channels
+    - patch_indicators: Batch size * (number of patches + 1)
+    - bn: Batch size * number of images
     """
 
     type: Literal["image_patches"]
@@ -66,12 +65,11 @@ class Ovis2_5ImagePatchInputs(TensorSchema):
 
 
 class Ovis2_5VideoPatchInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of videos * number of patches
-        - patch_size: patch_size_x * patch_size_y * num_channels
-        - patch_indicators: Batch size * (number of patches + 1)
-        - bn: Batch size * number of videos
+    """Dimensions:
+    - bnp: Batch size * number of videos * number of patches
+    - patch_size: patch_size_x * patch_size_y * num_channels
+    - patch_indicators: Batch size * (number of patches + 1)
+    - bn: Batch size * number of videos
     """
 
     type: Literal["video_patches"]
@@ -83,8 +81,7 @@ class Ovis2_5VideoPatchInputs(TensorSchema):
 
 
 class VisualTokenizer(torch.nn.Module):
-    """
-    VIT
+    """VIT
     """
 
     def __init__(
@@ -320,8 +317,7 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         self,
         visual_indicators: list[int],
     ) -> list[int]:
-        """
-        Filter image indicators placeholders and convert them to corresponding
+        """Filter image indicators placeholders and convert them to corresponding
         tokens in visual tokenizer.
         """
         hf_config = self.info.get_hf_config()

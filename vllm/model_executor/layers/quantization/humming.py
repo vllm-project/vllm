@@ -805,8 +805,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        """
-        Apply Humming-quantized MoE computation using the standard kernel flow.
+        """Apply Humming-quantized MoE computation using the standard kernel flow.
 
         This method uses FusedMoEKernel.apply() which orchestrates:
         1. Preparation (quantization if needed - skipped for Humming via

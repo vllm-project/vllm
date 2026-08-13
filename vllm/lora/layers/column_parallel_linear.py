@@ -83,8 +83,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
 
 
 class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
-    """
-    LoRA on top of ColumnParallelLinear layer.
+    """LoRA on top of ColumnParallelLinear layer.
     LoRA B is sliced for tensor parallelism.
     There are two types for the `base_layer`:
     1. ColumnParallelLinear, e.g.`dense_h_to_4h` in `FalconForCausalLM`.
@@ -140,6 +139,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         Returns:
             - output
             - bias
+
         """
         bias = self.base_layer.bias if not self.base_layer.skip_bias_add else None
 
@@ -210,8 +210,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_config: LoRAConfig,
         model_config: PretrainedConfig | None = None,
     ) -> None:
-        """
-        The main reason for overriding this function is to enhance  code
+        """The main reason for overriding this function is to enhance  code
         maintainability.
         """
         self.lora_config = lora_config
@@ -268,8 +267,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_a: list[torch.Tensor],
         lora_b: list[torch.Tensor],
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """
-        Expand packed adapter groups when they don't match n_slices.
+        """Expand packed adapter groups when they don't match n_slices.
         E.g. in_proj_qkv (covers Q+K+V) + in_proj_z
         """
         expanded_a: list[torch.Tensor] = []
@@ -369,8 +367,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
 
 class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
-    """
-    ColumnParallelLinear layer that is specifically designed for
+    """ColumnParallelLinear layer that is specifically designed for
     qkv_proj. Certain models, such as chatglm3 and baichuan-7b,
     only contains a single LoRA within their qkv_proj layer.
 
@@ -474,8 +471,7 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         lora_config: LoRAConfig,
         model_config: PretrainedConfig | None = None,
     ) -> None:
-        """
-        The main reason for overloading this function is to handle inconsistent
+        """The main reason for overloading this function is to handle inconsistent
         weight dimensions in qkv lora.
         """
         super().create_lora_weights(max_loras, lora_config, model_config)
@@ -502,8 +498,7 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
 
 
 class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
-    """
-    Differs from ColumnParallelLinearWithLoRA by slicing LoRA A also.
+    """Differs from ColumnParallelLinearWithLoRA by slicing LoRA A also.
 
     Based on S-LoRA, slicing happens along the rank dim.
     """
@@ -543,8 +538,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
 
 
 class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLoRA):
-    """
-    Differs from MergedColumnParallelLinearWithLoRA by slicing the
+    """Differs from MergedColumnParallelLinearWithLoRA by slicing the
     LoRA A's also.
 
     Based on S-LoRA, slicing happens along the rank dim.
@@ -586,8 +580,7 @@ class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLo
 
 
 class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
-    """
-    Differs from QKVParallelLinearWithLoRA by slicing the
+    """Differs from QKVParallelLinearWithLoRA by slicing the
     LoRA A's also.
 
     Based on S-LoRA, slicing happens along the rank dim.
@@ -622,8 +615,7 @@ class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
 
 
 class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
-    """
-    Differs from MergedQKVParallelLinearWithLoRA by slicing the
+    """Differs from MergedQKVParallelLinearWithLoRA by slicing the
     LoRA A's also.
 
     Based on S-LoRA, slicing happens along the rank dim.
@@ -722,7 +714,8 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Override to handle single tensor weights
-        that need to be split into slices."""
+        that need to be split into slices.
+        """
         self.reset_lora(index)
 
         # Handle case where checkpoint has single tensor weights

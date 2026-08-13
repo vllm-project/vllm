@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DecodeBenchConnector: A KV Connector for decode instance performance testing.
+"""DecodeBenchConnector: A KV Connector for decode instance performance testing.
 
 This connector emulates a prefill-decode disaggregated setting by filling
 the KV cache with dummy values, allowing measurement of decoder performance
@@ -10,7 +9,7 @@ under larger input sequence lengths (ISL) in resource-limited environments.
 Usage:
     To use this connector for benchmarking, configure it in the kv_transfer_config:
 
-    Example:
+Example:
         vllm serve <model> --kv-transfer-config '{
             "kv_connector": "DecodeBenchConnector",
             "kv_role": "kv_both",
@@ -29,6 +28,7 @@ Usage:
         - fill_mean (float): Mean value for random normal fill (default: 0.015)
         - fill_std (float): Standard deviation for random fill (default: 0.0)
           Set to 0 for constant values, >0 for random sampling
+
 """
 
 from dataclasses import dataclass
@@ -75,8 +75,7 @@ class DecodeBenchConnectorMetadata(KVConnectorMetadata):
 
 
 class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
-    """
-    A KV Connector for decode instance performance testing.
+    """A KV Connector for decode instance performance testing.
 
     This connector fills the KV cache with dummy (non-zero) values to
     emulate a prefill-decode disaggregated setting, enabling performance
@@ -200,8 +199,7 @@ class DecodeBenchConnectorScheduler:
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
-        """
-        For new requests, return the number of tokens that should be filled
+        """For new requests, return the number of tokens that should be filled
         with dummy KV cache values.
 
         Returns:
@@ -209,6 +207,7 @@ class DecodeBenchConnectorScheduler:
             - num_tokens_to_fill: number of uncomputed tokens minus 1
                 (we fill everything except the last token for decode)
             - is_async: False (synchronous filling)
+
         """
         req_id = request.request_id
 
@@ -232,8 +231,7 @@ class DecodeBenchConnectorScheduler:
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        """
-        Called after blocks are allocated. Store the block IDs so we can
+        """Called after blocks are allocated. Store the block IDs so we can
         fill them with dummy values.
 
         Supports both standard attention (single KV cache group) and MLA
@@ -279,8 +277,7 @@ class DecodeBenchConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: "SchedulerOutput"
     ) -> KVConnectorMetadata:
-        """
-        Build metadata containing information about which blocks to fill
+        """Build metadata containing information about which blocks to fill
         with dummy KV values.
         """
         meta = DecodeBenchConnectorMetadata(reqs_to_fill=self._pending_fills.copy())
@@ -291,8 +288,7 @@ class DecodeBenchConnectorScheduler:
         return meta
 
     def request_finished(self, request: "Request"):
-        """
-        Called when a request has finished. Clean up any state.
+        """Called when a request has finished. Clean up any state.
         """
         self._filled_requests.discard(request.request_id)
 
@@ -331,8 +327,7 @@ class DecodeBenchConnectorWorker:
         )
 
     def start_fill_kv(self, metadata: DecodeBenchConnectorMetadata):
-        """
-        Fill the allocated KV cache blocks with dummy (non-zero) values.
+        """Fill the allocated KV cache blocks with dummy (non-zero) values.
 
         This simulates having a populated KV cache from a prefill phase,
         allowing decode performance testing with larger context sizes.
@@ -360,13 +355,13 @@ class DecodeBenchConnectorWorker:
             )
 
     def _fill_blocks(self, group_idx: int, block_ids: list[int], num_tokens: int):
-        """
-        Fill specified blocks with dummy non-zero values for a specific KV cache group.
+        """Fill specified blocks with dummy non-zero values for a specific KV cache group.
 
         Args:
             group_idx: The KV cache group index to fill
             block_ids: List of block IDs to fill in this group
             num_tokens: Total number of tokens to fill across these blocks
+
         """
         if not block_ids:
             return
@@ -427,6 +422,7 @@ class DecodeBenchConnectorWorker:
             kv_cache: A KV cache tensor whose first dim is num_blocks.
             block_ids: Block IDs to fill. IDs that are out of range for this
                 tensor's first dim are ignored.
+
         """
         # Convert block_ids to tensor on device
         block_ids_tensor = torch.tensor(
@@ -473,6 +469,7 @@ class DecodeBenchConnectorWorker:
 
         Args:
             kv_cache: A state tensor to fill in its entirety.
+
         """
         if self.fill_std > 0:
             kv_cache.normal_(mean=self.fill_mean, std=self.fill_std)

@@ -172,7 +172,6 @@ def test_model_specialization_with_evaluate_guards(
     """Test that evaluate_guards correctly detects shape specialization
     violations.
     """
-
     if (
         use_aot_compile
         and dynamic_shapes_type == DynamicShapesType.BACKED

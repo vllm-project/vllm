@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for FileSystemTierManager.
+"""Unit tests for FileSystemTierManager.
 
 These tests use real disk I/O to verify the filesystem tier implementation.
 The tier manager writes KV cache blocks to disk and reads them back, verifying
@@ -370,7 +369,8 @@ def test_shutdown_discards_pending_tasks(fs_tier):
 @pytest.mark.parametrize("use_c_ext", [True, False])
 def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     """Data written by store must be exactly recovered by load, for batches
-    of any size -- including the empty batch."""
+    of any size -- including the empty batch.
+    """
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -467,7 +467,8 @@ def test_wait_idle_blocks_until_tasks_complete():
 
 def test_batch_lookup_c_extension(tmp_path):
     """Validates batch_lookup_C: empty, single, all-existing, all-missing,
-    mixed ordering, and input type validation."""
+    mixed ordering, and input type validation.
+    """
     try:
         from vllm.fs_io_C import batch_lookup as batch_lookup_C
     except ImportError:
@@ -531,7 +532,8 @@ def test_batch_lookup_dispatch(fs_tier, monkeypatch, use_c_ext):
 @pytest.mark.parametrize("use_c_ext", [True, False])
 def test_out_of_bounds_block_id_smoke(fs_tier, monkeypatch, use_c_ext):
     """Smoke test: a block id beyond the primary tensor's block count must
-    fail the job, for both the C extension and the Python fallback."""
+    fail the job, for both the C extension and the Python fallback.
+    """
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -613,7 +615,8 @@ def test_batched_partial_load_failure_keeps_loaded_blocks(
     loaded before it (#50321). Corrupt the LAST block: the earlier blocks load
     fine, so the job reports successful_keys for them and marks only the failed
     tail a miss. The earlier keys stay HIT — including for the same request —
-    while the corrupt block stays a MISS (its file was removed)."""
+    while the corrupt block stays a MISS (its file was removed).
+    """
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -665,7 +668,8 @@ def test_batched_load_first_block_fails_marks_whole_batch(
 ):
     """When the FIRST block fails, nothing loaded before it: the job reports no
     successful_keys (None) and the whole batch is marked a miss for the
-    request."""
+    request.
+    """
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -696,7 +700,8 @@ def test_transient_load_failure_leaves_file(fs_tier, monkeypatch, use_c_ext):
     """A transient host error (here ELOOP on open) is NOT a short read: the job
     fails but the block file must survive untouched, on both the C and Python
     paths. Deleting on a transient error would turn a passing hiccup into
-    permanent data loss."""
+    permanent data loss.
+    """
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -800,7 +805,8 @@ def test_mixed_job_results_emit_event_only_for_successful_job(
     fs_tier_with_events, monkeypatch
 ):
     """With a failed and a successful store job in flight, exactly one event
-    is emitted and its keys belong to the successful job."""
+    is emitted and its keys belong to the successful job.
+    """
     import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
 
     tier = fs_tier_with_events
@@ -885,7 +891,8 @@ def test_events_require_global_kv_events_flag(tmp_path):
 
 def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     """A GPU->CPU->fs cascade surfaces the tier-owned FS stored event via the
-    TieringOffloadingManager's aggregated take_events()."""
+    TieringOffloadingManager's aggregated take_events().
+    """
     from vllm.v1.kv_offload.tiering.manager import (
         CPUPrimaryTierOffloadingManager,
         TieringOffloadingManager,

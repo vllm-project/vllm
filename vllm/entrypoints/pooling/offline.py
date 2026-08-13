@@ -93,8 +93,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         Returns:
             A list of `PoolingRequestOutput` objects containing the
             pooled hidden states in the same order as the input prompts.
-        """
 
+        """
         if isinstance(prompts, dict) and "data" in prompts and pooling_task != "plugin":
             raise ValueError(
                 "The 'data' field is only supported for the 'plugin' pooling task."
@@ -203,8 +203,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[EmbeddingRequestOutput]:
-        """
-        Generate an embedding vector for each prompt.
+        """Generate an embedding vector for each prompt.
 
         This class automatically batches the given prompts, considering
         the memory constraint. For the best performance, put all of your prompts
@@ -226,8 +225,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         Returns:
             A list of `EmbeddingRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
-        """
 
+        """
         items = self.encode(
             prompts,
             use_tqdm=use_tqdm,
@@ -248,8 +247,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[ClassificationRequestOutput]:
-        """
-        Generate class logits for each prompt.
+        """Generate class logits for each prompt.
 
         This class automatically batches the given prompts, considering
         the memory constraint. For the best performance, put all of your prompts
@@ -271,8 +269,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         Returns:
             A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
-        """
 
+        """
         items = self.encode(
             prompts,
             use_tqdm=use_tqdm,
@@ -330,11 +328,12 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             chat_template: The chat template to use for the scoring. If None, we
                 use the model's default chat template.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
+
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
-        """
 
+        """
         if self.runner_type != "pooling":
             raise ValueError(
                 "LLM.score() is only supported for pooling models. "

@@ -79,7 +79,8 @@ class CPUAttentionBackend(AttentionBackend):
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """CPU attention supports decoder,
-        encoder-only and encoder-decoder attention."""
+        encoder-only and encoder-decoder attention.
+        """
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
@@ -363,8 +364,10 @@ class CPUAttentionBackendImpl(AttentionImpl):
             kv_cache: shape =
                 [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(

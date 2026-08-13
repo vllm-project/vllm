@@ -51,8 +51,7 @@ def _correct_attn_cp_out_kernel(
     N_ROUNDED: tl.constexpr,
     IS_BASE_E: tl.constexpr,
 ):
-    """
-    Apply the all-gathered lses to correct each local rank's attention
+    """Apply the all-gathered lses to correct each local rank's attention
     output. we still need perform a cross-rank reduction to obtain the
     final attention output.
 
@@ -65,6 +64,7 @@ def _correct_attn_cp_out_kernel(
             Pointer to output tensor of shape [ B, H, D ]
         vlse_ptr (triton.PointerType):
             Pointer to output tensor of shape [ B, H ]
+
     """
     batch_idx = tl.program_id(axis=0).to(tl.int64)
     head_idx = tl.program_id(axis=1).to(tl.int64)
@@ -153,6 +153,7 @@ def correct_attn_out(
 
     Returns:
         Tuple of (out, lse) with corrected attention and final log-sum-exp.
+
     """
     if ctx is None:
         ctx = CPTritonContext()
@@ -216,8 +217,7 @@ def _cp_lse_common(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ):
-    """
-    cp_attn_out: [ B, H, D ]
+    """cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     if cp_group.world_size == 1:
@@ -251,8 +251,7 @@ def cp_lse_ag_out_rs(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ):
-    """
-    cp_attn_out: [ B, H, D ]
+    """cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     out, lse = _cp_lse_common(
@@ -284,8 +283,7 @@ def cp_lse_ag_out_ar(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ):
-    """
-    cp_attn_out: [ B, H, D ]
+    """cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     out, lse = _cp_lse_common(
@@ -383,6 +381,7 @@ def pack_seq_triton(
 
     Returns:
         packed: [B, Lmax, ...] — packed tensor.
+
     """
     is_uint8 = x.dtype == torch.uint8
     if is_uint8:
@@ -479,8 +478,7 @@ def unpack_seq_triton(
     block_t: int = 64,
     block_d: int = 64,
 ) -> torch.Tensor:
-    """
-    Unpack a packed decode query tensor back to the original format.
+    """Unpack a packed decode query tensor back to the original format.
     Efficient Triton implementation.
 
     Args:
@@ -491,8 +489,8 @@ def unpack_seq_triton(
 
     Returns:
         unpacked_tensor: [N, ...] where N = sum(lengths)
-    """
 
+    """
     # Handle multi-dimensional input by reshaping to (B, Lmax, -1)
     original_shape = packed_tensor.shape
     if len(original_shape) > 3:

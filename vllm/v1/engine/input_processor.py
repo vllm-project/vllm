@@ -169,8 +169,7 @@ class InputProcessor:
         mm_hash: str,
         lora_request: LoRARequest | None,
     ) -> str:
-        """
-        When enable_tower_connector_lora is True, multi-modal embeddings
+        """When enable_tower_connector_lora is True, multi-modal embeddings
         vary depending on the LoRA request. Therefore, the mm_hash must be
         generated based on the LoRA request to prevent incorrect cache hits.
         """

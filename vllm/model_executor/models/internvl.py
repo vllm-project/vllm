@@ -63,13 +63,12 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
 class InternVLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - bnp: Batch size * number of images * (1 + num_patches)
-        - c: Number of channels (3)
-        - h: Height of each image patch
-        - w: Width of each image patch
+    """Dimensions:
+    - bn: Batch size * number of images
+    - bnp: Batch size * number of images * (1 + num_patches)
+    - c: Number of channels (3)
+    - h: Height of each image patch
+    - w: Width of each image patch
     """
 
     type: Literal["pixel_values"]
@@ -78,11 +77,10 @@ class InternVLImagePixelInputs(TensorSchema):
 
 
 class InternVLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of images
-        - f: Total image feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - n: Number of images
+    - f: Total image feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["image_embeds"]
@@ -93,13 +91,12 @@ InternVLImageInputs: TypeAlias = InternVLImagePixelInputs | InternVLImageEmbeddi
 
 
 class InternVLVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bvf: Batch size * number of videos * num_frames
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each video frame
-        - w: Width of each video frame
+    """Dimensions:
+    - bvf: Batch size * number of videos * num_frames
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each video frame
+    - w: Width of each video frame
     """
 
     type: Literal["pixel_values_videos"]
@@ -108,11 +105,10 @@ class InternVLVideoPixelInputs(TensorSchema):
 
 
 class InternVLVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of videos
-        - f: Total video feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - n: Number of videos
+    - f: Total video feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["video_embeds"]
@@ -884,8 +880,7 @@ class InternVLChatModel(
         return loader.load_weights(weights)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",

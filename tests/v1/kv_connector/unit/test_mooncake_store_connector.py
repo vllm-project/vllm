@@ -44,7 +44,8 @@ def _make_vllm_config():
 
 def _make_kv_cache_config() -> KVCacheConfig:
     """Single-group full-attention KVCacheConfig — enough for the connector
-    constructor's validate() pass."""
+    constructor's validate() pass.
+    """
     spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     return KVCacheConfig(
         num_blocks=4,
@@ -452,7 +453,8 @@ def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
 
 def _gated_recv(gate: threading.Event, value: int):
     """Mock recv side-effect that blocks until ``gate`` is set, so the
-    executor's lookup can be held pending deterministically."""
+    executor's lookup can be held pending deterministically.
+    """
 
     def recv():
         gate.wait()
@@ -463,7 +465,8 @@ def _gated_recv(gate: threading.Event, value: int):
 
 def test_lookup_key_client_non_block_lookup_async():
     """Non-blocking lookup defers to the executor: None first, hit once the
-    Future resolves."""
+    Future resolves.
+    """
     vllm_config = _make_vllm_config()
 
     with patch(

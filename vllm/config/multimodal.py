@@ -366,6 +366,7 @@ class MultiModalConfig:
         Returns:
             The kwargs to build the config with, unchanged unless the flag adds
             a `device`.
+
         """
         if mm_processor_device in (None, "auto"):
             return mm_processor_kwargs
@@ -399,6 +400,7 @@ class MultiModalConfig:
             ValueError: If `device` is not something `torch.device` accepts.
                 `validate_mm_processor_device` is what surfaces this during
                 startup, so the value is only parsed once.
+
         """
         device = (self.mm_processor_kwargs or {}).get("device")
         if device is None:
@@ -427,6 +429,7 @@ class MultiModalConfig:
             ValueError: If the requested device is not a torch device, or if it
                 is the accelerator on an instance that also runs the language
                 model.
+
         """
         from vllm.platforms import current_platform
 
@@ -461,8 +464,7 @@ class MultiModalConfig:
         )
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -485,8 +487,7 @@ class MultiModalConfig:
         return hash_str
 
     def get_limit_per_prompt(self, modality: str) -> int:
-        """
-        Get the maximum number of input items allowed per prompt
+        """Get the maximum number of input items allowed per prompt
         for the given modality (backward compatible).
         """
         if self.language_model_only:
@@ -504,8 +505,7 @@ class MultiModalConfig:
         self,
         inference_kwargs: Mapping[str, object],
     ) -> dict[str, object]:
-        """
-        Get the keyword arguments to pass to the multi-modal processor
+        """Get the keyword arguments to pass to the multi-modal processor
         according to the extra arguments passed during inference.
         """
         kwargs = self.mm_processor_kwargs or {}
@@ -533,7 +533,8 @@ class MultiModalConfig:
 
     def get_video_pruning_spec(self) -> tuple[VideoPruningMethod, float] | None:
         """Return `(method, rate)` when video pruning is enabled, else None.
-        `rate` is the fraction of video tokens to prune."""
+        `rate` is the fraction of video tokens to prune.
+        """
         if self.video_pruning_rate is not None and self.video_pruning_rate > 0:
             return (self.video_pruning_method, float(self.video_pruning_rate))
         return None

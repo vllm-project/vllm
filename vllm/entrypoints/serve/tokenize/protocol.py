@@ -183,8 +183,7 @@ class DetokenizeResponse(OpenAIBaseModel):
 
 
 class TokenizerInfoResponse(OpenAIBaseModel):
-    """
-    Response containing tokenizer configuration
+    """Response containing tokenizer configuration
     equivalent to tokenizer_config.json
     """
 

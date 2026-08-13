@@ -43,8 +43,7 @@ EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
 
 
 class RequestOutputCollector:
-    """
-    Collects streamed RequestOutputs per individual request,
+    """Collects streamed RequestOutputs per individual request,
     for hand-off to the consuming asyncio generate task.
 
     When streaming deltas, RequestOutputs are merged if the
@@ -454,7 +453,6 @@ class OutputProcessor:
 
     def propagate_error(self, e: Exception):
         """Propagate error to all generate() tasks."""
-
         for _, state in self.request_states.items():
             assert state.queue is not None
             state.queue.put(e)
@@ -592,8 +590,7 @@ class OutputProcessor:
         engine_core_timestamp: float | None = None,
         iteration_stats: IterationStats | None = None,
     ) -> OutputProcessorOutput:
-        """
-        Process the EngineCoreOutputs:
+        """Process the EngineCoreOutputs:
         1) Compute stats for logging
         2) Detokenize
         3) Create and handle RequestOutput objects:
@@ -613,7 +610,6 @@ class OutputProcessor:
         If you need to touch every element of the batch, do it from
         within the loop below.
         """
-
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:

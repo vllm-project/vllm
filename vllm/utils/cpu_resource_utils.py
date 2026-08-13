@@ -206,7 +206,8 @@ def get_visible_memory_node() -> list[int]:
 def _synthesize_cpu_list() -> list[LogicalCPUInfo]:
     """Synthesize a flat CPU list: each logical CPU is its own core on
     NUMA node 0.  Used when lscpu output is unavailable or unparsable
-    (e.g. macOS, RISC-V)."""
+    (e.g. macOS, RISC-V).
+    """
     cpu_count = os.cpu_count()
     assert cpu_count
     return [LogicalCPUInfo(i, i, 0) for i in range(cpu_count)]

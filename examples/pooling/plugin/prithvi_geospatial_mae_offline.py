@@ -85,8 +85,7 @@ def generate_datamodule():
 
 
 def process_channel_group(orig_img, channels):
-    """
-    Args:
+    """Args:
         orig_img: torch.Tensor representing original image (reference)
         with shape = (bands, H, W).
         channels: list of indices representing RGB channels.
@@ -94,8 +93,8 @@ def process_channel_group(orig_img, channels):
     Returns:
         torch.Tensor with shape (num_channels, height, width)
         for original image
-    """
 
+    """
     orig_img = orig_img[channels, ...]
     valid_mask = torch.ones_like(orig_img, dtype=torch.bool)
     valid_mask[orig_img == NO_DATA_FLOAT] = False
@@ -121,8 +120,8 @@ def read_geotiff(file_path: str):
     Returns:
         np.ndarray with shape (bands, height, width)
         meta info dict
-    """
 
+    """
     with rasterio.open(file_path) as src:
         img = src.read()
         meta = src.meta
@@ -142,8 +141,8 @@ def save_geotiff(image, output_path: str, meta: dict):
         image: np.ndarray with shape (bands, height, width)
         output_path: path where to save the image
         meta: dict with meta info.
-    """
 
+    """
     with rasterio.open(output_path, "w", **meta) as dest:
         for i in range(image.shape[0]):
             dest.write(image[i, :, :], i + 1)
@@ -176,8 +175,8 @@ def load_example(
     Returns:
         np.array containing created example
         list of meta info for each image in *file_paths*
-    """
 
+    """
     imgs = []
     metas = []
     temporal_coords = []

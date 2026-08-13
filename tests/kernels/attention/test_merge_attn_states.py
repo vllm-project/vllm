@@ -77,7 +77,8 @@ all_case_info: list[tuple] = []
 @pytest.mark.parametrize("output_dtype", [torch.float32, torch.half, torch.bfloat16])
 def test_merge_attn_states_both_empty(merge_fn, output_dtype) -> None:
     """When a token is empty on both sides (both LSE -inf), the 0/0 softmax
-    scales must not surface as NaN in the merged output."""
+    scales must not surface as NaN in the merged output.
+    """
     num_tokens, num_heads, head_size = 6, 8, 128
     prefix_output = torch.zeros(
         num_tokens, num_heads, head_size, device="cuda", dtype=output_dtype

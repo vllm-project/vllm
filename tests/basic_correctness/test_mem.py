@@ -18,8 +18,7 @@ DEVICE_TYPE = current_platform.device_type
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_python_error():
-    """
-    Test if Python error occurs when there's low-level
+    """Test if Python error occurs when there's low-level
     error happening from the C++ side.
     """
     allocator = get_mem_allocator_instance()

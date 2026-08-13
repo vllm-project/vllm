@@ -45,7 +45,7 @@ def _is_squared(node: object, x: fx.Node) -> bool:
 
 
 def _variance_eps(rsqrt: fx.Node, x: fx.Node) -> float | None:
-    """eps from `rsqrt(mean(x**2, -1) + eps)`, or `None` if not that shape."""
+    """Eps from `rsqrt(mean(x**2, -1) + eps)`, or `None` if not that shape."""
     add = peel(rsqrt.args[0])
     if not is_op(add, "add"):
         return None

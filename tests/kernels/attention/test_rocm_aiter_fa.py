@@ -283,7 +283,8 @@ def _run_direct_flash_attn_case(
 # Backend contract tests --------------------------------------------------
 def test_aiter_mha_backend_contract():
     """The ROCm backend advertises the dtypes, shapes, and attention types it
-    is designed to handle."""
+    is designed to handle.
+    """
     from vllm.v1.attention.backend import AttentionType
     from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
 
@@ -311,7 +312,8 @@ def test_aiter_mha_backend_contract():
 
 def test_aiter_mha_backend_validates_kv_cache_block_size():
     """The backend should reject KV cache shapes that cannot be gathered
-    correctly by the ROCm kernel."""
+    correctly by the ROCm kernel.
+    """
     from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
 
     assert AiterFlashAttentionBackend.get_kv_cache_shape(8, 16, 8, 128) == (
@@ -326,7 +328,8 @@ def test_aiter_mha_backend_validates_kv_cache_block_size():
 
 def test_aiter_mha_backend_supports_compute_capability_matches_mi3xx_probe():
     """The backend should trust the ROCm MI3xx probe instead of the raw torch
-    capability tuple."""
+    capability tuple.
+    """
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
 
@@ -351,7 +354,8 @@ def test_aiter_mha_env_flags_control_enablement(
     use_aiter, use_mha, expected, monkeypatch
 ):
     """Both the global AITER flag and the MHA-specific flag must be enabled
-    before the ROCm MHA path is considered active."""
+    before the ROCm MHA path is considered active.
+    """
     from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
@@ -369,7 +373,8 @@ def test_aiter_mha_env_flags_control_enablement(
 
 def test_aiter_mha_platform_gate_matches_install_and_arch():
     """The global AITER availability check should only open on ROCm MI3xx when
-    the aiter package is installed."""
+    the aiter package is installed.
+    """
     from vllm._aiter_ops import IS_AITER_FOUND, is_aiter_found_and_supported
 
     assert is_aiter_found_and_supported() is (
@@ -640,7 +645,8 @@ def test_aiter_mha_multi_batch(num_heads, head_size, dtype):
 @pytest.mark.parametrize("num_blocks", DIRECT_NUM_BLOCKS)
 def test_aiter_fa_large_block_table_matches_reference(num_blocks):
     """The direct paged-KV path should stay stable for both normal and very
-    large block tables."""
+    large block tables.
+    """
     atol = 2e-2
     rtol = 2e-2
     _assert_aiter_supported()
@@ -662,7 +668,8 @@ def test_aiter_fa_large_block_table_matches_reference(num_blocks):
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
 def test_aiter_fa_sliding_window_matches_reference():
     """The direct kernel should respect the same sliding-window causal mask as
-    the naive reference implementation."""
+    the naive reference implementation.
+    """
     atol = 2e-2
     rtol = 2e-2
     _assert_aiter_supported()

@@ -70,6 +70,7 @@ def load_audio_pyav(
     Returns:
         ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
         NumPy array and *sample_rate* is the native sample rate in Hz.
+
     """
     native_sr = None
     try:

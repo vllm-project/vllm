@@ -238,8 +238,7 @@ def test_cpu_offloading(
     cpu_block_size: int | None,
     uses_hma: bool,
 ) -> None:
-    """
-    Tests OffloadingConnector with CPUOffloadingSpec.
+    """Tests OffloadingConnector with CPUOffloadingSpec.
     """
     # configure OffloadingConnector (spec_name=CPUOffloadingSpec by default)
     extra_config: dict = {"cpu_bytes_to_use": 500 << 20}
@@ -300,7 +299,8 @@ def test_cpu_offloading(
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_cpu_offloading_metrics() -> None:
     """Verify that offloading Prometheus metrics (new flat and deprecated
-    labeled) are emitted after stores and loads."""
+    labeled) are emitted after stores and loads.
+    """
     extra_config: dict = {
         "cpu_bytes_to_use": 500 << 20,
         "block_size": CPU_BLOCK_SIZES,
@@ -489,7 +489,8 @@ def test_tiering_offloading() -> None:
 
 def test_fs_tiering_offloading(tmp_path) -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec
-    + fs secondary tier."""
+    + fs secondary tier.
+    """
     extra_config: dict = {
         "cpu_bytes_to_use": 1 << 30,
         "block_size": CPU_BLOCK_SIZES,

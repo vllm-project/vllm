@@ -25,12 +25,12 @@ logger = logging.get_logger(__name__)
 
 
 class NemotronHConfig(PretrainedConfig):
-    r"""
-    This is the configuration class to store the configuration of a
+    r"""This is the configuration class to store the configuration of a
     [`NemotronHModel`]. It is used to instantiate a NemotronH model according
     to the specified arguments, defining the model architecture. Instantiating
     a configuration with the defaults will yield a similar configuration to
     that of the NemotronH-v0.1 model.
+
     Args:
         vocab_size (`int`, *optional*, defaults to 131072):
             Vocabulary size of the NemotronH model. Defines the number of
@@ -139,6 +139,7 @@ class NemotronHConfig(PretrainedConfig):
             Size of chunks for Mamba processing.
         rescale_prenorm_residual (`bool`, *optional*, defaults to `True`):
             Whether to rescale the pre-normalization residual connections.
+
     """
 
     model_type = "nemotron_h"

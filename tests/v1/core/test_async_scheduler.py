@@ -486,7 +486,8 @@ def _create_async_pp_scheduler(
 
 def _assert_ordered_subset(delivered: list[int], emitted: list[int]) -> None:
     """Delivered tokens must be an order-preserving subset of the emitted
-    tokens with no duplicates (tokens are globally unique)."""
+    tokens with no duplicates (tokens are globally unique).
+    """
     it = iter(emitted)
     for token in delivered:
         assert token in it, f"token {token} delivered out of order or twice"
@@ -496,7 +497,8 @@ def _assert_positions_consistent(req, engine: PipelinedEngine) -> None:
     """The i-th delivered output token must be one the runner sampled for
     exactly sequence position prompt_len + i: catches a preempted request's
     stale output landing on a position the resumed request resampled (or
-    vice versa), which token-stream equality alone cannot see."""
+    vice versa), which token-stream equality alone cannot see.
+    """
     for i, token in enumerate(req.output_token_ids):
         expected = req.num_prompt_tokens + i
         actual = engine.emitted_position[token]

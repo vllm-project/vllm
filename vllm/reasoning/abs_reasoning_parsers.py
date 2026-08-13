@@ -24,8 +24,7 @@ logger = init_logger(__name__)
 
 
 class ReasoningParser:
-    """
-    Abstract reasoning parser class that should not be used directly.
+    """Abstract reasoning parser class that should not be used directly.
     Provided and methods should be used in derived classes.
 
     It is used to extract reasoning content from the model output.
@@ -72,26 +71,27 @@ class ReasoningParser:
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        """
-        Check if the reasoning content ends in the input_ids.
+        """Check if the reasoning content ends in the input_ids.
 
         It is used in structured engines like `xgrammar` to check if the
         reasoning content ends in the model output.
 
-        Parameters:
+        Parameters
+        ----------
         input_ids: list[int]
             The input_ids of the model output.
 
-        Returns:
+        Returns
+        -------
         bool
             True if the reasoning content ends in the input_ids.
+
         """
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
-        """
-        Check if the reasoning content ends in the input_ids on a
+        """Check if the reasoning content ends in the input_ids on a
         decode step.
 
         It is used in structured engines like `xgrammar` to check if the
@@ -99,29 +99,36 @@ class ReasoningParser:
         `input_ids` the entire model output and `delta_ids` are the last few
         computed tokens of the model output (like during a decode step).
 
-        Parameters:
+        Parameters
+        ----------
         input_ids: list[int]
             The entire model output.
         delta_ids: list[int]
             The last few computed tokens of the model output at the current decode step.
 
-        Returns:
+        Returns
+        -------
         bool
             True if the reasoning content ends in the `delta_ids` on a
             decode step.
+
         """
         return self.is_reasoning_end(input_ids)
 
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """
-        Extract content token ids from the input_ids.
-        Parameters:
+        """Extract content token ids from the input_ids.
+
+        Parameters
+        ----------
         input_ids: list[int]
             The input_ids of the model output.
-        Returns:
+
+        Returns
+        -------
         list[int]
             The extracted content from the input_ids.
+
         """
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
@@ -138,8 +145,8 @@ class ReasoningParser:
 
         Returns:
             int: Number of tokens that belong to reasoning content.
-        """
 
+        """
         # By default, assume the parser cannot detect reasoning spans.
         return 0
 
@@ -149,18 +156,20 @@ class ReasoningParser:
         model_output: str,
         request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
-        """
-        Extract reasoning content from a complete model-generated string.
+        """Extract reasoning content from a complete model-generated string.
 
         Used for non-streaming responses where we have the entire model response
         available before sending to the client.
 
-        Parameters:
+        Parameters
+        ----------
             model_output: The model-generated string to extract reasoning content from.
             request: The request object that was used to generate the model_output.
 
-        Returns:
+        Returns
+        -------
             A tuple containing the reasoning content and the content.
+
         """
 
     @abstractmethod
@@ -173,8 +182,7 @@ class ReasoningParser:
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> "DeltaMessage | None":
-        """
-        Instance method that should be implemented for extracting reasoning
+        """Instance method that should be implemented for extracting reasoning
         from an incomplete response; for use when handling reasoning calls and
         streaming. Has to be an instance method because  it requires state -
         the current tokens/diffs, but also the information about what has
@@ -204,15 +212,13 @@ class ReasoningParser:
         original_tag: str | None,
         tool_server: ToolServer | None,
     ) -> str | None:
-        """
-        Instance method that is implemented for preparing the structured tag
+        """Instance method that is implemented for preparing the structured tag
         """
         return original_tag
 
 
 class ReasoningParserManager:
-    """
-    Central registry for ReasoningParser implementations.
+    """Central registry for ReasoningParser implementations.
 
     Supports two registration modes:
       - Eager registration via `register_module`
@@ -226,14 +232,14 @@ class ReasoningParserManager:
 
     @classmethod
     def get_reasoning_parser(cls, name: str) -> type[ReasoningParser]:
-        """
-        Retrieve a registered or lazily registered ReasoningParser class.
+        """Retrieve a registered or lazily registered ReasoningParser class.
 
         If the parser is lazily registered, it will be imported and cached
         on first access.
 
         Raises:
             KeyError: if no parser is found under the given name.
+
         """
         if name in cls.reasoning_parsers:
             return cls.reasoning_parsers[name]
@@ -304,8 +310,7 @@ class ReasoningParserManager:
 
     @classmethod
     def register_lazy_module(cls, name: str, module_path: str, class_name: str) -> None:
-        """
-        Register a lazy module mapping for delayed import.
+        """Register a lazy module mapping for delayed import.
 
         Example:
             ReasoningParserManager.register_lazy_module(
@@ -313,6 +318,7 @@ class ReasoningParserManager:
                 module_path="vllm.reasoning.qwen3_engine_reasoning_parser",
                 class_name="Qwen3ParserReasoningAdapter",
             )
+
         """
         cls.lazy_parsers[name] = (module_path, class_name)
 
@@ -325,8 +331,7 @@ class ReasoningParserManager:
     ) -> (
         type[ReasoningParser] | Callable[[type[ReasoningParser]], type[ReasoningParser]]
     ):
-        """
-        Register module with the given name or name list. it can be used as a
+        """Register module with the given name or name list. it can be used as a
         decoder(with module as None) or normal function(with module as not
         None).
         """
@@ -359,8 +364,7 @@ class ReasoningParserManager:
 
     @classmethod
     def import_reasoning_parser(cls, plugin_path: str) -> None:
-        """
-        Import a user-defined reasoning parser by the path
+        """Import a user-defined reasoning parser by the path
         of the reasoning parser define file.
         """
         module_name = os.path.splitext(os.path.basename(plugin_path))[0]

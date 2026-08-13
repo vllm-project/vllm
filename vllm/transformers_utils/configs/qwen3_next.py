@@ -23,8 +23,7 @@ logger = logging.get_logger(__name__)
 
 
 class Qwen3NextConfig(PretrainedConfig):
-    r"""
-    This is the configuration class to store the configuration of a [`Qwen3NextModel`]. It is used to instantiate a
+    r"""This is the configuration class to store the configuration of a [`Qwen3NextModel`]. It is used to instantiate a
     Qwen3-Next model according to the specified arguments, defining the model architecture.
     Instantiating a configuration with the defaults will yield a similar configuration to that of
     Qwen3-Next-80B-A3B-Instruct [Qwen/Qwen3-Next-80B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct).
@@ -157,6 +156,7 @@ class Qwen3NextConfig(PretrainedConfig):
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```
+
     """  # noqa: E501
 
     model_type = "qwen3_next"

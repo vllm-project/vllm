@@ -20,8 +20,7 @@ logger = init_logger(__name__)
 
 
 class SingleWriterShmRingBuffer:
-    """
-    A single-writer, multiple-reader ring buffer implementation using shared
+    """A single-writer, multiple-reader ring buffer implementation using shared
     memory. This class provides a thread-safe ring buffer where one process
     can write data while multiple processes/threads can read from it.
 
@@ -190,8 +189,7 @@ class SingleWriterShmRingBuffer:
         return int.from_bytes(byte_data, "little", signed=True)
 
     def allocate_buf(self, size: int) -> tuple[int, int]:
-        """
-        Allocate a buffer `MD_SIZE` + `size` bytes in the shared memory.
+        """Allocate a buffer `MD_SIZE` + `size` bytes in the shared memory.
         Memory layout:
         `[4-byte monotonic_id][4-byte size][buffer data...]`
         """
@@ -260,8 +258,7 @@ class SingleWriterShmRingBuffer:
         is_free_fn: Callable[[int, memoryview], bool],
         nbytes: int | None = None,
     ) -> Iterable[int]:
-        """
-        Free a buffer of the given size. This is a no-op in shared memory,
+        """Free a buffer of the given size. This is a no-op in shared memory,
         but we need to keep track of the metadata.
 
         If freed memory spreads across the end and start of the ring buffer,
@@ -271,8 +268,8 @@ class SingleWriterShmRingBuffer:
         Args:
             nbytes (int, optional): The size of the buffer to free. If None,
                 frees the maximum size of the ring buffer.
-        """
 
+        """
         assert self.is_writer, "Only the writer can free buffers."
         logger.debug(
             "Freeing up space in the ring buffer, "
@@ -412,8 +409,7 @@ class ShmObjectStorageHandle:
 
 
 class SingleWriterShmObjectStorage:
-    """
-    A single-writer, multiple-reader object storage system built on top of a
+    """A single-writer, multiple-reader object storage system built on top of a
     shared memory ring buffer. Provides key-value storage with automatic memory
     management and cross-process serialization support.
 
@@ -458,8 +454,7 @@ class SingleWriterShmObjectStorage:
         serde_class: type[ObjectSerde] = MsgpackSerde,
         reader_lock: LockType | None = None,
     ):
-        """
-        Initialize the object storage.
+        """Initialize the object storage.
 
         Args:
             max_object_size: Maximum size for a single object in bytes.
@@ -467,10 +462,11 @@ class SingleWriterShmObjectStorage:
             ring_buffer: The shared memory ring buffer for storing objects.
             serde_class: Serializer/deserializer for objects.
             reader_lock: Optional lock for synchronizing reader access.
+
         Raises:
             ValueError: If reader_lock is None for readers.
-        """
 
+        """
         self.max_object_size = max_object_size
         self.n_readers = n_readers
         self.serde_class = serde_class
@@ -547,22 +543,19 @@ class SingleWriterShmObjectStorage:
             del self.writer_flag[freed_id]
 
     def is_cached(self, key: str) -> bool:
-        """
-        Check if the object with the given key is cached.
+        """Check if the object with the given key is cached.
         """
         return key in self.key_index
 
     def get_cached(self, key: str) -> tuple[int, int]:
-        """
-        Get the cached object by key if it exists.
+        """Get the cached object by key if it exists.
         """
         address, monotonic_id = self.key_index[key]
         self.increment_writer_flag(monotonic_id)
         return address, monotonic_id
 
     def put(self, key: str, value: Any) -> tuple[int, int]:
-        """
-        Store a key-value pair in the object storage.
+        """Store a key-value pair in the object storage.
         Attempts to free max_object_size bytes using FIFO order
         when the ring buffer runs out of space during a put() operation.
 
@@ -574,6 +567,7 @@ class SingleWriterShmObjectStorage:
             MemoryError: If there's not enough space in the buffer
             ValueError: If the serialized object is too large
             ValueError: If the key already exists in the storage
+
         """
         if key in self.key_index:
             raise ValueError(f"Key '{key}' already exists in the storage.")
@@ -639,8 +633,7 @@ class SingleWriterShmObjectStorage:
         address: int = 0,
         monotonic_id: int = 0,
     ) -> None:
-        """
-        Touch an existing cached item to update its eviction status.
+        """Touch an existing cached item to update its eviction status.
 
         For writers (ShmObjectStoreSenderCache): Increment writer_flag
         For readers (ShmObjectStoreReceiverCache): Increment reader_count
@@ -700,8 +693,7 @@ class SingleWriterShmObjectStorage:
         )
 
     def default_is_free_check(self, id: int, buf: memoryview) -> bool:
-        """
-        Default is_free function that checks if the first 4 bytes are zero.
+        """Default is_free function that checks if the first 4 bytes are zero.
         This indicates that the buffer is free.
         """
         reader_count = int.from_bytes(buf[0:4], "little", signed=True)

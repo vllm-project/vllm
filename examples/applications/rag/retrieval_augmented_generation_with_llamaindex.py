@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-RAG (Retrieval Augmented Generation) Implementation with LlamaIndex
+"""RAG (Retrieval Augmented Generation) Implementation with LlamaIndex
 ================================================================
 
 This script demonstrates a RAG system using:
@@ -35,6 +34,7 @@ Notes:
     - Ensure both vLLM services are running before executing
     - Default ports: 8000 (embedding), 8001 (chat)
     - First run may take time to download models
+
 """
 
 import argparse

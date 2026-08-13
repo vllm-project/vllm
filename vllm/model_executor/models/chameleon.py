@@ -75,12 +75,11 @@ logger = init_logger(__name__)
 
 
 class ChameleonImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -772,8 +771,7 @@ class ChameleonVQVAE(nn.Module):
 
 # Copied from transformers.models.chameleon.modeling_chameleon.ChameleonImageVocabularyMapping #noqa
 class ChameleonImageVocabularyMapping:
-    """
-    A class for mapping discrete image tokens from VQGAN to BPE tokens.
+    """A class for mapping discrete image tokens from VQGAN to BPE tokens.
     """
 
     def __init__(self, vocab_map: dict[str, int]):
@@ -878,8 +876,7 @@ class ChameleonModel(nn.Module):
         return self.embed_tokens(input_ids)
 
     def get_image_tokens(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """
-        Tokenizes images into discrete tokens with VQGAN module. Converts
+        """Tokenizes images into discrete tokens with VQGAN module. Converts
         obtained image tokens into BPE tokens and wraps with "boi" and "eoi"
         special tokens.
         """

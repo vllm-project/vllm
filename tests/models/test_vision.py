@@ -41,8 +41,7 @@ pytestmark = pytest.mark.cpu_test
 def test_resolve_visual_encoder_outputs(
     select_layers, num_layers_loaded, max_possible_layers, expected_features
 ):
-    """
-    Test that offsets are correctly handled for vision feature layers.
+    """Test that offsets are correctly handled for vision feature layers.
     """
     encoder_outputs = [torch.tensor([idx]) for idx in range(num_layers_loaded + 1)]
     output_tensor = resolve_visual_encoder_outputs(
@@ -94,11 +93,9 @@ def test_run_dp_sharded_vision_model(batch_size: int):
 def run_dp_sharded_vision_model_vs_direct(
     local_rank: int, world_size: int, batch_size: int, master_port: int
 ):
-    """
-    Test that run_dp_sharded_vision_model produces the same results as
+    """Test that run_dp_sharded_vision_model produces the same results as
     calling the model directly.
     """
-
     # Set random seed for reproducibility
     set_random_seed(0)
 
@@ -282,8 +279,7 @@ def test_run_dp_sharded_mrope_vision_model(batch_size: int):
 def run_dp_sharded_mrope_vision_model_vs_direct(
     local_rank: int, world_size: int, batch_size: int, master_port: int
 ):
-    """
-    Test that run_dp_sharded_mrope_vision_model produces the same results as
+    """Test that run_dp_sharded_mrope_vision_model produces the same results as
     calling the model directly.
     """
     # Set random seed for reproducibility
@@ -517,7 +513,8 @@ def _reference_input_norm(
 def test_fused_input_norm_matches_reference(num_patches: int):
     """FusedInputNorm must equal the plain affine, including for num_patches
     above the cuDNN batch-norm grid limit (~65535) that previously raised
-    CUDNN_STATUS_INTERNAL_ERROR (issue #51717)."""
+    CUDNN_STATUS_INTERNAL_ERROR (issue #51717).
+    """
     channel = 3
     patch_size = 14 * 14
     image_mean = [0.48145466, 0.4578275, 0.40821073]

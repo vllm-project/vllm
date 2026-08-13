@@ -181,7 +181,8 @@ def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
 
 def test_passes_with_reasoning_parser(serve_parser):
     """Ensure validation passes if reasoning is enabled
-    with a reasoning parser"""
+    with a reasoning parser
+    """
     args = serve_parser.parse_args(
         args=[
             "--reasoning-parser",
@@ -282,7 +283,8 @@ def test_default_chat_template_kwargs_invalid_json(serve_parser):
 )
 def test_served_model_name_parsing(tmp_path, vllm_parser, args, raises):
     """Ensure that users don't misuse --served-model-name and end up with the default
-    model tag instead of the one they intended to serve."""
+    model tag instead of the one they intended to serve.
+    """
     # Call the serve subparser
     args.insert(0, "serve")
     # Create a dummy config file if the test case includes it

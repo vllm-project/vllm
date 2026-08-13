@@ -27,8 +27,7 @@ def determine_expert_map(
     num_fused_shared_experts: int = 0,
     return_expert_mask: bool = False,
 ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
-    """
-    Calculates how many experts should be assigned to each rank for EP and
+    """Calculates how many experts should be assigned to each rank for EP and
     creates a mapping from global to local expert index. Experts are
     distributed evenly across ranks. Any remaining are assigned to the
     last rank.
@@ -56,6 +55,7 @@ def determine_expert_map(
                 and 0 for sentinel.
                 Returns None if ep_size is 1.
                 Used only when AITER MOE is enabled.
+
     """
     from typing import get_args
 
@@ -150,8 +150,7 @@ def determine_expert_placement_strategy(
 
 
 class ExpertMapManager:
-    """
-    Manages expert ID mappings and placement for Expert Parallelism.
+    """Manages expert ID mappings and placement for Expert Parallelism.
 
     Responsibilities:
     - Calculate local vs global expert counts
@@ -193,8 +192,7 @@ class ExpertMapManager:
         num_fused_shared_experts: int = 0,
         rocm_aiter_enabled: bool = False,
     ):
-        """
-        Initialize expert map manager.
+        """Initialize expert map manager.
 
         Args:
             global_num_experts: Total number of experts across all ranks
@@ -203,6 +201,7 @@ class ExpertMapManager:
             placement_strategy: Strategy for placing experts ('linear' or 'round_robin')
             num_fused_shared_experts: Number of fused shared experts (for AITER)
             rocm_aiter_enabled: Whether ROCm AITER fusion is enabled
+
         """
         self.global_num_experts = global_num_experts
         self.moe_parallel_config = moe_parallel_config
@@ -295,8 +294,7 @@ class ExpertMapManager:
 
     @property
     def expert_map(self) -> torch.Tensor | None:
-        """
-        Mapping from global expert ID to local expert ID.
+        """Mapping from global expert ID to local expert ID.
 
         Returns tensor of shape (global_num_experts,) where:
         - expert_map[global_id] = local_id if expert is on this rank
@@ -308,8 +306,7 @@ class ExpertMapManager:
 
     @property
     def expert_mask(self) -> torch.Tensor | None:
-        """
-        Expert mask for AITER fusion (ROCm-specific).
+        """Expert mask for AITER fusion (ROCm-specific).
 
         Returns tensor of shape (global_num_experts + num_fused_shared + 1,)
         where 1 indicates expert is on this rank, 0 otherwise.
@@ -325,8 +322,7 @@ class ExpertMapManager:
     def routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        """
-        Routing tables for round-robin placement.
+        """Routing tables for round-robin placement.
 
         Returns (global_to_physical, physical_to_global, local_to_global)
         or None if not using round-robin or tables not needed.
@@ -334,8 +330,7 @@ class ExpertMapManager:
         return self._routing_tables
 
     def map_global_to_local(self, global_id: int) -> int:
-        """
-        Map global expert ID to local expert ID.
+        """Map global expert ID to local expert ID.
 
         Args:
             global_id: Global expert ID (0 to global_num_experts - 1)
@@ -345,6 +340,7 @@ class ExpertMapManager:
 
         Raises:
             ValueError: If expert is not on this rank
+
         """
         if self._expert_map is None:
             return global_id
@@ -369,8 +365,7 @@ class ExpertMapManager:
         moe_parallel_config: FusedMoEParallelConfig,
         global_num_experts: int,
     ) -> None:
-        """
-        Update expert mappings for new EP configuration.
+        """Update expert mappings for new EP configuration.
 
         Used during dynamic reconfiguration (e.g., elastic scaling).
 
@@ -378,6 +373,7 @@ class ExpertMapManager:
             global_num_experts: New total number of experts across all ranks
             moe_parallel_config: New MoE parallel configuration (contains ep_size,
                                  ep_rank, backend flags)
+
         """
         self.moe_parallel_config = moe_parallel_config
         self.global_num_experts = global_num_experts
@@ -397,8 +393,7 @@ class ExpertMapManager:
             self._init_aiter_shared_experts_topK_buffer()
 
     def get_compressed_map_string(self) -> str:
-        """
-        Get compressed string representation of expert map for logging.
+        """Get compressed string representation of expert map for logging.
 
         Returns string mapping local to global expert IDs.
         """
@@ -457,8 +452,7 @@ class ExpertMapManager:
     def _init_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        """
-        Ensure routing tables are initialized if needed for round-robin.
+        """Ensure routing tables are initialized if needed for round-robin.
 
         This is a public method that can be called to explicitly initialize
         routing tables. It's safe to call multiple times (idempotent).

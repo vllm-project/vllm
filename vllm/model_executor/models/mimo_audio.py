@@ -1308,6 +1308,7 @@ class MimoAudioEncoder(nn.Module):
 
         Returns:
             [T//group_size, group_size, audio_channels]
+
         """
         T = audio.shape[0]
         audio = audio[:, : self.audio_channels]
@@ -1348,6 +1349,7 @@ class MimoAudioEncoder(nn.Module):
             Tuple of:
             - audio_embeds: [total_tokens, out_hidden_size] concatenated embeddings
             - item_token_lens: list of int, number of tokens per input item
+
         """
         if self.audio_tokenizer is None:
             raise RuntimeError(

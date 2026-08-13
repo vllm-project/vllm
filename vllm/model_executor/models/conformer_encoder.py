@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Shared Conformer encoder components for FireRedASR2 and FireRedLID.
+"""Shared Conformer encoder components for FireRedASR2 and FireRedLID.
 
 Both models use the same Conformer-based audio encoder architecture
 (Conv2dSubsampling → RelPositionalEncoding → N × RelPosEmbConformerBlock).
@@ -287,8 +286,7 @@ class RelPosEmbConformerBlock(nn.Module):
 
 
 class ConformerEncoder(nn.Module):
-    """
-    Conformer encoder shared by FireRedASR2 and FireRedLID.
+    """Conformer encoder shared by FireRedASR2 and FireRedLID.
     """
 
     def __init__(

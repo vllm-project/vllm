@@ -216,13 +216,12 @@ class VisualTokenizer(torch.nn.Module):
 
 
 class OvisImagePatchInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of images * number of patches
-        - h: Height of each patch
-        - w: Width of each patch
-        - patch_indicators: Batch size * (number of patches + 1)
-        - bn: Batch size * number of images
+    """Dimensions:
+    - bnp: Batch size * number of images * number of patches
+    - h: Height of each patch
+    - w: Width of each patch
+    - patch_indicators: Batch size * (number of patches + 1)
+    - bn: Batch size * number of images
     """
 
     type: Literal["image_patches"]
@@ -330,8 +329,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         self,
         image_indicators: list[int],
     ) -> list[int]:
-        """
-        Filter image indicators placeholders and convert them to corresponding
+        """Filter image indicators placeholders and convert them to corresponding
         tokens in visual tokenizer.
         For example, [-301, -300, -302, -300, -303, -300, -304, -300, -305]
         should return [vocab_size-1, vocab_size-2, ..., vocab_size-5]

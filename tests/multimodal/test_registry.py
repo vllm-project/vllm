@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for MultiModalRegistry.supports_multimodal_inputs and
+"""Unit tests for MultiModalRegistry.supports_multimodal_inputs and
 Qwen2.5-VL visual component loading behavior.
 """
 
@@ -28,7 +27,8 @@ pytestmark = pytest.mark.cpu_test
 @pytest.mark.core_model
 def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
     """Test supports_multimodal_inputs returns correct boolean for various
-    configs."""
+    configs.
+    """
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt=limit_mm_per_prompt,

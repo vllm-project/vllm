@@ -79,6 +79,7 @@ class SchedulerInterface(ABC):
         Returns:
             A SchedulerOutput object containing information about the scheduled
             requests.
+
         """
         raise NotImplementedError
 
@@ -105,6 +106,7 @@ class SchedulerInterface(ABC):
         Returns:
             A dict of client index to EngineCoreOutputs object containing the
             outputs for each request originating from that client.
+
         """
         raise NotImplementedError
 
@@ -115,6 +117,7 @@ class SchedulerInterface(ABC):
 
         Args:
             draft_token_ids: The input draft token ids for each request.
+
         """
         raise NotImplementedError
 
@@ -129,6 +132,7 @@ class SchedulerInterface(ABC):
             draft_token_ids: The input draft token ids for each request.
             scheduler_output: Update the given scheduler_output
                 with the corresponding draft token ids.
+
         """
         raise NotImplementedError
 
@@ -138,6 +142,7 @@ class SchedulerInterface(ABC):
 
         Args:
             request: The new request being added.
+
         """
         raise NotImplementedError
 
@@ -162,6 +167,7 @@ class SchedulerInterface(ABC):
         Returns:
             List of requests that were aborted. Will not include any that were
             already finished.
+
         """
         raise NotImplementedError
 
@@ -172,7 +178,8 @@ class SchedulerInterface(ABC):
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests in the scheduler's
-        internal queue."""
+        internal queue.
+        """
         return self.get_num_unfinished_requests() > 0
 
     @abstractmethod
@@ -192,7 +199,8 @@ class SchedulerInterface(ABC):
 
     def has_requests(self) -> bool:
         """Returns True if there are unfinished requests, or finished requests
-        not yet returned in SchedulerOutputs."""
+        not yet returned in SchedulerOutputs.
+        """
         return self.has_unfinished_requests() or self.has_finished_requests()
 
     @property
@@ -218,6 +226,7 @@ class SchedulerInterface(ABC):
                 preempted and moved to the waiting queue. Otherwise, this method
                 will only reset the KV prefix cache when there is no running request
                 taking KV cache.
+
         """
         raise NotImplementedError
 

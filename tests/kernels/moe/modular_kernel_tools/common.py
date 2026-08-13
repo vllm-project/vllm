@@ -148,8 +148,7 @@ class Config:
         return self.E // self.world_size
 
     def make_env_data(self) -> tuple[VllmConfig, dict[Any, Any]]:
-        """
-        make env data for vllm launch.
+        """Make env data for vllm launch.
         """
         vllm_config = VllmConfig()
         vllm_config.model_config = SimpleNamespace(
@@ -169,7 +168,8 @@ class Config:
 
     def fe_supports_quant_scheme(self) -> bool:
         """Check if the fused experts class supports this quant config.
-        See https://github.com/ROCm/aiter/issues/2419 for AITER gaps."""
+        See https://github.com/ROCm/aiter/issues/2419 for AITER gaps.
+        """
         if self.quant_config is None or self.quant_dtype is None:
             return True
         if self.quant_dtype != torch.float8_e4m3fn:
@@ -444,8 +444,7 @@ class RankTensors:
     def make_hidden_states(
         config: Config,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """
-        Return hidden_states
+        """Return hidden_states
         """
         m, k, dtype = (config.M, config.K, config.dtype)
         device = torch.accelerator.current_device_index()

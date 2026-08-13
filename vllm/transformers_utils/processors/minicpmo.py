@@ -14,8 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Processor class for MiniCPMO.
+"""Processor class for MiniCPMO.
 """
 
 import math
@@ -35,8 +34,7 @@ MiniCPMOBatchFeature: TypeAlias = BatchFeature
 
 
 class MiniCPMOProcessor(ProcessorMixin):
-    r"""
-    Constructs a MiniCPMV processor which wraps a MiniCPMV image
+    r"""Constructs a MiniCPMV processor which wraps a MiniCPMV image
     processor and a MiniCPMV tokenizer into a single processor.
 
     [`MiniCPMVProcessor`] offers all the functionalities of
@@ -49,6 +47,7 @@ class MiniCPMOProcessor(ProcessorMixin):
             The image processor is a required input.
         tokenizer ([`LlamaTokenizerWrapper`], *optional*):
             The tokenizer is a required input.
+
     """
 
     attributes = ["image_processor", "feature_extractor", "tokenizer"]
@@ -253,8 +252,7 @@ class MiniCPMOProcessor(ProcessorMixin):
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.batch_decode
     # with CLIP->Llama
     def batch_decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to LlamaTokenizerFast's
+        """This method forwards all its arguments to LlamaTokenizerFast's
         [`~PythonBackend.batch_decode`]. Please refer to the
         docstring of this method for more information.
         """
@@ -274,8 +272,7 @@ class MiniCPMOProcessor(ProcessorMixin):
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.decode
     # with CLIP->Llama
     def decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to LlamaTokenizerFast's
+        """This method forwards all its arguments to LlamaTokenizerFast's
         [`~PythonBackend.decode`]. Please refer to the docstring
         of this method for more information.
         """
@@ -551,14 +548,12 @@ class MelSpectrogramFeatures(torch.nn.Module):
         )
 
     def __call__(self, audio: torch.Tensor) -> torch.Tensor:
-        """
-        audio: Tensor([num_channels, num_samples])
+        """audio: Tensor([num_channels, num_samples])
         """
         return super().__call__(audio)
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        """
-        audio: Tensor([num_channels, num_samples])
+        """audio: Tensor([num_channels, num_samples])
         """
         mel: torch.Tensor = self.mel_spec(audio)
         features = torch.log(torch.clip(mel, min=1e-5))

@@ -236,7 +236,8 @@ class TestInductorFallbackFastPath:
 
     def test_inner_set_membership_still_works_for_standard_ops(self):
         """The patch must not break Inductor's existing fallback decisions
-        for non-vllm ops such as ``torchvision::roi_align``."""
+        for non-vllm ops such as ``torchvision::roi_align``.
+        """
         import torch._inductor.lowering as _lowering
 
         allow_list = _lowering.FALLBACK_ALLOW_LIST

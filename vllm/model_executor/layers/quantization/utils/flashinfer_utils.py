@@ -210,7 +210,6 @@ def align_fp4_moe_weights_for_fi(
     not satisfied (e.g. with certain tensor-parallel sizes), we pad the
     gate/up and down projection weights along the intermediate dim.
     """
-
     # Current local intermediate size (per partition) is the K dimension of
     # the down projection.
     num_experts, hidden_size, intermediate = w2.shape
@@ -301,7 +300,6 @@ def align_moe_weights_for_fi(
     not satisfied (e.g. with certain tensor-parallel sizes), we pad the
     gate/up and down projection weights along the intermediate dim.
     """
-
     # Current local intermediate size (per partition) is the K dimension of
     # the down projection.
     num_experts, hidden_size, intermediate = w2.shape
@@ -451,8 +449,7 @@ def prepare_fp8_moe_layer_for_fi(
     w2_input_scale: torch.Tensor | None,
     is_trtllm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Convert Fp8 MoE weights to flashinfer kernel format
+    """Convert Fp8 MoE weights to flashinfer kernel format
 
     Note that for trtllm we update the model state dict
     with the scale format needed for these kernels.
@@ -460,7 +457,6 @@ def prepare_fp8_moe_layer_for_fi(
     Note that for per-tensor, we update the layer's
     intermediate size if the weights needed padding.
     """
-
     assert hasattr(layer.moe_config, "is_act_and_mul")
     block_quant = (
         hasattr(layer, "weight_block_size") and layer.weight_block_size is not None

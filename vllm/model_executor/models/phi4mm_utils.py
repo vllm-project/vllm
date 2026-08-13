@@ -29,6 +29,7 @@ def get_activation(name: str = "relu") -> torch.nn.Module:
             activation function name,
             one of ["relu", "gelu", "swish", "sigmoid"],
             default "relu".
+
     """
     name = name.lower()
     if name == "relu":
@@ -48,8 +49,7 @@ def get_activation(name: str = "relu") -> torch.nn.Module:
 def adaptive_enc_mask(
     x_len: int, chunk_start_idx: list[int], left_window: int = 0, right_window: int = 0
 ) -> torch.Tensor:
-    """
-    The function is very important for Transformer Transducer Streaming mode
+    """The function is very important for Transformer Transducer Streaming mode
     Args:
         x_len: sequence length
         chunk_start_idx: first idx of each chunk, such as [0,18,36,48].
@@ -57,7 +57,8 @@ def adaptive_enc_mask(
         left_window: how many left chunks can be seen
         right_window: how many right chunks can be seen. It is used for
         chunk overlap model.
-        Returns:
+
+    Returns:
             mask (torch.Tensor): a mask tensor for streaming model
             Torch 1.0.1
             tensor([[1., 1., 0., 0.],
@@ -67,6 +68,7 @@ def adaptive_enc_mask(
             tensor([[True., True., False., False.],
                     [False., True., True., False.],
                     [False., False., True., True.]])
+
     """
     chunk_start_idx = torch.Tensor(
         chunk_start_idx
@@ -184,9 +186,9 @@ class GLUPointWiseConv(nn.Module):
             self.b2 = nn.Parameter(torch.zeros(1, output_dim, 1))
 
     def forward(self, x: Tensor) -> Tensor:
-        """
-        Args:
-            x: input tensor
+        """Args:
+        x: input tensor
+
         """
         # to be consistent with GLULinear, we assume the input always has the
         # #channel (#dim) in the last dimension of the tensor, so need to
@@ -273,10 +275,9 @@ class DepthWiseSeparableConv1d(nn.Module):
         self.depthwise_seperable_out_channel = depthwise_seperable_out_channel
 
     def forward(self, x: Tensor) -> Tensor:
-        """
+        """Args:
+        x: input tensor
 
-        Args:
-            x: input tensor
         """
         x = self.dw_conv(x)
         if self.depthwise_seperable_out_channel != 0:
@@ -341,6 +342,7 @@ class ConvModule(nn.Module):
              or onnx export.  Typically this is set by the export program or
              the decoder program, and it isn't present in your config file.
              default False
+
     """
 
     def __init__(
@@ -406,8 +408,7 @@ class ConvModule(nn.Module):
                 self.ln2 = nn.Linear(input_dim * depthwise_multiplier, input_dim)
 
     def _add_ext_pw_layer(self) -> None:
-        """
-        This function is an extension of __init__ function
+        """This function is an extension of __init__ function
         and dedicated to the convolution module creation
         of the conformer.
         """
@@ -471,6 +472,7 @@ class ConvModule(nn.Module):
 
         Args:
             x: input tensor.
+
         """
         x = self.layer_norm(x)
 
@@ -531,6 +533,7 @@ class GLULinear(nn.Module):
             default "sigmoid" (swish function).
         bias_in_glu: bool, optional
             If True, the addtive bias is added. Default False.
+
     """
 
     def __init__(
@@ -549,6 +552,7 @@ class GLULinear(nn.Module):
 
         Args:
             x: input tensor.
+
         """
         x = self.linear(x)
         return self.glu_act(x)
@@ -572,6 +576,7 @@ class FeedForward(nn.Module):
             sigmoid activation is only used with "glu_in_fnn=True",
             default "sigmoid".
         bias_in_glu: bool, optional
+
     """
 
     def __init__(
@@ -600,6 +605,7 @@ class FeedForward(nn.Module):
 
         Args:
             x: input tensor.
+
         """
         out = self.net(self.layer_norm(x))
 
@@ -630,8 +636,7 @@ def _pre_hook(
 
 
 class T5RelativeAttentionLogitBias(nn.Module):
-    """
-    This module implements the relative position bias described in Section
+    """This module implements the relative position bias described in Section
     2.1 of the T5 paper: https://arxiv.org/pdf/1910.10683.pdf
 
     The Huggingface implementation is used as a reference
@@ -671,6 +676,7 @@ class T5RelativeAttentionLogitBias(nn.Module):
             Whether to use symmetric or asymmetric biases. symmetric=False uses
             2x number of bias params to distinguish L->R from R->L. This was
             found to be better for the encoder.
+
     """
 
     def __init__(
@@ -799,6 +805,7 @@ class AbsolutePositionalEncoding(nn.Module):
 
         Args:
             x: input tensor
+
         """
         if self.pe is not None and self.pe.size(1) >= x.size(1):
             if self.pe.dtype != x.dtype or self.pe.device != x.device:
@@ -840,6 +847,7 @@ class MeanVarianceNormLayer(nn.Module):
     Args:
         input_size: int
             layer input size.
+
     """
 
     def __init__(self, input_size: int) -> None:
@@ -853,13 +861,13 @@ class MeanVarianceNormLayer(nn.Module):
 
         Args:
             input_: input tensor.
+
         """
         return (input_ - self.global_mean) * self.global_invstd
 
 
 class CausalConv1D(nn.Conv1d):
-    """
-    A causal version of nn.Conv1d where each step would have limited access to
+    """A causal version of nn.Conv1d where each step would have limited access to
     locations on its right or left
     All arguments are the same as nn.Conv1d except padding.
 
@@ -952,8 +960,7 @@ class CausalConv1D(nn.Conv1d):
 
 
 class CausalConv2D(nn.Conv2d):
-    """
-    A causal version of nn.Conv2d where each location in the 2D matrix would
+    """A causal version of nn.Conv2d where each location in the 2D matrix would
     have no access to locations on its right or down
     All arguments are the same as nn.Conv2d except padding which should be
     set as None
@@ -1037,6 +1044,7 @@ class NemoConvSubsampling(torch.nn.Module):
         activation (Module): activation function, default is nn.ReLU()
         is_causal (bool): whether to use causal Conv1/2D, where each step will
             have limited access to locations on its right or left
+
     """
 
     def __init__(
@@ -1334,8 +1342,7 @@ class NemoConvSubsampling(torch.nn.Module):
         return [0, self.subsampling_factor + 1]
 
     def forward(self, x: Tensor, mask: Tensor | None) -> tuple[Tensor, Tensor | None]:
-        """
-        Forward method for NeMo subsampling.
+        """Forward method for NeMo subsampling.
 
         Args:
             x: input tensor
@@ -1346,6 +1353,7 @@ class NemoConvSubsampling(torch.nn.Module):
                 time_reduction_factor, feat_out)
             pad_mask: tensor of padded hidden state sequences (B, 1, T //
                 time_reduction_factor)
+
         """
         x = x.unsqueeze(1) if self.conv2d_subsampling else x.transpose(1, 2)
 
@@ -1450,7 +1458,8 @@ class NemoConvSubsampling(torch.nn.Module):
 
     def conv_split_by_channel(self, x: Tensor) -> Tensor:
         """For dw convs, tries to split input by time, run conv and concat
-        results"""
+        results
+        """
         x = self.conv[0](x)  # full conv2D
         x = self.conv[1](x)  # activation
 
@@ -1490,7 +1499,6 @@ class NemoConvSubsampling(torch.nn.Module):
         self, conv: torch.nn.Module, chunk_size: int, x: Tensor
     ) -> Tensor:
         """Performs channel chunked convolution"""
-
         ind = 0
         out_chunks = []
         for chunk in torch.split(x, chunk_size, 1):
@@ -1574,7 +1582,7 @@ class AttModule(nn.Module):
         self.export_mode = False
 
     def set_export(self, mode: bool = True) -> None:
-        """set the export mode"""
+        """Set the export mode"""
         self.export_mode = mode
 
     def forward(
@@ -1591,6 +1599,7 @@ class AttModule(nn.Module):
             memory: memory tensor.
             pos_emb: positional encoder embedding.
             att_mask: attention mask tensor.
+
         """
         return x, memory, pos_emb, att_mask
 
@@ -1638,6 +1647,7 @@ class MultiHeadedAttention(nn.Module):
             if group_size > 1:       GQA
             if group_size = 1:       MHA
             if group_size = n_head:  MQA
+
     """
 
     inv_sqrt_d_k: torch.jit.Final[float]
@@ -1715,6 +1725,7 @@ class MultiHeadedAttention(nn.Module):
             relative_attention_bias: bias added to attention logits w.r.t.
                 relative positions
                 (1, n_head, time1, time2)
+
         """
         n_batch = query.size(0)
 
@@ -1830,6 +1841,7 @@ def get_offset(input_layer: str, time_reduction: int) -> int:
         time_reduction: time reduction factor for downsampling a feature
     Returns:
         int: offset
+
     """
     if input_layer in ("conv2d", "nemo_conv") and time_reduction == 4:
         return 3
@@ -1841,13 +1853,14 @@ def get_offset(input_layer: str, time_reduction: int) -> int:
 
 
 def unfold_tensor(xs_pad: Tensor, max_seq_len: int) -> Tensor:
-    """
-    For a given tensor with shape of (N, T, D), if sequence length T is
+    """For a given tensor with shape of (N, T, D), if sequence length T is
     longer than max_seq_len, this function unfold it to a
     (NT', max_seq_len, D) where T' is T // max_seq_len.
+
     Args:
         xs_pad: input tensor with shape (N, T, D)
         max_seq_len: maximum sequence length
+
     """
     _, _, D = xs_pad.shape
     xs_pad = xs_pad.transpose(-1, -2)  # convert to N, D, T

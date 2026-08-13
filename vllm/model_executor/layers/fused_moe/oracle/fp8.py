@@ -71,12 +71,10 @@ def _get_priority_backends(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
 ) -> list[Fp8MoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
+    """Get available backends in priority order based on platform and config.
 
     This function can be extended to become more complex as needed.
     """
-
     _AVAILABLE_BACKENDS = [
         Fp8MoeBackend.AITER,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
@@ -274,11 +272,9 @@ def select_fp8_moe_backend(
     activation_key: QuantKey | None,
     allow_vllm_cutlass: bool = False,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the primary FP8 MoE backend
+    """Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
 
@@ -429,7 +425,8 @@ def _humming_fp8_weight_schema(
     layer: RoutedExperts, weight: torch.Tensor, weight_scale: torch.Tensor
 ) -> dict[str, Any]:
     """Build the humming weight schema from the canonical on-device fp8/mxfp8
-    tensors (scale dtype/shape, block size), not the producing quant method."""
+    tensors (scale dtype/shape, block size), not the producing quant method.
+    """
     # mxfp8: e8m0 group-32 scales (stored as uint8 bytes or e8m0). humming has
     # no compressed-tensors mxfp8 loader; its modelopt schema fits both sources.
     if weight_scale.dtype in (torch.uint8, torch.float8_e8m0fnu):
@@ -587,8 +584,7 @@ def make_fp8_moe_quant_config(
     gemm1_beta: float | None = None,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Create FusedMoEQuantConfig for the specified FP8 Backend.
+    """Create FusedMoEQuantConfig for the specified FP8 Backend.
     The FusedMoEQuantConfig holds the scales that are used
     at runtime by the Modular Kernel abstraction.
 
@@ -599,7 +595,6 @@ def make_fp8_moe_quant_config(
     In a future PR, we will have this function should be
     a method of the modular kernel itself.
     """
-
     # MARLIN and CPU are mixed precision W8A16 config.
     if fp8_backend == Fp8MoeBackend.MARLIN or fp8_backend == Fp8MoeBackend.CPU:
         return fp8_w8a16_moe_quant_config(

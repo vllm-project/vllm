@@ -121,8 +121,7 @@ class KVEventBatch(EventBatch):
 
 
 class KVEventAggregator:
-    """
-    Aggregates KV events across multiple workers.
+    """Aggregates KV events across multiple workers.
     Tracks how many times each event appears and returns only those
     that were emitted by all workers.
     """
@@ -136,22 +135,22 @@ class KVEventAggregator:
         self._num_workers: int = num_workers
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
-        """
-        Add events from a worker batch.
+        """Add events from a worker batch.
 
         Args:
             events: List of KVCacheEvent objects.
+
         """
         if not isinstance(events, list):
             raise TypeError("events must be a list of KVCacheEvent.")
         self._event_counter.update(events)
 
     def get_common_events(self) -> list[KVCacheEvent]:
-        """
-        Return events that appeared in all workers.
+        """Return events that appeared in all workers.
 
         Returns:
             List of events present in all workers.
+
         """
         return [
             event
@@ -160,43 +159,41 @@ class KVEventAggregator:
         ]
 
     def get_all_events(self) -> list[KVCacheEvent]:
-        """
-        Return all events for all workers.
+        """Return all events for all workers.
 
         Returns:
             List of events for all workers.
+
         """
         return list(self._event_counter.elements())
 
     def clear_events(self) -> None:
-        """
-        Clear all tracked events.
+        """Clear all tracked events.
         """
         self._event_counter.clear()
 
     def increment_workers(self, count: int = 1) -> None:
-        """
-        Increment the number of workers contributing events.
+        """Increment the number of workers contributing events.
 
         Args:
             count: Number to increment the workers by.
+
         """
         if count <= 0:
             raise ValueError("count must be positive.")
         self._num_workers += count
 
     def reset_workers(self) -> None:
-        """
-        Reset the number of workers to 1.
+        """Reset the number of workers to 1.
         """
         self._num_workers = 1
 
     def get_number_of_workers(self) -> int:
-        """
-        Return the number of workers.
+        """Return the number of workers.
 
         Returns:
             int number of workers.
+
         """
         return self._num_workers
 
@@ -208,8 +205,7 @@ class KVEventAggregator:
 
 
 class KVConnectorKVEvents(ABC):
-    """
-    Abstract base class for KV events.
+    """Abstract base class for KV events.
     Acts as a container for KV events from the connector.
     """
 
@@ -309,6 +305,7 @@ class ZmqEventPublisher(EventPublisher):
         Maximum number of events to buffer in memory.
     topic:
         Topic to publish events to.
+
     """
 
     SHUTDOWN_TIMEOUT: float = 1.0
@@ -506,6 +503,7 @@ class ZmqEventPublisher(EventPublisher):
         Returns:
             The endpoint with the port offset by data_parallel_rank
                 or suffix appended
+
         """
         # Do nothing if input is None or data_parallel_rank is 0
         if not endpoint or data_parallel_rank == 0:

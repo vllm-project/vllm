@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-HyperCLOVAX V2 (32B Think Model) Implementation.
+"""HyperCLOVAX V2 (32B Think Model) Implementation.
 
 This module contains the V2 architecture that uses Qwen2.5 Vision Transformer
 instead of CLIP/SigLIP used in V1.
@@ -57,8 +56,7 @@ V2_VIDEO_TOKEN: str = "<|video_start|><|VIDEO_PAD|><|video_end|>"
 
 
 class HCXVisionV2ImagePixelInputs(TensorSchema):
-    """
-    V2 Image inputs using Qwen2.5-VL style grid_thw format.
+    """V2 Image inputs using Qwen2.5-VL style grid_thw format.
 
     Dimensions:
         - np: Number of patches
@@ -72,8 +70,7 @@ class HCXVisionV2ImagePixelInputs(TensorSchema):
 
 
 class HCXVisionV2ImageEmbeddingInputs(TensorSchema):
-    """
-    V2 Image embedding inputs.
+    """V2 Image embedding inputs.
 
     Dimensions:
         - nf: Number of image features
@@ -90,8 +87,7 @@ HCXVisionV2ImageInputs = HCXVisionV2ImagePixelInputs | HCXVisionV2ImageEmbedding
 
 
 class HCXVisionV2VideoPixelInputs(TensorSchema):
-    """
-    V2 Video inputs using Qwen2.5-VL style grid_thw format.
+    """V2 Video inputs using Qwen2.5-VL style grid_thw format.
 
     Dimensions:
         - np: Number of patches
@@ -105,8 +101,7 @@ class HCXVisionV2VideoPixelInputs(TensorSchema):
 
 
 class HCXVisionV2VideoEmbeddingInputs(TensorSchema):
-    """
-    V2 Video embedding inputs.
+    """V2 Video embedding inputs.
 
     Dimensions:
         - nf: Number of video features
@@ -416,8 +411,7 @@ class HCXVisionV2MultiModalProcessor(
     dummy_inputs=HCXVisionV2DummyInputsBuilder,
 )
 class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    """
-    HyperCLOVAX-SEED Vision-Language Model (V2 architecture).
+    """HyperCLOVAX-SEED Vision-Language Model (V2 architecture).
 
     Supports:
     - HyperCLOVAX-SEED-Think-32B: Vision + Text

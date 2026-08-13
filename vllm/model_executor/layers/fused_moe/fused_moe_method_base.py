@@ -58,8 +58,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
     def uses_weight_scale_2_pattern(self) -> bool:
-        """
-        Returns True if this quantization method uses 'weight_scale_2' pattern
+        """Returns True if this quantization method uses 'weight_scale_2' pattern
         for per-tensor weight scales (e.g., FP4 variants), False otherwise.
 
         This method should be overridden by subclasses that use the
@@ -74,8 +73,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         act_dtype: torch.dtype,
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> tuple[int, int]:
-        """
-        Given layer hidden size and intermediate size per partition and MoE
+        """Given layer hidden size and intermediate size per partition and MoE
         configurations, round up hidden_size and intermediate_size_per_partition
         if necessary.
 
@@ -92,6 +90,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 - rounded_hidden_size is the possibly rounded up hidden size.
                 - rounded_intermediate_size_per_partition is the possibly rounded
                   up intermediate size per partition.
+
         """
         from .all2all_utils import maybe_roundup_layer_hidden_size
 
@@ -118,8 +117,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def has_unpadded_output(self) -> bool:
-        """
-        Indicates that the hidden_states output might be the unpadded
+        """Indicates that the hidden_states output might be the unpadded
         hidden_states shape rather than the full padded shape.
         """
         return False
@@ -150,8 +148,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         shared_experts: "SharedExperts | None",
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        """
-        Apply the MoE operation using modular kernels.
+        """Apply the MoE operation using modular kernels.
 
         Args:
             layer: RoutedExperts instance containing weight parameters
@@ -162,6 +159,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         Returns:
             Output tensor from routed experts
+
         """
         raise NotImplementedError
 
@@ -172,8 +170,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Apply the MoE operation using monolithic kernels.
+        """Apply the MoE operation using monolithic kernels.
 
         Args:
             layer: RoutedExperts instance containing weight parameters
@@ -182,5 +179,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         Returns:
             Output tensor from routed experts
+
         """
         raise NotImplementedError

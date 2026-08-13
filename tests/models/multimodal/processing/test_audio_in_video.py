@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Regression tests for Qwen2.5-Omni and Qwen3-Omni audio-in-video processor
+"""Regression tests for Qwen2.5-Omni and Qwen3-Omni audio-in-video processor
 caching.
 
 Tests the use_audio_in_video feature where audio is extracted from video and
@@ -50,8 +49,7 @@ def create_mm_data(num_videos: int) -> dict[str, list]:
 @pytest.mark.parametrize("model_id", MODELS)
 @pytest.mark.parametrize("num_videos", [1, 2])
 def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> None:
-    """
-    Regression test for https://github.com/vllm-project/vllm/pull/36800
+    """Regression test for https://github.com/vllm-project/vllm/pull/36800
 
     MultiModalProcessorSenderCache.get_and_update_item returns (None, updates)
     on a cache hit, so mm_kwargs["video"] items become None on the second call.
@@ -117,8 +115,7 @@ def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> Non
 
 @pytest.mark.parametrize("model_id", MODELS)
 def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
-    """
-    A video with no audio track, combined with `use_audio_in_video=True`,
+    """A video with no audio track, combined with `use_audio_in_video=True`,
     must raise a clear `ValueError` naming the mismatch, rather than an
     opaque `StopIteration`-derived error from the underlying HF processor.
     """

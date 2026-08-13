@@ -22,7 +22,8 @@ AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 class StreamedResponseHandler:
     """Handles streaming HTTP responses by accumulating chunks until complete
-    messages are available."""
+    messages are available.
+    """
 
     def __init__(self):
         self.buffer = ""
@@ -30,7 +31,8 @@ class StreamedResponseHandler:
 
     def add_chunk(self, chunk_bytes: bytes) -> list[str]:
         """Add a chunk of bytes to the buffer and return any complete
-        messages."""
+        messages.
+        """
         chunk_str = self._decoder.decode(chunk_bytes)
         self.buffer += chunk_str
 
@@ -168,6 +170,7 @@ async def async_request_openai_completions(
 
     Returns:
         The output of the request function.
+
     """
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Completions API", "completions")

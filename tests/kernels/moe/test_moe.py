@@ -78,8 +78,7 @@ def iterative_moe(
     expert_map: torch.Tensor = None,
     renormalize: bool = False,
 ) -> torch.Tensor:
-    """
-    Baseline implementation of fused moe.
+    """Baseline implementation of fused moe.
 
     Args:
         hidden_states: [*, hidden_size]
@@ -87,6 +86,7 @@ def iterative_moe(
         w2: [num_experts, hidden_size, intermediate_size]
         gating_output: [*, num_experts]
         expert_map: [num_experts]
+
     """
     orig_shape = hidden_states.shape
     hidden_size = hidden_states.shape[-1]
@@ -1678,8 +1678,7 @@ def test_batched_fused_marlin_moe(
             )
 
         def is_valid(self):
-            """
-            Return True only if the input can be represented in a Batched
+            """Return True only if the input can be represented in a Batched
             format.
             """
             return torch.all(self.expert_num_tokens_cpu <= self.max_tokens_per_batch)
@@ -1805,8 +1804,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
     dtype: torch.dtype,
     workspace_init,
 ):
-    """
-    Test BF16 unquantized MoE with FlashInfer TRTLLM backend.
+    """Test BF16 unquantized MoE with FlashInfer TRTLLM backend.
     """
     set_random_seed(7)
 

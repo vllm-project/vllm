@@ -32,14 +32,14 @@ def _make_get_num_new_matched_tokens(
 
 @pytest.fixture
 def fail_scheduler():
-    """scheduler with kv_load_failure_policy='fail'"""
+    """Scheduler with kv_load_failure_policy='fail'"""
     vllm_config = create_vllm_config()
     vllm_config.kv_transfer_config.kv_load_failure_policy = "fail"
     return create_scheduler(vllm_config)
 
 
 def test_error_propagation_sync_load(fail_scheduler: Scheduler):
-    """test invalid_block_ids with fail policy -> FINISHED_ERROR (sync load)"""
+    """Test invalid_block_ids with fail policy -> FINISHED_ERROR (sync load)"""
     num_prompt_blocks = 100
     num_external_computed_blocks = 99
     invalid_block_idx = 50
@@ -93,7 +93,7 @@ def test_error_propagation_sync_load(fail_scheduler: Scheduler):
 
 
 def test_error_propagation_async_load(fail_scheduler: Scheduler):
-    """test invalid_block_ids with fail policy -> FINISHED_ERROR (async load)"""
+    """Test invalid_block_ids with fail policy -> FINISHED_ERROR (async load)"""
     num_prompt_blocks = 100
     num_external_computed_blocks = 99
     invalid_block_idx = 50

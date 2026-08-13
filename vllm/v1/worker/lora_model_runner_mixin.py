@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Define LoRA functionality mixin for model runners.
+"""Define LoRA functionality mixin for model runners.
 """
 
 from collections.abc import Callable
@@ -154,8 +153,7 @@ class LoRAModelRunnerMixin:
         num_sampled_tokens: np.ndarray | None = None,
         num_active_loras: int = 0,
     ):
-        """
-        Context manager to select dummy LoRAs for capture/warmup.
+        """Context manager to select dummy LoRAs for capture/warmup.
 
         Args:
             lora_config: LoRA configuration, or None if LoRA is disabled.
@@ -164,6 +162,7 @@ class LoRAModelRunnerMixin:
             num_active_loras: Number of distinct active LoRAs to use.
                 - 0: No LoRA active (set up zero mappings).
                 - >0: Use exactly this many distinct LoRAs.
+
         """
         if num_sampled_tokens is None:
             num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
@@ -259,8 +258,7 @@ class LoRAModelRunnerMixin:
         num_active_loras: int = 0,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ):
-        """
-        Context manager for dummy runs with LoRA.
+        """Context manager for dummy runs with LoRA.
 
         Args:
             lora_config: LoRA configuration.
@@ -269,6 +267,7 @@ class LoRAModelRunnerMixin:
             remove_lora: Whether to remove LoRAs after the context exits.
             num_active_loras: Number of distinct active LoRAs to use.
                 LoRA is activated when num_active_loras > 0.
+
         """
         with (
             self.maybe_setup_dummy_loras(lora_config, remove_lora),

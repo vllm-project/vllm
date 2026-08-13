@@ -90,8 +90,7 @@ ISO639_1_SUPPORTED_LANGS = {
 
 ### Audio Input
 class GraniteSpeechAudioInputs(TensorSchema):
-    """
-    Audio input features for Granite Speech model.
+    """Audio input features for Granite Speech model.
 
     Dimensions:
         - b: Batch size
@@ -471,7 +470,8 @@ class GraniteSpeechConformerConvModule(nn.Module):
 
 class GraniteSpeechConformerBlock(nn.Module):
     """Conformer block, consisting largely of linear layers,
-    attention, and convolutional layers."""
+    attention, and convolutional layers.
+    """
 
     def __init__(self, config: PretrainedConfig, prefix: str = ""):
         super().__init__()
@@ -723,9 +723,11 @@ class GraniteSpeechForConditionalGeneration(
         Args:
             audio_embed_sizes: torch.Tensor
                 Tensor of num features in each seq in the batch.
+
         Returns:
             torch.Tensor: Mask of shape (bsz, num_features) to be applied to
             the audio features prior to splitting the audio embeddings.
+
         """
         most_audio_features = int(torch.max(audio_embed_sizes))
         mask_indices = torch.arange(most_audio_features).view(1, -1)
@@ -754,10 +756,12 @@ class GraniteSpeechForConditionalGeneration(
         Args:
             input_features: list[torch.Tensor]
                 3D Input features to be coerced into a tensor.
+
         Returns:
             torch.Tensor: Tensor of shape [bsz, num_features, 160], where
             num_features is the max number of features of any entry in the
             batch.
+
         """
         feat_lens = [feats.shape[1] for feats in input_features]
         padding = [max(feat_lens) - length for length in feat_lens]
@@ -781,8 +785,10 @@ class GraniteSpeechForConditionalGeneration(
             audio_input: GraniteSpeechAudioInputs
                 Audio inputs object containing Mel features, an input features
                 mask, and the (flattened) number of audio tokens per instance.
+
         Returns:
             tuple[torch.Tensor]: List of length bsz.
+
         """
         # TODO (Alex) - support embedding inputs
         encoder_embeds = self.encoder(audio_input["input_features"])

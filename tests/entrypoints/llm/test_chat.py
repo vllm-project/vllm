@@ -25,8 +25,7 @@ def text_llm():
 
 @pytest.fixture(scope="function")
 def llm_for_failure_test():
-    """
-    Fixture for testing issue #26081.
+    """Fixture for testing issue #26081.
     Uses a small max_model_len to easily trigger length errors.
     """
     # pytest caches the fixture so we use weakref.proxy to
@@ -77,8 +76,7 @@ def test_multi_chat(text_llm):
 
 
 def test_llm_chat_tokenization_no_double_bos(text_llm):
-    """
-    LLM.chat() should not add special tokens when using chat templates.
+    """LLM.chat() should not add special tokens when using chat templates.
     Check we get a single BOS token for llama chat.
     """
     messages = [
@@ -142,8 +140,7 @@ def test_chat_extra_kwargs(thinking_llm, enable_thinking):
 
 
 def test_chat_batch_failure_cleanup(llm_for_failure_test):
-    """
-    Tests that if a batch call to llm.chat() fails mid-way
+    """Tests that if a batch call to llm.chat() fails mid-way
     (e.g., due to one invalid prompt), the requests that
     were already enqueued are properly aborted and do not
     pollute the queue for subsequent calls.

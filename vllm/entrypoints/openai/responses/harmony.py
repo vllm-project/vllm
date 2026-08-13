@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Harmony ↔ Responses API conversion utilities.
+"""Harmony ↔ Responses API conversion utilities.
 
 Handles two directions:
   1. Response Input → Harmony Messages  (input parsing)
@@ -52,7 +51,8 @@ logger = init_logger(__name__)
 
 def _parse_harmony_format_message(chat_msg: dict) -> Message:
     """Reconstruct a Message from Harmony-format dict,
-    preserving channel, recipient, and content_type."""
+    preserving channel, recipient, and content_type.
+    """
     author_dict = chat_msg["author"]
     role = author_dict.get("role")
     name = author_dict.get("name")

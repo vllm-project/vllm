@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Based on:
+"""Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
 Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
@@ -21,8 +20,7 @@ _EXPAND_LORA_SCALE_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
 
 def _get_expand_lora_scale_ptr(lora_weights: list[torch.Tensor], device: torch.device):
-    """
-    `_EXPAND_LORA_SCALE_PTR_DICT` collects the required information during
+    """`_EXPAND_LORA_SCALE_PTR_DICT` collects the required information during
     `profile_run`,
     After this, it remains constant and subsequent usage is through LUT.
     Refer to:
@@ -91,8 +89,7 @@ def _lora_expand_kernel_fp8(
     per_channel_quant: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
-    """
-    FP8-compatible expand kernel wrapper.
+    """FP8-compatible expand kernel wrapper.
     """
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
@@ -192,8 +189,7 @@ def _lora_expand_fp8(
     use_fp8_w8a8: bool = False,
     per_channel_quant: bool = False,
 ) -> None:
-    """
-    FP8-compatible LoRA expand operation.
+    """FP8-compatible LoRA expand operation.
 
     Args:
         inputs: Input tensor from shrink operation [num_slices, num_tokens, lora_rank]
@@ -216,6 +212,7 @@ def _lora_expand_fp8(
         group_n (int, optional): Block size for N in block-wise quantization.
         use_fp8_w8a8 (bool, optional): Whether to use FP8 W8A8 quantization.
         per_channel_quant (bool, optional): Whether to use per-channel quantization.
+
     """
     assert no_lora_flag_cpu.numel() == 1
     if no_lora_flag_cpu.item():

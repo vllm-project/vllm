@@ -140,8 +140,7 @@ class FalconH1SSMDecoderLayer(nn.Module):
         self._init_mup_vector()
 
     def _init_mup_vector(self):
-        """
-        Non learnable per-block scaling vector composed of element-wise
+        """Non learnable per-block scaling vector composed of element-wise
         multipliersapplied to each separate contiguous block of the output
         of the linear projection (in_proj) before further processing
         (gating, convolution, SSM):
@@ -313,8 +312,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
 
 
 class FalconH1ParallelHybrid(nn.Module):
-    """
-    A hybrid decoder layer for FalconH1 where the input is processed
+    """A hybrid decoder layer for FalconH1 where the input is processed
     in parallel through both the self-attention branch and the SSM (Mamba)
     branch. Their outputs are then summed to produce the final hidden state.
 
@@ -550,6 +548,7 @@ class FalconH1ForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config

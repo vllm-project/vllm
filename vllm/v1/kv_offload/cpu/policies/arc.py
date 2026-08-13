@@ -10,8 +10,7 @@ from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
 
 class ARCCachePolicy(CachePolicy):
-    """
-    ARC (Adaptive Replacement Cache) cache policy.
+    """ARC (Adaptive Replacement Cache) cache policy.
 
     Data Structures:
         T1: Recent cache containing blocks accessed once.

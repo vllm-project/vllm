@@ -86,8 +86,8 @@ def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
     Args:
       kwargs: `LLM` constructor kwargs
       logitproc_loaded: server has loaded dummy logitproc if True
-    """
 
+    """
     # Create a vLLM instance and load custom logitproc
     llm_logitproc = LLM(
         model=MODEL_NAME,
@@ -158,8 +158,8 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
       logitproc_source: what source (entrypoint, fully-qualified class name
                         (FQCN), class object, or None) the user pulls the
                         logitproc from
-    """
 
+    """
     # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
     set_random_seed(40)
@@ -213,8 +213,8 @@ def test_custom_logitsprocs_req(monkeypatch):
 
     Args:
       monkeypatch: for setting env vars
-    """
 
+    """
     # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
     set_random_seed(40)
@@ -258,6 +258,7 @@ def test_rejects_custom_logitsprocs(
       logitproc_source: what source (entrypoint, fully-qualified class name
                         (FQCN), or class object) the user pulls the
                         logitproc from
+
     """
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     set_random_seed(40)

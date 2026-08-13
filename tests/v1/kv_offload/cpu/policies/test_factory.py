@@ -15,7 +15,8 @@ from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 class _DummyCachePolicy(CachePolicy):
     """Minimal CachePolicy for CachePolicyFactory registration tests. Loaded
     by module path, so it must be importable at module scope (mirrors
-    tests/v1/kv_offload/test_factory.py's SingleArgExternalOffloadingSpec)."""
+    tests/v1/kv_offload/test_factory.py's SingleArgExternalOffloadingSpec).
+    """
 
     def __init__(self, cache_capacity: int) -> None:
         self.cache_capacity = cache_capacity
@@ -54,7 +55,8 @@ class TestCachePolicyFactory:
 
     def test_pre_registered_policies_can_be_imported(self):
         """If someone moves a policy module but forgets to update
-        factory.py, CI fails."""
+        factory.py, CI fails.
+        """
         for name in CachePolicyFactory._registry:
             cls = CachePolicyFactory._registry[name]()
             assert issubclass(cls, CachePolicy)
@@ -88,7 +90,8 @@ class TestCachePolicyFactory:
         register_cache_policy() call -- this is how external projects
         integrate a custom CachePolicy without forking/patching vLLM.
         Mirrors tests/v1/kv_offload/test_factory.py's
-        test_dynamic_load_via_spec_module_path."""
+        test_dynamic_load_via_spec_module_path.
+        """
         policy_cls = CachePolicyFactory.get_cache_policy_cls(
             "_DummyCachePolicy", "tests.v1.kv_offload.cpu.policies.test_factory"
         )
@@ -96,7 +99,8 @@ class TestCachePolicyFactory:
 
     def test_manager_resolves_policy_via_module_path(self):
         """End-to-end: CPUOffloadingManager resolves an unregistered policy
-        purely from cache_policy_module_path."""
+        purely from cache_policy_module_path.
+        """
         manager = CPUOffloadingManager(
             num_blocks=4,
             cache_policy="_DummyCachePolicy",
@@ -106,6 +110,7 @@ class TestCachePolicyFactory:
 
     def test_unregistered_policy_without_module_path_raises(self):
         """eviction_policy not in registry + no cache_policy_module_path ->
-        ValueError, same shape as the OffloadingSpecFactory error path."""
+        ValueError, same shape as the OffloadingSpecFactory error path.
+        """
         with pytest.raises(ValueError, match="Unknown cache policy"):
             CachePolicyFactory.get_cache_policy_cls("nonexistent", None)

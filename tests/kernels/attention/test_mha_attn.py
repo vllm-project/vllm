@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test:
+"""Test:
 
 * Tests for MMEncoderAttention layer
 """
@@ -41,8 +40,7 @@ if current_platform.is_rocm():
 
 @pytest.mark.parametrize("device", devices)
 def test_mha_attn_platform(default_vllm_config, device: str):
-    """
-    Test the attention selector between different platform and device.
+    """Test the attention selector between different platform and device.
     """
     torch.set_default_dtype(torch.float16)
 
@@ -105,8 +103,7 @@ def ref_attention(
     value: torch.Tensor,
     scale: float,
 ) -> torch.Tensor:
-    """
-    Native implementation of scaled dot product attention without mask:
+    """Native implementation of scaled dot product attention without mask:
     - query, key, value: [batch_size, seq_len, num_heads, head_size]
     - attn_mask: [batch_size, seq_len, seq_len]
     """

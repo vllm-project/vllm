@@ -94,8 +94,7 @@ def _store_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """
-    Store callback: Writes to a temp file then atomically replaces the destination.
+    """Store callback: Writes to a temp file then atomically replaces the destination.
     """
     # Check if block already exists to avoid redundant writes
     if os.path.exists(dest_path):
@@ -141,7 +140,8 @@ def _load_block(
 ) -> None:
     """Read one KV block from disk; remove the file only on a provable short
     read (a too-short file is genuine corruption) and leave it untouched on any
-    other error."""
+    other error.
+    """
     fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
     o_direct = O_DIRECT if use_o_direct else 0
@@ -172,8 +172,7 @@ def batch_store_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """
-    Store a batch of KV blocks from a shared buffer to disk in one call.
+    """Store a batch of KV blocks from a shared buffer to disk in one call.
 
     Each block buffer[offsets[i] : offsets[i]+block_size] is written atomically
     to dest_paths[i] via a temp-file rename.  Raises on first error.
@@ -197,8 +196,7 @@ def batch_load_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """
-    Load a batch of KV blocks from disk into a shared buffer in one call.
+    """Load a batch of KV blocks from disk into a shared buffer in one call.
 
     Block i is read from source_paths[i] into view[offsets[i] : offsets[i]+block_size].
     Raises on first error (see _load_block for the delete-on-short-read policy).

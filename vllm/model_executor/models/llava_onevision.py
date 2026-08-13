@@ -53,17 +53,16 @@ _MAX_FRAMES_PER_VIDEO = 16
 
 
 class LlavaOnevisionVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of videos
-        - f: Number of frames
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - bn: Batch size * number of videos
+    - f: Number of frames
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
 
-        Note that `f` may be different for each batch, and 'num_frames'
-        may be different for each video, in which case the data is passed as a
-        list instead of a batched tensor.
+    Note that `f` may be different for each batch, and 'num_frames'
+    may be different for each video, in which case the data is passed as a
+    list instead of a batched tensor.
     """
 
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
@@ -75,16 +74,15 @@ class LlavaOnevisionVideoPixelInputs(TensorSchema):
 
 
 class LlavaOnevisionImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - np: Number of patches (1 + num_patches)
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - bn: Batch size * number of images
+    - np: Number of patches (1 + num_patches)
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
 
-        Note that `num_patches` may be different per batch and image,
-        in which case the data is passed as a list instead of a batched tensor.
+    Note that `num_patches` may be different per batch and image,
+    in which case the data is passed as a list instead of a batched tensor.
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -98,11 +96,10 @@ class LlavaOnevisionImagePixelInputs(TensorSchema):
 
 
 class LlavaOnevisionImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - ifs: Image feature size
-        - hs: Hidden size (must match language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - ifs: Image feature size
+    - hs: Hidden size (must match language model backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -564,8 +561,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     def _parse_and_validate_video_input(
         self, **kwargs: object
     ) -> LlavaOnevisionVideoPixelInputs | None:
-        """
-        A legal video input should have the following dimensions:
+        """A legal video input should have the following dimensions:
         {
             "pixel_values_videos" :
                 list[b, Tensor(nb_frames, nb_channels, height, width)]
@@ -893,10 +889,12 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for LlaVA-Onevision.
+
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             pixel_values_videos: Pixels in each frames for each input videos.
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None

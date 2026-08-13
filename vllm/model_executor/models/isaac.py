@@ -175,23 +175,23 @@ def create_pixel_shuffle_index_map(
     scale_factor: int = 1,
     device: torch.device | None = None,
 ) -> torch.Tensor:
-    """
-    Build a gather-index map that tells us, for every *output* token after
+    """Build a gather-index map that tells us, for every *output* token after
     pixel-shuffle, which `scale_factor**2` *input* tokens are being merged.
 
-    Args
+    Args:
     ----
     seq_sizes     : (num_images,)  - #patches in each image (row-major order)
     token_grids   : (num_images,2) - (height, width) for every image
     scale_factor  : spatial down-scale factor (≥2)
     device        : (optional) overrides `seq_sizes.device`
 
-    Returns
+    Returns:
     -------
     gather_idx : (new_total_seq_len, scale_factor**2) int64 tensor.
                  gather_idx[i, j] is the *flat* index into the *original*
                  packed sequence for the j-th sub-patch that forms the
                  i-th output token.
+
     """
     if device is None:
         device = seq_sizes.device
@@ -264,6 +264,7 @@ def pixel_shuffle_varlen(
 
     Raises:
         ValueError: If more than one batch item is provided.
+
     """
     keep_batch_dim = x.dim() == 3
     if keep_batch_dim:
@@ -401,8 +402,7 @@ class IsaacDummyInputsBuilder(BaseDummyInputsBuilder[IsaacProcessingInfo]):
 
 
 class IsaacImagePixelInputs(TensorSchema):
-    """
-    Schema for validating Isaac image inputs.
+    """Schema for validating Isaac image inputs.
 
     Dimensions:
         - np: Number of patches
@@ -681,12 +681,10 @@ class Siglip2VisionTransformer(nn.Module):
         self,
         packed_seq_patches: tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
-        r"""
-        spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
-            Tensor containing the spatial dimensions (height, width)
-            of the input images.
+        r"""spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
+        Tensor containing the spatial dimensions (height, width)
+        of the input images.
         """
-
         seq_patches, token_grids = packed_seq_patches
         seq_sizes = torch.prod(token_grids, dim=-1)
 
@@ -998,8 +996,7 @@ class IsaacForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",

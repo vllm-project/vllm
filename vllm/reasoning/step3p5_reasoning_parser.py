@@ -14,8 +14,7 @@ if TYPE_CHECKING:
 
 
 class Step3p5ReasoningParser(BaseThinkingReasoningParser):
-    """
-    Reasoning parser for Step3p5 model.
+    """Reasoning parser for Step3p5 model.
 
     Step3p5 uses the <think>...</think> format, but it tends to emit an extra
     newline immediately before and/or after the </think> token. This parser trims:

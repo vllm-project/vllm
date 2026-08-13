@@ -286,7 +286,6 @@ def create_vllm_config(
 
 def test_write_mode_saves_local_block_ids():
     """Write mode records local block ids in MoRIIOConnectorMetadata.reqs_to_save."""
-
     # Setup Scheduler and Request
     vllm_config = create_vllm_config(role="kv_producer")
     scheduler = create_scheduler(vllm_config)
@@ -397,7 +396,6 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
 
 def test_read_mode_loads_remote_block_ids():
     """Read mode loads remote block ids into local cache mapping."""
-
     # Setup Scheduler and Request
     vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
     scheduler = create_scheduler(vllm_config)
@@ -624,7 +622,6 @@ def test_register_kv_caches(mock_parallel_groups):
 )
 def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     """MoRIIO handshake socket returns valid agent metadata over ZMQ."""
-
     ROLE = "kv_consumer"
     vllm_config = create_vllm_config(role=ROLE)
     from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
@@ -689,7 +686,8 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
 def test_resolve_host_ip_prefers_extra_config():
     """An explicit ``host_ip`` in kv_connector_extra_config overrides get_ip()
     (so an external router can advertise a routable/internal address); an
-    absent or empty value falls back to get_ip()."""
+    absent or empty value falls back to get_ip().
+    """
     assert resolve_host_ip({"host_ip": "10.0.0.7"}) == "10.0.0.7"
 
     fallback = get_ip()

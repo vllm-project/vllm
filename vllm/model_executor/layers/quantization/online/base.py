@@ -85,7 +85,8 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
 
 class OnlineQuantizationConfig(QuantizationConfig):
     """Model-level config for online quantization (quantize fp16/bf16 weights
-    during model loading, without requiring a pre-quantized checkpoint)."""
+    during model loading, without requiring a pre-quantized checkpoint).
+    """
 
     def __init__(
         self,

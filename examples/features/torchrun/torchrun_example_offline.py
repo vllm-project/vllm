@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-experimental support for tensor-parallel inference with torchrun,
+"""experimental support for tensor-parallel inference with torchrun,
 see https://github.com/vllm-project/vllm/issues/11400 for
 the motivation and use case for this example.
 run the script with `torchrun --nproc-per-node=4 torchrun_example_offline.py`,

@@ -97,7 +97,8 @@ class TestProcessorCompoundDeltas:
 
     def test_split_name_and_args_same_index(self):
         """Regression: parsers like KimiK2 emit name and args as separate
-        DeltaToolCalls at the same index within one DeltaMessage."""
+        DeltaToolCalls at the same index within one DeltaMessage.
+        """
         tc_name = _make_tool_call(0, name="get_weather")
         tc_args = _make_tool_call(0, arguments='{"city":"SF"}')
         delta = DeltaMessage(tool_calls=[tc_name, tc_args])
@@ -113,7 +114,8 @@ class TestProcessorCompoundDeltas:
 
     def test_reasoning_to_content_transition(self):
         """Regression: the old special case in emit_delta handled this;
-        now split_delta handles it generically."""
+        now split_delta handles it generically.
+        """
         processor = SimpleStreamingEventProcessor()
         _run_through_processor(processor, DeltaMessage(reasoning="think"))
         assert processor.state.current_state == _StateType.REASONING

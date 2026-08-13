@@ -122,7 +122,6 @@ class LogprobsTensors(NamedTuple):
         num_positions: int, num_tokens_per_position: int
     ) -> "LogprobsTensors":
         """Create empty LogprobsTensors on CPU."""
-
         logprob_token_ids = torch.empty(
             (num_positions, num_tokens_per_position), dtype=torch.int32, device="cpu"
         )
@@ -345,8 +344,7 @@ class DraftTokenIds:
 def make_empty_encoder_model_runner_output(
     scheduler_output: "SchedulerOutput",
 ) -> ModelRunnerOutput:
-    """
-    Create a ModelRunnerOutput stub that contains the correct
+    """Create a ModelRunnerOutput stub that contains the correct
     per-request bookkeeping but no generated data yet.
     """
     if not scheduler_output.num_scheduled_tokens:

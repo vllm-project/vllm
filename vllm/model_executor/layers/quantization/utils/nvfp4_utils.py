@@ -11,8 +11,7 @@ from vllm.utils.math_utils import round_up
 
 
 def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
-    """
-    Pad and block-interleave the FP4 block-scales so that they match the data
+    """Pad and block-interleave the FP4 block-scales so that they match the data
     layout expected by the CUTLASS / FlashInfer kernels.
 
     Parameters
@@ -23,6 +22,7 @@ def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
     -------
     torch.Tensor
         The swizzled tensor with the same logical shape as *scale*.
+
     """
     assert scale.dtype == torch.float8_e4m3fn, (
         "swizzle_blockscale expects the input tensor to be in "
@@ -65,8 +65,7 @@ def pad_nvfp4_weight_for_cutlass(
     weight: torch.Tensor,
     alignment: int = 32,
 ) -> tuple[torch.Tensor, int]:
-    """
-    Pad packed NVFP4 weights so that both N (rows) and K (columns) satisfy
+    """Pad packed NVFP4 weights so that both N (rows) and K (columns) satisfy
     the alignment constraints required by CUTLASS / FlashInfer FP4 kernels.
 
     CUTLASS FP4 kernel requires both K and N matrix dimensions to be divisible
@@ -102,8 +101,7 @@ def pad_nvfp4_activation_for_cutlass(
     x_fp4: torch.Tensor,
     weights_padding_bytes: int,
 ) -> torch.Tensor:
-    """
-    Pad packed FP4 activations to match the K-dimension padding applied to weights.
+    """Pad packed FP4 activations to match the K-dimension padding applied to weights.
     The padding is in bytes (tensor dimension), not FP4 elements.
     """
     if weights_padding_bytes > 0:
@@ -115,8 +113,7 @@ def slice_nvfp4_output(
     out: torch.Tensor,
     output_size: int,
 ) -> torch.Tensor:
-    """
-    Slice the output tensor to remove padding in N dimension if weight was padded.
+    """Slice the output tensor to remove padding in N dimension if weight was padded.
     """
     if out.shape[-1] != output_size:
         return out[..., :output_size].contiguous()

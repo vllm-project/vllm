@@ -383,7 +383,8 @@ def test_mxfp8_linear_emulation_bf16_at_load(
 ):
     """EmulationMxfp8LinearKernel load-time BF16 dequant (default) and the
     ``VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0`` per-step fallback must produce the
-    same result; the dtype-match (BF16/FP16 activations) must also hold."""
+    same result; the dtype-match (BF16/FP16 activations) must also hold.
+    """
     from vllm.model_executor.kernels.linear.mxfp8.emulation import (
         EmulationMxfp8LinearKernel,
     )
@@ -434,7 +435,8 @@ def test_mxfp8_linear_emulation_bf16_at_load(
 # produced EP garbage).
 def _capture_expert_mask(expert_mask, *, global_num_experts):
     """Drive the real ``AiterMxfp8Experts.apply`` mask branch and capture the
-    ``expert_mask`` it forwards to ``rocm_aiter_ops.fused_moe``."""
+    ``expert_mask`` it forwards to ``rocm_aiter_ops.fused_moe``.
+    """
     from types import SimpleNamespace
     from unittest import mock
 
@@ -485,7 +487,8 @@ def _capture_expert_mask(expert_mask, *, global_num_experts):
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_aiter_mxfp8_apply_forwards_expert_mask_unchanged():
     """AiterMxfp8Experts.apply forwards the precomputed 0/1 mask to aiter as-is
-    (no re-derivation that would collapse an already-0/1 mask to all-ones)."""
+    (no re-derivation that would collapse an already-0/1 mask to all-ones).
+    """
     # 0/1 local-expert mask over global ids + trailing sentinel (rank owns 0..3).
     ep_mask = torch.tensor(
         [1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=torch.int32, device=DEVICE
@@ -499,7 +502,8 @@ def test_aiter_mxfp8_apply_forwards_expert_mask_unchanged():
 def test_routed_experts_expert_map_delegates_to_kernel():
     """RoutedExperts.expert_map returns the 0/1 mask only for kernels that set
     ``consumes_expert_mask`` (AITER), and the canonical -1 map otherwise -- keyed
-    on the resolved kernel, not the global aiter switch."""
+    on the resolved kernel, not the global aiter switch.
+    """
     from types import SimpleNamespace
 
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test batch-invariant matmul against torch.matmul for various shape combinations.
+"""Test batch-invariant matmul against torch.matmul for various shape combinations.
 
 Tests correctness (matches torch.matmul) and batch invariance (result for one
 item doesn't change based on other items in the batch).
@@ -49,8 +48,7 @@ DEVICE_TYPE = current_platform.device_type
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_matmul_correctness(a_shape, b_shape, dtype):
-    """
-    Compare matmul_batch_invariant against torch.matmul for various shapes.
+    """Compare matmul_batch_invariant against torch.matmul for various shapes.
     """
     device = torch.device(DEVICE_TYPE)
 
@@ -83,11 +81,9 @@ def test_matmul_correctness(a_shape, b_shape, dtype):
 @skip_unsupported
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_matmul_batch_invariance(dtype):
-    """
-    Verify that the result for one item is bitwise identical regardless
+    """Verify that the result for one item is bitwise identical regardless
     of what other items are in the batch.
     """
-
     device = torch.device(DEVICE_TYPE)
 
     torch.manual_seed(42)

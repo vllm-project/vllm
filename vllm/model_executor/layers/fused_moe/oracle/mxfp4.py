@@ -313,7 +313,8 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
 
 def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     """Available backends in priority order, BF16-act variant before
-    activation-quantized variant within each vendor family."""
+    activation-quantized variant within each vendor family.
+    """
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
@@ -335,8 +336,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
 
 
 def _get_priority_backends() -> list[Mxfp4MoeBackend]:
-    """
-    Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
+    """Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
     TRTLLM MXFP8; SM90 falls through to Triton_unfused or Marlin (the
     backend-level ``is_supported_config`` check filters by device capability).
     """
@@ -387,7 +387,8 @@ def _resolve_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
     """Combine the model-supplied activation key with the user override.
-    Raises on conflict (both set and disagreeing)."""
+    Raises on conflict (both set and disagreeing).
+    """
     user_override = _user_moe_activation_override()
     if user_override is None:
         return model_activation_key
@@ -437,7 +438,8 @@ def _filter_by_activation(
 ) -> list[Mxfp4MoeBackend]:
     """Pick variants matching ``requested_activation_key``; without one,
     prefer BF16 if the list has any, else keep the list as-is so explicit
-    non-BF16 picks (e.g. the ``_afp8`` aliases) still land."""
+    non-BF16 picks (e.g. the ``_afp8`` aliases) still land.
+    """
     if requested_activation_key is not None:
         return [
             b
@@ -453,8 +455,7 @@ def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the primary MXFP4 MoE backend.
+    """Select the primary MXFP4 MoE backend.
 
     Args:
         config: MoE configuration
@@ -463,6 +464,7 @@ def select_mxfp4_moe_backend(
             Use kFp8StaticTensorSym for W4A8 scheme.
 
     Note: Shape-specific fallbacks may still occur at runtime.
+
     """
     requested_activation_key = _resolve_activation_key(activation_key)
 
@@ -571,8 +573,7 @@ def select_mxfp4_moe_backend(
 def select_deepseek_v4_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the MXFP4 MoE backend with MXFP8 activation as top priority.
+    """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """
     activation_format = (
@@ -715,7 +716,6 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     torch.Tensor | None,
 ]:
     """Convert loaded weights into backend-specific kernel format."""
-
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
             w13_weight,

@@ -117,7 +117,8 @@ def _spec_cls_with_metric_definitions(
     metric_definitions: dict[str, Any],
 ) -> type:
     """Build a fake offloading spec class reporting the given metric
-    definitions, so tests don't need to patch the real CPU spec."""
+    definitions, so tests don't need to patch the real CPU spec.
+    """
 
     class _FakeOffloadingSpec:
         @staticmethod
@@ -187,7 +188,8 @@ def test_build_kv_connector_stats_with_empty_dict():
 
 def test_build_kv_connector_stats_reconstructs_offload_stats():
     """Test that OffloadingConnector stats are properly reconstructed with
-    correct data."""
+    correct data.
+    """
     serialized_data = {
         _StatsKey.TYPES: {
             LOAD_BYTES: _MetricType.COUNTER,

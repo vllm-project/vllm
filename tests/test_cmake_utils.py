@@ -26,9 +26,10 @@ endif()
 def test_extract_archs_prefers_sass_target_over_corrupted_virtual_arch(
     tmp_path: Path,
 ):
-    """torch's autodetection can emit a bogus arch=compute_* half (e.g.
+    """Torch's autodetection can emit a bogus arch=compute_* half (e.g.
     capability 12.1 corrupted to arch=compute_20,code=sm_121); the SASS
-    target must win, while PTX-only entries keep the virtual arch."""
+    target must win, while PTX-only entries keep the virtual arch.
+    """
     repo_root = Path(__file__).parents[1]
     script = tmp_path / "test_extract_archs.cmake"
     script.write_text(

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Contains helpers related to importing modules.
+"""Contains helpers related to importing modules.
 
 This is similar in concept to the `importlib` module.
 """
@@ -24,8 +23,7 @@ logger = init_logger(__name__)
 
 
 def import_pynvml():
-    """
-    Historical comments:
+    """Historical comments:
 
     libnvml.so is the library behind nvidia-smi, and
     pynvml is a Python wrapper around it. We use it to get GPU
@@ -57,8 +55,7 @@ def import_pynvml():
 
 @cache
 def import_triton_kernels():
-    """
-    For convenience, prioritize triton_kernels that is available in
+    """For convenience, prioritize triton_kernels that is available in
     `site-packages`. Use `vllm.third_party.triton_kernels` as a fall-back.
     """
     if _has_module("triton_kernels"):
@@ -83,8 +80,7 @@ def import_triton_kernels():
 
 
 def import_from_path(module_name: str, file_path: str | os.PathLike):
-    """
-    Import a Python file according to its file path.
+    """Import a Python file according to its file path.
 
     Based on the official recipe:
     https://docs.python.org/3/library/importlib.html#importing-a-source-file-directly
@@ -102,8 +98,7 @@ def import_from_path(module_name: str, file_path: str | os.PathLike):
 
 
 def resolve_obj_by_qualname(qualname: str) -> Any:
-    """
-    Resolve an object by its fully-qualified class name.
+    """Resolve an object by its fully-qualified class name.
     """
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
@@ -127,8 +122,7 @@ def get_vllm_optional_dependencies():
 
 
 class _PlaceholderBase:
-    """
-    Disallows downstream usage of placeholder modules.
+    """Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
     [`__getattr__`][vllm.utils.import_utils._PlaceholderBase.__getattr__]
@@ -139,8 +133,7 @@ class _PlaceholderBase:
     """
 
     def __getattr__(self, key: str) -> Never:
-        """
-        The main class should implement this to throw an error
+        """The main class should implement this to throw an error
         for attribute accesses representing downstream usage.
         """
         raise NotImplementedError
@@ -283,8 +276,7 @@ class _PlaceholderBase:
 
 
 class PlaceholderModule(_PlaceholderBase):
-    """
-    A placeholder object to use when a module does not exist.
+    """A placeholder object to use when a module does not exist.
 
     This enables more informative errors when trying to access attributes
     of a module that does not exist.
@@ -339,8 +331,7 @@ class _PlaceholderModuleAttr(_PlaceholderBase):
 
 
 class LazyLoader(ModuleType):
-    """
-    `LazyLoader` module borrowed from [Tensorflow]
+    """`LazyLoader` module borrowed from [Tensorflow]
     (https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py)
     with an addition of "module caching".
 
@@ -521,7 +512,6 @@ def has_tilelang() -> bool:
 
 def has_arctic_inference() -> bool:
     """Whether the optional `arctic_inference` package is available."""
-
     return _has_module("arctic_inference")
 
 

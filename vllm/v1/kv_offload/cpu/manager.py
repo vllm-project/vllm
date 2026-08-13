@@ -28,8 +28,7 @@ from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 
 
 class CPUOffloadingManager(OffloadingManager):
-    """
-    An OffloadingManager with a pluggable CachePolicy, resolved by name via
+    """An OffloadingManager with a pluggable CachePolicy, resolved by name via
     CachePolicyFactory (built in: "lru", "arc"; external policies can either
     register their own or be loaded out-of-tree via cache_policy_module_path).
 

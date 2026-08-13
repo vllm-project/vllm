@@ -72,7 +72,8 @@ def test_true_w4a4_kernels_reject_unset_activation(kernel_cls):
 @pytest.mark.parametrize("kernel_cls", _TRUE_W4A4_KERNELS)
 def test_true_w4a4_kernels_reject_explicit_non_mxfp4_activation(kernel_cls):
     """FlashInfer/XPU/Aiter quantize activations to MXFP4 internally, so an
-    explicit request for a different activation format must be rejected."""
+    explicit request for a different activation format must be rejected.
+    """
     config = MxFp4LinearLayerConfig(activation_quant_key=kMxfp6E3M2Dynamic)
     can_implement, reason = kernel_cls.can_implement(config)
     assert not can_implement
@@ -87,7 +88,8 @@ def test_weight_only_kernels_accept_unquantized_or_mxfp4_activation(
     """Marlin/Humming never quantize activations, so an unset activation key,
     or one that already describes MXFP4-shaped data, is tolerated. When an
     activation key is explicitly set, a warning must be logged noting that it
-    is ignored, since these kernels are weight-only (A16)."""
+    is ignored, since these kernels are weight-only (A16).
+    """
     config = MxFp4LinearLayerConfig(activation_quant_key=activation_quant_key)
     with patch(f"{kernel_cls.__module__}.logger.warning_once") as warning_once:
         can_implement, reason = kernel_cls.can_implement(config)
@@ -116,7 +118,8 @@ def test_weight_only_kernels_reject_non_mxfp4_activation(kernel_cls):
 )
 def test_emulation_kernel_accepts_any_config(activation_quant_key, monkeypatch):
     """EmulationMxfp4LinearKernel is the universal fallback: it must accept
-    every supported activation format."""
+    every supported activation format.
+    """
     # `EmulationMxfp4LinearKernel.can_implement` gates on `has_quark()`,
     # which we are not testing here.
     monkeypatch.setattr(
@@ -134,7 +137,8 @@ def test_emulation_kernel_accepts_any_config(activation_quant_key, monkeypatch):
 
 def test_emulation_kernel_derives_quant_dequant_func_from_config(monkeypatch):
     """quant_dequant_func must be derived purely from the config's activation
-    QuantKey, not set externally."""
+    QuantKey, not set externally.
+    """
     # `EmulationMxfp4LinearKernel.can_implement` gates on `has_quark()`,
     # which we are not testing here.
     monkeypatch.setattr(
@@ -158,7 +162,8 @@ def test_emulation_kernel_derives_quant_dequant_func_from_config(monkeypatch):
 
 def test_aiter_kernel_is_supported_requires_native_mx_support():
     """AiterMxfp4LinearKernel must not be selected on platforms without
-    native MX compute, even if AITER itself is importable."""
+    native MX compute, even if AITER itself is importable.
+    """
     with patch(
         "vllm.model_executor.kernels.linear.mxfp4.aiter.current_platform.supports_mx",
         return_value=False,
@@ -194,7 +199,8 @@ class OOTMxFp4LinearKernel(MxFp4LinearKernel):
 @patch("vllm.model_executor.kernels.linear.current_platform")
 def test_init_mxfp4_linear_kernel_dispatches_to_registered_kernel(platform_mock):
     """init_mxfp4_linear_kernel should select a registered kernel that
-    reports itself as supported, and construct it with a fresh config."""
+    reports itself as supported, and construct it with a fresh config.
+    """
     platform_mock._enum = PlatformEnum.OOT
     register_linear_kernel(OOTMxFp4LinearKernel, PlatformEnum.OOT, "mxfp4")
 

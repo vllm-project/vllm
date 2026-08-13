@@ -135,7 +135,8 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> tuple[str, list[str], bool]:
         """Prepare weights for the model.
 
-        If the model is not local, it will be downloaded."""
+        If the model is not local, it will be downloaded.
+        """
         model_name_or_path = (
             maybe_download_from_modelscope(model_name_or_path, revision)
             or model_name_or_path

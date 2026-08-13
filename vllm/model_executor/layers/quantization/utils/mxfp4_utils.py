@@ -35,7 +35,7 @@ def should_use_cdna4_mx_scale_swizzle() -> bool:
 
 
 def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
-    """weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel"""
+    """Weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel"""
     assert has_triton_kernels()
     import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
     from triton_kernels.numerics import InFlexData
@@ -381,8 +381,7 @@ def downcast_to_mxfp(
     BLOCK_OUT_DIM: int = 128,
     BLOCK_QUANT_DIM: int = 32,
 ):
-    """
-    Convert the src weights to MXFP4. The src weight is quantized along the
+    """Convert the src weights to MXFP4. The src weight is quantized along the
     axis dimension into packed e2m1 values (torch.uint8, two values per
     byte), so the size of that dimension in the output is half of the
     logical (unpacked) size.

@@ -72,8 +72,7 @@ class SMControlContextManager:
         set_comm_sms: Callable[[int], None],
         set_compute_sms: Callable[[int], None],
     ):
-        """
-        Context manager for controlling SM (Streaming Multiprocessor)
+        """Context manager for controlling SM (Streaming Multiprocessor)
         allocation. Upon entering the context, it sets the number of SMs
         allocated for communication and computation to comm_sms and
         total_sms - comm_sms respectively. Upon exiting, it restores the
@@ -86,8 +85,8 @@ class SMControlContextManager:
                 A function that sets the number of SMs for communication.
             set_compute_sms (Callable[[int], None]):
                 A function that sets the number of SMs for computation.
-        """
 
+        """
         assert current_platform.is_cuda() or current_platform.is_rocm(), (
             "SM/CU control is supported on CUDA and ROCm platforms"
         )
@@ -210,8 +209,7 @@ class UBatchWrapper:
         return self.runnable
 
     def _capture_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
-        """
-        Capture a cudagraph for a microbatched run.
+        """Capture a cudagraph for a microbatched run.
 
         The logic here is somewhat complicated because we need to make sure that
         each of the ubatch threads initialize the cuda context before we start

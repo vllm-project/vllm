@@ -106,11 +106,10 @@ logger = init_logger(__name__)
 
 
 class HunYuanVLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: Number of patches
-        - ni: Number of images
-        - cps: Number of channels * patch_size * patch_size
+    """Dimensions:
+    - np: Number of patches
+    - ni: Number of images
+    - cps: Number of channels * patch_size * patch_size
     """
 
     type: Literal["pixel_values"]
@@ -127,11 +126,10 @@ class HunYuanVLImagePixelInputs(TensorSchema):
 
 
 class HunYuanVLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - nf: Number of image features
-        - hs: Hidden size
-        - ni: Number of images
+    """Dimensions:
+    - nf: Number of image features
+    - hs: Hidden size
+    - ni: Number of images
     """
 
     type: Literal["image_embeds"]
@@ -1041,8 +1039,7 @@ class HunYuanVLForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model.model",

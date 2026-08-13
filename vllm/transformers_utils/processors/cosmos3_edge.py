@@ -65,8 +65,7 @@ class Cosmos3EdgeImageProcessor(Siglip2ImageProcessor):
         resample: PILImageResampling | InterpolationMode | int | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        """
-        Rescales the image so that the following conditions are met:
+        """Rescales the image so that the following conditions are met:
 
         1. Both dimensions (height and width) are divisible by 'factor'.
         2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
@@ -314,6 +313,7 @@ class Cosmos3EdgeProcessor(Qwen3VLProcessor):
             normalize, and patch video inputs.
         chat_template: An optional Jinja template used to render chat messages
             into a tokenizable string.
+
     """
 
     attributes = ["image_processor", "tokenizer", "video_processor"]

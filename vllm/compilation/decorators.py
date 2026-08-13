@@ -56,8 +56,7 @@ def should_torch_compile_mm_encoder(vllm_config: VllmConfig) -> bool:
 
 
 def ignore_torch_compile(cls: type[_T]) -> type[_T]:
-    """
-    A decorator to ignore support_torch_compile decorator
+    """A decorator to ignore support_torch_compile decorator
     on the class. This is useful when a parent class has
     a support_torch_compile decorator, but we don't want to
     compile the class `cls` that inherits the parent class.
@@ -76,8 +75,7 @@ def ignore_torch_compile(cls: type[_T]) -> type[_T]:
 
 
 def _should_ignore_torch_compile(cls: type[_T]) -> bool:
-    """
-    Check if the class should be ignored for torch.compile.
+    """Check if the class should be ignored for torch.compile.
     """
     return getattr(cls, IGNORE_COMPILE_KEY, False)
 
@@ -123,8 +121,7 @@ def support_torch_compile(
     enable_if: Callable[[VllmConfig], bool] | None = None,
     is_encoder: bool = False,
 ) -> Callable[[type[_T]], type[_T]] | type[_T]:
-    """
-    A decorator to add support for compiling the forward method of a class.
+    """A decorator to add support for compiling the forward method of a class.
 
     Usage 1: use directly as a decorator without arguments:
 
@@ -336,7 +333,6 @@ def _support_torch_compile(
     is_encoder: bool = False,
 ) -> type[_T]:
     """Internal implementation of support_torch_compile decorator."""
-
     if TorchCompileWithNoGuardsWrapper in cls.__bases__:
         # support decorating multiple times
         return cls
@@ -725,8 +721,7 @@ def _support_torch_compile(
 def maybe_use_cudagraph_partition_wrapper(
     vllm_config: VllmConfig,
 ) -> Generator[None, None, None]:
-    """
-    Context manager to set/unset customized cudagraph partition wrappers.
+    """Context manager to set/unset customized cudagraph partition wrappers.
 
     If we're using Inductor-based graph partitioning, we currently have the
     whole `fx.Graph` before Inductor lowering and the piecewise

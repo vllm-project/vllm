@@ -81,16 +81,15 @@ def _maybe_space_split_dict(path: str | PathLike) -> dict[str, str]:
 
 @cache
 def maybe_model_redirect(model: str) -> str:
-    """
-    Use model_redirect to redirect the model name to a local folder.
+    """Use model_redirect to redirect the model name to a local folder.
 
     Args:
         model: hf model name
 
     Returns:
         maybe redirect to a local folder
-    """
 
+    """
     model_redirect_path = envs.VLLM_MODEL_REDIRECT_PATH
 
     if not model_redirect_path:
@@ -118,7 +117,8 @@ def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
 
 def convert_model_repo_to_path(model_repo: str) -> str:
     """When VLLM_USE_MODELSCOPE is True convert a model
-    repository string to a Path str."""
+    repository string to a Path str.
+    """
     if not envs.VLLM_USE_MODELSCOPE or Path(model_repo).exists():
         return model_repo
     from modelscope.utils.file_utils import get_model_cache_root

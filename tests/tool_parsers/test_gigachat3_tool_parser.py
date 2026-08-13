@@ -18,7 +18,8 @@ from vllm.tool_parsers import ToolParser, ToolParserManager
 @pytest.fixture(scope="function")
 def default_tokenizer() -> TokenizerLike:
     """Override module-scoped default_tokenizer because gigachat tests
-    mutate the tokenizer via ``add_tokens``."""
+    mutate the tokenizer via ``add_tokens``.
+    """
     return AutoTokenizer.from_pretrained("openai-community/gpt2")
 
 
@@ -333,8 +334,7 @@ def test_streaming_tool_call_with_large_steps(
     model_output_deltas: list[str],
     gigachat_tokenizer: TokenizerLike,
 ):
-    """
-    Test that the closing braces are streamed correctly.
+    """Test that the closing braces are streamed correctly.
     """
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("gigachat3")(
         gigachat_tokenizer

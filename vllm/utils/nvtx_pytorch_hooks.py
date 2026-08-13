@@ -186,6 +186,7 @@ def layerwise_nvtx_marker_context(module_name, module_obj, in_tensor=None, kwarg
                                  kwargs=kwargs) as ctx:
             ctx.result = module(*args, **kwargs)
         return ctx.result
+
     """
     holder = ResultHolder()
 
@@ -221,9 +222,9 @@ class PytHooks:
     a PytHook object. Then call the register_hooks method.
 
     Example:
-
         my_hook = PytHook()
         my_hook.register_hooks(my_network_model)
+
     """
 
     def __init__(self):

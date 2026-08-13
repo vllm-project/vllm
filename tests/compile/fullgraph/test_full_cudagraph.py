@@ -17,8 +17,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 @contextlib.contextmanager
 def temporary_environ(env_vars):
-    """
-    Temporarily set environment variables and restore them afterward.
+    """Temporarily set environment variables and restore them afterward.
     We have to do this vs monkeypatch because monkeypatch doesn't work
     with "module" scoped fixtures.
     """
@@ -125,8 +124,7 @@ def llm_pair(request):
     indirect=True,
 )
 class TestFullCUDAGraph:
-    """
-    Use a class such that an llm pair is constructed once for all
+    """Use a class such that an llm pair is constructed once for all
     batch_size/max_tokens combinations and released immediately after.
 
     Module-scope fixtures would stick around the whole time,
@@ -149,11 +147,9 @@ class TestFullCUDAGraph:
         ],
     )
     def test_full_cudagraph(self, batch_size, max_tokens, llm_pair: tuple[LLM, LLM]):
-        """
-        Test various batch sizes and max_tokens to ensure that the
+        """Test various batch sizes and max_tokens to ensure that the
         full cudagraph compilation works for padded cases too.
         """
-
         full_cudagraph_llm, piecewise_llm = llm_pair
 
         prompts = ["the quick brown fox"] * batch_size

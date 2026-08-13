@@ -75,8 +75,7 @@ def is_linear_layer(layer_idx, layer_group_size):
 
 
 class BailingMoeV25MLAAttention(nn.Module):
-    """
-    MLA Attention for BailingMoeV2.5 full attention layers.
+    """MLA Attention for BailingMoeV2.5 full attention layers.
     """
 
     def __init__(
@@ -594,7 +593,6 @@ class BailingMoeV25Model(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load checkpoint weights with simplified mapping."""
-
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
 

@@ -88,8 +88,7 @@ def _get_vit_attn_backend(
     *,
     attn_backend_override: AttentionBackendEnum | None = None,
 ) -> AttentionBackendEnum:
-    """
-    Get the available attention backend for Vision Transformer.
+    """Get the available attention backend for Vision Transformer.
     """
     return current_platform.get_vit_attn_backend(
         head_size,
@@ -102,8 +101,7 @@ def get_vit_attn_backend(
     head_size: int,
     dtype: torch.dtype,
 ) -> AttentionBackendEnum:
-    """
-    Get the attention backend for Vision Transformer.
+    """Get the attention backend for Vision Transformer.
     """
     mm_cfg = get_multimodal_config()
     attn_backend_override = (
@@ -120,7 +118,8 @@ def get_multimodal_config() -> MultiModalConfig | None:
     """Return the current ``MultiModalConfig``, or ``None`` when no engine
     config context is active (e.g., during unit tests) or when the current
     ``model_config`` does not carry a ``multimodal_config`` (e.g., minimal
-    stubs used in tests)."""
+    stubs used in tests).
+    """
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None or vllm_config.model_config is None:
         return None
@@ -142,8 +141,7 @@ def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
 
 
 def is_vit_use_data_parallel(num_heads: int | None = None) -> bool:
-    """
-    Get the tensor parallel type for Vision Transformer.
+    """Get the tensor parallel type for Vision Transformer.
     """
     mm_cfg = get_multimodal_config()
     can_split = (
@@ -235,6 +233,7 @@ def resolve_visual_encoder_outputs(
             concatenated with the other select_layers along the last dimension.
         feature_select_strategy: Defines how to select the hidden states
             from each layer.
+
     """
     if select_layers is None:
         if not isinstance(encoder_outputs, torch.Tensor):
@@ -302,10 +301,11 @@ def run_dp_sharded_vision_model(
     Args:
         image_input (torch.Tensor): Image input tensor.
         vision_model (torch.nn.Module): Vision model.
+
     Returns:
         torch.Tensor: Output image embeddings
-    """
 
+    """
     num_chunks = image_input.shape[0]
     mp_world_size = get_tensor_model_parallel_world_size()
     num_chunks_per_rank = (num_chunks + mp_world_size - 1) // mp_world_size
@@ -329,8 +329,7 @@ def get_load_balance_assignment(
     sizes: list[int],
     num_gpus: int = 2,
 ) -> tuple[list[int], list[int], list[int]]:
-    """
-    Generate load balancing assignment and metadata
+    """Generate load balancing assignment and metadata
     for distributing data across GPUs.
     The load is determined by the total image sizes,
     not the number of images.
@@ -354,7 +353,6 @@ def get_load_balance_assignment(
         ```
 
     """
-
     n_samples = len(sizes)
 
     # Handle edge cases
@@ -414,6 +412,7 @@ def run_dp_sharded_mrope_vision_model(
                    Different rope types have different dimension to do ViT.
                    "rope_3d" for 3D rope (e.g., Qwen2.5-VL)
                    "rope_2d" for 2D rope (e.g., Kimi-VL)
+
     Returns:
         torch.Tensor: Output image embeddings
 
@@ -585,8 +584,7 @@ def run_dp_sharded_mrope_vision_model(
 
 
 class FusedInputNorm(nn.Module):
-    """
-    Module that applies rescaling and normalization to input images.
+    """Module that applies rescaling and normalization to input images.
     Equivalent to: output = (input * rescale_factor - mean) / std
     """
 

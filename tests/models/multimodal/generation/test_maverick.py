@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Create a reduced-layer version of the Maverick model for testing purposes.
+"""Create a reduced-layer version of the Maverick model for testing purposes.
 
 This script creates a new model with fewer layers by:
 1. Loading the original Maverick model configuration
@@ -39,7 +38,6 @@ def run_maverick_serving(model: str):
     """Test Llama-4-Maverick model with vLLM LLM class using CLI equivalent
     options with reduced layers.
     """
-
     try:
         sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
@@ -71,8 +69,7 @@ def run_maverick_serving(model: str):
 
 
 def get_rope_layers_config(model_path: str) -> list[int]:
-    """
-    Get the interleaved RoPE configuration from HuggingFace config
+    """Get the interleaved RoPE configuration from HuggingFace config
 
     Args:
         model_path: Path to the local directory containing the reduced
@@ -81,6 +78,7 @@ def get_rope_layers_config(model_path: str) -> list[int]:
     Returns:
         List of 0 or 1 indicating whether each layer uses RoPE and local attn
         0 indicates that RoPE is not used while 1 indicates that RoPE is used.
+
     """
     config_path = Path(model_path) / "config.json"
     model_config = json.loads(config_path.read_text())
@@ -98,8 +96,7 @@ def create_reduced_maverick_model(
     vision_layers: int = 2,
     force_recreate: bool = False,
 ) -> str:
-    """
-    Create a reduced-layer version of the Maverick model.
+    """Create a reduced-layer version of the Maverick model.
 
     Args:
         original_model_name: Name of the original Maverick model
@@ -111,8 +108,8 @@ def create_reduced_maverick_model(
 
     Returns:
         Path to the created reduced model directory
-    """
 
+    """
     print(
         f"Creating reduced Maverick model with {text_layers} text layers and "
         f"{vision_layers} vision layers..."
@@ -178,7 +175,6 @@ def create_reduced_config(
     original_config: Any, text_layers: int, num_experts: int, vision_layers: int
 ) -> dict[str, Any]:
     """Create a reduced configuration based on the original."""
-
     # Convert config to dictionary
     config_dict = original_config.to_dict()
 
@@ -220,7 +216,6 @@ def create_reduced_config(
 
 def copy_tokenizer_files(original_model_name: str, output_path: Path) -> None:
     """Copy tokenizer files from the original model."""
-
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             original_model_name, trust_remote_code=True
@@ -233,7 +228,6 @@ def copy_tokenizer_files(original_model_name: str, output_path: Path) -> None:
 
 def create_preprocessor_config(original_config: Any, output_path: Path) -> None:
     """Create preprocessor_config.json for multimodal model."""
-
     # Try to load the original preprocessor config
     try:
         processor = AutoProcessor.from_pretrained(
@@ -253,7 +247,6 @@ def create_reduced_safetensors(
     original_config: Any, reduced_config: dict[str, Any], output_path: Path
 ) -> None:
     """Create safetensors files with weights for the reduced model."""
-
     print("Generating synthetic weights for reduced model...")
 
     text_config = reduced_config["text_config"]
@@ -276,7 +269,6 @@ def create_reduced_safetensors(
 
 def create_text_model_weights(text_config: dict[str, Any]) -> dict[str, torch.Tensor]:
     """Create synthetic weights for the text model with MoE structure."""
-
     weights = {}
 
     vocab_size = text_config["vocab_size"]
@@ -405,7 +397,6 @@ def create_vision_model_weights(
     vision_config: dict[str, Any],
 ) -> dict[str, torch.Tensor]:
     """Create synthetic weights for the vision model."""
-
     weights = {}
 
     hidden_size = vision_config["hidden_size"]
@@ -474,7 +465,6 @@ def create_shared_weights(
     text_config: dict[str, Any], vision_config: dict[str, Any]
 ) -> dict[str, torch.Tensor]:
     """Create weights for shared components (vision-language connector)"""
-
     weights = {}
 
     text_hidden_size = text_config["hidden_size"]
@@ -492,7 +482,6 @@ def save_weights_to_safetensors(
     weights: dict[str, torch.Tensor], output_path: Path
 ) -> None:
     """Save weights to safetensors files and create index."""
-
     # Determine how to shard the weights
     max_shard_size = 5 * 1024 * 1024 * 1024  # 5GB per shard
 
@@ -653,7 +642,6 @@ def test_dummy_maverick(
 
 def main():
     """Main function to create and test the reduced model."""
-
     import argparse
 
     parser = argparse.ArgumentParser(

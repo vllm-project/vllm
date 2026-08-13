@@ -24,7 +24,8 @@ from vllm.entrypoints.serve.utils.server_utils import (
 
 def _fake_request(log_error_stack: bool = False) -> SimpleNamespace:
     """Minimal stand-in for a FastAPI Request - just enough for the
-    handler to read req.app.state.args.log_error_stack."""
+    handler to read req.app.state.args.log_error_stack.
+    """
     return SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(args=SimpleNamespace(log_error_stack=log_error_stack))
@@ -35,7 +36,8 @@ def _fake_request(log_error_stack: bool = False) -> SimpleNamespace:
 
 class TestValidationErrorParamFallback:
     """Ensure `param` falls back to the Pydantic error's `loc` when no
-    custom VLLMValidationError context is present."""
+    custom VLLMValidationError context is present.
+    """
 
     @pytest.mark.parametrize(
         ("error_type", "msg"),
@@ -59,7 +61,8 @@ class TestValidationErrorParamFallback:
     async def test_param_fallback_does_not_crash_on_non_dict_error(self):
         """Schemathesis fuzzing found that errors[0] isn't always a dict.
         The fallback must not crash in that case - it should just leave
-        param as None instead of raising."""
+        param as None instead of raising.
+        """
         exc = RequestValidationError(["some unexpected non-dict error"])
 
         response = await validation_exception_handler(_fake_request(), exc)
@@ -97,7 +100,8 @@ class TestCleanLocForParam:
 
     def test_all_internal_falls_back_to_raw_join(self):
         """If every loc segment looks internal, fall back to the raw
-        dot-join rather than returning an empty string."""
+        dot-join rather than returning an empty string.
+        """
         loc = ("function-wrap[__log_extra_fields__()]",)
         assert clean_loc_for_param(loc) == "function-wrap[__log_extra_fields__()]"
 
@@ -105,7 +109,8 @@ class TestCleanLocForParam:
 class TestValidationErrorDoesNotLeakServerPaths:
     """FastAPI sets endpoint_file/line/function/path on the exception
     during routing, not in the constructor - so we set them manually
-    here to reproduce the real leak. See #31683."""
+    here to reproduce the real leak. See #31683.
+    """
 
     @pytest.mark.asyncio
     async def test_handler_strips_endpoint_file_context(self):

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Named tool choice for Kimi K3: allowed when the XTML structural tag is
-attached (strict tool calling), rejected otherwise."""
+attached (strict tool calling), rejected otherwise.
+"""
 
 import pytest
 

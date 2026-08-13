@@ -104,5 +104,6 @@ class LogitsProcessor(ABC):
         Args:
             batch_update: Non-None iff there have been changes
                 to the batch makeup.
+
         """
         raise NotImplementedError

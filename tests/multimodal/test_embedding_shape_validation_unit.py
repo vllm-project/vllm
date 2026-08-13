@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for embedding shape validation.
+"""Unit tests for embedding shape validation.
 
 Simple, fast unit tests that can run without server fixtures.
 Run with: pytest tests/multimodal/test_embedding_shape_validation_unit.py -v
@@ -167,16 +166,14 @@ class TestAudioEmbedBasicValidation:
 
 
 class TestShapeValidationDoSPrevention:
-    """
-    Tests for DoS prevention through shape validation.
+    """Tests for DoS prevention through shape validation.
 
     Verifies that embeddings with incorrect shapes are rejected early,
     preventing crashes during model inference.
     """
 
     def test_prevent_crash_from_wrong_shape_image_embeds(self):
-        """
-        Prevent crash scenario: wrong hidden size in image embeddings.
+        """Prevent crash scenario: wrong hidden size in image embeddings.
 
         Without validation, this would pass initial checks but crash later
         during model forward pass when dimensions don't match.
@@ -198,8 +195,7 @@ class TestShapeValidationDoSPrevention:
         assert str(wrong_hidden_size) in error_msg  # Received
 
     def test_prevent_crash_from_wrong_shape_audio_embeds(self):
-        """
-        Prevent crash scenario: wrong hidden size in audio embeddings.
+        """Prevent crash scenario: wrong hidden size in audio embeddings.
         """
         expected_hidden_size = 768
         wrong_hidden_size = 4096

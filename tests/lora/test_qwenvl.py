@@ -292,8 +292,7 @@ def test_qwen2vl_multiple_lora_types(
     qwen2vl_vision_tower_lora_files,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    Test multiple LoRA adapter types (language, vision tower + connector,
+    """Test multiple LoRA adapter types (language, vision tower + connector,
     vision tower only) using the same LLM instance to verify mm_encoder_cache
     behavior with different LoRA requests.
 

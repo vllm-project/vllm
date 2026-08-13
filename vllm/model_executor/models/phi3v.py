@@ -118,13 +118,12 @@ def _init_img_processor(
 
 
 class Phi3VImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - n: Number of images
-        - p: Number of patches
-        - h: Height of each patch
-        - w: Width of each patch
+    """Dimensions:
+    - b: Batch size
+    - n: Number of images
+    - p: Number of patches
+    - h: Height of each patch
+    - w: Width of each patch
     """
 
     type: Literal["pixel_values", "image_embeds"] = "pixel_values"
@@ -142,12 +141,11 @@ class Phi3VImagePixelInputs(TensorSchema):
 
 
 class Phi3VImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - n: Number of images
-        - f: Image feature size (e.g., number of tokens per image)
-        - h: Hidden size (must match language model backbone)
+    """Dimensions:
+    - b: Batch size
+    - n: Number of images
+    - f: Image feature size (e.g., number of tokens per image)
+    - h: Hidden size (must match language model backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -227,8 +225,7 @@ class Phi3HDImageEmbedding(nn.Module):
     def forward(
         self, pixel_values: torch.FloatTensor, image_sizes: torch.Tensor
     ) -> torch.FloatTensor:
-        """
-        process image and return vision embeddings.
+        """Process image and return vision embeddings.
 
         pixel_values: (num_images, num_crops, c, h, w)
         output: (num_images, num_img_tokens, hidden_size)
@@ -243,8 +240,7 @@ class Phi3HDImageEmbedding(nn.Module):
         return image_features_proj
 
     def hd_feature_transform(self, image_features, image_sizes):
-        """
-        image_features: (num_images, num_crops+1, 24*24, 1024)
+        """image_features: (num_images, num_crops+1, 24*24, 1024)
         """
         assert self.hd_transform_order == "sub_glb", (
             f"hd_transform_order `{self.hd_transform_order}` not implemented"
@@ -303,8 +299,7 @@ class Phi3HDImageEmbedding(nn.Module):
         return batch_image_features_proj
 
     def reshape_hd_patches_2x2merge(self, image_features, h_crop, w_crop):
-        """
-        image_features: (num_images*num_crops, 24*24, 1024)
+        """image_features: (num_images*num_crops, 24*24, 1024)
         output: (num_images, h_crop*12, w_crop*12, 4096)
         where h_crop*w_crop == num_crops
         """
@@ -328,8 +323,7 @@ class Phi3HDImageEmbedding(nn.Module):
         return image_features_hd
 
     def add_image_newline(self, image_features_hd):
-        """
-        image_features_hd: (num_images, h_crop*12, w_crop*12, 4096)
+        """image_features_hd: (num_images, h_crop*12, w_crop*12, 4096)
         output: (num_images, (h_crop*12) * (w_crop*12+1), 4096)
         """
         num_images, h, w, hid_dim = image_features_hd.shape

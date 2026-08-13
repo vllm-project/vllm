@@ -194,7 +194,8 @@ def _make_pending_load_unfinished_request(
 
 def _make_pending_load_scheduler_output() -> SimpleNamespace:
     """scheduler_output for a step where req-0 is parked on a pending load
-    (not in scheduled_new_reqs or scheduled_cached_reqs)."""
+    (not in scheduled_new_reqs or scheduled_cached_reqs).
+    """
     return SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
@@ -371,7 +372,8 @@ def test_running_request_not_in_resumed_req_ids_appends_blocks():
 def test_resumed_request_in_resumed_req_ids_replaces_blocks():
     """A request the scheduler marks resumed gets the FULL block table in
     new_block_ids and must REPLACE the tracker's blocks (not append), even if
-    a stale tracker from before preemption is still present."""
+    a stale tracker from before preemption is still present.
+    """
     scheduler = _make_bare_scheduler()
     _make_resumed_unfinished_request(
         scheduler,

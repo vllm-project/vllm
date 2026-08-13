@@ -340,8 +340,7 @@ class GraniteMoeModel(nn.Module):
         return hidden_states
 
     def _load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """
-        This function is copied from `MixtralModel.load_weights`, mainly to
+        """This function is copied from `MixtralModel.load_weights`, mainly to
         decouple from mixtral, avoiding impact on support like BNB
         quantization.
         """

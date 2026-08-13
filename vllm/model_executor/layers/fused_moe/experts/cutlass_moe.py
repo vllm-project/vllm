@@ -520,8 +520,7 @@ def run_cutlass_moe_fp4(
     *,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> None:
-    """
-    MoE implementation for FP4 Inputs
+    """MoE implementation for FP4 Inputs
 
     # Gemm 1
     a: Input tensor: [m, k] (half/bfloat16)

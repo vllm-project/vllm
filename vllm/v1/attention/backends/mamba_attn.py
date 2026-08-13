@@ -204,8 +204,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> M:
-        """
-        This method builds the metadata for full cudagraph capture.
+        """This method builds the metadata for full cudagraph capture.
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
         m = common_attn_metadata
@@ -252,8 +251,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         prev_last_scheduled_idx: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> M:
-        """
-        Default build implementation for Mamba-like attention backends.
+        """Default build implementation for Mamba-like attention backends.
         Subclasses (e.g., Mamba2) can override to add additional metadata.
         """
         return self._compute_common_metadata(
@@ -269,8 +267,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_computed_tokens_p_cpu: torch.Tensor,
         query_start_loc_p_cpu: torch.Tensor,
     ) -> tuple[list[int], list[int], list[int]]:
-        """
-        Compute chunk-specific metadata for Mamba models.
+        """Compute chunk-specific metadata for Mamba models.
 
         The code below carefully constructs the chunks such that:
         1. Chunks contain tokens from a *single* sequence only.
@@ -357,8 +354,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         common: M,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Compute chunk metadata and return as device tensors.
+        """Compute chunk metadata and return as device tensors.
         Returns (cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p).
         """
         num_prefills = common.num_prefills
@@ -437,8 +433,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_accepted_tokens: torch.Tensor | None = None,
         prev_last_scheduled_idx: torch.Tensor | None = None,
     ) -> M:
-        """
-        Compute metadata common to both Mamba1 and Mamba2.
+        """Compute metadata common to both Mamba1 and Mamba2.
         """
         num_reqs = common_attn_metadata.num_reqs
 
@@ -693,8 +688,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self,
         metadata: M,
     ) -> M:
-        """
-        Update the metadata for cudagraph capture.
+        """Update the metadata for cudagraph capture.
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
         state_indices_tensor_d = metadata.state_indices_tensor_d

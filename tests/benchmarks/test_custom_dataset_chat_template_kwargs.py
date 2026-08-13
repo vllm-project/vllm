@@ -12,7 +12,8 @@ from vllm.benchmarks.datasets import get_samples
 class _RecordingTokenizer:
     """Minimal tokenizer stub that records the kwargs forwarded to
     apply_chat_template, so we can assert chat_template_kwargs propagation
-    without loading a real model/template."""
+    without loading a real model/template.
+    """
 
     def __init__(self) -> None:
         self.captured_kwargs: dict | None = None

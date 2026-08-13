@@ -51,7 +51,6 @@ def _mapping(
 
 def validate_shape(*, tp_size: int, latent_dim: int, hidden_dim: int) -> None:
     """Validate constraints imposed by the fused collective mapping."""
-
     if tp_size <= 0 or latent_dim <= 0 or hidden_dim <= 0:
         raise ValueError("collective dimensions must be positive")
     if hidden_dim % tp_size:
@@ -78,7 +77,6 @@ def _select_routed_schedule(
     max_m: int,
 ) -> tuple[int, int]:
     """Match upstream MNNVL's one-cluster-per-token occupancy policy."""
-
     _, cluster_ctas, threads, _ = _mapping(tp_size, latent_dim, hidden_dim)
     sm_count = torch.cuda.get_device_properties(
         torch.accelerator.current_device_index()
@@ -714,7 +712,6 @@ def compile_kernel(
     include_routed: bool = True,
 ) -> None:
     """Compile the rank/M specialization without retaining caller tensors."""
-
     key = _compile_key(
         rank,
         tp_size,

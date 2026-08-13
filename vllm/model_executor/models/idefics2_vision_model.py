@@ -45,8 +45,7 @@ from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Idefics2VisionEmbeddings(nn.Module):
-    """
-    This is a modified version of `siglip.modelign_siglip.SiglipVisionEmbeddings
+    """This is a modified version of `siglip.modelign_siglip.SiglipVisionEmbeddings
     ` to enable images of variable
     resolution.
 
@@ -276,10 +275,9 @@ class Idefics2EncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`):
-                Input to the layer of shape `(batch, seq_len, embed_dim)`.
+        """Args:
+        hidden_states (`torch.FloatTensor`):
+            Input to the layer of shape `(batch, seq_len, embed_dim)`.
 
         """
         residual = hidden_states
@@ -294,13 +292,13 @@ class Idefics2EncoderLayer(nn.Module):
 
 
 class Idefics2Encoder(nn.Module):
-    """
-    Transformer encoder consisting of `config.num_hidden_layers` self attention
+    """Transformer encoder consisting of `config.num_hidden_layers` self attention
     layers. Each layer is a
     [`Idefics2EncoderLayer`].
 
     Args:
         config: Idefics2Config
+
     """
 
     def __init__(
@@ -336,14 +334,14 @@ class Idefics2Encoder(nn.Module):
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        r"""
-        Args:
-            inputs_embeds (torch.Tensor):
-                Optionally, instead of passing `input_ids` you can choose to
-                directly pass an embedded representation.
-                This is useful if you want more control over how to convert
-                `input_ids` indices into associated vectorsthan the model's
-                internal embedding lookup matrix.
+        r"""Args:
+        inputs_embeds (torch.Tensor):
+            Optionally, instead of passing `input_ids` you can choose to
+            directly pass an embedded representation.
+            This is useful if you want more control over how to convert
+            `input_ids` indices into associated vectorsthan the model's
+            internal embedding lookup matrix.
+
         """
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:

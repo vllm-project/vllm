@@ -590,8 +590,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         request: AnthropicMessagesRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | AnthropicMessagesResponse | ErrorResponse:
-        """
-        Messages API similar to Anthropic's API.
+        """Messages API similar to Anthropic's API.
 
         See https://docs.anthropic.com/en/api/messages
         for the API specification. This API mimics the Anthropic messages API.

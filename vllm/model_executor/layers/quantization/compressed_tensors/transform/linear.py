@@ -29,8 +29,7 @@ from vllm.platforms import current_platform
 
 
 class CompressedTensorsLinearTransformMethod(LinearMethodBase):
-    """
-    Wraps `CompressedTensorsLinearMethod` or `UnquantizedLinearMethod` and adds
+    """Wraps `CompressedTensorsLinearMethod` or `UnquantizedLinearMethod` and adds
     input and output transforms to either side of the original apply method
     """
 
@@ -240,8 +239,7 @@ def get_schemes_args(
 def get_layer_partition_names(
     layer_name: str, packed_modules_mapping: dict[str, list[str]]
 ) -> list[str]:
-    """
-    Get all partition names associated with this layer.
+    """Get all partition names associated with this layer.
     Names are returned in order of their partition indices.
 
     ```python
@@ -251,7 +249,8 @@ def get_layer_partition_names(
         "gate_proj",
         "up_proj",
     ]
-    assert get_layer_partition_names("mlp.down_proj", mapping) == ["down_proj"]"""
+    assert get_layer_partition_names("mlp.down_proj", mapping) == ["down_proj"]
+    """
     for fused_suffix, part_suffixes in packed_modules_mapping.items():
         if layer_name.endswith(fused_suffix):
             return [

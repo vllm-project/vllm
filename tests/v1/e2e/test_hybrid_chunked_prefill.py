@@ -58,8 +58,8 @@ def test_mtp_speculative_mixed_batch_short_prefill(
     vllm_runner, model_name, enable_prefix_caching
 ):
     """Test to ensure MTP speculative decoding correctly handles
-    short prefill chunks that fall below the reorder_batch_threshold."""
-
+    short prefill chunks that fall below the reorder_batch_threshold.
+    """
     # Set so large that both prefills will be classified as decodes in a mixed batch
     # note, with prefix caching we require chunk_size >= mamba_block_size
     chunk_size = 256 if not enable_prefix_caching else 16384

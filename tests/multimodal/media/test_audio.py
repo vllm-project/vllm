@@ -116,7 +116,8 @@ def test_small_file_passes_memory_guard():
 
 def test_memory_guard_rejects_large_allocation():
     """A file whose frames*channels*4 exceeds the byte limit must be
-    rejected before allocating the buffer."""
+    rejected before allocating the buffer.
+    """
     # 100_000 frames * 8 channels * 4 bytes = 3.2 MB
     payload = _make_flac_bytes(frames=100_000, channels=8, samplerate=48000)
     # Set limit to 1 MiB — should reject
@@ -131,7 +132,8 @@ def test_memory_guard_rejects_large_allocation():
 
 def test_forged_samplerate_rejected_by_memory_guard():
     """The PoC scenario: high sample rate fools the duration guard but
-    the memory guard catches the large frame*channel allocation."""
+    the memory guard catches the large frame*channel allocation.
+    """
     # Forged high sample rate: 655350 Hz, 8 channels, 1M frames
     # Duration guard sees: 1_000_000 / 655_350 = 1.5s → passes
     # Memory: 1_000_000 * 8 * 4 = 32 MB

@@ -65,8 +65,7 @@ DEVICE_TYPE = current_platform.device_type
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
-    """
-    Only perform necessary steps in GPUModelRunner.initialize_kv_cache()
+    """Only perform necessary steps in GPUModelRunner.initialize_kv_cache()
     """
     attn_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
@@ -1201,14 +1200,12 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     reason="Attention backend FLASHINFER is only supported on CUDA.",
 )
 def test_hybrid_attention_mamba_tensor_shapes():
-    """
-    The GPU model runner creates different views into the
+    """The GPU model runner creates different views into the
     KVCacheTensors for the attention and mamba layers
     (via _reshape_kv_cache_tensors function). This test verifies
     that the views are compatible: writing a mamba block
     will not corrupt an attention block and vice versa
     """
-
     set_random_seed(42)
 
     update_environment_variables(
@@ -1394,7 +1391,8 @@ def test_hybrid_attention_mamba_tensor_shapes():
 
 def test_hybrid_block_table_initialization():
     """Test hybrid block table with different kernel and kvcache_manager block
-    sizes."""
+    sizes.
+    """
     from vllm.v1.worker.block_table import BlockTable
 
     # Test configuration: kvcache_manager block size = 32,

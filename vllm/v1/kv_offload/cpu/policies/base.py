@@ -8,8 +8,7 @@ from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
 
 class BlockStatus(ctypes.Structure):
-    """
-    Offloading status for a single block of KV data.
+    """Offloading status for a single block of KV data.
     Holds the following information:
 
     ref_cnt - the current number of transfers using this block as a source.
@@ -27,15 +26,13 @@ class BlockStatus(ctypes.Structure):
 
     @property
     def is_ready(self) -> bool:
-        """
-        Returns whether the block is ready to be read.
+        """Returns whether the block is ready to be read.
         """
         return self.ref_cnt >= 0
 
 
 class CachePolicy(ABC):
-    """
-    Encapsulates both block organization (data structures) and replacement
+    """Encapsulates both block organization (data structures) and replacement
     decisions (which block to evict). LRU and ARC differ in both dimensions —
     ARC's ghost lists and target_t1_size live at the intersection of storage
     and eviction, so they cannot be separated cleanly.
@@ -58,20 +55,19 @@ class CachePolicy(ABC):
 
     @abstractmethod
     def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
-        """
-        Mark blocks as recently used.
+        """Mark blocks as recently used.
 
         Args:
             keys: Blocks to mark as recently used.
             req_context: Per-request context for the request touching these blocks.
+
         """
 
     @abstractmethod
     def evict(
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:
-        """
-        Evict exactly n blocks, skipping any in protected.
+        """Evict exactly n blocks, skipping any in protected.
 
         Returns a list of (key, block) for the evicted blocks,
         or None if n evictions cannot be satisfied. The operation is atomic:
@@ -83,8 +79,7 @@ class CachePolicy(ABC):
 
     @abstractmethod
     def clear(self) -> None:
-        """
-        Remove ALL blocks regardless of ref_cnt.
+        """Remove ALL blocks regardless of ref_cnt.
 
         Ghost lists and adaptive state are also reset.
         """

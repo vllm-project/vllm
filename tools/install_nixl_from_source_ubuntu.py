@@ -104,7 +104,6 @@ def install_system_dependencies():
 
 def build_and_install_prerequisites(args):
     """Builds UCX and NIXL from source, creating a self-contained wheel."""
-
     if not args.force_reinstall and is_pip_package_installed("nixl"):
         print("--> NIXL is already installed. Nothing to do.", flush=True)
         return

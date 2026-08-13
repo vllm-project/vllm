@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-KV cache helper for store.
+"""KV cache helper for store.
 """
 
 from collections.abc import Iterator
@@ -53,7 +52,8 @@ def get_kv_connector_cache_layout():
 
 class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single
-    output corresponding to Rank 0 for scheduler."""
+    output corresponding to Rank 0 for scheduler.
+    """
 
     def __init__(self, expected_finished_count: int):
         # Complete transfer tracker. Used to track finished requests
@@ -227,11 +227,10 @@ def copy_kv_blocks(
 
 
 def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
-    """
-    Transforms the layout of received KV cache blocks to the local block_size.
+    """Transforms the layout of received KV cache blocks to the local block_size.
     (Only works for local blocksize > remote blocksize)
 
-    example:
+    Example:
     local blocksize = 16 tokens, remote blocksize = 4 tokens
     local block[0] = remote block[0, 1, 2, 3]
     remote is |h0-b0|h1-b0|h2-b0|h3-b0|h0-b1|h1-b1|h2-b1|h3-b1|...
@@ -240,6 +239,7 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
     1. view => view remote as n_blocks * remote_shape(H,remoteN,D)
     2. permute => (H, nblocks, remoteN, D)
     3. flatten => (H, localN, D)
+
     """
     blocks_to_update = cache.index_select(0, indices)
     # use physical order
@@ -287,8 +287,7 @@ def kv_postprocess_layout_on_receive(cache, indices):
 
 
 def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
-    """
-    Transforms the layout of received KV cache to the local block_size and HND.
+    """Transforms the layout of received KV cache to the local block_size and HND.
     (Only works for local blocksize > remote blocksize)
 
     prefill is HND, smaller block_size
@@ -311,9 +310,9 @@ def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_rati
 def yield_req_data(
     scheduler_output,
 ) -> Iterator[tuple[str, tuple[list[int], ...] | None, bool]]:
-    """
-    Yields:
-        (req_id, new_block_id_groups, preempted)
+    """Yields:
+    (req_id, new_block_id_groups, preempted)
+
     """
     # new requests
     for req_data in scheduler_output.scheduled_new_reqs:
@@ -340,6 +339,7 @@ def get_current_attn_backends(
 
     Returns:
         Deduplicated list of attention backend classes.
+
     """
     layer_type = cast(type[Any], AttentionLayerBase)
     layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)

@@ -63,8 +63,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         use_tqdm: bool = False,
         concurrency_limit: int | None = None,
     ) -> list[BeamSearchOutput]:
-        """
-        Generate sequences using beam search.
+        """Generate sequences using beam search.
 
         Args:
             prompts: A list of prompts. Each prompt can be a string or a list
@@ -74,6 +73,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             use_tqdm: Whether to use tqdm to display the progress bar.
             concurrency_limit: The maximum number of concurrent requests.
                 If None, the number of concurrent requests is unlimited.
+
         """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?

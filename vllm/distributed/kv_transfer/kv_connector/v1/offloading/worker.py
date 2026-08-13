@@ -344,14 +344,14 @@ class OffloadingConnectorWorker:
             )
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
-        """
-        Returns:
-            tuple of (finished_sending, finished_recving). Stores never
-            emit finished_sending — the scheduler tracks store completion
-            via kv_connector_worker_meta.completed_jobs and fences any
-            block reuse via jobs_to_flush. Loads still emit
-            finished_recving so the base scheduler can resume requests
-            blocked on remote KV (and free aborted-during-load reqs).
+        """Returns:
+        tuple of (finished_sending, finished_recving). Stores never
+        emit finished_sending — the scheduler tracks store completion
+        via kv_connector_worker_meta.completed_jobs and fences any
+        block reuse via jobs_to_flush. Loads still emit
+        finished_recving so the base scheduler can resume requests
+        blocked on remote KV (and free aborted-during-load reqs).
+
         """
         assert self.worker is not None
         finished_recving: set[str] = set()

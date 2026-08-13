@@ -72,7 +72,8 @@ def test_draft_lookahead_uses_boundary_feature_when_cached():
     """The drafter's +1 look-ahead can reach the feature at offset ==
     processed_end (the next chunk). When its encoder output is already cached
     (the scheduler encoded it ahead), it is used for the look-ahead position
-    rather than ignored."""
+    rather than ignored.
+    """
     f0 = _feature("h0", offset=0, length=8)
     f1 = _feature("h1", offset=8, length=8)  # starts exactly at processed_end
     runner = _make_runner([f0, f1], cached=[f0, f1])
@@ -89,7 +90,8 @@ def test_draft_lookahead_uses_boundary_feature_when_cached():
 def test_draft_lookahead_tolerates_missing_boundary_feature():
     """When the +1 look-ahead feature past the processed boundary is not yet
     encoded, fall back to the token embedding (the draft token is verified by
-    the target) instead of raising."""
+    the target) instead of raising.
+    """
     f0 = _feature("h0", offset=0, length=8)
     f1 = _feature("h1", offset=8, length=8)  # boundary feature, not cached
     runner = _make_runner([f0, f1], cached=[f0])
@@ -106,7 +108,8 @@ def test_draft_lookahead_tolerates_missing_boundary_feature():
 def test_draft_lookahead_raises_on_interior_miss():
     """A miss for a feature within the processed range (not the look-ahead
     boundary) is a real invariant violation and must fail loudly, even on the
-    drafter path."""
+    drafter path.
+    """
     f0 = _feature("h0", offset=0, length=8)  # interior, within processed range
     runner = _make_runner([f0], cached=[])
 
@@ -116,7 +119,8 @@ def test_draft_lookahead_raises_on_interior_miss():
 
 def test_target_path_raises_on_encoder_cache_miss():
     """On the target path (no look-ahead) a miss is a real invariant
-    violation and must fail loudly."""
+    violation and must fail loudly.
+    """
     f0 = _feature("h0", offset=0, length=8)
     runner = _make_runner([f0], cached=[])
 
@@ -127,7 +131,8 @@ def test_target_path_raises_on_encoder_cache_miss():
 @pytest.mark.parametrize("draft_lookahead", [0, 1])
 def test_multi_request_batch_gathers_per_request(draft_lookahead):
     """Two prefilling requests in one batch: per-request query bounds must be
-    indexed by request, not applied as whole arrays."""
+    indexed by request, not applied as whole arrays.
+    """
     a0 = _feature("a0", offset=0, length=8)
     b0 = _feature("b0", offset=0, length=8)
     cache = EncoderCache()

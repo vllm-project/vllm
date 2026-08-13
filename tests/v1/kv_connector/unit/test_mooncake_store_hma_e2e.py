@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end save->lookup test for MooncakeStoreConnector on a hybrid
-(SWA + Full) attention config, using a dict-backed mock store."""
+(SWA + Full) attention config, using a dict-backed mock store.
+"""
 
 import sys
 import threading
@@ -143,8 +144,7 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
 
 
 def test_e2e_swa_plus_full_save_then_lookup_hits():
-    """
-    E2E: build a SWA+Full hybrid worker, save all blocks via the sending
+    """E2E: build a SWA+Full hybrid worker, save all blocks via the sending
     thread (synchronously), then verify lookup returns the full hit length.
     Also verify that evicting SWA's early blocks (outside its window) still
     allows a full hit because the window covers the tail.
@@ -266,7 +266,8 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
 
 def test_recv_skips_swa_blocks_before_window():
     """Producer stored every block for both groups; consumer must only fetch
-    SWA blocks within the sliding window, not the head."""
+    SWA blocks within the sliding window, not the head.
+    """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     # sliding_window=32, block_size=16 → 2 contiguous blocks within window.
     swa = SlidingWindowSpec(
@@ -334,7 +335,8 @@ def test_recv_skips_swa_blocks_before_window():
 
 def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     """DSv4-style: hash_block_size=4, group block_size=16 — process_tokens
-    keys each chunk by its ending fine hash, including a partial tail."""
+    keys each chunk by its ending fine hash, including a partial tail.
+    """
     md = KeyMetadata("m", 0, 0, 0, 0, group_id=3)
     db = ChunkedTokenDatabase(md, block_size=16, hash_block_size=4)
     db.set_kv_caches_base_addr([0])
@@ -367,7 +369,8 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
     """Sub-block prompt (the 900/128/1536 shape, scaled to 12/4/16): the
     partial tail is offloaded for both groups under the boundary sub-hash. The
     full-attention block is read from the request block table; the mamba block
-    is the core-provided CoW target, not block_ids."""
+    is the core-provided CoW target, not block_ids.
+    """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
         block_size=16,
@@ -446,7 +449,8 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
 def test_offload_syncs_event_before_put():
     """An offload-carrying meta synchronizes its CoW-fence event before the
     store put reads the blocks, then completes in one pass and drains the
-    completion counter."""
+    completion counter.
+    """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
         block_size=16,
@@ -517,7 +521,8 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     offload must persist every FA block up to the boundary — the normal save
     floors to the lcm, so those blocks are otherwise never written and the
     consumer's per-group lookup would miss. The mamba boundary block still
-    reads the core-provided CoW target."""
+    reads the core-provided CoW target.
+    """
     full = FullAttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
         block_size=16,

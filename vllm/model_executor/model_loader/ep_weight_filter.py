@@ -23,7 +23,8 @@ def parse_expert_id(weight_name: str) -> int | None:
 
     Returns ``None`` for dense weights (attention, layernorm, embedding),
     shared experts, and 3D fused-expert tensors where all experts are stored
-    in a single tensor without a numeric expert id in the name."""
+    in a single tensor without a numeric expert id in the name.
+    """
     m = _EXPERT_ID_RE.search(weight_name)
     return int(m.group(1)) if m else None
 
@@ -45,6 +46,7 @@ def compute_local_expert_ids(
     Args:
         placement: ``"linear"`` for contiguous assignment,
             ``"round_robin"`` for interleaved assignment.
+
     """
     if ep_size <= 1:
         return None
@@ -66,7 +68,8 @@ def should_skip_weight(
     local_expert_ids: set[int] | None,
 ) -> bool:
     """Return ``True`` if *weight_name* is an expert weight that does not
-    belong to the local rank and should be skipped during loading."""
+    belong to the local rank and should be skipped during loading.
+    """
     if local_expert_ids is None:
         return False
     eid = parse_expert_id(weight_name)

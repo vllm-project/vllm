@@ -27,8 +27,7 @@ def set_torchao_reload_attrs(model: torch.nn.Module, model_config: ModelConfig):
 
 
 def support_quantized_model_reload_from_hp_weights(original_load_weights: FunctionType):
-    """
-    Decorator for `load_weights` method for AutoWeightsLoader.load_weights to support
+    """Decorator for `load_weights` method for AutoWeightsLoader.load_weights to support
     reloading high precision (bfloat16/float16/float32) weight for an already quantized
     model, this involves restoring the weights to a high precision weights and
     then online quantize the weights.

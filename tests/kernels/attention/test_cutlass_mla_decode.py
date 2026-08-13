@@ -223,7 +223,8 @@ def test_cutlass_mla_decode_cross_layer_view():
     """The kernel must read the cache's page-dim stride instead of assuming
     pages are packed back-to-back. A per-layer view into a cross-layer
     (block-major) cache has stride(0) inflated by num_layers; outputs must
-    match a contiguous cache holding the same data exactly."""
+    match a contiguous cache holding the same data exactly.
+    """
     device = torch.device("cuda:0")
     torch.set_default_dtype(torch.bfloat16)
     torch.set_default_device(device)

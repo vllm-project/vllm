@@ -37,8 +37,7 @@ def prepare_static_weights_for_trtllm_mxint4_moe(
     gemm2_weights: torch.Tensor,
     gemm2_scales: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
-    """
-    Prepare MxInt4 weights for TRT-LLM kernel.
+    """Prepare MxInt4 weights for TRT-LLM kernel.
 
     Input:
         gemm1_weights: [num_experts, 2*intermediate_size, hidden_size//8] int32
@@ -51,6 +50,7 @@ def prepare_static_weights_for_trtllm_mxint4_moe(
     Returns:
         Dict with keys 'gemm1_weights', 'gemm1_scales', 'gemm2_weights',
             'gemm2_scales' containing shuffled/packed tensors ready for kernel
+
     """
     from flashinfer import block_scale_interleave
     from flashinfer.fused_moe import (
@@ -192,8 +192,7 @@ def flashinfer_trtllm_mxint4_moe(
     routing_method_type: int | None = None,
     routing_replay_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """
-    Apply FlashInfer TensorRT-LLM MxInt4 MoE kernel.
+    """Apply FlashInfer TensorRT-LLM MxInt4 MoE kernel.
 
     Args:
         x: Input hidden states. dtype: bfloat16
@@ -214,6 +213,7 @@ def flashinfer_trtllm_mxint4_moe(
 
     Returns:
         Output tensor from MoE layer. dtype: same as x (bfloat16)
+
     """
     from flashinfer import RoutingMethodType
     from flashinfer.fused_moe import trtllm_mxint4_block_scale_moe

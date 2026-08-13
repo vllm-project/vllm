@@ -57,7 +57,8 @@ class _FakeTensor:
     """Sentinel stand-in for torch.Tensor in load_weights tests. Supports the
     .detach().clone() chain used by load_weights for buffered mm weights;
     both methods return self so identity (and the existing equality
-    assertions) are preserved through cloning."""
+    assertions) are preserved through cloning.
+    """
 
     def detach(self):
         return self

@@ -50,7 +50,8 @@ def _make_flexkv_module(
     impl_mock: MagicMock,
 ) -> tuple[types.ModuleType, types.ModuleType]:
     """Build a fake ``flexkv`` package hierarchy that returns *impl_mock*
-    when ``FlexKVConnectorV1Impl`` is instantiated."""
+    when ``FlexKVConnectorV1Impl`` is instantiated.
+    """
     flexkv_mod = types.ModuleType("flexkv")
     integration_mod = types.ModuleType("flexkv.integration")
     vllm_mod = types.ModuleType("flexkv.integration.vllm")
@@ -71,7 +72,8 @@ def _make_flexkv_module(
 
 def _install_flexkv_mock(impl_mock: MagicMock):
     """Insert fake flexkv modules into sys.modules and return a context that
-    cleans them up afterwards."""
+    cleans them up afterwards.
+    """
     flexkv_mod, adapter_mod = _make_flexkv_module(impl_mock)
     mods = {
         "flexkv": flexkv_mod,
@@ -104,7 +106,8 @@ def _build_connector(vllm_config: VllmConfig, impl_mock: MagicMock):
 
 class TestFlexKVConnectorImportError:
     """FlexKVConnectorV1 should fail with a helpful message when flexkv is
-    absent."""
+    absent.
+    """
 
     def test_import_error_message(self):
         from vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector import (

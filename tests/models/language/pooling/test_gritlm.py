@@ -16,8 +16,7 @@ ATOL = 2.3e-3
 
 
 def _arr(arr):
-    """
-    Convert a list of integers to an array of integers.
+    """Convert a list of integers to an array of integers.
     """
     return np.array(arr)
 
@@ -62,8 +61,7 @@ def gritlm_instruction(instruction):
 
 
 def get_test_data():
-    """
-    Grabbed this test data and the expected values from
+    """Grabbed this test data and the expected values from
     README.md in https://github.com/ContextualAI/gritlm
     """
     q_instruction = gritlm_instruction(

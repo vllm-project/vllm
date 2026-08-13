@@ -68,7 +68,8 @@ async def client(server):
 def image_url() -> str:
     """Stable real image as a data URL, kept identical across both the
     text and prompt_embeds requests so any output difference must come from
-    how the text content is delivered."""
+    how the text content is delivered.
+    """
     return encode_image_url(ImageAsset("stop_sign").pil_image)
 
 

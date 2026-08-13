@@ -14,8 +14,7 @@ logger = init_logger(__name__)
 
 
 class GCDebugConfig:
-    """
-    Config for GC Debugger.
+    """Config for GC Debugger.
     - 0: disable GC debugger
     - 1: enable GC debugger with gc.collect elapsed times
     - '{"top_objects":5}': enable GC debugger with top 5 collected objects
@@ -44,8 +43,7 @@ class GCDebugConfig:
 
 
 class GCDebugger:
-    """
-    Debugger for GC which logs helpful information for GC understanding.
+    """Debugger for GC which logs helpful information for GC understanding.
     To enable, you should call maybe_attach_gc_debug_callback in the process.
     """
 
@@ -59,8 +57,7 @@ class GCDebugger:
         self.gc_top_collected_objects: str = ""
 
     def handle(self, phase: str, info: dict[str, int]) -> None:
-        """
-        Handles a GC event (e.g. GC start or GC finish)
+        """Handles a GC event (e.g. GC start or GC finish)
         """
         generation = info.get("generation")
         if generation is None:
@@ -94,8 +91,7 @@ class GCDebugger:
 
 
 def freeze_gc_heap() -> None:
-    """
-    Freeze all objects tracked by the garbage collector. It should be invoked
+    """Freeze all objects tracked by the garbage collector. It should be invoked
     after server init / warmup, to reduce GC overhead from static objects
     during serving time.
     """
@@ -109,8 +105,7 @@ def freeze_gc_heap() -> None:
 
 
 def maybe_attach_gc_debug_callback() -> None:
-    """
-    Attached a callback for GC debug when VLLM_GC_DEBUG is enabled.
+    """Attached a callback for GC debug when VLLM_GC_DEBUG is enabled.
     """
     config = GCDebugConfig(envs.VLLM_GC_DEBUG)
     if config.enabled:
@@ -123,8 +118,7 @@ def maybe_attach_gc_debug_callback() -> None:
 
 
 def _compute_detailed_type(o: Any) -> str:
-    """
-    Detailed object type.
+    """Detailed object type.
 
     TODO(Jialin): Further enhance the detailed type with element types for
     easier debugging. We tried but occasionally it would run into signals
@@ -139,8 +133,7 @@ def _compute_detailed_type(o: Any) -> str:
 
 
 def _compute_top_gc_collected_objects(objects: list[Any], top: int) -> str:
-    """
-    Group collected objects by types.
+    """Group collected objects by types.
     """
     if top <= 0:
         return ""

@@ -101,8 +101,7 @@ class ArcticMLP(nn.Module):
 
 
 class ArcticMoE(nn.Module):
-    """
-    Model-parallel implementation of Arctic MoE Layer.
+    """Model-parallel implementation of Arctic MoE Layer.
     """
 
     def __init__(

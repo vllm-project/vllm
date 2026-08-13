@@ -16,8 +16,7 @@ def moe_align_block_size(
     pad_sorted_ids: bool = False,
     ignore_invalid_experts: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Aligns the token distribution across experts to be compatible with block
+    """Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.
 
     Note: In the case of expert_parallel, moe_align_block_size initially
@@ -26,7 +25,8 @@ def moe_align_block_size(
     the current GPU rank as -1 so the MoE matmuls could skip those blocks.
     This requires the num_experts input arg to be the num global experts.
 
-    Parameters:
+    Parameters
+    ----------
     - topk_ids: A tensor of shape [total_tokens, top_k] representing the
         top-k expert indices for each token.
     - block_size: The block size used in block matrix multiplication.
@@ -44,7 +44,8 @@ def moe_align_block_size(
         and will not participate in counting or ranking, and there will be no
         -1 in expert_ids.
 
-    Returns:
+    Returns
+    -------
     - sorted_token_ids: A tensor containing the sorted token indices according
         to their allocated expert.
     - expert_ids: A tensor indicating the assigned expert index for each block.
@@ -70,6 +71,7 @@ def moe_align_block_size(
         the subsequent matrix multiplication.
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
+
     """
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     if pad_sorted_ids:
@@ -106,8 +108,7 @@ def moe_align_block_size(
 def batched_moe_align_block_size(
     max_tokens_per_batch: int, block_size: int, expert_num_tokens: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Given num_batches, max_tokens_per_batch, block_size and the number of
+    """Given num_batches, max_tokens_per_batch, block_size and the number of
     valid-tokens in each batch, prepare sorted_token_ids, expert_ids and
     num_tokens_post_pad. sorted_token_ids, expert_ids and num_tokens_post_pad
     have the same semantics as in moe_align_block_size.
@@ -115,14 +116,16 @@ def batched_moe_align_block_size(
     This function is intended to be a drop in replacement for
     moe_align_batch_size for the batched case.
 
-    Parameters:
+    Parameters
+    ----------
     - max_tokens_per_batch (int): Number of tokens in each batch (both
         valid and invalid).
     - block_size (int): block_size to align the data to.
     - expert_num_tokens (torch.Tensor): expert_num_tokens[i], indicates
         the number of valid tokens in batch i.
 
-    Returns:
+    Returns
+    -------
     - sorted_token_ids (torch.Tensor): Torch tensor of size
         (num_batches * max_tokens_per_batch) indicating the token indices for
         that block.
@@ -166,8 +169,8 @@ def batched_moe_align_block_size(
 
       num_tokens_post_pad will be 24 as sorted_token_ids has valid entries
       until 24.
-    """
 
+    """
     B = expert_num_tokens.size(0)
     device = expert_num_tokens.device
 

@@ -43,7 +43,8 @@ def _reference_weight(module: nn.Module) -> torch.Tensor | None:
     """A weight whose trailing dim is the module's hidden size.
 
     Linears and 2-D gate weights are `[out, hidden]`; norm weights are
-    `[hidden]`. Used to fabricate a placeholder input of matching size/dtype."""
+    `[hidden]`. Used to fabricate a placeholder input of matching size/dtype.
+    """
     for child in module.modules():
         if isinstance(child, nn.Linear):
             return child.weight
@@ -58,7 +59,8 @@ class _MetaProxy(fx.Proxy):
 
     Shape questions (`len`, iteration, `.shape` unpacks) are answered by
     executing each op on the meta values, so PyTorch's meta kernels are the
-    single source of shape inference — no per-op rules."""
+    single source of shape inference — no per-op rules.
+    """
 
     meta: object = _UNKNOWN
 
@@ -75,7 +77,8 @@ class _MetaAttribute(_MetaProxy, fx.proxy.Attribute):
     """Attribute proxy (e.g. `x.shape`) carrying its meta value.
 
     `Proxy.__getattr__` constructs `Attribute` directly, bypassing
-    `Tracer.proxy`, so the meta value must be grafted on here too."""
+    `Tracer.proxy`, so the meta value must be grafted on here too.
+    """
 
     def __init__(self, root: fx.Proxy, attr: str):
         super().__init__(root, attr)
@@ -211,7 +214,8 @@ def _leaf_attention_interfaces():
     """Patch `AttentionInterface.get_interface` so traced forwards see a leaf node.
 
     `vllm_attention_function` needs runtime context so it is untraceable.
-    Every interface returns `(attn_output, attn_weights)`."""
+    Every interface returns `(attn_output, attn_weights)`.
+    """
     from transformers.modeling_utils import AttentionInterface
 
     original = AttentionInterface.get_interface
@@ -289,7 +293,8 @@ def forward_parameters(cls: type[nn.Module]) -> dict[str, inspect.Parameter]:
 def forward_input_count(cls: type[nn.Module]) -> int:
     """The number of tensor inputs `cls.forward` declares, excluding `self` and
     any `*args`/`**kwargs`. Read from the signature, so it is independent of
-    whether the trace completes (unlike counting placeholders)."""
+    whether the trace completes (unlike counting placeholders).
+    """
     params = list(forward_parameters(cls).values())
     if not params:
         return 1  # uninspectable: assume a single input and let matching decide
@@ -397,7 +402,8 @@ def upstream_linear(node: object, module: nn.Module) -> fx.Node | None:
     Non-linear submodules are transparent too (e.g. the dropout GPT-style
     attentions apply after their output projection). Never walks through a leaf
     call (e.g. an attention interface): its inputs are what attention consumes,
-    not what produced the value."""
+    not what produced the value.
+    """
     stack = [node]
     seen: set[fx.Node] = set()
     while stack:
@@ -420,7 +426,8 @@ def downstream_linear(node: fx.Node, module: nn.Module) -> fx.Node | None:
     """Nearest linear consuming `node`'s output, walking through casts/scalings.
 
     Never walks through a leaf call (e.g. an attention interface): what crosses
-    it is consumed by the attention computation, not projected."""
+    it is consumed by the attention computation, not projected.
+    """
     queue = list(node.users)
     seen: set[fx.Node] = set()
     while queue:
@@ -482,8 +489,7 @@ def is_method(node: object, name: str) -> bool:
 
 
 def is_op(node: object, name: str) -> bool:
-    """
-    Is node `torch.<name>()`, `F.<name>()`, `operator.<name>()`, or `Tensor.<name>()`.
+    """Is node `torch.<name>()`, `F.<name>()`, `operator.<name>()`, or `Tensor.<name>()`.
     """
     return any(
         is_fn(node, getattr(module, name, None)) for module in (torch, F, operator)

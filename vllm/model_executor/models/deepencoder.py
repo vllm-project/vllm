@@ -82,23 +82,23 @@ class ImageEncoderViT(nn.Module):
         global_attn_indexes: tuple[int, ...] = (),
         last_conv_output: int = 1024,
     ) -> None:
-        """
-        Args:
-            img_size (int): Input image size.
-            patch_size (int): Patch size.
-            in_chans (int): Number of input image channels.
-            embed_dim (int): Patch embedding dimension.
-            depth (int): Depth of ViT.
-            num_heads (int): Number of attention heads in each ViT block.
-            mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
-            qkv_bias (bool): If True, add a learnable bias to query, key, value.
-            norm_layer (nn.Module): Normalization layer.
-            act_layer (nn.Module): Activation layer.
-            use_abs_pos (bool): If True, use absolute positional embeddings.
-            use_rel_pos (bool): If True, add relative positional embeddings to the attention map.
-            rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
-            window_size (int): Window size for window attention blocks.
-            global_attn_indexes (list): Indexes for blocks using global attention.
+        """Args:
+        img_size (int): Input image size.
+        patch_size (int): Patch size.
+        in_chans (int): Number of input image channels.
+        embed_dim (int): Patch embedding dimension.
+        depth (int): Depth of ViT.
+        num_heads (int): Number of attention heads in each ViT block.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        qkv_bias (bool): If True, add a learnable bias to query, key, value.
+        norm_layer (nn.Module): Normalization layer.
+        act_layer (nn.Module): Activation layer.
+        use_abs_pos (bool): If True, use absolute positional embeddings.
+        use_rel_pos (bool): If True, add relative positional embeddings to the attention map.
+        rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
+        window_size (int): Window size for window attention blocks.
+        global_attn_indexes (list): Indexes for blocks using global attention.
+
         """  # noqa: E501
         super().__init__()
         self.img_size = img_size
@@ -197,7 +197,8 @@ class ImageEncoderViT(nn.Module):
 
 class Block(nn.Module):
     """Transformer blocks with support of window attention and residual propagation
-    blocks"""
+    blocks
+    """
 
     def __init__(
         self,
@@ -212,20 +213,20 @@ class Block(nn.Module):
         window_size: int = 0,
         input_size: tuple[int, int] | None = None,
     ) -> None:
-        """
-        Args:
-            dim (int): Number of input channels.
-            num_heads (int): Number of attention heads in each ViT block.
-            mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
-            qkv_bias (bool): If True, add a learnable bias to query, key, value.
-            norm_layer (nn.Module): Normalization layer.
-            act_layer (nn.Module): Activation layer.
-            use_rel_pos (bool): If True, add relative positional embeddings to the attention map.
-            rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
-            window_size (int): Window size for window attention blocks. If it equals 0, then
-                use global attention.
-            input_size (tuple(int, int) or None): Input resolution for calculating the relative
-                positional parameter size.
+        """Args:
+        dim (int): Number of input channels.
+        num_heads (int): Number of attention heads in each ViT block.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        qkv_bias (bool): If True, add a learnable bias to query, key, value.
+        norm_layer (nn.Module): Normalization layer.
+        act_layer (nn.Module): Activation layer.
+        use_rel_pos (bool): If True, add relative positional embeddings to the attention map.
+        rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
+        window_size (int): Window size for window attention blocks. If it equals 0, then
+            use global attention.
+        input_size (tuple(int, int) or None): Input resolution for calculating the relative
+            positional parameter size.
+
         """  # noqa: E501
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -280,14 +281,14 @@ class RelPosAttention(PluggableLayer):
         rel_pos_zero_init: bool = True,
         input_size: tuple[int, int] | None = None,
     ) -> None:
-        """
-        Args:
-            dim (int): Number of input channels.
-            num_heads (int): Number of attention heads.
-            qkv_bias (bool):  If True, add a learnable bias to query, key, value.
-            rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
-            input_size (tuple(int, int) or None): Input resolution for calculating the relative
-                positional parameter size.
+        """Args:
+        dim (int): Number of input channels.
+        num_heads (int): Number of attention heads.
+        qkv_bias (bool):  If True, add a learnable bias to query, key, value.
+        rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
+        input_size (tuple(int, int) or None): Input resolution for calculating the relative
+            positional parameter size.
+
         """  # noqa: E501
         super().__init__()
         self.num_heads = num_heads
@@ -356,8 +357,8 @@ class RelPosAttention(PluggableLayer):
 def window_partition(
     x: torch.Tensor, window_size: int
 ) -> tuple[torch.Tensor, tuple[int, int]]:
-    """
-    Partition into non-overlapping windows with padding if needed.
+    """Partition into non-overlapping windows with padding if needed.
+
     Args:
         x (tensor): input tokens with [B, H, W, C].
         window_size (int): window size.
@@ -365,6 +366,7 @@ def window_partition(
     Returns:
         windows: windows after partition with [B * num_windows, window_size, window_size, C].
         (Hp, Wp): padded height and width before partition
+
     """  # noqa: E501
     B, H, W, C = x.shape
 
@@ -387,8 +389,8 @@ def window_unpartition(
     pad_hw: tuple[int, int],
     hw: tuple[int, int],
 ) -> torch.Tensor:
-    """
-    Window unpartition into original sequences and removing padding.
+    """Window unpartition into original sequences and removing padding.
+
     Args:
         windows (tensor): input tokens with [B * num_windows, window_size, window_size, C].
         window_size (int): window size.
@@ -397,6 +399,7 @@ def window_unpartition(
 
     Returns:
         x: unpartitioned sequences with [B, H, W, C].
+
     """  # noqa: E501
     Hp, Wp = pad_hw
     H, W = hw
@@ -412,9 +415,9 @@ def window_unpartition(
 
 
 def get_rel_pos(q_size: int, k_size: int, rel_pos: torch.Tensor) -> torch.Tensor:
-    """
-    Get relative positional embeddings according to the relative positions of
+    """Get relative positional embeddings according to the relative positions of
         query and key sizes.
+
     Args:
         q_size (int): size of query q.
         k_size (int): size of key k.
@@ -422,6 +425,7 @@ def get_rel_pos(q_size: int, k_size: int, rel_pos: torch.Tensor) -> torch.Tensor
 
     Returns:
         Extracted positional embeddings according to relative positions.
+
     """
     max_rel_dist = int(2 * max(q_size, k_size) - 1)
     # Interpolate rel pos if needed.
@@ -457,8 +461,7 @@ def add_decomposed_rel_pos(
     q_size: tuple[int, int],
     k_size: tuple[int, int],
 ) -> torch.Tensor:
-    """
-    Calculate decomposed Relative Positional Embeddings from :paper:`mvitv2`.
+    """Calculate decomposed Relative Positional Embeddings from :paper:`mvitv2`.
     https://github.com/facebookresearch/mvit/blob/19786631e330df9f3622e5402b4a419a263a2c80/mvit/models/attention.py
     Args:
         q (Tensor): query q in the attention layer with shape (B, q_h * q_w, C).
@@ -469,6 +472,7 @@ def add_decomposed_rel_pos(
 
     Returns:
         attn (Tensor): attention map with added relative positional embeddings.
+
     """  # noqa: E501
     q_h, q_w = q_size
     k_h, k_w = k_size
@@ -488,8 +492,7 @@ def add_decomposed_rel_pos(
 
 
 class PatchEmbed(nn.Module):
-    """
-    Image to Patch Embedding.
+    """Image to Patch Embedding.
     """
 
     def __init__(
@@ -500,13 +503,13 @@ class PatchEmbed(nn.Module):
         in_chans: int = 3,
         embed_dim: int = 768,
     ) -> None:
-        """
-        Args:
-            kernel_size (Tuple): kernel size of the projection layer.
-            stride (Tuple): stride of the projection layer.
-            padding (Tuple): padding size of the projection layer.
-            in_chans (int): Number of input image channels.
-            embed_dim (int): Patch embedding dimension.
+        """Args:
+        kernel_size (Tuple): kernel size of the projection layer.
+        stride (Tuple): stride of the projection layer.
+        padding (Tuple): padding size of the projection layer.
+        in_chans (int): Number of input image channels.
+        embed_dim (int): Patch embedding dimension.
+
         """
         super().__init__()
 

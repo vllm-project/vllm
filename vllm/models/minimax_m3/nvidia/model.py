@@ -190,7 +190,8 @@ class MiniMaxM3MLP(nn.Module):
 
 class MiniMaxM3MoE(nn.Module):
     """Sigmoid-routed MoE block with a routing-bias correction and a shared
-    expert."""
+    expert.
+    """
 
     def __init__(
         self,
@@ -780,7 +781,8 @@ class MiniMaxM3DecoderLayer(nn.Module):
     @property
     def ffn_all_reduce_deferred(self) -> bool:
         """This layer's FFN output is left un-reduced; the caller fuses the
-        all-reduce into the next RMSNorm."""
+        all-reduce into the next RMSNorm.
+        """
         if self.is_moe_layer:
             return self.block_sparse_moe.experts.moe_config.skip_final_all_reduce
         return not self.mlp.down_proj.reduce_results

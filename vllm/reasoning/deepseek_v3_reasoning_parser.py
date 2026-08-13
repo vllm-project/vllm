@@ -18,8 +18,7 @@ if TYPE_CHECKING:
 
 
 class DeepSeekV3ReasoningParser(ReasoningParser):
-    """
-    V3 parser that delegates to either DeepSeekR1ReasoningParser or
+    """V3 parser that delegates to either DeepSeekR1ReasoningParser or
     IdentityReasoningParser based on `thinking` and `separate_reasoning`.
     """
 
@@ -81,8 +80,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
 
 
 class DeepSeekV3ReasoningWithThinkingParser(DeepSeekV3ReasoningParser):
-    """
-    DeepSeekV3ReasoningParser that defaults to thinking mode.
+    """DeepSeekV3ReasoningParser that defaults to thinking mode.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):

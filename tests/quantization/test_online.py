@@ -168,14 +168,12 @@ def test_online_quantization(
     use_rocm_aiter: bool,
     monkeypatch,
 ) -> None:
-    """
-    Tests that online quantization frontend configuration works -
+    """Tests that online quantization frontend configuration works -
     selecting quant schemes, overriding quant schemes by type, ignoring
     layers.
 
     Does not test performance, peak memory usage, etc.
     """
-
     # TODO: Relax this condition once there is a native MXFP4_MXFP4
     # linear/moe backend supported on cuda.
     if quant_scheme == "mxfp4" and not (on_gfx950() or on_gfx942()):

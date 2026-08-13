@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DeepEP test utilities
+"""DeepEP test utilities
 """
 
 import dataclasses

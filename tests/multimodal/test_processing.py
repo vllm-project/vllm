@@ -1069,8 +1069,7 @@ def test_hf_processor_call_kwargs(
 
 
 def test_apply_matches_no_match_exits_quickly():
-    """
-    Test that _apply_matches exits quickly when no matches are found.
+    """Test that _apply_matches exits quickly when no matches are found.
 
     Previously, _apply_matches had O(n²) behavior when no match was found
     because it would increment start_idx by 1 each iteration while
@@ -1138,8 +1137,7 @@ def test_iter_token_matches_rejects_negative_start_idx():
 
 
 def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
-    """
-    Test that placeholder scanning stays linear under adversarial candidates.
+    """Test that placeholder scanning stays linear under adversarial candidates.
 
     The fast-forward scan must not rescan the prompt tail per position when
     one candidate's first token never occurs (forcing a full search) while
@@ -1172,8 +1170,7 @@ def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
     ],
 )
 def test_find_mm_placeholders_resolves_content_lazily(prompt):
-    """
-    Test that content of items the scan never reaches is not resolved.
+    """Test that content of items the scan never reaches is not resolved.
 
     With `tokenizer=None`, resolving string content raises; the scan must
     return no placeholders instead of raising on the second item.

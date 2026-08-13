@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Provides a timeslice logging decorator
+"""Provides a timeslice logging decorator
 """
 
 import functools
@@ -9,8 +8,7 @@ import time
 
 
 def logtime(logger, msg=None):
-    """
-    Logs the execution time of the decorated function.
+    """Logs the execution time of the decorated function.
     Always place it beneath other decorators.
     """
 

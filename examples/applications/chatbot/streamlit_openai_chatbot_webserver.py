@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-vLLM Chat Assistant - A Streamlit Web Interface
+"""vLLM Chat Assistant - A Streamlit Web Interface
 
 A streamlined chat interface that quickly integrates
 with vLLM API server.
@@ -78,6 +77,7 @@ def create_new_chat_session():
         - current_session: Sets to new session ID
         - active_session: Sets to new session ID
         - messages: Resets to empty list
+
     """
     session_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state.sessions[session_id] = []
@@ -101,6 +101,7 @@ def switch_to_chat_session(session_id):
         - current_session: Updated to specified session_id
         - active_session: Updated to specified session_id
         - messages: Loaded from sessions[session_id]
+
     """
     st.session_state.current_session = session_id
     st.session_state.active_session = session_id
@@ -134,6 +135,7 @@ def get_llm_response(messages, model, reason, content_ph=None, reasoning_ph=None
     Note:
         The function uses streamlit placeholders for live updates.
         When reason=True, the reasoning process appears above the response.
+
     """
     full_text = ""
     think_text = ""
@@ -256,6 +258,7 @@ def server_supports_reasoning():
 
     Returns:
         bool: True if the model supports reasoning, False otherwise
+
     """
     resp = client.chat.completions.create(
         model=model,

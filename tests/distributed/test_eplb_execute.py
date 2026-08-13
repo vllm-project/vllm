@@ -31,8 +31,7 @@ def create_expert_indices_with_redundancy(
     total_physical_experts: int,
     redundancy_config: list[int],  # redundancy for each logical expert
 ) -> torch.Tensor:
-    """
-    Create expert indices with redundancy.
+    """Create expert indices with redundancy.
 
     Args:
         num_layers: number of layers
@@ -42,6 +41,7 @@ def create_expert_indices_with_redundancy(
 
     Returns:
         indices: Shape (num_layers, total_physical_experts)
+
     """
     assert sum(redundancy_config) == total_physical_experts
     assert len(redundancy_config) == num_logical_experts
@@ -70,8 +70,7 @@ def create_expert_weights(
     device: torch.device,
     physical_to_logical_mapping: torch.Tensor,
 ) -> list[list[torch.Tensor]]:
-    """
-    Create fake expert weights tensor for testing.
+    """Create fake expert weights tensor for testing.
 
     Use `arange` to generate predictable weights values, based on logical
     expert ID.
@@ -80,6 +79,7 @@ def create_expert_weights(
     Args:
         physical_to_logical_mapping: Shape (num_layers, num_local_experts)
             mapping[layer, physical_pos] = logical_expert_id
+
     """
     expert_weights = []
 
@@ -184,8 +184,7 @@ def verify_redundant_experts_have_same_weights(
     world_size: int,
     num_local_experts: int,
 ) -> bool:
-    """
-    Verify that all replicas of the same logical expert have the same weights.
+    """Verify that all replicas of the same logical expert have the same weights.
     """
     num_layers = len(expert_weights)
     total_physical_experts = world_size * num_local_experts
@@ -543,7 +542,6 @@ def test_rearrange_expert_weights_with_redundancy(
     eplb_communicator,
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
-
     if eplb_communicator == "nixl" and not has_nixl():
         pytest.skip("NIXL is not available")
     if torch.accelerator.device_count() < world_size:
@@ -653,7 +651,6 @@ def test_async_transfer_layer_without_mtp(
     eplb_communicator: str,
 ):
     """Exercise async EPLB transfer path without MTP/spec decode."""
-
     if eplb_communicator == "nixl" and not has_nixl():
         pytest.skip("NIXL is not available")
     if torch.accelerator.device_count() < world_size:
@@ -671,11 +668,9 @@ def test_async_transfer_layer_without_mtp(
 
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_rearrange_expert_weights_no_change(world_size):
-    """
-    Test that when the indices do not change, the weights should remain
+    """Test that when the indices do not change, the weights should remain
     unchanged.
     """
-
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(
@@ -775,7 +770,6 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_rearrange_expert_weights_profile_mode(world_size):
     """Test profile mode (should not copy actual weights)"""
-
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(
@@ -894,7 +888,6 @@ def test_nixl_deferred_init(
     num_logical_experts,
 ):
     """Test NixlEplbCommunicator with defer_remote_setup=True (elastic EP path)."""
-
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(

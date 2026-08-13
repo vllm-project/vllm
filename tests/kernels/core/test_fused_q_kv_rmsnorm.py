@@ -55,7 +55,8 @@ def test_fused_q_kv_rmsnorm_correctness(num_tokens: int, dtype: torch.dtype):
 def test_fused_q_kv_rmsnorm_launches_past_grid_y_cap(num_tokens: int):
     """Regression guard: grid used to be (2, num_tokens), hitting CUDA's
     65535 grid-y cap at num_tokens >= 65536. The new grid (num_tokens, 2)
-    lifts that bound to 2**31-1."""
+    lifts that bound to 2**31-1.
+    """
     device = "cuda"
     dtype = torch.bfloat16
     q_size, kv_size = 192, 576

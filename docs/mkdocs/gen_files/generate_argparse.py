@@ -76,8 +76,7 @@ mock_if_no_torch("torch.nn", MagicMock(Parameter=object))
 # Mock torch.library.infer_schema for vllm.ir.ops.IrOpInplaceOverload.__init__
 # We need to return the corresponding number of inputs, as IR infra will assert it
 def get_outputs(native_fn: Callable) -> str:
-    """
-    Extract output schema from function's return type annotation,
+    """Extract output schema from function's return type annotation,
     e.g. 'Tensor' or 'Tensor, Tensor'.
     """
     import typing
@@ -244,6 +243,7 @@ def create_parser(add_cli_args, **kwargs) -> FlexibleArgumentParser:
 
     Returns:
         FlexibleArgumentParser: A parser with markdown formatting for the class.
+
     """
     try:
         parser = FlexibleArgumentParser(add_json_tip=False)

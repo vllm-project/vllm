@@ -316,7 +316,8 @@ def test_free_request_with_duplicate_mm_hashes():
     """Freeing a request whose two inputs share the same mm_hash must fully
     clean up request_cached_ids. After the first free_encoder_input call,
     cached[mm_hash] becomes empty; the second call must still remove the
-    remaining input_id from request_cached_ids."""
+    remaining input_id from request_cached_ids.
+    """
     manager = EncoderCacheManager(cache_size=20)
 
     req = MockRequest("r1", ["imgA", "imgA"], [4, 4])

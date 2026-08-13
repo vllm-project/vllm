@@ -31,6 +31,7 @@ def mxint4_quantize(
     Returns:
         - uint8 packed (2 INT4/byte): [..., k//2] - stores SIGNED INT4 [-8, 7]
         - scales in BF16: [..., k//sf_vec_size]
+
     """
     x_reshaped = x.reshape(-1, sf_vec_size)
     x_max = x_reshaped.max(dim=-1, keepdim=True)[0].to(torch.float32)
@@ -61,6 +62,7 @@ def mxint4_quantize_moe_weights(
     Returns:
         - weights_mxint4: Quantized weights [e, n, k//2] uint8
         - scales_mxint4: Quantization scales [e, n, k//group_size] bf16
+
     """
     e = weights_bf16.shape[0]
     weight_list = []
@@ -101,6 +103,7 @@ def marlin_quantize_moe_weights(
     Returns:
         - weights_marlin: Marlin quantized weights [e, k//8, n] int32
         - scales_marlin: Marlin quantization scales [e, k//group_size, n] bf16
+
     """
     from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
         marlin_quantize,
@@ -293,7 +296,8 @@ def test_marlin_vs_trtllm_mxint4_moe_kimik2(monkeypatch, m, n, k, e, topk, group
 @torch.inference_mode()
 def test_flashinfer_trtllm_mxint4_moe_wrapper(m, n, k, e, topk):
     """Test that the flashinfer_trtllm_mxint4_moe wrapper matches the raw
-    trtllm_mxint4_block_scale_moe kernel call."""
+    trtllm_mxint4_block_scale_moe kernel call.
+    """
     pytest.importorskip("flashinfer")
     from flashinfer import RoutingMethodType
     from flashinfer.fused_moe import trtllm_mxint4_block_scale_moe

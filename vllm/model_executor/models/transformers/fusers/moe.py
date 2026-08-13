@@ -80,7 +80,8 @@ def _forced_dtype(nodes: Iterable[fx.Node]) -> torch.dtype | None:
 
     Computations that must run in higher precision say so in their forward (e.g.
     `hidden_states.type(torch.float32)`), so the dtype is readable from the graph
-    even when the config does not name it."""
+    even when the config does not name it.
+    """
     for node in nodes:
         if node.op not in ("call_method", "call_function"):
             continue
@@ -125,7 +126,8 @@ class SharedExpertMLP(nn.Module):
 def _moe_block_forward(self: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
     """Standard MoE block forward.
 
-    Routing and any shared experts are handled inside `self.experts: MoERunner`."""
+    Routing and any shared experts are handled inside `self.experts: MoERunner`.
+    """
     orig_shape = hidden_states.shape
     hidden_states = hidden_states.reshape(-1, orig_shape[-1])
     num_tokens = hidden_states.shape[0]
@@ -152,7 +154,8 @@ class MoEBlockFuser:
     def _match_router(gate: nn.Module) -> tuple[str, torch.dtype | None] | None:
         """Matches `topk(score(linear(x)))`, `score` being `softmax`/`sigmoid`.
 
-        Returns the scoring function and the dtype the router computes in."""
+        Returns the scoring function and the dtype the router computes in.
+        """
         state = {name for name, _ in named_state(gate)}
         if "weight" not in state or state - {"weight", "e_score_correction_bias"}:
             return None
@@ -280,7 +283,8 @@ class MoEBlockFuser:
         self, moe_block: nn.Module, prefix: str
     ) -> SharedExpertMLP | None:
         """Build the HF shared expert (and its optional gate)
-        as a `SharedExpertMLP` for vLLM's fused MoE."""
+        as a `SharedExpertMLP` for vLLM's fused MoE.
+        """
         if self.shared_name is None:
             return None
         shared_experts = getattr(moe_block, self.shared_name)

@@ -23,7 +23,8 @@ pytestmark = pytest.mark.skipif(
 def test_concat_and_cache_mla_into_unified_slot_view():
     """concat_and_cache_mla must write correctly into a per-layer view whose
     block stride is the full unified slot (block-major), with zero bleed into
-    the other layers' segments of the same slot."""
+    the other layers' segments of the same slot.
+    """
     from vllm import _custom_ops as ops
 
     torch.manual_seed(0)
@@ -85,7 +86,8 @@ def test_concat_and_cache_mla_into_unified_slot_view():
 def test_flashmla_dense_decode_unified_slot_view():
     """FlashMLA dense decode (FLASHMLA backend, e.g. Kimi-K2-style dense MLA
     on Hopper) must read a unified-slot block-major view bit-identically to a
-    contiguous per-layer cache."""
+    contiguous per-layer cache.
+    """
     import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_dense_supported()
@@ -150,7 +152,8 @@ def test_flashmla_dense_decode_unified_slot_view():
 def test_flashinfer_mla_dense_decode_unified_slot_view():
     """FlashInfer MLA dense decode must read a unified-slot block-major view
     (inflated stride(0), non-zero storage offset) bit-identically to a
-    contiguous per-layer cache."""
+    contiguous per-layer cache.
+    """
     try:
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
     except ImportError:
@@ -220,7 +223,8 @@ def test_flashinfer_mla_dense_decode_unified_slot_view():
 def test_flashmla_fp8_sparse_decode_unified_slot_view():
     """FlashMLA fp8 sparse decode (DeepSeek V3.2/V4 DSA path) must read a
     unified-slot block-major view bit-identically to a contiguous fp8_ds_mla
-    cache, with finite nonzero output."""
+    cache, with finite nonzero output.
+    """
     import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_sparse_supported()
@@ -306,7 +310,8 @@ def test_flashmla_fp8_sparse_decode_unified_slot_view():
 def test_indexer_k_quant_and_cache_into_unified_slot_view():
     """indexer_k_quant_and_cache (DeepSeek V3.2/V4 DSA indexer K write) must
     write correctly into a per-layer view whose block stride is the full
-    unified slot, with zero bleed into the other layers' segments."""
+    unified slot, with zero bleed into the other layers' segments.
+    """
     from vllm import _custom_ops as ops
 
     torch.manual_seed(0)
@@ -351,7 +356,8 @@ def test_indexer_k_quant_and_cache_into_unified_slot_view():
 
 def test_flashattn_mla_dense_decode_unified_slot_view():
     """FA3 decode (FLASH_ATTN_MLA backend) must read a unified-slot
-    block-major view bit-identically to a contiguous per-layer cache."""
+    block-major view bit-identically to a contiguous per-layer cache.
+    """
     try:
         from vllm.vllm_flash_attn import flash_attn_varlen_func
     except ImportError:
@@ -424,7 +430,8 @@ def test_flashattn_mla_dense_decode_unified_slot_view():
 def test_flashmla_dense_fp8_decode_unified_slot_view():
     """FlashMLA dense fp8 decode (FLASHMLA backend with quantized KV cache)
     must read a unified-slot block-major view bit-identically to a contiguous
-    per-layer fp8 cache."""
+    per-layer fp8 cache.
+    """
     import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_dense_supported()
@@ -495,7 +502,8 @@ def test_flashmla_dense_fp8_decode_unified_slot_view():
 def test_flashinfer_mla_dense_fp8_decode_unified_slot_view():
     """FlashInfer MLA dense decode with an fp8 KV cache must read a
     unified-slot block-major view bit-identically to a contiguous per-layer
-    cache."""
+    cache.
+    """
     try:
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
     except ImportError:

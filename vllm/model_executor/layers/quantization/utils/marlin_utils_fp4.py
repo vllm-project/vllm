@@ -41,8 +41,8 @@ def _nvfp4_compute_scale_factor(
 ) -> float:
     """Compute the power-of-2 scale_factor needed so that all non-zero
     values in marlin_scales * 2^7 are >= 2 after rescaling.
-    Returns a Python float (power of 2, >= 1.0)."""
-
+    Returns a Python float (power of 2, >= 1.0).
+    """
     # Since half has a smaller dynamic range compared to bfloat16,
     # no rescaling is applied here if active dtype is half.
     if a_dtype is not None and a_dtype == torch.half:
@@ -79,6 +79,7 @@ def nvfp4_marlin_process_scales(
 
     Returns:
         A tuple of (processed_scales, scale_factor).
+
     """
     if not (marlin_scales >= 0).all():
         logger.warning_once(
@@ -379,7 +380,8 @@ def prepare_nvfp4_moe_layer_for_marlin(
 
     def pad_w13(x: torch.Tensor) -> torch.Tensor:
         """Zero-pad each gate/up shard of a (E, num_shards * N, cols)
-        tensor to padded_N rows."""
+        tensor to padded_N rows.
+        """
         if padded_N == N:
             return x
         x = x.view(E, num_shards, N, x.size(-1))
@@ -388,7 +390,8 @@ def prepare_nvfp4_moe_layer_for_marlin(
 
     def pad_w2(x: torch.Tensor, packing: int) -> torch.Tensor:
         """Zero-pad the packed N (last) dim of a (E, K, N / packing)
-        tensor."""
+        tensor.
+        """
         if padded_N == N:
             return x
         return torch.nn.functional.pad(x, (0, (padded_N - N) // packing))

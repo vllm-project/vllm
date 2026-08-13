@@ -258,14 +258,14 @@ class MiMoVisionAttention(nn.Module):
         max_seqlen: torch.Tensor,
         full_attn: bool = True,
     ) -> torch.Tensor:
-        """
-        Args:
-            x: [seq_len, batch=1, embed_dim]  (seq-first convention)
-            cu_seqlens: cumulative sequence lengths [num_seqs+1], int32
-            rotary_pos_emb_cos: [seq_len, qk_channels // 2]
-            rotary_pos_emb_sin: [seq_len, qk_channels // 2]
-            max_seqlen: maximum sequence length
-            full_attn: if True, full attention; if False, window attention
+        """Args:
+        x: [seq_len, batch=1, embed_dim]  (seq-first convention)
+        cu_seqlens: cumulative sequence lengths [num_seqs+1], int32
+        rotary_pos_emb_cos: [seq_len, qk_channels // 2]
+        rotary_pos_emb_sin: [seq_len, qk_channels // 2]
+        max_seqlen: maximum sequence length
+        full_attn: if True, full attention; if False, window attention
+
         """
         # [seq_len, 1, embed_dim] -> QKV projection
         qkv, _ = self.qkv(x)  # [seq_len, 1, q_size + kv_size + kv_size]
@@ -514,6 +514,7 @@ class MiMoVisionTransformer(nn.Module):
         Returns:
             cos: [total_tokens, qk_channels // 2]
             sin: [total_tokens, qk_channels // 2]
+
         """
         cos_list, sin_list = [], []
         for i in range(grid_thw.size(0)):
@@ -559,12 +560,12 @@ class MiMoVisionTransformer(nn.Module):
         return torch.cat(cos_list, dim=0), torch.cat(sin_list, dim=0)
 
     def forward(self, x: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             x: [total_tokens, C] pre-flattened patches
             grid_thw: [num_images, 3] tensor of (t, h, w) for each image/video
         Returns:
             [merged_tokens, out_hidden_size]
+
         """
         # Ensure grid_thw is a tensor
         if not isinstance(grid_thw, torch.Tensor):
@@ -1464,8 +1465,8 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
                 batch. **NOTE**: If mrope is enabled (default setting for
                 Qwen2.5-VL opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
-        """
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 

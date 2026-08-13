@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Tests for DPSupervisor: unit tests and lifecycle integration tests.
+"""Tests for DPSupervisor: unit tests and lifecycle integration tests.
 
 Lifecycle integration tests replace child vLLM servers with lightweight
 aiohttp "fake" servers controlled by the test, so the suite runs without GPUs.
@@ -329,8 +328,7 @@ async def test_shutdown_if_supervisor_server_error_on_startup(
 
 
 class MockVLLMServer:
-    """
-    Minimal FastAPI server that mimics one vLLM replica.
+    """Minimal FastAPI server that mimics one vLLM replica.
     GET /health returns 200 when healthy, 503 otherwise.
     Health state is toggled by the test via set_healthy().
     """
@@ -448,8 +446,7 @@ def launch_mock_vllm_with_drain(
 
 
 async def _poll_supervisor_health(expected_status: int, use_ssl: bool = False) -> bool:
-    """
-    GET /health on the supervisor once and check for expected_status.
+    """GET /health on the supervisor once and check for expected_status.
 
     Pass expected_status=-1 to assert the supervisor is not listening yet
     (a connection error is expected). The supervisor only starts its HTTP
@@ -571,8 +568,7 @@ async def _run_supervisor(
 
 @pytest.mark.asyncio
 async def test_basic_lifecycle(monkeypatch):
-    """
-    A) Supervisor is not listening while children are unhealthy.
+    """A) Supervisor is not listening while children are unhealthy.
     B) /health returns 200 once every child reports healthy.
     C) SIGTERM and shutdown
     """
@@ -643,8 +639,7 @@ async def test_basic_lifecycle_with_ssl(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_failed_startup(monkeypatch):
-    """
-    A) One of the vLLM servers crashes during startup.
+    """A) One of the vLLM servers crashes during startup.
     B) DPSupervisor detects this, and cleans up resources.
     """
     args = _make_args()
@@ -667,8 +662,7 @@ async def test_failed_startup(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_becomes_unhealthy(monkeypatch):
-    """
-    A) Supervisor is not listening while children are unhealthy.
+    """A) Supervisor is not listening while children are unhealthy.
     B) /health returns 200 once every child reports healthy.
     C) Child process becomes unhealthy.
     D) Detected and shutdown.
@@ -708,8 +702,7 @@ async def test_becomes_unhealthy(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_dp_server_fails(monkeypatch):
-    """
-    A) Supervisor is not listening while children are unhealthy.
+    """A) Supervisor is not listening while children are unhealthy.
     B) /health returns 200 once every child reports healthy.
     C) Child process fails.
     D) Detected and shutdown.
@@ -752,8 +745,7 @@ async def test_dp_server_fails(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shutdown_timeout(monkeypatch: pytest.MonkeyPatch):
-    """
-    Child mock servers delay shutdown by 10s on SIGTERM (simulating in-flight
+    """Child mock servers delay shutdown by 10s on SIGTERM (simulating in-flight
     request drain).  The supervisor is configured with shutdown_timeout=10,
     so its total wait budget is 10 + CHILD_EXIT_GRACE_S seconds.  The
     children exit naturally within that window, so no force-kill should occur

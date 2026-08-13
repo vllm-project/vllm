@@ -43,8 +43,7 @@ GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere")
 
 
 class AuthenticationMiddleware:
-    """
-    Pure ASGI middleware that authenticates each request by checking
+    """Pure ASGI middleware that authenticates each request by checking
     if the Authorization Bearer token exists and equals anyof "{api_key}".
 
     Notes
@@ -52,6 +51,7 @@ class AuthenticationMiddleware:
     There are two cases in which authentication is skipped:
         1. The HTTP method is OPTIONS.
         2. The request path doesn't start with GUARDED_PREFIX (e.g. /health).
+
     """
 
     def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
@@ -94,8 +94,7 @@ class AuthenticationMiddleware:
 
 
 class XRequestIdMiddleware:
-    """
-    Middleware the set's the X-Request-Id header for each response
+    """Middleware the set's the X-Request-Id header for each response
     to a random uuid4 (hex) value if the header isn't already
     present in the request, otherwise use the provided request id.
     """
@@ -111,8 +110,7 @@ class XRequestIdMiddleware:
         request_headers = Headers(scope=scope)
 
         async def send_with_request_id(message: Message) -> None:
-            """
-            Custom send function to mutate the response headers
+            """Custom send function to mutate the response headers
             and append X-Request-Id to it.
             """
             if message["type"] == "http.response.start":
@@ -138,8 +136,7 @@ def load_log_config(log_config_file: str | None) -> dict | None:
 
 
 def get_uvicorn_log_config(args: Namespace) -> dict | None:
-    """
-    Get the uvicorn log config based on the provided arguments.
+    """Get the uvicorn log config based on the provided arguments.
 
     Priority:
     1. If log_config_file is specified, use it
@@ -338,8 +335,7 @@ async def vllm_error_handler(req: Request, exc: VLLMError):
 async def engine_error_handler(
     req: Request, exc: EngineDeadError | EngineGenerateError
 ):
-    """
-    VLLM V1 AsyncLLM catches exceptions and returns
+    """VLLM V1 AsyncLLM catches exceptions and returns
     only two types: EngineGenerateError and EngineDeadError.
 
     EngineGenerateError is raised by the per request generate()
@@ -361,7 +357,6 @@ async def engine_error_handler(
     will not automatically shut down. Instead, we use the watchdog
     background task for check for errored state.
     """
-
     if req.app.state.args.log_error_stack:
         logger.exception(
             "Engine Exception caught. Request id: %s",
@@ -475,7 +470,8 @@ _INTERNAL_LOC_MARKERS = frozenset(
 
 def _is_internal_loc_segment(segment: str) -> bool:
     """True if `segment` is a Pydantic-internal wrapper/union-branch
-    marker rather than a user-meaningful field name or list index."""
+    marker rather than a user-meaningful field name or list index.
+    """
     if _BRACKETED_INTERNAL_RE.search(segment):
         return True
     return segment.lower() in _INTERNAL_LOC_MARKERS

@@ -96,7 +96,8 @@ class RMSNorm(nn.Module):
 
 def select_norm_impl(config: CohereConfig) -> tuple[type[nn.Module], float]:
     """Returns (norm_class, eps). Uses RMSNorm when config.rms_norm_eps is set,
-    otherwise falls back to LayerNorm with config.layer_norm_eps."""
+    otherwise falls back to LayerNorm with config.layer_norm_eps.
+    """
     rms_eps = getattr(config, "rms_norm_eps", None)
     if rms_eps is not None:
         return RMSNorm, rms_eps

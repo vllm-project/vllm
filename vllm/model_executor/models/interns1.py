@@ -88,13 +88,12 @@ class InternS1MultiModalProjector(nn.Module):
 
 
 class InternS1ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of images * (1 + num_patches)
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
-        - bn: Batch size * number of images
+    """Dimensions:
+    - bnp: Batch size * number of images * (1 + num_patches)
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
+    - bn: Batch size * number of images
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -103,11 +102,10 @@ class InternS1ImagePixelInputs(TensorSchema):
 
 
 class InternS1ImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - ni: Number of images
-        - tifs: Total image feature size
-        - hs: Hidden size (must match language model backbone)
+    """Dimensions:
+    - ni: Number of images
+    - tifs: Total image feature size
+    - hs: Hidden size (must match language model backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -118,13 +116,12 @@ InternS1ImageInputs: TypeAlias = InternS1ImagePixelInputs | InternS1ImageEmbeddi
 
 
 class InternS1VideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnv: Batch size * number of videos * number of frames
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - bnv: Batch size * number of videos * number of frames
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
     """
 
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
@@ -133,11 +130,10 @@ class InternS1VideoPixelInputs(TensorSchema):
 
 
 class InternS1VideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - nv: Number of videos
-        - tvfs: Total video feature size
-        - hs: Hidden size (must match language model backbone)
+    """Dimensions:
+    - nv: Number of videos
+    - tvfs: Total video feature size
+    - hs: Hidden size (must match language model backbone)
     """
 
     type: Literal["video_embeds"] = "video_embeds"
@@ -814,8 +810,7 @@ class InternS1ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",

@@ -409,6 +409,7 @@ def rocm_fp8_paged_mqa_logits(
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
+
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -493,6 +494,7 @@ def fp8_mqa_logits_torch(
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
+
     """
     k_fp8, scale = kv
     seq_len_kv = k_fp8.shape[0]
@@ -561,8 +563,8 @@ def rocm_fp8_mqa_logits(
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
-    """
 
+    """
     # TODO(ganyi): Temporarily workaround, will remove the module check and reference
     # path after aiter merge this kernel into main
     from vllm._aiter_ops import rocm_aiter_ops

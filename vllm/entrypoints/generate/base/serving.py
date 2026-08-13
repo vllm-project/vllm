@@ -262,7 +262,8 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
     ) -> _T:
         """Wrap a `create_*` coroutine so that, if it raises or returns an
         ErrorResponse (i.e. the request never reached the engine), the KV
-        connector is notified to free any pinned remote-prefill blocks."""
+        connector is notified to free any pinned remote-prefill blocks.
+        """
         kv_transfer_params = self.has_kv_connector and request.kv_transfer_params
         if not kv_transfer_params or not kv_transfer_params.get("do_remote_prefill"):
             return await awaitable

@@ -39,8 +39,7 @@ _EXPERTS_SEPARATOR = ".experts."
 
 
 def _is_remote_expert_key(raw_name: str, spec: "MoEEPLoadSpec") -> bool:
-    """
-    Decide whether a checkpoint key belongs to a non-local expert.
+    """Decide whether a checkpoint key belongs to a non-local expert.
     """
     pos = raw_name.find(_EXPERTS_SEPARATOR)
     if pos < 0:
@@ -67,15 +66,14 @@ class LoRAModel:
         loras: dict[str, LoRALayerWeights],
         is_3d_lora_weight: bool = False,
     ) -> None:
-        """
-        Args:
-            lora_model_id: The integer id for the lora model.
-            rank: lora rank.
-            loras: module name -> weights for lora-replaced layers.
-            is_3d_lora_weight: Whether the on-disk MoE adapter is in the 3D
-                fused (gate_up_proj / down_proj) layout. Propagated from the
-                originating LoRARequest. Only consulted by the LoRA model
-                manager when enable_mixed_moe_lora_format is on.
+        """Args:
+        lora_model_id: The integer id for the lora model.
+        rank: lora rank.
+        loras: module name -> weights for lora-replaced layers.
+        is_3d_lora_weight: Whether the on-disk MoE adapter is in the 3D
+            fused (gate_up_proj / down_proj) layout. Propagated from the
+            originating LoRARequest. Only consulted by the LoRA model
+            manager when enable_mixed_moe_lora_format is on.
 
         """
         self.id = lora_model_id
@@ -90,7 +88,8 @@ class LoRAModel:
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
 
-        Will share the underlying tensors."""
+        Will share the underlying tensors.
+        """
         return self.__class__(
             lora_model_id,
             rank=self.rank,
@@ -201,6 +200,7 @@ class LoRAModel:
 
         Returns:
             Loaded LoRA Model.
+
         """
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")

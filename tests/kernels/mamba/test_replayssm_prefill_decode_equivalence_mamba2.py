@@ -67,7 +67,8 @@ def _run_prefill_decode_equivalence(
     the exact fp32 recurrence (and each other). All paths use the production dt
     flow (raw dt + softplus + a per-head dt_bias), so this also checks prefill
     and decode apply the softplus/bias preprocessing consistently. ``state_dtype``
-    is the recurrent-state precision; ``act_dtype`` the activation/buffer one."""
+    is the recurrent-state precision; ``act_dtype`` the activation/buffer one.
+    """
     device = "cuda"
     rtol, atol = _prefill_tolerances(act_dtype)
     set_random_seed(seed)

@@ -99,8 +99,7 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
 
 
 class FusedRMSQuantKey(NamedTuple):
-    """
-    Named tuple for identifying the type of RMSNorm + quant fusion.
+    """Named tuple for identifying the type of RMSNorm + quant fusion.
     quant: type of quantization
     fused_add: does the op also perform the residual add
     """
@@ -611,8 +610,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
 
 
 class RMSNormQuantFusionPass(VllmPatternMatcherPass):
-    """
-    This pass fuses rms_norm & quant custom ops into a fused rms_norm_quant op.
+    """This pass fuses rms_norm & quant custom ops into a fused rms_norm_quant op.
     It also supports fused_add_rms_norm.
     """
 

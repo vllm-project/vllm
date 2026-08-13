@@ -85,7 +85,8 @@ class MiniMaxM3IndexerMSAPrefillMetadata:
 class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
     """Decode reuses the inherited base ``decode`` field (the Triton decode
     metadata); ``prefill_msa`` carries the fmha score plan for the prefill side
-    (the base ``prefill`` field is unused on this path)."""
+    (the base ``prefill`` field is unused on this path).
+    """
 
     prefill_msa: MiniMaxM3IndexerMSAPrefillMetadata | None = None
     # Per-forward view (``[:num_tokens]``) of the builder's persistent unified
@@ -111,7 +112,8 @@ class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
 
 class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
     """Decode metadata is the cudagraph-safe Triton decode metadata; the prefill
-    fmha plan is built eagerly (prefill batches are not captured)."""
+    fmha plan is built eagerly (prefill batches are not captured).
+    """
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 

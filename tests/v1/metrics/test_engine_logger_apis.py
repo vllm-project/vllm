@@ -13,8 +13,7 @@ from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
 
 @pytest.fixture
 def log_stats_enabled_engine_args():
-    """
-    Shared fixture providing common AsyncEngineArgs configuration
+    """Shared fixture providing common AsyncEngineArgs configuration
     used across multiple tests.
     """
     return AsyncEngineArgs(
@@ -27,10 +26,8 @@ def log_stats_enabled_engine_args():
 
 @pytest.mark.asyncio
 async def test_async_llm_replace_default_loggers(log_stats_enabled_engine_args):
+    """RayPrometheusStatLogger should replace the default PrometheusStatLogger
     """
-    RayPrometheusStatLogger should replace the default PrometheusStatLogger
-    """
-
     engine = AsyncLLM.from_engine_args(
         log_stats_enabled_engine_args, stat_loggers=[RayPrometheusStatLogger]
     )
@@ -40,8 +37,7 @@ async def test_async_llm_replace_default_loggers(log_stats_enabled_engine_args):
 
 @pytest.mark.asyncio
 async def test_async_llm_add_to_default_loggers(log_stats_enabled_engine_args):
-    """
-    It's still possible to use custom stat loggers exclusively by passing
+    """It's still possible to use custom stat loggers exclusively by passing
     disable_log_stats=True in addition to a list of custom stat loggers.
     """
     # Create engine_args with disable_log_stats=True for this test

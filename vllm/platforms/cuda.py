@@ -62,7 +62,8 @@ def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     CUDA_VISIBLE_DEVICES has already been set to the desired value.
 
     # This can be removed and simply replaced with torch.cuda.get_device_count
-    # after https://github.com/pytorch/pytorch/pull/122815 is released."""
+    # after https://github.com/pytorch/pytorch/pull/122815 is released.
+    """
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
     # LRU Cache purposes.
 
@@ -243,8 +244,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
+        """Set the device for the current platform.
         """
         torch.cuda.set_device(device)
         # With this trick we can force the device to be set eagerly
@@ -779,8 +779,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @with_nvml_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
-        """
-        query if the set of gpus are fully connected by nvlink (1 hop)
+        """Query if the set of gpus are fully connected by nvlink (1 hop)
         """
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_ids]
         for i, handle in enumerate(handles):

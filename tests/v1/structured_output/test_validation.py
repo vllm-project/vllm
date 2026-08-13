@@ -29,7 +29,8 @@ class _StubModelConfig:
 def test_structured_outputs_rejected_for_diffusion_models():
     """Diffusion LLMs denoise the canvas in parallel, which is incompatible
     with the token-by-token grammar FSM. The request must fail with a clear
-    validation error instead of an FSM rejection mid-generation (#45436)."""
+    validation error instead of an FSM rejection mid-generation (#45436).
+    """
     params = SamplingParams(
         structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
     )
@@ -62,7 +63,8 @@ def test_degenerate_structured_outputs_rejected(structured_outputs, match):
     """json_object=False and an empty json schema pass the `is not None`
     exclusivity check but resolve to no structured-output key, so they must be
     rejected at request validation (-> 400) instead of reaching and crashing
-    the engine."""
+    the engine.
+    """
     params = SamplingParams(structured_outputs=structured_outputs)
     with pytest.raises(VLLMValidationError, match=match):
         params._validate_structured_outputs(

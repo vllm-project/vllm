@@ -127,8 +127,7 @@ class _HfExamplesInfo:
         check_min_version: bool = True,
         check_max_version: bool = True,
     ) -> str | None:
-        """
-        If the installed transformers version does not meet the requirements,
+        """If the installed transformers version does not meet the requirements,
         perform the given action.
         """
         if (
@@ -185,8 +184,7 @@ class _HfExamplesInfo:
         *,
         on_fail: Literal["error", "skip"],
     ) -> None:
-        """
-        If the model is not available online, perform the given action.
+        """If the model is not available online, perform the given action.
         """
         if not self.is_available_online:
             msg = "Model is not available online"

@@ -94,16 +94,15 @@ def _assert_deterministic(
 
 
 class QKVInputs(NamedTuple):
-    """
-    Data structure for representing unpacked attention inputs,
+    """Data structure for representing unpacked attention inputs,
     query/key/values and their sequence lengths.
 
     Attributes:
-
         * {query,key,value}: unpacked (batch_size x padded_seq_len x
                              num_heads x head_size) attention inputs
         * q_seq_lens: query sequence lengths list
         * kv_seq_lens: shared key/value sequence lengths list
+
     """
 
     query: torch.Tensor
@@ -114,16 +113,15 @@ class QKVInputs(NamedTuple):
 
 
 class QKVO(NamedTuple):
-    """
-    Data structure for representing unpacked attention inputs,
+    """Data structure for representing unpacked attention inputs,
     alongside unpacked known-correct attention output
 
     Attributes:
-
         * qkv: unpacked (batch_size x padded_seq_len x
                              num_heads x head_size) attention inputs
         * ideal_output: unpacked (batch_size x padded_seq_len x
                         num_heads x head_size) known-correct attention output
+
     """
 
     qkv: QKVInputs
@@ -131,11 +129,9 @@ class QKVO(NamedTuple):
 
 
 class PackedQKVInputs(NamedTuple):
-    """
-    Data structure for representing packed attention inputs
+    """Data structure for representing packed attention inputs
 
     Attributes:
-
         * {query,key,value}: packed (number_of_tokens x num_heads
                              x head_size) attention inputs
         * q_start_loc_list: list of query start locations within packed tensor
@@ -143,6 +139,7 @@ class PackedQKVInputs(NamedTuple):
                              packed tensor
         * q_seq_lens: query sequence lengths list
         * kv_seq_lens: shared key/value sequence lengths list
+
     """
 
     query: torch.Tensor
@@ -155,16 +152,15 @@ class PackedQKVInputs(NamedTuple):
 
 
 class PackedQKVO(NamedTuple):
-    """
-    Data structure for representing packed attention inputs,
+    """Data structure for representing packed attention inputs,
     alongside packed known-correct attention output
 
     Attributes:
-
         * packed_qkv: packed (number_of_tokens x num_heads
                       x head_size) attention inputs
         * ideal_output: packed (number_of_tokens x num_heads
                         x head_size) known-correct attention output
+
     """
 
     packed_qkv: PackedQKVInputs | None
@@ -172,13 +168,12 @@ class PackedQKVO(NamedTuple):
 
 
 class KVMemoryMap(NamedTuple):
-    """
-    Data structure for encapsulating KV cache memory mapping.
+    """Data structure for encapsulating KV cache memory mapping.
 
     Attributes:
-
         * block_tables: KV cache block tables
         * slot_mapping: mapping of sequence offset to physical address
+
     """
 
     block_tables: torch.Tensor
@@ -186,18 +181,17 @@ class KVMemoryMap(NamedTuple):
 
 
 class PhaseTestParameters(NamedTuple):
-    """
-    Data structure for encapsulating the test parameters
+    """Data structure for encapsulating the test parameters
     for a given test "phase" (prefill or decode phase) and attention
     scenario (encoder, decoder-self, encoder/decoder-cross)
 
     Attributes:
-
         * packed_qkvo: packed (number_of_tokens x num_heads
                        x head_size) attention inputs & known-correct
                        output
         * kv_mmap: KV cache memory mapping, specific to this test phase &
                    attention scenario
+
     """
 
     packed_qkvo: PackedQKVO
@@ -208,13 +202,12 @@ def maybe_make_int_tensor(
     _list: list[int] | None,
     device: torch.device | str,
 ) -> torch.Tensor:
-    """
-    Convert Python int list to a 1D int torch.Tensor on `device`
+    """Convert Python int list to a 1D int torch.Tensor on `device`
 
     Returns:
-
     * If _list is not None: 1D int torch.Tensor on `device`
     * None otherwise
+
     """
     return (
         None if _list is None else torch.tensor(_list, dtype=torch.int, device=device)
@@ -225,13 +218,12 @@ def maybe_make_long_tensor(
     _list: list[int] | None,
     device: torch.device | str,
 ) -> torch.Tensor:
-    """
-    Convert Python int list to a 1D long torch.Tensor on `device`
+    """Convert Python int list to a 1D long torch.Tensor on `device`
 
     Returns:
-
     * If _list is not None: 1D long torch.Tensor on `device`
     * None otherwise
+
     """
     return (
         None if _list is None else torch.tensor(_list, dtype=torch.long, device=device)
@@ -239,11 +231,10 @@ def maybe_make_long_tensor(
 
 
 def maybe_max(_list: list | None) -> Number | None:
-    """
-    Returns:
-
+    """Returns:
     * If _list is not None: max(_list)
     * None otherwise
+
     """
     return None if _list is None else max(_list)
 
@@ -252,19 +243,16 @@ def make_causal_mask(
     q_max_seq_len: int,
     kv_max_seq_len: int,
 ) -> torch.Tensor:
-    """
-    Create a q_max_seq_len x kv_max_seq_len causal mask
+    """Create a q_max_seq_len x kv_max_seq_len causal mask
 
     Arguments:
-
     * q_max_seq_len: query max seq len
     * kv_max_seq_len: key/value max seq len
 
     Returns:
-
     * 2D tensor, q_max_seq_len x kv_max_seq_len
-    """
 
+    """
     # Create a matrix where entry (i, j) is True if i >= j
     mask = torch.triu(torch.ones(q_max_seq_len, kv_max_seq_len), diagonal=1)
     # Replace True with float('-inf') and False with 0
@@ -281,8 +269,7 @@ def ref_masked_attention(
     q_seq_lens: list | None = None,
     kv_seq_lens: list | None = None,
 ) -> torch.Tensor:
-    """
-    "Golden" masked attention reference. Supports two types of masking:
+    """"Golden" masked attention reference. Supports two types of masking:
 
     * Basic attention mask, utilizing {q,kv}_seq_lens args to mask out
       padding elements
@@ -290,7 +277,6 @@ def ref_masked_attention(
       causal
 
     Arguments:
-
     * query: batch_size x q_padded_seq_len x num_heads x head_size
     * key: batch_size x kv_padded_seq_len x num_heads x head_size
     * value: batch_size x kv_padded_seq_len x num_heads x head_size
@@ -301,10 +287,9 @@ def ref_masked_attention(
     * kv_seq_lens: list of unpadded key/value seq_lens for each batch index
 
     Returns:
-
     * Attention result, batch_size x q_padded_seq_len x num_heads x head_size
-    """
 
+    """
     assert q_seq_lens is not None
     assert kv_seq_lens is not None
 
@@ -346,8 +331,7 @@ def make_qkv(
     attn_type: AttentionType = AttentionType.ENCODER_DECODER,
     force_max_len: bool = False,
 ) -> tuple[QKVInputs, QKVInputs, QKVInputs]:
-    """
-    Construct QKV test tensors for self- and cross-attention.
+    """Construct QKV test tensors for self- and cross-attention.
 
     Generates three query/key/value triplets:
 
@@ -361,7 +345,6 @@ def make_qkv(
     seqlens
 
     Arguments:
-
     * batch_size
     * max_q_seq_len: max query seq len
     * max_kv_seq_len: max key/value seq len
@@ -379,12 +362,11 @@ def make_qkv(
     * device: CPU or CUDA device
 
     Returns:
-
     * Overall QKVInputs structure (containing full unpacked Q/K/V tensors)
     * Prefill QKVInputs structure (containing all but the last sequence offset)
     * Decode QKVInputs structure (containing all only the last sequence offset)
-    """
 
+    """
     if force_max_len:
         q_seq_lens = [max_q_seq_len for _ in range(batch_size)]
     else:
@@ -474,24 +456,21 @@ def make_qkv(
 def pack_tensor(
     unpacked_tensor: torch.Tensor, seq_lens: list[int], device: torch.device | str
 ) -> tuple[torch.Tensor, list[int]]:
-    """
-    Pack a batch_size x padded_seq_len x num_heads x head_size tensor into an
+    """Pack a batch_size x padded_seq_len x num_heads x head_size tensor into an
     unpadded number_of_tokens x num_heads x head_size tensor, where
     number_of_tokens = sum(seq_lens)
 
     Arguments:
-
     * unpacked_tensor: batch_size x padded_seq_len x num_heads x head_size
     * seq_lens: list of token counts for each seq
     * device: CPU or CUDA device
 
-    Returns
-
+    Returns:
     * packed_tensor: number_of_tokens x num_heads x head_size
     * start_loc_list: start idx of each batch elt in packed_tensor; [0] +
       list(itertools.accumulate(seq_lens))
-    """
 
+    """
     num_tok = sum(seq_lens)
     num_heads = unpacked_tensor.shape[-2]
     head_size = unpacked_tensor.shape[-1]
@@ -507,8 +486,7 @@ def pack_tensor(
 
 
 def pack_qkv(qkv: QKVInputs, device: torch.device | str) -> PackedQKVInputs:
-    """
-    Individually pack each of Q, K and V, each with dimensions batch_size x
+    """Individually pack each of Q, K and V, each with dimensions batch_size x
     padded_seq_len x num_heads x head_size, into respective number_of_tokens x
     num_heads x head_size tensors.
 
@@ -517,17 +495,15 @@ def pack_qkv(qkv: QKVInputs, device: torch.device | str) -> PackedQKVInputs:
     For K and V, number_of_tokens = sum(kv_seq_lens)
 
     Arguments:
-
     * qkv: Unpacked (batch_size x padded_seq_len x num_heads x head_size)
            attention inputs
     * device: CPU or CUDA device
 
-    Returns
-
+    Returns:
     * Packed (number_of_tokens x num_heads x head_size) QKV inputs
       derived from unpacked inputs
-    """
 
+    """
     if qkv.query is None:
         packed_query = None
         q_start_loc_list = None
@@ -563,18 +539,15 @@ def _make_metadata_tensors(
     torch.Tensor,
     int | None,
 ]:
-    """
-    Build scalar & tensor values required to build attention metadata structure.
+    """Build scalar & tensor values required to build attention metadata structure.
 
     Arguments:
-
     * seq_lens: list of token-counts for each decoder input seq
     * context_lens: list of context length values for each seq
     * encoder_seq_lens: list of token-counts for each encoder input seq
     * device: CPU or CUDA device
 
     Returns:
-
     * seq_lens_tensor: decoder seq_lens list, as tensor
     * context_lens_tensor: context_lens list, as tensor
     * max_context_len: max(context_lens)
@@ -583,6 +556,7 @@ def _make_metadata_tensors(
     * encoder_seq_lens_tensor: encoder seq_lens list, as tensor
     * encoder_seq_start_loc: start idx of each encoder sequence
     * max_encoder_seq_len: encoder seq_lens list, as tensor
+
     """
     seq_lens_tensor = maybe_make_int_tensor(seq_lens, device)
     context_lens_tensor = maybe_make_int_tensor(context_lens, device)
@@ -637,11 +611,9 @@ def make_kv_cache(
     backend: str,
     default_val: float = 0.0,
 ) -> torch.Tensor:
-    """
-    Create a fake KV cache.
+    """Create a fake KV cache.
 
     Arguments:
-
     * num_blocks: number of blocks in the KV cache
     * num_heads: number of attention heads
     * head_size: head dimension
@@ -650,9 +622,9 @@ def make_kv_cache(
     * default_val: initialization value for KV cache elements
 
     Returns:
-
     * kv_cache: 2 x num_blocks x block_size x num_heads x head_size
     *     for backend 'FLASH_ATTN'
+
     """
     if backend != "FLASH_ATTN":
         raise ValueError(f"Unknown backend value: '{backend}'. Expected 'FLASH_ATTN'.")
@@ -663,8 +635,7 @@ def make_kv_cache(
 
 
 def _num_tokens_to_min_blocks(num_tokens: int, block_size: int) -> int:
-    """
-    Compute the minimum number of blocks required to hold num_tokens tokens,
+    """Compute the minimum number of blocks required to hold num_tokens tokens,
     given block_size
     """
     return (num_tokens + block_size - 1) // block_size
@@ -683,8 +654,7 @@ def split_slot_mapping(
     seq_lens: list[int],
     device: torch.device | str,
 ):
-    """
-    Split a slot mapping into valid prefill- and decode-phase slot mappings.
+    """Split a slot mapping into valid prefill- and decode-phase slot mappings.
 
     Context:
     * Your goal is to test (1) prefill of N prompts, with prompt-lengths
@@ -708,7 +678,6 @@ def split_slot_mapping(
     The N excised entries are appended to obtain the decode-phase slot mapping
 
     Arguments:
-
     * slot_mapping_list: Length-P 1D slot mapping (as list) reflecting all N
       post-decode sequences
     * seq_lens: list of N post-decode sequence lengths (K_i + 1 in the
@@ -716,13 +685,12 @@ def split_slot_mapping(
     * device: cuda, cpu, etc.
 
     Returns:
-
     * prefill_slot_mapping: Length-M 1D slot mapping (as Tensor)
       reflecting all N prefill prompts
     * decode_slot_mapping: Length-N 1D slot mapping (as Tensor) reflecting
       all N decoded tokens
-    """
 
+    """
     prefill_slot_mapping = []
     decode_slot_mapping = []
 
@@ -746,8 +714,7 @@ def make_block_tables_slot_mapping(
     device: torch.device | str,
     block_base_addr: int = 0,
 ) -> tuple[torch.Tensor, list[int], int]:
-    """
-    Construct fake block tables & slot mappings.
+    """Construct fake block tables & slot mappings.
 
     For a sequence with num_tokens tokens the minimum number
     of required KV cache blocks is
@@ -772,19 +739,17 @@ def make_block_tables_slot_mapping(
     i.e. the total of prefill prompt tokens + decoded tokens.
 
     Arguments:
-
     * block_size: number of offsets per block
     * seq_lens: list of token-counts for each sequence
     * block_base_addr: the block table base address
     * device: CPU or CUDA device
 
     Return:
-
     * block_tables_tensor: block table for sequence
     * slot_mapping_list: slot mapping for sequence
     * max_block_idx: the highest block address within this block table
-    """
 
+    """
     # Provision minimum number of KV cache blocks
     num_blocks_list = [
         _num_tokens_to_min_blocks(num_tokens, block_size) for num_tokens in seq_lens
@@ -824,14 +789,13 @@ def make_block_tables_slot_mapping(
 def assert_actual_matches_ideal(
     test_params: PhaseTestParameters, output_under_test: torch.Tensor, backend: str
 ) -> None:
-    """
-    Assert that observed output matches the ideal output
+    """Assert that observed output matches the ideal output
     contained in the test parameters data structure.
 
     Arguments:
-
     * test_params: Test parameters including packed ideal output
     * output_under_test: actually observed output value
+
     """
     ideal_output = test_params.packed_qkvo.ideal_output
     if backend != "FLASH_ATTN":
@@ -852,8 +816,7 @@ def fp8_allclose(
     atol: float = 1e-08,
     equal_nan: bool = False,
 ) -> bool:
-    """
-    Reference implementation of torch.allclose
+    """Reference implementation of torch.allclose
     """
     torch._refs._check_close_args(name="torch.allclose", a=a, b=b, rtol=rtol, atol=atol)
 

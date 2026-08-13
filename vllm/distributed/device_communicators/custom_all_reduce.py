@@ -78,8 +78,7 @@ class CustomAllreduce:
         max_mnnvl_reduce_scatter_size=_DEFAULT_MNNVL_REDUCE_SCATTER_MAX_SIZE,
         symm_mem_enabled=False,
     ) -> None:
-        """
-        Args:
+        """Args:
             group: the process group to work on. If None, it will use the
                 default process group.
             device: the device to bind the CustomAllreduce to. If None,
@@ -87,6 +86,7 @@ class CustomAllreduce:
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
+
         """
         self._IS_CAPTURING = False
         self._ptr = 0
@@ -313,8 +313,7 @@ class CustomAllreduce:
 
     @contextmanager
     def capture(self):
-        """
-        The main responsibility of this context manager is the
+        """The main responsibility of this context manager is the
         `register_graph_buffers` call at the end of the context.
         It records all the buffer addresses used in the CUDA graph.
         """

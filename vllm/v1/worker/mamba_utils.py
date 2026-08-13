@@ -296,8 +296,7 @@ def postprocess_mamba_fused_kernel(
     # the existing 2D-grid contract.
     TEMPORAL_TILES: tl.constexpr = 1,
 ):
-    """
-    Fused GPU kernel for postprocess_mamba that computes decisions AND performs
+    """Fused GPU kernel for postprocess_mamba that computes decisions AND performs
     mamba state copies without any CPU-GPU synchronization.
 
     Grid: (num_reqs, num_layers * num_state_types [, TEMPORAL_TILES])
@@ -591,8 +590,7 @@ class MambaCopyBuffers:
 
 @dataclasses.dataclass
 class MambaSpecDecodeGPUContext:
-    """
-    Context for GPU-side Mamba state copy operations during the
+    """Context for GPU-side Mamba state copy operations during the
     fused postprocess path.
 
     Only used when speculative decoding is enabled on a hybrid model
@@ -718,8 +716,7 @@ class MambaSpecDecodeGPUContext:
         mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
         block_tables: list[torch.Tensor],
     ) -> None:
-        """
-        Extract and cache memory layout metadata from Mamba state tensors.
+        """Extract and cache memory layout metadata from Mamba state tensors.
 
         This method populates the pre-allocated metadata tensors with information
         needed by `postprocess_mamba_fused_kernel` to perform state copies entirely
@@ -751,6 +748,7 @@ class MambaSpecDecodeGPUContext:
             block_tables: per-mamba-group persistent block-table tensors, in
                 the same order as `mamba_group_ids`. Their `data_ptr()` /
                 `stride(0)` are captured once for the kernel to index into.
+
         """
         if self.is_initialized:
             return
@@ -865,8 +863,7 @@ class MambaSpecDecodeGPUContext:
         num_computed_tokens_gpu: torch.Tensor,
         num_draft_tokens_gpu: torch.Tensor,
     ) -> None:
-        """
-        Run the fused postprocess_mamba kernel on GPU.
+        """Run the fused postprocess_mamba kernel on GPU.
 
         This computes decisions and performs mamba state copies entirely on GPU,
         eliminating the CPU-GPU sync that was previously needed.
@@ -878,6 +875,7 @@ class MambaSpecDecodeGPUContext:
             num_scheduled_tokens_gpu: [num_reqs] scheduled token counts
             num_computed_tokens_gpu: [num_reqs] computed token counts
             num_draft_tokens_gpu: [num_reqs] draft token counts
+
         """
         if num_reqs == 0 or not self.is_initialized:
             return
@@ -933,6 +931,7 @@ class MambaSpecDecodeGPUContext:
             token_bias_gpu: [max_reqs] accepted-token bias (num_accepted - 1).
             idx_mapping: optional [num_reqs] batch_idx -> req_state_idx.
                 None means V1 batch order already equals request state order.
+
         """
         if num_reqs == 0 or not self.is_initialized:
             return
@@ -1167,8 +1166,7 @@ def preprocess_mamba(
     copy_bufs: MambaCopyBuffers,
     align_ctx: MambaSpecDecodeGPUContext | None = None,
 ):
-    """
-    Copy the mamba state of previous step to the last
+    """Copy the mamba state of previous step to the last
     (1 + num_speculative_blocks) block.
     """
     fused = _resolve_fused_precopy(align_ctx)

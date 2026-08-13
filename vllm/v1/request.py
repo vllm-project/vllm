@@ -335,8 +335,7 @@ class Request:
         return prefill_stats
 
     def __lt__(self, other: "Request") -> bool:
-        """
-        Compare two requests based on priority, arrival time, and request ID.
+        """Compare two requests based on priority, arrival time, and request ID.
         Used in priority scheduling.
         """
         if self.priority != other.priority:

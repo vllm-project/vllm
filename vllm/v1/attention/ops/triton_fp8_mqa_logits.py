@@ -184,6 +184,7 @@ def fp8_mqa_logits_gfx942(
         Logits of shape ``[M, N]``, float32 -- positions outside
         ``[cu_starts[i], cu_ends[i])`` for row ``i`` are pre-filled with
         ``-inf`` so the caller can run a top-k without masking.
+
     """
     seq_len, num_heads, head_size = q.shape
     seq_len_kv = k_fp8.shape[0]

@@ -62,15 +62,14 @@ from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Step3VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
-        - bnp: Batch size * number of images * number of patches
-        - hp: Height of patch
-        - wp: Width of patch
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
+    - bnp: Batch size * number of images * number of patches
+    - hp: Height of patch
+    - wp: Width of patch
     """
 
     type: Literal["pixel_values"]
@@ -80,11 +79,10 @@ class Step3VLImagePixelInputs(TensorSchema):
 
 
 class Step3VLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - f: Image feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - f: Image feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"

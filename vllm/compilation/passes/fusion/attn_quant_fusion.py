@@ -36,8 +36,7 @@ _FP8_QUANT_KEY = QuantKey(dtype=FP8_DTYPE, scale=kStaticTensorScale, symmetric=T
 
 
 class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
-    """
-    Fusion for Attention+Fp8StaticQuant.
+    """Fusion for Attention+Fp8StaticQuant.
 
     Only triggers when the attention implementation returns True in
     `fused_output_quant_supported()`. If the pattern is found, the
@@ -172,8 +171,7 @@ class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
 class AttnNvfp4QuantPattern(
     VllmPatternReplacement[..., tuple[torch.Tensor, torch.Tensor]]
 ):
-    """
-    Fusion for Attention+Nvfp4Quant.
+    """Fusion for Attention+Nvfp4Quant.
 
     Only triggers when the attention implementation returns True in
     `fused_output_quant_supported()`. If the pattern is found, the
@@ -360,8 +358,7 @@ class AttnNvfp4QuantPattern(
 
 
 class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
-    """
-    This pass fuses post-attention quantization onto attention if supported.
+    """This pass fuses post-attention quantization onto attention if supported.
 
     It uses the pattern matcher and matches each layer manually, as strings
     cannot be wildcarded. This also lets us check support on attention layers

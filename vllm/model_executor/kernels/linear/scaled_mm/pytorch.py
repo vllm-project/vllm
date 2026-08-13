@@ -25,8 +25,7 @@ def _get_num_tokens(output_shape: list) -> int:
 
 
 class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    """
-    Base class for FP8 linear kernels using Torch.
+    """Base class for FP8 linear kernels using Torch.
     Each subclass represents a kernel variant for
     specific device capabilities and torch versions.
     """

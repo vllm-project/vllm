@@ -323,7 +323,8 @@ def _aiter_moe_fused_shared_experts_enabled(config: PretrainedConfig) -> bool:
 
 class MiniMaxM3MoE(nn.Module):
     """Sigmoid-routed MoE block with a routing-bias correction and a shared
-    expert."""
+    expert.
+    """
 
     def __init__(
         self,

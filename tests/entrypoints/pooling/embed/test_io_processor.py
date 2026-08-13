@@ -241,7 +241,8 @@ class TestResolveTruncation:
 
     def test_truncate_none_with_max_tokens(self):
         """truncate=NONE should NOT set truncate_prompt_tokens; the
-        max_tokens limit is enforced separately via _check_max_tokens."""
+        max_tokens limit is enforced separately via _check_max_tokens.
+        """
         req = self._make_request(truncate="NONE", max_tokens=10)
         tokens, side = EmbedIOProcessor._resolve_cohere_truncation(req)
         assert tokens is None

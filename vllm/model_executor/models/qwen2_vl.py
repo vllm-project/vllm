@@ -118,8 +118,7 @@ _MAX_FRAMES_PER_VIDEO = 14
 
 
 class Qwen2VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - np: The total number of patches over each image over each prompt in
               the batch
         - ni: Number of images
@@ -146,8 +145,7 @@ class Qwen2VLImagePixelInputs(TensorSchema):
 
 
 class Qwen2VLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - nf: Number of image features
         - hs: Hidden size
         - ni: Number of images
@@ -178,8 +176,7 @@ Qwen2VLImageInputs: TypeAlias = Qwen2VLImagePixelInputs | Qwen2VLImageEmbeddingI
 
 
 class Qwen2VLVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - np: The total number of patches over each video over each prompt in
               the batch
         - ctps: Number of channels * temporal_patch_size * patch_size *
@@ -207,8 +204,7 @@ class Qwen2VLVideoPixelInputs(TensorSchema):
 
 
 class Qwen2VLVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - nf: Number of video features
         - hs: Hidden size
         - nv: Number of videos
@@ -1198,14 +1194,14 @@ class Qwen2VLForConditionalGeneration(
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
     ) -> Iterator[tuple[int, int, int, int, float]]:
-        """
-        Iterate over multimodal features and yield grid information.
+        """Iterate over multimodal features and yield grid information.
 
         Args:
             mm_features: List of multimodal feature specifications
 
         Yields:
             Tuple of (offset, grid_t, grid_h, grid_w, t_factor) for each frame/image
+
         """
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
@@ -1705,8 +1701,8 @@ class Qwen2VLForConditionalGeneration(
                 otherwise it will be `(seq_len,)`.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
-        """
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -1729,8 +1725,7 @@ class Qwen2VLForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",

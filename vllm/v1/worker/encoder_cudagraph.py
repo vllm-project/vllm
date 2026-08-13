@@ -61,7 +61,8 @@ class EncoderCudaGraphManager:
         model: SupportsEncoderCudaGraph,
     ):
         """Initialize CUDA graph manager with provided token budgets
-        and max batch size."""
+        and max batch size.
+        """
         self.vllm_config = vllm_config
         self.device = device
         self.dtype = dtype
@@ -285,6 +286,7 @@ class EncoderCudaGraphManager:
 
         Returns:
             Token budget if found, None if no fitting budget.
+
         """
         budgets = budgets if budgets is not None else self.token_budgets
         for budget in budgets:
@@ -320,8 +322,10 @@ class EncoderCudaGraphManager:
             mm_kwargs: Multimodal inputs for the batch.
             token_budget: Token budget to use.
             path: Configured encoder path.
+
         Returns:
             Encoder outputs, or None if graph not captured.
+
         """
         graph_set = self._get_graph_set(path)
         num_items = len(self._get_item_specs(mm_kwargs))
@@ -466,6 +470,7 @@ class EncoderCudaGraphManager:
             images_per_rank: Number of items per rank.
             max_output_tokens_per_rank: Max output tokens across all ranks
                 (for padding during all_gather).
+
         """
         tp_size = get_tensor_model_parallel_world_size()
         current_rank = get_tensor_model_parallel_rank()
@@ -593,6 +598,7 @@ class EncoderCudaGraphManager:
 
         Returns:
             List of encoder outputs (one per item).
+
         """
         if self.use_dp:
             per_item_out_tokens = self._get_per_item_out_tokens(mm_kwargs)

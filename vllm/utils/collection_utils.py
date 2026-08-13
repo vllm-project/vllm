@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Contains helpers that are applied to collections.
+"""Contains helpers that are applied to collections.
 
 This is similar in concept to the `collections` module.
 """
@@ -19,8 +18,7 @@ _V = TypeVar("_V")
 
 
 class LazyDict(Mapping[str, _V], Generic[_V]):
-    """
-    Evaluates dictionary items only when they are accessed.
+    """Evaluates dictionary items only when they are accessed.
 
     Adapted from: https://stackoverflow.com/a/47212782/5082708
     """
@@ -108,8 +106,7 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
 
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
-    """
-    Unlike [`itertools.groupby`][], groups are not broken by
+    """Unlike [`itertools.groupby`][], groups are not broken by
     non-contiguous data.
     """
     groups = defaultdict[_K, list[_V]](list)

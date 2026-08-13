@@ -271,8 +271,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        """
-        Humming kernels handle input quantization internally in apply().
+        """Humming kernels handle input quantization internally in apply().
 
         This property tells the prepare/finalize step to skip input
         quantization (by setting defer_input_quant=True) and pass
@@ -282,6 +281,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         Returns:
             True to indicate that this expert expects unquantized inputs
             and will handle quantization internally.
+
         """
         return True
 
@@ -651,8 +651,7 @@ class HummingIndexedExperts(HummingExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        """
-        Standard apply implementation for Humming indexed experts.
+        """Standard apply implementation for Humming indexed experts.
 
         Humming performs activation quantization internally and consumes the
         weights supplied by the modular kernel interface.
@@ -754,8 +753,7 @@ class HummingGroupedExperts(HummingExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        """
-        Standard apply implementation for Humming grouped experts.
+        """Standard apply implementation for Humming grouped experts.
 
         Humming performs activation quantization internally and consumes the
         weights supplied by the modular kernel interface.
@@ -868,8 +866,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        """
-        Standard apply implementation for Humming batched grouped experts.
+        """Standard apply implementation for Humming batched grouped experts.
 
         Humming performs activation quantization internally and consumes the
         weights supplied by the modular kernel interface.

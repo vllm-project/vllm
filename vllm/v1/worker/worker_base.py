@@ -50,8 +50,7 @@ class WorkerBase:
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ) -> None:
-        """
-        Initialize common worker components.
+        """Initialize common worker components.
 
         Args:
             vllm_config: Complete vLLM configuration
@@ -60,6 +59,7 @@ class WorkerBase:
             distributed_init_method: Distributed initialization method
             is_driver_worker: Whether this worker handles driver
                 responsibilities
+
         """
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -104,6 +104,7 @@ class WorkerBase:
 
         Returns:
             Compilation times (language_model, encoder) in seconds.
+
         """
         raise NotImplementedError
 
@@ -185,8 +186,7 @@ class WorkerBase:
 
 
 class WorkerWrapperBase:
-    """
-    This class represents one process in an executor/engine. It is responsible
+    """This class represents one process in an executor/engine. It is responsible
     for lazily initializing the worker and handling the worker's lifecycle.
     We first instantiate the WorkerWrapper, which remembers the worker module
     and class name. Then, when we call `update_environment_variables`, and the
@@ -198,8 +198,7 @@ class WorkerWrapperBase:
         rpc_rank: int = 0,
         global_rank: int | None = None,
     ) -> None:
-        """
-        Initialize the worker wrapper with the given vllm_config and rpc_rank.
+        """Initialize the worker wrapper with the given vllm_config and rpc_rank.
         Note: rpc_rank is the rank of the worker in the executor. In most cases,
         it is also the rank of the worker in the distributed group. However,
         when multiple executors work together, they can be different.
@@ -228,8 +227,7 @@ class WorkerWrapperBase:
 
     @instrument(span_name="Worker init")
     def init_worker(self, all_kwargs: list[dict[str, Any]]) -> None:
-        """
-        Here we inject some common logic before initializing the worker.
+        """Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
         kwargs = all_kwargs[self.rpc_rank]

@@ -30,8 +30,7 @@ def maybe_get_oot_by_class(class_type: type) -> type:
 
 
 class PluggableLayer(nn.Module):
-    """
-    Base class for pluggable layers.
+    """Base class for pluggable layers.
 
     A PluggableLayer is a *module-composing* abstraction: it may instantiate other
     ``torch.nn.Module`` objects as sub-layers, and its functionality depends on
@@ -101,8 +100,7 @@ class PluggableLayer(nn.Module):
 
 
 class CustomOp(nn.Module):
-    """
-    Base class for custom ops.
+    """Base class for custom ops.
     Dispatches the forward method to the appropriate backend.
     """
 
@@ -207,8 +205,7 @@ class CustomOp(nn.Module):
             return self.forward_cuda
 
     def maybe_compile(self, fn, *, enable: bool = True):
-        """
-        Compile fn if compilation enabled.
+        """Compile fn if compilation enabled.
         Useful for CustomOp instances called from within a torch custom op,
         meaning the forward call is hidden from the model-level torch.compile.
 
@@ -294,8 +291,7 @@ class CustomOp(nn.Module):
 
     @staticmethod
     def default_on() -> bool:
-        """
-        Behavior controlled by `CompilationConfig.custom_ops`: On by default if
+        """Behavior controlled by `CompilationConfig.custom_ops`: On by default if
         'all', off by default if 'none'.
         When PyTorch Inductor is used, 'none' is the default value,
         otherwise 'all'.

@@ -566,8 +566,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                     model. `None` if no videos are passed.
                 - video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in
                     LLM. `None` if no videos are passed.
-        """
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 

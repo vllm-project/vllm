@@ -79,10 +79,10 @@ def _count_expert_num_tokens(
 def count_expert_num_tokens(
     topk_ids: torch.Tensor, num_local_experts: int, expert_map: torch.Tensor | None
 ) -> torch.Tensor:
-    """
-    Count the number to tokens assigned to each expert.
+    """Count the number to tokens assigned to each expert.
 
-    Parameters:
+    Parameters
+    ----------
     - topk_ids (torch.Tensor): Tensor mapping each token to its
     list of experts.
     - num_local_experts (int): Number of experts in this rank.
@@ -90,9 +90,11 @@ def count_expert_num_tokens(
     from the global expert space to the local expert space of the expert
     parallel shard.
 
-    Returns:
+    Returns
+    -------
     A tensor of size num_local_experts, where tensor[i] holds the number
     of tokens assigned to the ith expert.
+
     """
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
     expert_num_tokens = torch.empty(
@@ -117,8 +119,7 @@ def count_expert_num_tokens(
 
 
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
-    """
-    Shrink the given tensor and apply the given view to it.  This is
+    """Shrink the given tensor and apply the given view to it.  This is
     used to resize the intermediate fused_moe caches.
     """
     assert prod(v) <= x.numel(), (
@@ -141,8 +142,7 @@ def _fp8_quantize(
     per_act_token: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform fp8 quantization on the inputs.  If a block_shape
+    """Perform fp8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
     if block_shape is None:
@@ -167,11 +167,9 @@ def _int8_quantize(
     per_act_token: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform int8 quantization on the inputs.  If a block_shape
+    """Perform int8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
-
     # If weights are per-channel (per_channel_quant=True), then
     # activations apply per-token quantization. Otherwise, assume
     # activation tensor-wise fp8/int8 quantization, dynamic or static

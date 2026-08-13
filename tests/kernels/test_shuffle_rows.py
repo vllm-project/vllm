@@ -17,7 +17,8 @@ from vllm.platforms import current_platform
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 def test_shuffle_rows_basic(num_tokens: int, hidden_size: int, dtype: torch.dtype):
     """Test basic functionality of shuffle_rows with various tensor sizes and
-    dtypes."""
+    dtypes.
+    """
     if not current_platform.is_cuda():
         pytest.skip("shuffle_rows requires CUDA")
 
@@ -72,7 +73,8 @@ def test_shuffle_rows_permutation(
 @pytest.mark.parametrize("hidden_size", [256, 512])
 def test_shuffle_rows_expansion(num_tokens: int, hidden_size: int):
     """Test shuffle_rows with expansion (more output tokens than input
-    tokens)."""
+    tokens).
+    """
     if not current_platform.is_cuda():
         pytest.skip("shuffle_rows requires CUDA")
 

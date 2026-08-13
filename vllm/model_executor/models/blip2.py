@@ -48,12 +48,11 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
 class Blip2ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -61,11 +60,10 @@ class Blip2ImagePixelInputs(TensorSchema):
 
 
 class Blip2ImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - f: Image feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - f: Image feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["image_embeds"]
@@ -677,8 +675,8 @@ class Blip2ForConditionalGeneration(
 
         Info:
             [`Blip2ImageInputs`][vllm.model_executor.models.blip2.Blip2ImageInputs]
-        """
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 

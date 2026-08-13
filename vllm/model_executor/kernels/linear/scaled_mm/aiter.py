@@ -69,8 +69,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        `AiterInt8ScaledMMLinearKernel` implements a fused version of
+        """`AiterInt8ScaledMMLinearKernel` implements a fused version of
             `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
         where scale_a * a and scale_b * b are implemented using numpy-style
         broadcasting.

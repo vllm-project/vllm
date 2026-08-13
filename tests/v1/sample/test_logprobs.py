@@ -127,6 +127,7 @@ def _repeat_logprob_config(
       `logprob_prompt_logprob_list` enough times to match the
       number of `test_prompts`, or else is truncated to match
       the number of `test_prompts`
+
     """
     num_test_prompts = len(test_prompts)
     # Make sure there is a logprobs configuration for each test prompt
@@ -337,6 +338,7 @@ def test_get_logprobs_and_prompt_logprobs(
       batch_logprobs_composition: logprobs configuration for test batch
       temperature: "temperature" sampling parameter
       example_prompts: example prompt fixture
+
     """
     vllm_config = vllm_model.llm.llm_engine.vllm_config
     do_apc = vllm_config.cache_config.enable_prefix_caching
@@ -389,7 +391,7 @@ def test_get_logprobs_and_prompt_logprobs(
 
 
 def test_max_logprobs():
-    """vLLM v1 engine should fail a request with `logprobs > max_logprobs`
+    """VLLM v1 engine should fail a request with `logprobs > max_logprobs`
     Should also fail for `prompt_logprobs > max_logprobs`
     APC should not matter as this test checks basic request validation.
     """
@@ -436,6 +438,7 @@ def test_none_logprobs(vllm_model, example_prompts):
     Args:
       vllm_model: vLLM model fixture
       example_prompts: list of example prompts (test fixture)
+
     """
     max_tokens = 5
 
@@ -464,6 +467,7 @@ def test_zero_logprobs(vllm_model, example_prompts):
     Args:
       vllm_model: vLLM model fixture
       example_prompts: list of example prompts (test fixture)
+
     """
     max_tokens = 5
 
@@ -495,6 +499,7 @@ def test_all_logprobs(example_prompts):
 
     Args:
       example_prompts: list of example prompts (test fixture)
+
     """
     with VllmRunner(
         "facebook/opt-125m",
@@ -567,7 +572,8 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
 def test_prompt_logprobs_mode():
     """prompt_logprobs must respect logprobs_mode: *_logits and *_logprobs
     must return different values. Prompt tokens skip sampling processors,
-    so processed_* == raw_* on the prompt side."""
+    so processed_* == raw_* on the prompt side.
+    """
     from vllm import LLM
 
     values: dict[str, float] = {}
@@ -1126,6 +1132,7 @@ def test_spec_decode_logprobs(
         logprobs_mode: logprobs mode.
         model_setup: Tuple of (method, base model name,
             speculative_config dict, top_logprobs).
+
     """
     from vllm import LLM
 
@@ -1223,7 +1230,6 @@ def test_prompt_logprobs_with_chunking_and_preemption():
     This test ensures that the num_prompt_logprobs tracking persists
     across preemptions and prefill chunks.
     """
-
     # Create prompts that will trigger chunking and preemption
     prompts = [
         "The following numbers of the sequence "

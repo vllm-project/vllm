@@ -49,8 +49,7 @@ COMPLETED_NONE_FUTURE.set_result(None)
 
 @dataclass
 class RayWorkerMetaData:
-    """
-    Metadata for a Ray worker.
+    """Metadata for a Ray worker.
     The order of ray worker creation can be random,
     and we need to reset the rank after creating all workers.
     """
@@ -232,8 +231,7 @@ class RayDistributedExecutor(Executor):
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
 
         def sort_by_driver_then_worker_ip(item: RayWorkerMetaData):
-            """
-            Sort the workers based on 3 properties:
+            """Sort the workers based on 3 properties:
             1. If the worker is on the same node as the driver (vllm engine),
                 it should be placed first.
             2. Then, if the worker is on a node with fewer workers, it should
@@ -422,6 +420,7 @@ class RayDistributedExecutor(Executor):
 
         Returns:
             The model runner output.
+
         """
         scheduler_output = self.scheduler_output
         if scheduler_output is None:

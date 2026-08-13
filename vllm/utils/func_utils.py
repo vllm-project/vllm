@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Contains helpers that are applied to functions.
+"""Contains helpers that are applied to functions.
 
 This is similar in concept to the `functools` module.
 """
@@ -127,8 +126,7 @@ def get_allowed_kwarg_only_overrides(
     requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
 ) -> dict[str, Any]:
-    """
-    Given a callable which has one or more keyword only params and a dict
+    """Given a callable which has one or more keyword only params and a dict
     mapping param names to values, drop values that can be not be kwarg
     expanded to overwrite one or more keyword-only args. This is used in a
     few places to handle custom processor overrides for multimodal models,
@@ -145,6 +143,7 @@ def get_allowed_kwarg_only_overrides(
         Dictionary containing the kwargs to be leveraged which may be used
         to overwrite one or more keyword only arguments when invoking the
         callable.
+
     """
     if not overrides:
         return {}

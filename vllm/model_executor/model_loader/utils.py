@@ -260,8 +260,7 @@ def get_architecture_class_name(model_config: ModelConfig) -> str:
 def configure_quant_config(
     quant_config: QuantizationConfig, model_class: type[nn.Module]
 ):
-    """
-    Pass packed_modules_mapping by reference to quant_config so that
+    """Pass packed_modules_mapping by reference to quant_config so that
     quant_config can properly match fused modules
 
     Note that model attributes are passed by reference to quant_config,

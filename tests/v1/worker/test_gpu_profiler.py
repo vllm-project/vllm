@@ -24,8 +24,7 @@ from vllm.v1.worker.gpu_worker import Worker
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
-    """
-    A basic implementation of a worker profiler for testing purposes.
+    """A basic implementation of a worker profiler for testing purposes.
     """
 
     def __init__(self, profiler_config: ProfilerConfig):
@@ -305,7 +304,8 @@ class TestAnnotateProfile:
 
 def test_profiler_entered_during_capture():
     """Profiler is used as a context manager in _warmup_and_capture,
-    confirming it is active during the actual graph capture run."""
+    confirming it is active during the actual graph capture run.
+    """
     runner = MagicMock()
     runner.compilation_config.cudagraph_num_of_warmups = 0
     mock_profiler = MagicMock()

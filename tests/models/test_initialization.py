@@ -63,7 +63,6 @@ def can_initialize(
     The spawn process causes the _initialize_kv_caches_v1 function below to
     become ineffective.
     """
-
     model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(

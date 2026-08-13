@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-MkDocs hook + markdown extension to enable the following links to render correctly,
+"""MkDocs hook + markdown extension to enable the following links to render correctly,
 including inside content included via pymdownx.snippets:
 
 - Relative file links outside of the `docs/` directory, e.g.:
@@ -71,8 +70,7 @@ class UrlSchemesPreprocessor(Preprocessor):
             return lines
 
         def replace_relative_link(match: re.Match) -> str:
-            """
-            Replace relative file links with URLs if they point outside the docs dir.
+            """Replace relative file links with URLs if they point outside the docs dir.
             """
             title = match.group("title")
             path = match.group("path")
@@ -91,8 +89,7 @@ class UrlSchemesPreprocessor(Preprocessor):
             return f"[{gh_icon} {title}]({url})"
 
         def replace_github_link(match: re.Match) -> str:
-            """
-            Replace GitHub issue, PR, and project links with enhanced Markdown links.
+            """Replace GitHub issue, PR, and project links with enhanced Markdown links.
             """
             repo = match.group("repo")
             type = match.group("type")

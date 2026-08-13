@@ -96,7 +96,6 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
     def build_attn_metadata(self, batch_size: int) -> AttentionMetadata:
         """Initialize attention metadata."""
-
         # TODO (Rohan138) reuse utils from vllm/v1/worker/gpu/attn_utils.py
 
         # Create common attn metadata

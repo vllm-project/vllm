@@ -12,6 +12,5 @@ class CPUOffloadingMetrics:
 
 
 class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
-    """
-    Spec for loading/storing a KV block to CPU memory.
+    """Spec for loading/storing a KV block to CPU memory.
     """

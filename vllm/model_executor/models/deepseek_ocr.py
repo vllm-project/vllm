@@ -79,13 +79,12 @@ _IMAGE_TOKEN = "<image>"
 
 
 class DeepseekOCRImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - n: Number of images
-        - p: Number of patches
-        - base_size: Base size of the processor
-        - image_size: Image size of the processor
+    """Dimensions:
+    - b: Batch size
+    - n: Number of images
+    - p: Number of patches
+    - base_size: Base size of the processor
+    - image_size: Image size of the processor
     """
 
     type: Literal["pixel_values"]
@@ -140,7 +139,8 @@ class NoRepeatNGramLogitsProcessor:
 
 class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of overriding the wrapper class `__init__()` in order to utilize
-    info about the device type"""
+    info about the device type
+    """
 
     @classmethod
     def validate_params(cls, params: SamplingParams):
@@ -631,8 +631,7 @@ class DeepseekOCRForCausalLM(
         return autoloaded_weights
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
@@ -668,8 +667,7 @@ class DeepseekOCRForCausalLM(
         self,
         image_spatial_crop: torch.Tensor | None = None,
     ) -> tuple[int, int, int, int]:
-        """
-        Return (num_input_tokens, num_output_tokens, global_output_token,
+        """Return (num_input_tokens, num_output_tokens, global_output_token,
         local_output_token) for a single image described by
         ``image_spatial_crop``.
         """
@@ -845,8 +843,7 @@ class DeepseekOCRForCausalLM(
         self,
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Encode batched global images with newline tokens inserted.
+        """Encode batched global images with newline tokens inserted.
         Output shape: ``[B * 272, n_embed]``.
         """
         bsz = pixel_values.shape[0]
@@ -871,8 +868,7 @@ class DeepseekOCRForCausalLM(
         self,
         images_crop: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Encode local patches without newline insertion (newlines are added later
+        """Encode local patches without newline insertion (newlines are added later
         in ``postprocess_encoder_output`` via ``_assemble_patch_grid``).
         Output shape: ``[P * 100, n_embed]``.
         """
@@ -942,8 +938,7 @@ class DeepseekOCRForCausalLM(
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """
-        Assemble per-image embeddings from global and local encoder outputs.
+        """Assemble per-image embeddings from global and local encoder outputs.
 
         ``output['global']`` contains global-image features with newlines already
         inserted (from CUDA graph replay or eager fallback):

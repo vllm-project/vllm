@@ -29,7 +29,8 @@ def test_get_file_store_init_method_is_unique():
 
 def _call_with_timeout(func, timeout: float = 10.0):
     """Run func in a daemon thread so a livelock regression fails the test
-    quickly instead of hanging the suite."""
+    quickly instead of hanging the suite.
+    """
     result: dict = {}
 
     def target():
@@ -96,7 +97,8 @@ def test_get_open_port_skips_reserved_dp_master_ports(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """VLLM_PORT == VLLM_DP_MASTER_PORT must not livelock by returning the
-    same free-but-reserved port forever (upstream issue #50024)."""
+    same free-but-reserved port forever (upstream issue #50024).
+    """
     base = 42123
     with monkeypatch.context() as m:
         m.setenv("VLLM_PORT", str(base))
@@ -109,7 +111,8 @@ def test_get_open_ports_list_skips_reserved_dp_master_ports(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The VLLM_PORT band scan must not hand out ports inside the window
-    reserved for the data parallel master process."""
+    reserved for the data parallel master process.
+    """
     base = 42223
     reserved = range(base, base + 10)
     with monkeypatch.context() as m:
@@ -125,7 +128,8 @@ def test_get_open_port_ephemeral_skips_reserved_range(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """An ephemeral port that happens to fall in the reserved range is
-    replaced by a rescan starting past the range."""
+    replaced by a rescan starting past the range.
+    """
     base = 42323
     with monkeypatch.context() as m:
         m.delenv("VLLM_PORT", raising=False)
@@ -144,7 +148,8 @@ def test_get_open_port_ephemeral_without_dp_master_port(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Without VLLM_PORT and VLLM_DP_MASTER_PORT, an ephemeral port is
-    returned as before."""
+    returned as before.
+    """
     with monkeypatch.context() as m:
         m.delenv("VLLM_PORT", raising=False)
         m.delenv("VLLM_DP_MASTER_PORT", raising=False)

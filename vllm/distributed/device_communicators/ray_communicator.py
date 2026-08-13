@@ -20,8 +20,7 @@ logger = init_logger(__name__)
 
 
 class RayPPCommunicator(Communicator):
-    """
-    Communicator to be used for pipeline parallelism in Ray Compiled Graph.
+    """Communicator to be used for pipeline parallelism in Ray Compiled Graph.
     This is wraps around the vLLM _PP GroupCoordinator.
 
     This class is not thread-safe.
@@ -38,8 +37,7 @@ class RayPPCommunicator(Communicator):
         cuda_stream: torch.cuda.Stream | None,
         use_communication_streams: bool = False,
     ):
-        """
-        Initialize a RayPPCommunicator that can be used to communicate with
+        """Initialize a RayPPCommunicator that can be used to communicate with
         other Ray Compiled Graph actors for pipeline parallelism.
 
         Args:
@@ -54,6 +52,7 @@ class RayPPCommunicator(Communicator):
                 is not supported.
             use_communication_streams: Whether to use communication streams.
                 This is not supported.
+
         """
         self._world_size = world_size
         self._rank: int | None = None
@@ -87,8 +86,7 @@ class RayPPCommunicator(Communicator):
         self._closed = False
 
     def _build_actor_rank_mapping(self):
-        """
-        Use collective communication to build a mapping from actor IDs to ranks.
+        """Use collective communication to build a mapping from actor IDs to ranks.
         This should be called once during initialization.
         """
         if self._comm is None:
@@ -128,8 +126,7 @@ class RayPPCommunicator(Communicator):
         return self._actor_handles
 
     def get_rank(self, actor: ray.actor.ActorHandle) -> int:
-        """
-        Return the given actor's rank using device communicator collective ops.
+        """Return the given actor's rank using device communicator collective ops.
         """
         assert hasattr(self, "_actor_id_to_rank"), (
             "Actor rank mapping not built. "
@@ -144,20 +141,17 @@ class RayPPCommunicator(Communicator):
             raise ValueError(f"Actor {actor} not found in communicator group")
 
     def get_self_rank(self) -> int | None:
-        """
-        Return this actor's rank.
+        """Return this actor's rank.
         """
         return self._rank
 
     def get_world_size(self) -> int:
-        """
-        Return the number of ranks in the RayPPCommunicator group.
+        """Return the number of ranks in the RayPPCommunicator group.
         """
         return self._world_size
 
     def send(self, buf: "torch.Tensor", peer_rank: int) -> None:
-        """
-        Send a torch.Tensor to a peer.
+        """Send a torch.Tensor to a peer.
 
         This returns when the send kernel has been queued, but the kernel may
         not have completed. Therefore, the caller should ensure that there are
@@ -170,6 +164,7 @@ class RayPPCommunicator(Communicator):
             buf: The torch.Tensor to send. It should already be on this
                 actor's default device.
             peer_rank: The rank of the actor to send to.
+
         """
         if self._closed:
             raise RayChannelError("RayPPCommunicator has been destroyed.")
@@ -184,8 +179,7 @@ class RayPPCommunicator(Communicator):
         peer_rank: int,
         allocator: TorchTensorAllocator,
     ) -> "torch.Tensor":
-        """
-        Receive a torch.Tensor from a peer and synchronize the current stream.
+        """Receive a torch.Tensor from a peer and synchronize the current stream.
 
         After this call returns, the receive buffer is safe to read from
         any stream. An RayChannelError will be raised if an error occurred
@@ -197,6 +191,7 @@ class RayPPCommunicator(Communicator):
             peer_rank: The rank of the actor to receive from.
             allocator: The allocator to use to create the received tensor.
                 This is ignored for this implementation.
+
         """
         if self._closed:
             raise RayChannelError("RayPPCommunicator has been destroyed.")

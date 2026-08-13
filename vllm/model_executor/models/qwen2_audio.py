@@ -68,10 +68,9 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 # # === Audio Inputs === #
 class Qwen2AudioFeatureInputs(TensorSchema):
-    """
-    Dimensions:
-        - na: Number of audios
-        - nmb: Number of mel bins
+    """Dimensions:
+    - na: Number of audios
+    - nmb: Number of mel bins
     """
 
     type: Literal["audio_features"]
@@ -87,12 +86,11 @@ class Qwen2AudioFeatureInputs(TensorSchema):
 
 
 class Qwen2AudioEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size
-        - naf: Number of audio features
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
+    """Dimensions:
+    - bn: Batch size
+    - naf: Number of audio features
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
     """
 
     type: Literal["audio_embeds"] = "audio_embeds"

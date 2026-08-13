@@ -1193,8 +1193,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs: int,
         page_size: int,
     ) -> torch.Tensor:
-        """
-        Compute paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len for FlashInfer
+        """Compute paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len for FlashInfer
         attention.
 
         Results are stored in self.paged_kv_indptr,
@@ -1854,8 +1853,10 @@ class FlashInferImpl(AttentionImpl):
                 - NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
                 - HND: [num_blocks, 2, num_kv_heads, block_size, head_size]
             attn_metadata: Metadata for attention.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if attn_metadata is None:
             # Profiling run.
@@ -2503,8 +2504,7 @@ def fast_plan_decode(
     fixed_split_size: int = -1,
     disable_split_kv: bool = False,
 ) -> None:
-    """
-    A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
+    """A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
     cudagraph capture/replay, while the no cudagraph version turns back
     to the original plan.
     using original plan after passing host-side buffers:

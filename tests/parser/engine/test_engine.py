@@ -264,7 +264,8 @@ class TestStreaming:
 
     def test_unmatched_close_brace_does_not_poison_depth(self):
         """A stray } in malformed JSON must not kill streaming for
-        all subsequent content."""
+        all subsequent content.
+        """
         engine = StreamingParserEngine(_hermes_config(), tokenizer=None)
         engine.feed("<tool_call>", [])
 
@@ -280,7 +281,8 @@ class TestStreaming:
 
     def test_json_args_no_premature_close_brace(self):
         """Closing braces of the top-level JSON shouldn't be streamed
-        until confirmed by the end tag."""
+        until confirmed by the end tag.
+        """
         engine = StreamingParserEngine(_hermes_config(), tokenizer=None)
 
         engine.feed("<tool_call>", [])
@@ -335,7 +337,8 @@ class TestLexerBufferFlush:
 
     def test_buffered_prefix_emitted_in_current_state(self):
         """Text buffered by the lexer (e.g. '<') must be emitted as
-        REASONING_CHUNK before THINK_END transitions to CONTENT."""
+        REASONING_CHUNK before THINK_END transitions to CONTENT.
+        """
         engine = StreamingParserEngine(_think_config(), _make_think_tokenizer())
 
         events = engine.feed("<think>", [_START_ID])
@@ -373,11 +376,13 @@ class TestLexerBufferFlush:
 
 class TestTokenIdFiltering:
     """When token IDs are available, lex-matched terminals that also
-    have token_id_terminal entries should be demoted to content."""
+    have token_id_terminal entries should be demoted to content.
+    """
 
     def test_lex_matched_terminal_demoted_after_token_ids_seen(self):
         """After receiving token IDs, text that matches a token-ID
-        terminal should be treated as content, not trigger a transition."""
+        terminal should be treated as content, not trigger a transition.
+        """
         engine = StreamingParserEngine(_hermes_config(), _make_hermes_tokenizer())
 
         # First feed with a non-special token ID to set _ever_had_token_ids
@@ -398,7 +403,8 @@ class TestTokenIdFiltering:
 
     def test_scanner_matched_terminal_bypasses_filter(self):
         """PreLexedTerminals from the scanner bypass the filter and
-        still trigger state transitions."""
+        still trigger state transitions.
+        """
         engine = StreamingParserEngine(_hermes_config(), _make_hermes_tokenizer())
 
         events = engine.feed("<tool_call>", [_TOOL_START_ID])
@@ -411,7 +417,8 @@ class TestTokenIdFiltering:
 
     def test_no_filtering_without_token_ids(self):
         """When no token IDs are ever provided (non-streaming),
-        text matching still triggers transitions."""
+        text matching still triggers transitions.
+        """
         engine = StreamingParserEngine(_hermes_config(), _make_hermes_tokenizer())
 
         events = engine.feed('<tool_call>{"name": "f"}</tool_call>', [])
@@ -423,7 +430,8 @@ class TestTokenIdFiltering:
 
     def test_mixed_text_then_real_tool_call(self):
         """Text mentioning tool syntax followed by a real special-token
-        tool call."""
+        tool call.
+        """
         engine = StreamingParserEngine(_hermes_config(), _make_hermes_tokenizer())
 
         events1 = engine.feed("Mention <tool_call> in text. ", [1, 2, 3, 4])
@@ -443,7 +451,8 @@ class TestTokenIdFiltering:
 
 def _func_prefix_config() -> ParserEngineConfig:
     """Config mixing token-ID terminals (TOOL_START/END) with
-    text-only terminals (FUNC_PREFIX) and fallback transitions."""
+    text-only terminals (FUNC_PREFIX) and fallback transitions.
+    """
     return ParserEngineConfig(
         name="func_prefix_test",
         terminals={
@@ -512,11 +521,13 @@ def _make_func_prefix_tokenizer():
 
 class TestTextOnlyFallbackFiltering:
     """When token IDs are available, transitions marked
-    skip_in_token_id_mode should be skipped."""
+    skip_in_token_id_mode should be skipped.
+    """
 
     def test_func_prefix_in_prose_demoted_in_strict_mode(self):
         """<function=get_time> in prose should NOT trigger a tool call
-        when strict mode is active."""
+        when strict mode is active.
+        """
         engine = StreamingParserEngine(
             _func_prefix_config(), _make_func_prefix_tokenizer()
         )
@@ -533,7 +544,8 @@ class TestTextOnlyFallbackFiltering:
 
     def test_normal_flow_after_tool_start_still_works(self):
         """TOOL_START (special token) -> FUNC_PREFIX (text) should
-        still parse a tool call normally in strict mode."""
+        still parse a tool call normally in strict mode.
+        """
         engine = StreamingParserEngine(
             _func_prefix_config(), _make_func_prefix_tokenizer()
         )
@@ -553,7 +565,8 @@ class TestTextOnlyFallbackFiltering:
 
     def test_fallback_fires_without_token_ids(self):
         """When no token IDs are provided, fallback transitions should
-        still fire normally."""
+        still fire normally.
+        """
         engine = StreamingParserEngine(
             _func_prefix_config(), _make_func_prefix_tokenizer()
         )
@@ -567,7 +580,8 @@ class TestTextOnlyFallbackFiltering:
 
     def test_tool_between_fallback_blocked_in_strict_mode(self):
         """The (TOOL_BETWEEN, FUNC_PREFIX) fallback should also be
-        blocked in strict mode."""
+        blocked in strict mode.
+        """
         engine = StreamingParserEngine(
             _func_prefix_config(), _make_func_prefix_tokenizer()
         )
@@ -597,7 +611,8 @@ class TestNoUnusedTokenizerAttr:
 class TestArgsResetOnReentry:
     """When leaving TOOL_ARGS and later re-entering (e.g. two tool
     calls), the entering-TOOL_ARGS block resets args tracking.  The
-    redundant reset on exit was removed."""
+    redundant reset on exit was removed.
+    """
 
     @staticmethod
     def _multi_tool_config() -> ParserEngineConfig:
@@ -672,7 +687,8 @@ class TestArgsResetOnReentry:
 
 class TestToolPreambleFinish:
     """finish() in TOOL_PREAMBLE state emits TOOL_CALL_END when a tool
-    call was started (tool_index >= 0), but not when tool_index is -1."""
+    call was started (tool_index >= 0), but not when tool_index is -1.
+    """
 
     @staticmethod
     def _preamble_with_tool_call_start_config() -> ParserEngineConfig:
@@ -731,7 +747,8 @@ class TestToolPreambleFinish:
 
 class TestRegexTerminalInfraRemoved:
     """TerminalDef.priority, LexerShape.regex_terminals, and the regex
-    matching loop were removed."""
+    matching loop were removed.
+    """
 
     def test_terminal_def_no_priority(self):
         import regex as re
@@ -756,7 +773,8 @@ class TestRegexTerminalInfraRemoved:
 
 class TestMultiCharTerminalInArgs:
     """Regression: multi-char terminals falling through in TOOL_ARGS
-    must be fed char-by-char via _feed_args_text, not _feed_args_char."""
+    must be fed char-by-char via _feed_args_text, not _feed_args_char.
+    """
 
     @staticmethod
     def _newline_config() -> ParserEngineConfig:
@@ -848,7 +866,8 @@ class TestSkipToolParsing:
 
 def _message_header_config(reasoning_end: bool) -> ParserEngineConfig:
     """MESSAGE_HEADER-based grammar whose tool opener optionally carries
-    REASONING_END, mirroring the two shapes a transition table can take."""
+    REASONING_END, mirroring the two shapes a transition table can take.
+    """
     return ParserEngineConfig(
         name=f"message_header_test_{reasoning_end}",
         initial_state=ParserState.MESSAGE_HEADER,

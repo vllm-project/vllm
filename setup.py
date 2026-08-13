@@ -509,8 +509,7 @@ class precompiled_wheel_utils:
     def fetch_metadata_for_variant(
         commit: str, variant: str | None
     ) -> tuple[list[dict], str]:
-        """
-        Fetches metadata for a specific variant of the precompiled wheel.
+        """Fetches metadata for a specific variant of the precompiled wheel.
         """
         variant_dir = f"{variant}/" if variant is not None else ""
         repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
@@ -542,7 +541,6 @@ class precompiled_wheel_utils:
     @staticmethod
     def detect_system_cuda_variant() -> str:
         """Auto-detect CUDA variant from torch, nvidia-smi, or env default."""
-
         # Map CUDA major version to hosted wheel variants on wheels.vllm.ai
         supported = {12: "cu129", 13: "cu130"}
 
@@ -651,8 +649,7 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def determine_wheel_url() -> tuple[str, str | None]:
-        """
-        Try to determine the precompiled wheel URL or path to use.
+        """Try to determine the precompiled wheel URL or path to use.
         The order of preference is:
         1. user-specified wheel location (can be either local or remote, via
            VLLM_PRECOMPILED_WHEEL_LOCATION)

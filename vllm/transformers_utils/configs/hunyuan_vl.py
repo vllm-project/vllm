@@ -71,8 +71,7 @@ class HunYuanVLVisionConfig(PretrainedConfig):
 
 
 class HunYuanVLTextConfig(PretrainedConfig):
-    r"""
-    This is the configuration class to store the configuration of a [`HunYuanVLTextConfig`]. It is used to instantiate an
+    r"""This is the configuration class to store the configuration of a [`HunYuanVLTextConfig`]. It is used to instantiate an
     HunYuan model according to the specified arguments, defining the model architecture. Instantiating a configuration
     with the defaults will yield a similar configuration to that of the HunYuan-7B.
     Hunyuan-7B-Instruct [tencent/Hunyuan-7B-Instruct](https://huggingface.co/tencent/Hunyuan-7B-Instruct).
@@ -144,6 +143,7 @@ class HunYuanVLTextConfig(PretrainedConfig):
             The dropout ratio for the attention probabilities.
         head_dim (`int`, *optional*, defaults to 128):
             The attention head dimension.
+
     """  # noqa: E501
 
     model_type = "hunyuan_vl_text"

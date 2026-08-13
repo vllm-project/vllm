@@ -48,7 +48,6 @@ async def test_online_audio_in_video(
     client: openai.AsyncOpenAI, video_assets: VideoTestAssets
 ):
     """Test video input with `audio_in_video=True`"""
-
     # we don't use video_urls above because they missed audio stream.
     video_path = video_assets[0].video_path
     with open(video_path, "rb") as f:
@@ -98,7 +97,6 @@ async def test_online_audio_in_video_multi_videos(
     client: openai.AsyncOpenAI, video_assets: VideoTestAssets
 ):
     """Test multi-video input with `audio_in_video=True`"""
-
     # we don't use video_urls above because they missed audio stream.
     video_path = video_assets[0].video_path
     with open(video_path, "rb") as f:
@@ -152,7 +150,6 @@ async def test_online_audio_in_video_interleaved(
     client: openai.AsyncOpenAI, video_assets: VideoTestAssets
 ):
     """Test interleaved video/audio input with `audio_in_video=True`"""
-
     # we don't use video_urls above because they missed audio stream.
     video_path = video_assets[0].video_path
     with open(video_path, "rb") as f:

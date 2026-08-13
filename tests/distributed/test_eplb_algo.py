@@ -288,7 +288,6 @@ def test_device_compatibility(device):
 
 def test_additional_cases():
     """Test more edge cases and different parameter combinations"""
-
     # Test case 1: Large-scale distributed setup
     weight1 = torch.tensor(
         [[50, 100, 75, 120, 90, 60, 80, 110, 40, 70, 95, 85, 65, 55, 45, 35]]
@@ -320,8 +319,7 @@ def test_additional_cases():
 
 
 def test_compute_logical_maps_with_negative_indices():
-    """
-    Test that compute_logical_maps correctly handles physical slots containing
+    """Test that compute_logical_maps correctly handles physical slots containing
     -1 (unused slots).
     """
     # 2 layers, 6 physical slots, 4 logical experts.

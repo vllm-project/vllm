@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 
-"""
-What is the difference between the official original version and one
+"""What is the difference between the official original version and one
 that has been converted into a sequence classification model?
 
 Qwen3-Reranker is a language model that doing reranker by using the
@@ -34,8 +33,7 @@ model_name = "Qwen/Qwen3-Reranker-0.6B"
 
 
 def get_llm() -> LLM:
-    """
-    Initializes and returns the LLM model for Qwen3-Reranker.
+    """Initializes and returns the LLM model for Qwen3-Reranker.
 
     Returns:
         LLM: Configured vLLM instance for reranking tasks.
@@ -43,6 +41,7 @@ def get_llm() -> LLM:
     Note:
         This function loads the ORIGINAL Qwen3-Reranker model with specific
         overrides to make it compatible with vLLM's score API.
+
     """
     return LLM(
         # Specify the original model from HuggingFace

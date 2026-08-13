@@ -64,8 +64,7 @@ def lmcache_get_or_create_config() -> V1Config:
 
 
 def hex_hash_to_int16(s: str) -> int:
-    """
-    Convert a hex hash string to a 16-bit integer.
+    """Convert a hex hash string to a 16-bit integer.
     """
     return int(s, 16) & 0xFFFF
 
@@ -75,8 +74,7 @@ def apply_mm_hashes_to_token_ids(
     mm_hashes: list[str],
     mm_positions: list["PlaceholderRange"],
 ) -> torch.Tensor:
-    """
-    Overwrite token_ids in-place for multimodal placeholders using
+    """Overwrite token_ids in-place for multimodal placeholders using
     efficient slice assignments.
     """
     n = token_ids.size(0)
@@ -100,8 +98,7 @@ def mla_enabled(model_config: "ModelConfig") -> bool:
 def create_lmcache_metadata(
     vllm_config=None, model_config=None, parallel_config=None, cache_config=None
 ):
-    """
-    Create LMCacheEngineMetadata from vLLM configuration.
+    """Create LMCacheEngineMetadata from vLLM configuration.
 
     This function extracts common metadata creation logic that was duplicated
     across multiple files.
@@ -116,6 +113,7 @@ def create_lmcache_metadata(
                                           to vllm_config)
         cache_config (CacheConfig): Cache configuration (alternative to
                                     vllm_config)
+
     """
     # Third Party
     # First Party
@@ -169,8 +167,7 @@ def create_lmcache_metadata(
 def extract_mm_features(
     request: Union["Request", "NewRequestData"], modify: bool = False
 ) -> tuple[list[str], list["PlaceholderRange"]]:
-    """
-    Normalize multimodal information from a Request into parallel lists.
+    """Normalize multimodal information from a Request into parallel lists.
 
     This helper reads either:
       1) `request.mm_features` (objects each exposing `.identifier` and
@@ -193,6 +190,7 @@ def extract_mm_features(
     Returns:
         tuple[list[str], list[PlaceholderRange]]: (`mm_hashes`, `mm_positions`).
         May be `([], [])` when no multimodal data is present.
+
     """
     if getattr(request, "mm_features", None):
         mm_hashes, mm_positions = zip(

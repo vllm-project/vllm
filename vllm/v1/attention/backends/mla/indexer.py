@@ -81,8 +81,7 @@ def split_indexer_prefill_chunks(
     max_logits_bytes: int,
     request_offset: int = 0,
 ) -> list[tuple[slice, slice]]:
-    """
-    Split prefill requests into chunks for the sparse indexer, respecting:
+    """Split prefill requests into chunks for the sparse indexer, respecting:
     - N constraint: total_seq_lens <= workspace_size (existing O(N) workspace)
     - Logits constraint: M * N * 4 <= max_logits_bytes
 

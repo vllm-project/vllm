@@ -214,12 +214,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def set_xfer_handshake_metadata_pp_aware(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        """
-        Set handshake metadata keyed by (pp_rank, tp_rank) so the side
+        """Set handshake metadata keyed by (pp_rank, tp_rank) so the side
         channel can serve every PP stage's agent metadata.
 
         Args:
             metadata (dict): the handshake metadata to set.
+
         """
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
@@ -310,14 +310,14 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_scheduler.shutdown()
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
-        """
-        Get the KVConnector handshake metadata for this connector.
+        """Get the KVConnector handshake metadata for this connector.
         This metadata is used for out-of-band connector handshake
         between P/D workers.
 
         Returns:
             KVConnectorHandshakeMetadata: the handshake metadata.
             None if no handshake metadata is available.
+
         """
         assert self.connector_worker is not None
         return self.connector_worker.xfer_handshake_metadata

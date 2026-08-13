@@ -78,8 +78,7 @@ def maybe_roundup_layer_hidden_size(
     act_dtype: torch.dtype,
     moe_parallel_config: FusedMoEParallelConfig,
 ) -> int:
-    """
-    Given layer hidden size and MoE configurations, round up hidden_size
+    """Given layer hidden size and MoE configurations, round up hidden_size
     if necessary.
 
     Args:
@@ -91,6 +90,7 @@ def maybe_roundup_layer_hidden_size(
         Rounded up hidden_size if rounding up is required based on the configs
         and all2all backend.
         Original hidden size otherwise.
+
     """
     if moe_parallel_config.use_deepep_ht_kernels:
         hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(

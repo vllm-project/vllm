@@ -72,7 +72,8 @@ FP8_DTYPE = current_platform.fp8_dtype()
 def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
     """Pre-populate the HF cache for (repo_id, filename) pairs that upstream
     trust_remote_code modules would otherwise fetch from third-party CDNs
-    (often unreachable from US-based CI)."""
+    (often unreachable from US-based CI).
+    """
     if HF_HUB_OFFLINE:
         return
     for repo_id, filename in assets:
@@ -855,7 +856,8 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         max_wait_seconds: float | None = None,
     ) -> None:
         """Store custom child process function then invoke superclass
-        constructor which will indirectly launch it."""
+        constructor which will indirectly launch it.
+        """
         self.child_process_fxn = child_process_fxn
         super().__init__(
             model=model,
@@ -1176,8 +1178,7 @@ def compare_two_settings(
     include_seeded_sampling: bool = True,
     force_v1_runner: bool = False,
 ) -> None:
-    """
-    Launch API server with two different sets of arguments/environments
+    """Launch API server with two different sets of arguments/environments
     and compare the results of the API calls.
 
     Args:
@@ -1191,8 +1192,8 @@ def compare_two_settings(
         force_v1_runner: Whether to pin all compared settings to the v1 model
             runner to avoid mixing model runner differences into correctness
             tests.
-    """
 
+    """
     compare_all_settings(
         model,
         [arg1, arg2],
@@ -1214,9 +1215,9 @@ def compare_all_settings(
     include_seeded_sampling: bool = True,
     force_v1_runner: bool = False,
 ) -> None:
-    """
-    Launch API server with several different sets of arguments/environments
+    """Launch API server with several different sets of arguments/environments
     and compare the results of the API calls with the first set of arguments.
+
     Args:
         model: The model to test.
         all_args: A list of argument lists to pass to the API server.
@@ -1226,8 +1227,8 @@ def compare_all_settings(
         force_v1_runner: Whether to pin all compared settings to the v1 model
             runner to avoid mixing model runner differences into correctness
             tests.
-    """
 
+    """
     if force_v1_runner:
         all_envs = [
             {"VLLM_USE_V2_MODEL_RUNNER": "0", **(env or {})} for env in all_envs
@@ -1357,6 +1358,7 @@ def ensure_current_vllm_config():
         with ensure_current_vllm_config():
             init_distributed_environment(...)
             ensure_model_parallel_initialized(...)
+
     """
     from vllm.config import (
         VllmConfig,
@@ -1496,8 +1498,7 @@ def assert_rocm_custom_allreduce_backend_state_on_worker(
 
 @contextmanager
 def error_on_warning(category: type[Warning] = Warning):
-    """
-    Within the scope of this context manager, tests will fail if any warning
+    """Within the scope of this context manager, tests will fail if any warning
     of the given category is emitted.
     """
     with warnings.catch_warnings():
@@ -1943,6 +1944,7 @@ def create_new_process_for_each_test(
 
     Returns:
         A decorator to run test functions in separate processes.
+
     """
     if method is None:
         method = "spawn" if requires_spawn_multiprocessing() else "fork"
@@ -1956,8 +1958,7 @@ def create_new_process_for_each_test(
 
 
 def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
-    """
-    Get a pytest mark, which skips the test if the GPU doesn't meet
+    """Get a pytest mark, which skips the test if the GPU doesn't meet
     a minimum memory requirement in GB.
 
     This can be leveraged via `@large_gpu_test` to skip tests in environments
@@ -1992,8 +1993,7 @@ requires_fp8 = pytest.mark.skipif(
 
 
 def large_gpu_test(*, min_gb: int):
-    """
-    Decorate a test to be skipped if no GPU is available or it does not have
+    """Decorate a test to be skipped if no GPU is available or it does not have
     sufficient memory.
 
     Currently, the CI machine uses L4 GPU which has 24 GB VRAM.
@@ -2018,8 +2018,7 @@ def multi_gpu_marks(*, num_gpus: int):
 
 
 def multi_gpu_test(*, num_gpus: int):
-    """
-    Decorate a test to be run only when multiple GPUs are available.
+    """Decorate a test to be run only when multiple GPUs are available.
     """
     marks = multi_gpu_marks(num_gpus=num_gpus)
 
@@ -2034,13 +2033,13 @@ def multi_gpu_test(*, num_gpus: int):
 
 
 def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
-    """
-    Mark a test to only run when the GPU count falls within [min_gpus, max_gpus].
+    """Mark a test to only run when the GPU count falls within [min_gpus, max_gpus].
 
     Examples:
         @gpu_tier_mark(min_gpus=2)          # only on multi-GPU
         @gpu_tier_mark(max_gpus=1)          # only on single-GPU
         @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
+
     """
     gpu_count = current_platform.device_count()
     marks = []
@@ -2108,8 +2107,8 @@ async def completions_with_server_args(
 
     Returns:
       OpenAI Completion instance
-    """
 
+    """
     if isinstance(max_tokens, int):
         max_tokens = [max_tokens] * len(prompts)
 
@@ -2167,8 +2166,7 @@ def get_client_text_logprob_generations(
 
 
 def has_module_attribute(module_name, attribute_name):
-    """
-    Helper function to check if a module has a specific attribute.
+    """Helper function to check if a module has a specific attribute.
     """
     try:
         module = importlib.import_module(module_name)
@@ -2241,14 +2239,15 @@ def disable_aiter_plain_rmsnorm(monkeypatch) -> None:
 
 
 def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
-    """
-    Generate prompts which a bunch of assignments,
+    """Generate prompts which a bunch of assignments,
     then asking for the value of one of them.
     The prompt is just under 10k tokens; sliding window is 4k
     so the answer is outside sliding window, but should still be correct.
+
     Args:
         batch_size: number of prompts to generate
         ln_range: an argument to control the length of the prompt
+
     """
     prompts: list[str] = []
     answer: list[int] = []
@@ -2288,8 +2287,7 @@ def check_answers(
 
 
 def flat_product(*iterables: Iterable[Any]):
-    """
-    Flatten lists of tuples of the cartesian product.
+    """Flatten lists of tuples of the cartesian product.
     Useful when we want to avoid nested tuples to allow
     test params to be unpacked directly from the decorator.
 
@@ -2301,6 +2299,7 @@ def flat_product(*iterables: Iterable[Any]):
       (3, 4, "a"),
       (3, 4, "b"),
     ]
+
     """
     for element in itertools.product(*iterables):
         normalized = (e if isinstance(e, tuple) else (e,) for e in element)
@@ -2308,8 +2307,7 @@ def flat_product(*iterables: Iterable[Any]):
 
 
 class TestFP8Layer(torch.nn.Module):
-    """
-    Test helper for FP8 linear operations. Creates random weights and scales
+    """Test helper for FP8 linear operations. Creates random weights and scales
     based on quantization configuration.
 
     Args:
@@ -2318,6 +2316,7 @@ class TestFP8Layer(torch.nn.Module):
         weight_quant_key: Weight quantization configuration.
         out_dtype: Output dtype. Defaults to current default dtype.
         force_kernel: Optional kernel to force use of specific implementation.
+
     """
 
     def __init__(

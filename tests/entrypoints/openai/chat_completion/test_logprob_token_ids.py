@@ -191,7 +191,8 @@ async def test_logprob_token_ids_stream_with_no_top_k(server):
 async def test_logprob_token_ids_default_behavior_unchanged(server):
     """Without `logprob_token_ids`, the response carries the natural top-k
     most-likely tokens. This guards against the new field accidentally
-    changing the default-path output."""
+    changing the default-path output.
+    """
     async with server.get_async_client() as client:
         resp = await client.chat.completions.create(
             model=MODEL_NAME,

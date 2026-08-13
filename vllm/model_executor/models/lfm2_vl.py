@@ -76,12 +76,11 @@ def _pad_cumulative_seqlens_buffer(
 
 
 class Lfm2VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Number of images in the prompt
-        - bn: Batch size * number of images
-        - d: Number of dimensions
-        - fd: Number of features per dimension
+    """Dimensions:
+    - b: Number of images in the prompt
+    - bn: Batch size * number of images
+    - d: Number of dimensions
+    - fd: Number of features per dimension
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -524,6 +523,7 @@ class Lfm2VLMultiModalProjector(nn.Module):
 
         Returns:
             projected_packed: (total_projected_tokens, text_hidden_size)
+
         """
         assert spatial_shapes.device.type == "cpu", (
             "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
@@ -652,6 +652,7 @@ class Lfm2VLForConditionalGeneration(
         Returns:
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_language_config = vllm_config.model_config.hf_config.text_config
@@ -1251,8 +1252,7 @@ class Lfm2VLForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",

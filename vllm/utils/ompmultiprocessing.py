@@ -187,18 +187,18 @@ class OMPProcessManager:
     def _get_autobind_cpu_ids(
         self, cpu_selector: Callable[[list[LogicalCPUInfo]], list[LogicalCPUInfo]]
     ) -> tuple[list[list[LogicalCPUInfo]], list[LogicalCPUInfo]]:
-        """
-        Return CPU ids to bind based on NUMA nodes, and CPU ids reserved for
+        """Return CPU ids to bind based on NUMA nodes, and CPU ids reserved for
         other processes.
         Currently for rank N, only CPU ids on the N-th node in available NUMA
         node list will be selected.
+
         Args:
             cpu_selector: a callable object to select CPUs from a CPU list
             of a physical core. The input is a LogicalCPUInfo list contains
             logical CPUs of a physical CPU, sorted by the LogicalCPUInfo.id.
             A selected LogicalCPUInfo list should be returned.
-        """
 
+        """
         # this memory node list has been sliced for DP offset
         allowed_numa_nodes = cr_utils.get_visible_memory_node()
         logical_cpu_list = cr_utils.get_allowed_cpu_list()

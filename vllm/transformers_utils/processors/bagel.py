@@ -18,8 +18,7 @@ class BagelProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-
 
 
 class BagelProcessor(ProcessorMixin):
-    """
-    Constructs a BAGEL processor which wraps a
+    """Constructs a BAGEL processor which wraps a
     SigLIP image processor and a Qwen2 tokenizer.
     """
 
@@ -36,8 +35,7 @@ class BagelProcessor(ProcessorMixin):
         images: ImageInput = None,
         **kwargs: Unpack[BagelProcessorKwargs],
     ):
-        """
-        Main method to prepare for the model one or several sequences(s) and image(s).
+        """Main method to prepare for the model one or several sequences(s) and image(s).
         """
         output_kwargs = self._merge_kwargs(
             BagelProcessorKwargs,
@@ -62,14 +60,12 @@ class BagelProcessor(ProcessorMixin):
         return BatchFeature(data={**pixel_values, **text_inputs})
 
     def batch_decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to Qwen2TokenizerFast's batch_decode.
+        """This method forwards all its arguments to Qwen2TokenizerFast's batch_decode.
         """
         return self.tokenizer.batch_decode(*args, **kwargs)
 
     def decode(self, *args, **kwargs):
-        """
-        This method forwards all its arguments to Qwen2TokenizerFast's decode.
+        """This method forwards all its arguments to Qwen2TokenizerFast's decode.
         """
         return self.tokenizer.decode(*args, **kwargs)
 

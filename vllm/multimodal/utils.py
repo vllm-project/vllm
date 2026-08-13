@@ -67,8 +67,7 @@ def encode_image_base64(
     image_mode: str | None = "RGB",
     format: str = "PNG",
 ) -> str:
-    """
-    Encode a pillow image to base64 format.
+    """Encode a pillow image to base64 format.
 
     By default, the image is converted into RGB format before being encoded.
     Pass `image_mode=None` to keep the original image mode.
@@ -83,8 +82,7 @@ def encode_image_url(
     image_mode: str | None = "RGB",
     format: str = "PNG",
 ) -> str:
-    """
-    Encode a pillow image as a data URL.
+    """Encode a pillow image as a data URL.
 
     By default, the image is converted into RGB format before being encoded.
     Pass `image_mode=None` to keep the original image mode.
@@ -147,14 +145,14 @@ def get_mm_features_in_window(
 def argsort_mm_positions(
     mm_positions: MultiModalPlaceholders,
 ) -> list[tuple[str, int]]:
-    """
-    Given a `MultiModalPlaceholders`, output a sequence of keys to
+    """Given a `MultiModalPlaceholders`, output a sequence of keys to
     sort the dictionary by `offset` (starting index in the input sequence)
     in ascending order.
 
     Returns:
         A list of `(modality, idx)`, which can be used to access an item
         by `mm_positions[modality][idx]`.
+
     """
     flat_items = (
         (modality, idx, item)
@@ -218,8 +216,7 @@ def group_and_batch_mm_items(
     device: torch.types.Device = None,
     pin_memory: bool = False,
 ) -> Generator[tuple[int, BatchedTensorInputs]]:
-    """
-    Group consecutive items (possibly from different requests) into batches.
+    """Group consecutive items (possibly from different requests) into batches.
 
     Items must be split across groups if any of the following occurs,
     as the batch would otherwise be invalid:
@@ -235,6 +232,7 @@ def group_and_batch_mm_items(
         A tuple `(num_items, grouped_kwargs)`, where:
         - `kwargs` is a dictionary of keyword arguments to pass to the model;
         - `num_items` is the corresponding number of items.
+
     """
     start_idx = 0
     for end_idx in range(1, len(items) + 1):
@@ -261,8 +259,7 @@ def group_and_batch_mm_kwargs(
     device: torch.types.Device = None,
     pin_memory: bool = False,
 ) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
-    """
-    Group consecutive items (possibly from different requests) into batches.
+    """Group consecutive items (possibly from different requests) into batches.
 
     Items must be split across groups if any of the following occurs,
     as the batch would otherwise be invalid:
@@ -282,6 +279,7 @@ def group_and_batch_mm_kwargs(
         - `modality` is the modality of the batch;
         - `kwargs` is a dictionary of keyword arguments to pass to the model;
         - `num_items` is the corresponding number of items.
+
     """
     for modality, group in groupby(mm_kwargs, key=lambda x: x[0]):
         items_lst = [item for _, item in group]
@@ -311,14 +309,14 @@ def fetch_audio(
     audio_url: str,
     audio_io_kwargs: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, int | float]:
-    """
-    Args:
+    """Args:
         audio_url: URL of the audio file to fetch.
         audio_io_kwargs: Additional kwargs passed to handle audio IO.
 
     Warning:
         This method has direct access to local files and is only intended
         to be called by user code. Never call this from the online server!
+
     """
     media_io_kwargs = None if not audio_io_kwargs else {"audio": audio_io_kwargs}
     media_connector = MediaConnector(
@@ -332,14 +330,14 @@ def fetch_image(
     image_url: str,
     image_io_kwargs: dict[str, Any] | None = None,
 ) -> Image.Image:
-    """
-    Args:
+    """Args:
         image_url: URL of the image file to fetch.
         image_io_kwargs: Additional kwargs passed to handle image IO.
 
     Warning:
         This method has direct access to local files and is only intended
         to be called by user code. Never call this from the online server!
+
     """
     media_io_kwargs = None if not image_io_kwargs else {"image": image_io_kwargs}
     media_connector = MediaConnector(
@@ -353,14 +351,14 @@ def fetch_video(
     video_url: str,
     video_io_kwargs: dict[str, Any] | None = None,
 ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
-    """
-    Args:
+    """Args:
         video_url: URL of the video file to fetch.
         video_io_kwargs: Additional kwargs passed to handle video IO.
 
     Warning:
         This method has direct access to local files and is only intended
         to be called by user code. Never call this from the online server!
+
     """
     media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
     media_connector = MediaConnector(

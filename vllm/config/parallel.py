@@ -560,15 +560,13 @@ class ParallelConfig:
 
     @property
     def local_engines_only(self) -> bool:
-        """
-        Client manages local+remote EngineCores in pure internal LB case.
+        """Client manages local+remote EngineCores in pure internal LB case.
         Client manages local EngineCores in hybrid and external LB case.
         """
         return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
 
     def get_next_dp_init_port(self) -> int:
-        """
-        We might need to initialize process groups in multiple
+        """We might need to initialize process groups in multiple
         processes that is related to data parallelism,
         e.g. both in the worker and in the engine, which
         can live in different processes. To avoid port conflicts, we
@@ -751,6 +749,7 @@ class ParallelConfig:
 
         Returns:
             (has_unfinished_global, pause_consensus)
+
         """
         tensor = torch.tensor(
             [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
@@ -772,8 +771,7 @@ class ParallelConfig:
         return tensor.item()
 
     def compute_hash(self):
-        """
-        Provide a hash that uniquely identifies all the configs
+        """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after

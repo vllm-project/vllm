@@ -49,8 +49,7 @@ def title(text: str) -> str:
 
 @dataclass
 class Example:
-    """
-    Example class for generating documentation content from a given path.
+    """Example class for generating documentation content from a given path.
 
     Attributes:
         path (Path): The path to the main directory or file.
@@ -64,6 +63,7 @@ class Example:
 
     Methods:
         generate() -> str: Generates the documentation content.
+
     """
 
     path: Path
@@ -75,7 +75,8 @@ class Example:
 
         If path is a file, it returns the path itself. If path is a directory, it
         searches for Markdown files (*.md) in the directory and returns the first one
-        found. If no Markdown files are found, it returns None."""
+        found. If no Markdown files are found, it returns None.
+        """
         # Single file example
         if self.path.is_file():
             return self.path
@@ -90,7 +91,8 @@ class Example:
         """Determine other files in the directory excluding the main file.
 
         If path is a file, it returns an empty list. Otherwise, it returns every file
-        in the directory except the main file in a list."""
+        in the directory except the main file in a list.
+        """
         # Single file example
         if self.path.is_file():
             return []
@@ -116,8 +118,7 @@ class Example:
         raise ValueError(f"Title not found in {self.main_file}")
 
     def fix_relative_links(self, content: str) -> str:
-        """
-        Fix relative links in markdown content by converting them to gh-file
+        """Fix relative links in markdown content by converting them to gh-file
         format.
 
         Args:
@@ -125,6 +126,7 @@ class Example:
 
         Returns:
             str: Content with relative links converted to gh-file format
+
         """
         # Regex to match markdown links [text](relative_path)
         # This matches links that don't start with http, https, ftp, or #

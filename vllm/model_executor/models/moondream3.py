@@ -293,6 +293,7 @@ class Moondream3VisionEncoder(nn.Module):
 
         Returns:
             patches: (batch, num_patches, patch_dim)
+
         """
         patch_size = self.config.enc_patch_size
         batch, channels, height, width = images.shape
@@ -319,6 +320,7 @@ class Moondream3VisionEncoder(nn.Module):
 
         Returns:
             features: (batch, num_patches, hidden_size)
+
         """
         # Create patches and embed
         patches = self.create_patches(pixel_values)
@@ -487,7 +489,6 @@ class Moondream3TextMoE(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with expert parallelism and custom GeGLU activation."""
-
         # Get router logits and compute top-k
         router_logits, _ = self.gate(x)  # [num_tokens, num_experts]
         topk_logits, topk_ids = torch.topk(
@@ -1317,7 +1318,6 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights with remapping from HuggingFace format."""
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 

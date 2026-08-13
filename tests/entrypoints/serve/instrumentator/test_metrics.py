@@ -400,7 +400,6 @@ async def _poll_until(
 
 def _get_running_metrics_from_api(server: RemoteOpenAIServer):
     """Return (running_count, waiting_count, kv_cache_usage)"""
-
     response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 

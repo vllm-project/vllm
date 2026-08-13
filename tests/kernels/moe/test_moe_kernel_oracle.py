@@ -21,7 +21,8 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
 
 class TestUnquantizedDelegation:
     """UnquantizedMoEKernelOracle methods must delegate to the existing
-    module-level functions; behaviour is bit-identical."""
+    module-level functions; behaviour is bit-identical.
+    """
 
     def test_make_kernel_delegates(self) -> None:
         quant_config = object()

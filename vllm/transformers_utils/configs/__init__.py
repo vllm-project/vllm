@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Model configs may be defined in this directory for the following reasons:
+"""Model configs may be defined in this directory for the following reasons:
 
 - There is no configuration file defined by HF Hub or Transformers library.
 - There is a need to override the existing config to support vLLM.

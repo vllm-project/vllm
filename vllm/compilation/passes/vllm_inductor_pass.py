@@ -35,8 +35,7 @@ class InductorCompilationConfig:
 
 
 class VllmInductorPass(InductorPass):
-    """
-    An inductor pass with access to vLLM PassConfig.
+    """An inductor pass with access to vLLM PassConfig.
     It provides timing, logging, and dumping utilities.
     """
 
@@ -93,8 +92,7 @@ def get_match_table() -> dict[str, int]:
 
 
 class VllmPatternMatcherPass(VllmInductorPass):
-    """
-    A VllmInductorPass that uses the Inductor pattern matcher.
+    """A VllmInductorPass that uses the Inductor pattern matcher.
     Provides pattern registration with match counting, debug dumping, and logging.
     """
 
@@ -123,8 +121,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
             logger.debug("fusion pass matches: %s", dict(cls.match_table))
 
     def dump_patterns(self, config: VllmConfig, pm_pass: PatternMatcherPass) -> None:
-        """
-        If debug dumping is enabled, dump the Inductor pattern-matcher patterns
+        """If debug dumping is enabled, dump the Inductor pattern-matcher patterns
         into the debug_dump_path folder next to the dumped fx graphs.
 
         This method does its best to print something that looks like Python code
@@ -195,8 +192,7 @@ R = TypeVar("R")
 
 
 class VllmPatternReplacement(ABC, Generic[P, R]):
-    """
-    A pattern/replacement pair for FX graph fusion.
+    """A pattern/replacement pair for FX graph fusion.
 
     Implement the three abstract members below, then pass
     instances to VllmFusionPatternMatcherPass.register(). The pass will
@@ -216,8 +212,7 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
     @property
     @abstractmethod
     def replacement(self) -> Callable[P, R]:
-        """
-        Returns a closure defining the FX subgraph to
+        """Returns a closure defining the FX subgraph to
         substitute in place of each match.
         """
         ...
@@ -294,8 +289,7 @@ def _remove_noop_permutes(gm: fx.GraphModule) -> None:
 
 
 class VllmFusionPatternMatcherPass(VllmPatternMatcherPass):
-    """
-    A VllmPatternMatcherPass for passes that use VllmPatternReplacement objects.
+    """A VllmPatternMatcherPass for passes that use VllmPatternReplacement objects.
     Subclasses register patterns via self.register() in their own __init__.
     """
 

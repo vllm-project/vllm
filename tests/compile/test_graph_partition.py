@@ -24,8 +24,7 @@ DEVICE_TYPE = current_platform.device_type
 
 
 def test_getitem_moved_to_producer_subgraph():
-    """
-    Test that getitem operations are moved to the same subgraph as their input,
+    """Test that getitem operations are moved to the same subgraph as their input,
     preventing tuple inputs to submodules.
     """
 
@@ -79,8 +78,7 @@ def test_getitem_moved_to_producer_subgraph():
 
 
 def test_no_tuple_inputs_with_multiple_consumers():
-    """
-    Test that when a tuple is consumed by multiple split operations,
+    """Test that when a tuple is consumed by multiple split operations,
     getitem operations are properly moved to avoid tuple inputs.
     """
 
@@ -138,13 +136,11 @@ def test_no_tuple_inputs_with_multiple_consumers():
 
 
 def test_consecutive_ops_in_split():
-    """
-    Test that consecutive splitting operations are grouped into the same subgraph
+    """Test that consecutive splitting operations are grouped into the same subgraph
     """
 
     def model_fn(x: torch.Tensor) -> torch.Tensor:
-        """
-        Define a simple model where consecutive operations create opportunities
+        """Define a simple model where consecutive operations create opportunities
         for splitting subgraphs.
         """
         # Apply silly attention followed by consecutive operations
@@ -211,8 +207,7 @@ def _subgraphs_with_empty_nodes(split_items, *, is_splitting_graph):
 
 
 def test_empty_only_partition_stays_separate_after_splitting_predecessor():
-    """
-    Empty-only subgraphs should not be merged when the only predecessor is
+    """Empty-only subgraphs should not be merged when the only predecessor is
     a splitting-op subgraph.
     """
 
@@ -248,8 +243,7 @@ def test_empty_only_partition_stays_separate_after_splitting_predecessor():
 
 
 def test_empty_only_partition_is_merged():
-    """
-    Empty-only subgraphs should still be merged when a non-splitting predecessor
+    """Empty-only subgraphs should still be merged when a non-splitting predecessor
     exists. The merged empty node must remain outside splitting-op subgraphs.
     """
 
@@ -294,8 +288,7 @@ def test_empty_only_partition_is_merged():
 
 
 def test_builtin_empty_only_partition_is_merged():
-    """
-    In Dynamo graphs, torch.empty/empty_like may appear as builtin call targets
+    """In Dynamo graphs, torch.empty/empty_like may appear as builtin call targets
     (not aten OpOverload). Ensure empty-only partitions are still merged.
     """
 
@@ -340,8 +333,7 @@ def test_builtin_empty_only_partition_is_merged():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_sym_size_whole_shape_boundary():
-    """
-    Test that using x.size() (whole shape) across a split boundary can be
+    """Test that using x.size() (whole shape) across a split boundary can be
     compiled by standalone_compile.
 
     The dynamo graph looks like:
@@ -400,8 +392,7 @@ def test_sym_size_whole_shape_boundary():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_symint_crosses_split_boundary():
-    """
-    Test that SymInt placeholders from torch.compile + mark_dynamic
+    """Test that SymInt placeholders from torch.compile + mark_dynamic
     cross split boundaries safely via split_module's natural threading.
 
     SymInt values are threaded through subgraphs by split_module and
@@ -459,8 +450,7 @@ def test_symint_crosses_split_boundary():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_shape_boundary_standalone_compile():
-    """
-    Repro for the original production bug:
+    """Repro for the original production bug:
 
         AssertionError: out_spec mismatch
         TreeSpec(tuple, None, [*, *, TreeSpec(Size, None, [*, *]), *])
@@ -529,8 +519,7 @@ def test_shape_boundary_standalone_compile():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_size_used_in_multiple_consumer_subgraphs():
-    """
-    Validates that x.size() (whole shape) used by multiple downstream subgraphs
+    """Validates that x.size() (whole shape) used by multiple downstream subgraphs
     does not cause torch.Size to cross split boundaries.
 
     Model:
@@ -584,8 +573,7 @@ def test_size_used_in_multiple_consumer_subgraphs():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_sym_size_metadata_propagated():
-    """
-    Validates that new sym_size.int nodes created by the pre-pass have
+    """Validates that new sym_size.int nodes created by the pre-pass have
     example_value metadata set. Without it, placeholder metadata in consumer
     subgraphs would be None, breaking any code that dynamically builds
     example inputs from metadata (e.g. standalone_compile per-submodule).
@@ -634,8 +622,7 @@ def test_sym_size_metadata_propagated():
 
 
 def test_decompose_size_with_getitem_user():
-    """
-    Regression test: _decompose_size_nodes must handle getitem users of size()
+    """Regression test: _decompose_size_nodes must handle getitem users of size()
     correctly.
 
     When a graph contains x.shape[i], it can appear as:
@@ -704,8 +691,7 @@ def test_decompose_size_with_getitem_user():
 
 
 def test_decompose_size_leaves_scalar_size_with_dim():
-    """
-    Regression test: _decompose_size_nodes must leave x.size(dim) alone.
+    """Regression test: _decompose_size_nodes must leave x.size(dim) alone.
 
     x.size() returns a torch.Size tuple that can't cross split boundaries and
     must be decomposed. x.size(dim), however, already returns a scalar

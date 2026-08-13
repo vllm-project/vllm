@@ -240,8 +240,7 @@ def fp32_router_gemm_dispatch_impl(
     weight: torch.Tensor,
     allow_bf16x3_router_gemm: bool,
 ) -> torch.Tensor:
-    """
-    Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
+    """Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
     otherwise optionally run the experimental BF16x3 kernel for medium/large
     SM100 router batches, then fall back to F.linear.
     This must be wrapped in a custom op because our torch.compile integration

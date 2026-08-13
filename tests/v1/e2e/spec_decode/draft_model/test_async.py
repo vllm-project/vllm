@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test that verifies no implicit GPU-CPU synchronization occurs during
+"""Test that verifies no implicit GPU-CPU synchronization occurs during
 speculative decoding generation under expected conditions.
 """
 
@@ -15,8 +14,7 @@ import torch
 
 @pytest.fixture
 def sync_tracker():
-    """
-    Fixture that patches CommonAttentionMetadata.seq_lens_cpu to detect
+    """Fixture that patches CommonAttentionMetadata.seq_lens_cpu to detect
     lazy init syncs. Prints stack traces immediately when syncs occur.
     """
     from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -104,8 +102,7 @@ def test_no_sync_with_spec_decode(
     num_spec_tokens: int,
     vllm_runner,
 ):
-    """
-    Test that no implicit GPU-CPU sync occurs during speculative decoding
+    """Test that no implicit GPU-CPU sync occurs during speculative decoding
     generation.
     """
     # Import vLLM AFTER sync_tracker fixture has applied the patch

@@ -48,7 +48,8 @@ def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
 def _packed_block_span(pool: torch.Tensor) -> int:
     """Per-block stride of ``pool`` in tokens (``stride(0)//stride(-2)``): ==
     block_size for unpacked KV, larger when packed (#44577). Raises if not
-    token-aligned."""
+    token-aligned.
+    """
     block_stride = pool.stride(0)
     token_stride = pool.stride(-2)
     if block_stride % token_stride != 0:

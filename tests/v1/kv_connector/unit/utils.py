@@ -259,7 +259,6 @@ def create_model_runner_output(
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
-
     # Make request data.
     req_ids = [req.request_id for req in reqs]
     req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}

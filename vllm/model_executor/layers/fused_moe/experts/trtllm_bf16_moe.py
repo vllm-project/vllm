@@ -32,8 +32,7 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 class TrtLlmBf16ExpertsBase:
-    """
-    BF16 unquantized TRTLLM-Gen MoE kernels. Shared base for modular and
+    """BF16 unquantized TRTLLM-Gen MoE kernels. Shared base for modular and
     monolithic interfaces.
     """
 
@@ -124,8 +123,7 @@ class TrtLlmBf16ExpertsBase:
 
 
 class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular):
-    """
-    BF16 unquantized TRTLLM-Gen MoE kernels. Supports modular interface.
+    """BF16 unquantized TRTLLM-Gen MoE kernels. Supports modular interface.
     """
 
     @staticmethod
@@ -225,8 +223,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
 
 
 class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonolithic):
-    """
-    BF16 unquantized TRTLLM-Gen MoE kernels. Supports monolithic interface.
+    """BF16 unquantized TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """
 
     @staticmethod

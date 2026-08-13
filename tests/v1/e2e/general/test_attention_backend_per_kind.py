@@ -72,7 +72,8 @@ def test_backend_per_kind_splits_groups(backend_per_kind, monkeypatch):
 )
 def test_backend_per_kind_overrides_global_backend(monkeypatch):
     """A per-kind entry wins over the global ``backend`` for its kind; other
-    kinds fall back to the global backend."""
+    kinds fall back to the global backend.
+    """
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     llm = LLM(
         model=MODEL,

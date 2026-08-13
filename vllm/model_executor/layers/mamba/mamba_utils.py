@@ -234,8 +234,8 @@ class MambaStateShapeCalculator:
     @classmethod
     def extra_groups_for_head_shards(cls, ngroups: int, tp_size: int):
         """Compute the increase in group numbers to account for
-        replication in order to accompany the head shards."""
-
+        replication in order to accompany the head shards.
+        """
         # in the case ngoups % tp_size == 0, this will be zero
         if ngroups % tp_size == 0:
             return 0
@@ -296,13 +296,13 @@ class MambaStateShapeCalculator:
 
 @dataclass
 class MambaCopySpec:
-    """
-    Data class specifying the memory-copy parameters for Mamba states used for
+    """Data class specifying the memory-copy parameters for Mamba states used for
     prefix caching in align mode.
 
     Attributes:
         start_addr (int): Starting address for the memory copy operation.
         num_elements (int): Number of elements to copy from the starting address.
+
     """
 
     start_addr: int

@@ -215,6 +215,7 @@ def FusedMoEFactory(
 
     Returns:
         MoERunner: Configured MoE execution pipeline ready for forward passes
+
     """
     vllm_config = get_current_vllm_config()
 

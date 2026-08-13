@@ -23,8 +23,7 @@ logger = init_logger(__name__)
 
 
 class VllmIRLoweringPass(VllmInductorPass):
-    """
-    This pass lowers vLLM IR ops to their implementations the priority list.
+    """This pass lowers vLLM IR ops to their implementations the priority list.
     """
 
     def __init__(self, vllm_config: VllmConfig) -> None:
@@ -113,8 +112,7 @@ class VllmIRLoweringPass(VllmInductorPass):
             logger.warning("Full node list: %s", ",".join(str(n) for n in failed_nodes))
 
     def uuid(self) -> str:
-        """
-        IR op priority & impl sources affect lowering pass output,
+        """IR op priority & impl sources affect lowering pass output,
         so we include them in the cache key.
         """
         priorities = {name: op.get_priority() for name, op in IrOp.registry.items()}

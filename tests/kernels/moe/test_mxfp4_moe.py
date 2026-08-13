@@ -67,8 +67,7 @@ def compute_ref_output(
 @pytest.mark.parametrize("num_experts", [8, 16, 32])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16])
 def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
-    """
-    Test the MXFP4 grouped GEMM kernel by:
+    """Test the MXFP4 grouped GEMM kernel by:
     1. Creating random per-expert inputs and weights
     2. Quantizing both to MXFP4 using the CUDA kernel
     3. Running the CUTLASS grouped GEMM
@@ -205,8 +204,7 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
     reason="mxfp4_experts_quant requires CUDA SM100",
 )
 def test_mxfp4_experts_quant_basic():
-    """
-    Basic smoke test for the MXFP4 experts quantization kernel.
+    """Basic smoke test for the MXFP4 experts quantization kernel.
     """
     device = "cuda"
     num_experts = 4
@@ -295,8 +293,7 @@ def compute_reference_e8m0_scale(block_max: float) -> int:
 @pytest.mark.parametrize("k", [256, 7168])
 @pytest.mark.parametrize("m", [16, 64])
 def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
-    """
-    Test that mxfp4_experts_quant computes E8M0 block scales correctly
+    """Test that mxfp4_experts_quant computes E8M0 block scales correctly
     per OCP MX spec (not the NVFP4 formula).
 
     The old buggy kernel used: floor(log2(max/6)) + 127
@@ -416,8 +413,7 @@ def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
     reason="mxfp4_experts_quant requires CUDA SM100",
 )
 def test_mxfp4_experts_quant_no_saturation():
-    """
-    Test that the E8M0 scale is large enough to avoid unexpected saturation.
+    """Test that the E8M0 scale is large enough to avoid unexpected saturation.
 
     With the buggy NVFP4 formula, the scale was too small causing most values
     to saturate to ±6 in FP4. The fixed OCP MX formula should ensure that

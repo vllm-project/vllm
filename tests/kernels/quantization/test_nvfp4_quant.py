@@ -174,8 +174,7 @@ def test_python_util_matches_cpp_allocation(
     shape: tuple[int, int],
     is_sf_swizzled_layout: bool,
 ) -> None:
-    """
-    Verify that the Python utility (create_fp4_output_tensors) allocates
+    """Verify that the Python utility (create_fp4_output_tensors) allocates
     tensors with the same shapes and dtypes as the C++ functional variant
     (scaled_fp4_quant_func).
     """

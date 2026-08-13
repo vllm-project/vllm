@@ -102,8 +102,7 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         return self.currsize / self.maxsize
 
     def stat(self, *, delta: bool = False) -> CacheInfo:
-        """
-        Gets the cumulative number of hits and queries against this cache.
+        """Gets the cumulative number of hits and queries against this cache.
 
         If `delta=True`, instead gets these statistics
         since the last call that also passed `delta=True`.
@@ -158,8 +157,7 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         self.__setitem__(key, value)
 
     def pin(self, key: _K) -> None:
-        """
-        Pins a key in the cache preventing it from being
+        """Pins a key in the cache preventing it from being
         evicted in the LRU order.
         """
         if key not in self:
@@ -167,8 +165,7 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         self.pinned_items.add(key)
 
     def _unpin(self, key: _K) -> None:
-        """
-        Unpins a key in the cache allowing it to be
+        """Unpins a key in the cache allowing it to be
         evicted in the LRU order.
         """
         self.pinned_items.remove(key)

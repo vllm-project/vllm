@@ -515,8 +515,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ):
-        """
-        This method builds the metadata for full cudagraph capture.
+        """This method builds the metadata for full cudagraph capture.
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
         m = common_attn_metadata

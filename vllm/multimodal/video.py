@@ -348,8 +348,7 @@ class OpenCVVideoBackendMixin:
         frame_indices: list[int],
         total_frames: int,
     ) -> tuple[npt.NDArray, list[int], dict[int, int]]:
-        """
-        Read frames with dynamic window forward-scan recovery.
+        """Read frames with dynamic window forward-scan recovery.
 
         When a target frame fails to load, the next successfully grabbed
         frame (before the next target frame) will be used to recover it.
@@ -364,6 +363,7 @@ class OpenCVVideoBackendMixin:
             - frames_array: Array of loaded frames
             - valid_frame_indices: List of frame indices that were loaded
             - recovered_map: Dict mapping recovered_idx -> source_idx
+
         """
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -665,6 +665,7 @@ def _pynvvc_frames_to_nhwc(frames: torch.Tensor) -> torch.Tensor:
 
     Returns:
         The same frames as a contiguous ``(N, H, W, C)`` tensor.
+
     """
     if frames.shape[-1] != 3 and frames.shape[-3] == 3:
         frames = frames.permute(0, 2, 3, 1)  # NCHW -> NHWC
@@ -1113,6 +1114,7 @@ class VideoBackend(
 
         Returns:
             Tuple of ``(frames_array, metadata_dict)``.
+
         """
         target = VideoTargetMetadata(
             num_frames=num_frames, fps=fps, max_duration=max_duration
@@ -1732,8 +1734,7 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         sampling_fps: float,
         max_fps: float = 8.0,
     ) -> list[float]:
-        """
-        Return the subset of `video_fps` factors that remain multiples
+        """Return the subset of `video_fps` factors that remain multiples
         of `sampling_fps`.
 
         Examples:
@@ -1748,6 +1749,7 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
                 ...
             ValueError: sampling_fps=2 must divide video_fps=5 to produce
                 consistent frame steps.
+
         """
         video_fps = int(video_fps)
         sampling_fps = int(sampling_fps)
@@ -1783,8 +1785,7 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         frame_sample_mode: str,
         candidate_target_fps: list[float],
     ) -> float | None:
-        """
-        Get the target fps that best spans the videoand has the most frames sampled
+        """Get the target fps that best spans the videoand has the most frames sampled
         """
         num_frames_sampled = 0
         selected_target_fps = None
@@ -2099,8 +2100,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         frame_recovery: bool = False,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        """
-        Load video frames with dynamic sampling based on duration.
+        """Load video frames with dynamic sampling based on duration.
 
         Args:
             data: Raw video bytes
@@ -2111,6 +2111,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
 
         Returns:
             Tuple of (frames_array, metadata_dict)
+
         """
         cap = cls.open_video_capture(data)
         _check_frame_pixel_limit(

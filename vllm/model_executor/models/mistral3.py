@@ -54,12 +54,11 @@ from .vision import get_vision_encoder_info
 
 
 class Mistral3ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values_pixtral"] = "pixel_values_pixtral"
@@ -73,8 +72,7 @@ class Mistral3ImagePixelInputs(TensorSchema):
 
 
 class Mistral3PatchMerger(nn.Module):
-    """
-    Learned merging of spatial_merge_size ** 2 patches
+    """Learned merging of spatial_merge_size ** 2 patches
     """
 
     def __init__(
@@ -317,6 +315,7 @@ def _get_num_hidden_layers(hf_config: Mistral3Config) -> int:
 
     Args:
         hf_config: Model config with vision feature layer(s).
+
     """
     feature_layers = hf_config.vision_feature_layer
     num_hidden_layers = hf_config.vision_config.num_hidden_layers
@@ -543,6 +542,7 @@ class Mistral3ForConditionalGeneration(
 
         Info:
             [`Mistral3ImagePixelInputs`][vllm.model_executor.models.mistral3.Mistral3ImagePixelInputs]
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -564,8 +564,7 @@ class Mistral3ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",

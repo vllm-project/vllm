@@ -218,6 +218,7 @@ def _create_nvfp4_hnd_kv_cache(
 
     Returns:
         ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, HND-strided).
+
     """
     # First create a bf16 HND cache so block tables are populated.
     # Use kv_in_head_dim=True so K/V are separate head groups (B, 2*H, N, hs).
@@ -286,7 +287,8 @@ def _create_nvfp4_hnd_kv_cache(
 
 def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL):
     """Run TRTLLM attention through the full FlashInfer pipeline
-    and compare against an SDPA reference."""
+    and compare against an SDPA reference.
+    """
     set_random_seed(42)
     device = torch.device(f"{DEVICE_TYPE}:0")
 
@@ -524,7 +526,8 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
 def test_trtllm_gen_full_attention_integration(batch_spec_name: str):
     """Test TRTLLM gen-full attention through the full FlashInfer
     MetadataBuilder.build() -> FlashInferImpl.forward() pipeline,
-    with real TRTLLM kernels on Blackwell."""
+    with real TRTLLM kernels on Blackwell.
+    """
     _run_trtllm_integration(BATCH_SPECS[batch_spec_name])
 
 
@@ -535,7 +538,8 @@ def test_trtllm_gen_full_attention_integration(batch_spec_name: str):
 @torch.inference_mode()
 def test_trtllm_gen_nvfp4_kv_integration(batch_spec_name: str):
     """Test TRTLLM attention with nvfp4 KV cache through the full
-    FlashInfer MetadataBuilder.build() -> FlashInferImpl.forward() pipeline."""
+    FlashInfer MetadataBuilder.build() -> FlashInferImpl.forward() pipeline.
+    """
     _run_trtllm_integration(
         BATCH_SPECS[batch_spec_name],
         kv_cache_dtype="nvfp4",

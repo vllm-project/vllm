@@ -52,8 +52,7 @@ _ENABLE_TORCH_WRAP: bool = True
 
 
 def set_default_torch_wrap(enable: bool = True) -> None:
-    """
-    Permanently set the torch wrap flag.
+    """Permanently set the torch wrap flag.
     """
     global _ENABLE_TORCH_WRAP
     _ENABLE_TORCH_WRAP = enable
@@ -61,14 +60,12 @@ def set_default_torch_wrap(enable: bool = True) -> None:
 
 @contextlib.contextmanager
 def enable_torch_wrap(enable: bool = True):
-    """
-    Context manager to enable/disable torch custom op wrapping for vLLM IR ops.
+    """Context manager to enable/disable torch custom op wrapping for vLLM IR ops.
     When torch wrapping is disabled, the torch custom op layer is skipped
     and IR ops dispatch directly to the implementation.
     Helpful for avoiding torch dispatch overhead in eager mode
     and avoiding the need for lowering for platforms not using Inductor.
     """
-
     global _ENABLE_TORCH_WRAP
     old = _ENABLE_TORCH_WRAP
     try:
@@ -110,8 +107,7 @@ def register_op(
     activations: list[str] | None = None,
     allow_inplace: bool = False,
 ) -> "IrOp | Callable[[Callable], IrOp]":
-    """
-    Register a new vLLM IR op.
+    """Register a new vLLM IR op.
 
     Args:
         f: the native implementation of the op
@@ -131,7 +127,9 @@ def register_op(
 
     @vllm.ir.register_op(name="custom_mul")
     def multiply(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        return x * y"""
+        return x * y
+
+    """
 
     def decorator(_f: Callable):
         op_name: str = _f.__name__ if name is None else name
@@ -226,16 +224,14 @@ class IrOp:
         self.torch_op: torch._ops.OpOverload = getattr(torch_ops, name).default
 
     def register_fake(self, fn: Callable) -> Callable:
-        """
-        Register a fake impl for the torch custom op. If this method is not called,
+        """Register a fake impl for the torch custom op. If this method is not called,
         the native implementation is used directly for the fake implementation.
         """
         self._fake_fn = fn
         return fn
 
     def _fake_call(self, *args, **kwargs) -> Any:
-        """
-        Call to the fake implementation of the op. We use indirection because we want
+        """Call to the fake implementation of the op. We use indirection because we want
         users to be able to register fake later but also want it to fall back to native
         directly by default, instead of going through the dispatching mechanism.
         """
@@ -249,8 +245,8 @@ class IrOp:
         supports_args: Callable[..., bool] | None = None,
         inplace: bool = False,
     ) -> Callable[[Callable[..., Any]], "IrOpImpl"]:
-        """
-        Register an implementation for this custom op.
+        """Register an implementation for this custom op.
+
         Args:
             provider: The name of the provider, must be unique.
             supported: Static support check, use this to check platform support.
@@ -302,8 +298,7 @@ class IrOp:
         return _register_impl
 
     def _inner_call(self, *args, **kwargs) -> Any:
-        """
-        Eager call to torch op lands here. When torch wrapping is disabled,
+        """Eager call to torch op lands here. When torch wrapping is disabled,
         __call__ routes straight here instead of going through torch op dispatching.
         """
         impl = self.dispatch(*args, **kwargs)
@@ -313,8 +308,7 @@ class IrOp:
         return impl.func_impl_fn(*args, **kwargs)
 
     def apply_arg_defaults(self, args) -> tuple:
-        """
-        Return args with default values applied.
+        """Return args with default values applied.
         Defaults are taken from the native implementation signature.
 
         SHOULD NOT BE USED IN THE DISPATCH PATH (SLOW).
@@ -325,8 +319,7 @@ class IrOp:
         return bound_args.args
 
     def dispatch(self, *args, **kwargs) -> "IrOpImpl":
-        """
-        Dispatch to the appropriate implementation based on current priority
+        """Dispatch to the appropriate implementation based on current priority
         and argument support checks. Returns the selected IrOpImpl.
 
         THIS FUNCTION IS ON THE HOT PATH (OP DISPATCH), MUST BE FAST.
@@ -413,8 +406,7 @@ class IrOp:
         return filtered_impls
 
     def set_default(self, priority: list[str]) -> None:
-        """
-        Permanently set the dispatch priority for this op. Use this for
+        """Permanently set the dispatch priority for this op. Use this for
         process-lifetime setup (e.g., worker startup). For scoped overrides,
         use ``set_priority`` instead.
         """
@@ -427,8 +419,7 @@ class IrOp:
 
     @contextlib.contextmanager
     def set_priority(self, priority: list[str]):
-        """
-        Context manager to set the dispatch priority for implementations for this op.
+        """Context manager to set the dispatch priority for implementations for this op.
         """
         old_priority_impls = self._priority_impls
         try:
@@ -636,8 +627,7 @@ class IrOpImpl:
 
     @weak_cache
     def uuid(self):
-        """
-        Compile-time hash to uniquely determine whether the implementation has changed.
+        """Compile-time hash to uniquely determine whether the implementation has changed.
         Used by vllm-compile hash mechanism and torch.compile lowering pass uuid to
         control the vLLM compile cache and AOTAutograd/Inductor caches respectively.
 
@@ -648,8 +638,7 @@ class IrOpImpl:
         return hash_source(*sources)
 
     def func_impl_fn(self, *args, **kwargs) -> Any:
-        """
-        Copy any inputs in activations if this is an inplace impl,
+        """Copy any inputs in activations if this is an inplace impl,
         to ensure functional semantics.
         """
         if not self.inplace:

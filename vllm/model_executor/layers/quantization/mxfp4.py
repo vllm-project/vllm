@@ -77,7 +77,8 @@ class Mxfp4Config(QuantizationConfig):
 
     def _make_moe_method(self, moe: FusedMoEConfig) -> FusedMoEMethodBase:
         """MoE method for RoutedExperts. Subclasses override to pick a
-        checkpoint-specific kernel family."""
+        checkpoint-specific kernel family.
+        """
         return Mxfp4MoEMethod(moe)
 
     def get_quant_method(

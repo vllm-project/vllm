@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-FileSystemTierManager: Pure-Python file system secondary tier for KV cache offloading.
+"""FileSystemTierManager: Pure-Python file system secondary tier for KV cache offloading.
 
 Store path:
     Data is written to a temp file (<dest_path.tmp>) via os.write,
@@ -84,8 +83,7 @@ class FsAsyncLookupManager(AsyncLookupManager):
 
 
 class FileSystemTierManager(SecondaryTierManager):
-    """
-    Pure-Python disk-backed secondary tier.
+    """Pure-Python disk-backed secondary tier.
 
     Read-priority threads service load jobs preferentially; write-priority
     threads service store jobs preferentially.  Both groups can drain either
@@ -117,20 +115,20 @@ class FileSystemTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
     ):
-        """
-        Args:
-            offloading_spec: Contains normalized offloading configuration and
-                blocks_per_chunk.
-            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-            tier_type: Tier type identifier, set by SecondaryTierFactory.
-            root_dir: Root directory for block files.
-            n_read_threads: Number of read-priority I/O threads.
-            n_write_threads: Number of write-priority I/O threads.
-            enable_kv_events: Emit BlockStored KV events for blocks
-                successfully stored to this tier. Effective only when KV
-                cache events are enabled globally (kv_events_config).
-            locality: Whether this tier's storage is LOCAL or REMOTE relative
-                to the publishing vLLM instance.
+        """Args:
+        offloading_spec: Contains normalized offloading configuration and
+            blocks_per_chunk.
+        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        tier_type: Tier type identifier, set by SecondaryTierFactory.
+        root_dir: Root directory for block files.
+        n_read_threads: Number of read-priority I/O threads.
+        n_write_threads: Number of write-priority I/O threads.
+        enable_kv_events: Emit BlockStored KV events for blocks
+            successfully stored to this tier. Effective only when KV
+            cache events are enabled globally (kv_events_config).
+        locality: Whether this tier's storage is LOCAL or REMOTE relative
+            to the publishing vLLM instance.
+
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
         self.locality = Locality(locality) if locality is not None else None
@@ -270,7 +268,8 @@ class FileSystemTierManager(SecondaryTierManager):
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Collect finished jobs; a failed promotion marks only its failed keys
-        as a miss here (scheduler thread)."""
+        as a miss here (scheduler thread).
+        """
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
             if self.events is not None:
@@ -332,8 +331,7 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def shutdown(self) -> None:
-        """
-        Release resources held by this tier.
+        """Release resources held by this tier.
 
         Shuts down the lookup manager and the thread pool,
         clearing pending tasks and waiting for active threads to complete.

@@ -28,8 +28,8 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
 
     Returns:
       DummyOutputProcessorTestVectors instance with no logprobs
-    """
 
+    """
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
     vllm_config = EngineArgs(model=TOKENIZER_NAME).create_engine_config()
     # Tokenize prompts under test & create dummy generated tokens
@@ -66,6 +66,7 @@ def dummy_test_vectors() -> DummyOutputProcessorTestVectors:
 
     Returns:
       DummyOutputProcessorTestVectors instance with logprobs
+
     """
     # Build dummy test vectors without logprobs
     dtv = _build_test_vectors_no_logprobs()

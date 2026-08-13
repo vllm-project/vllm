@@ -26,8 +26,7 @@ logger = init_logger(__name__)
 
 
 class QuarkNVFP4(QuarkScheme):
-    """
-    Quark NVFP4 quantization scheme.
+    """Quark NVFP4 quantization scheme.
 
     Supports loading NVFP4 checkpoints with the following structure:
     - weight: uint8, shape [out_features, in_features // 2] (packed FP4)

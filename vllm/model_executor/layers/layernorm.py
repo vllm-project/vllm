@@ -204,6 +204,7 @@ class RMSNormGated(CustomOp):
             device: Device to create parameters on
             dtype: Data type for parameters
             activation: Activation function name for gating
+
         """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -308,8 +309,7 @@ class RMSNormGated(CustomOp):
 
 
 class LayerNorm(nn.Module):
-    """
-    Layer Normalization.
+    """Layer Normalization.
     """
 
     def __init__(self, dim: int, eps: float = 1e-6):

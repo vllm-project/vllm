@@ -423,6 +423,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 ``max_prefill_qlen`` — concurrent requests can sum to more than
                 ``max_model_len`` when ``max_model_len < max_num_batched_tokens``.
             device: Target device for the buffers.
+
         """
         from aiter import get_ps_metadata_info_v1
 
@@ -834,8 +835,7 @@ def _expand_page_indices_kernel(
 
 
 class AiterMLAHelper:
-    """
-    AITER MLA persistent (asm) decode requires num_heads >= 16. Head counts
+    """AITER MLA persistent (asm) decode requires num_heads >= 16. Head counts
     < 16 are padded up to exactly 16: divisors of 16 by repeat_interleave,
     other counts (e.g. 12 heads/rank at TP8, 6 at TP16) by tiling the query
     heads and slicing to 16. Non-divisor padded decodes take the asm path;

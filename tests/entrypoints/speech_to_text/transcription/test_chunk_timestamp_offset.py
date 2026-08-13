@@ -18,8 +18,7 @@ _PATCH = "vllm.entrypoints.speech_to_text.base.serving"
 
 @pytest.mark.asyncio
 async def test_chunk_offsets_are_cumulative_not_nominal():
-    """
-    chunk_start_offsets must be cumulative actual chunk lengths, not the old approach of
+    """chunk_start_offsets must be cumulative actual chunk lengths, not the old approach of
     'idx * max_audio_clip_s'.  When split_audio places a boundary before the
     nominal 30 s mark, the old formula drifts; the fixed formula stays exact.
     """

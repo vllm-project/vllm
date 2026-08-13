@@ -611,8 +611,7 @@ class Qwen3ASRForConditionalGeneration(
         return llm_positions, mrope_position_delta
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
@@ -693,8 +692,7 @@ class Qwen3ASRForConditionalGeneration(
 
     @classmethod
     def post_process_output(cls, text: str) -> str:
-        """
-        Post-process Qwen3-ASR raw output to extract clean transcription.
+        """Post-process Qwen3-ASR raw output to extract clean transcription.
 
         The model outputs in format: "language {lang}<asr_text>{transcription}"
         This method strips the language prefix and asr_text tags.

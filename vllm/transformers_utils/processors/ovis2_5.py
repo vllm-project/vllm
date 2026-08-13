@@ -33,13 +33,13 @@ class Ovis2_5ProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[cal
 
 
 class Ovis2_5Processor(ProcessorMixin):
-    r"""
-    Constructs an Ovis processor which wraps an Ovis image processor
+    r"""Constructs an Ovis processor which wraps an Ovis image processor
     and a Qwen2 tokenizer into a single processor.
     [`OvisProcessor`] offers all the functionalities of
     [`Qwen2VLImageProcessor`] and [`Qwen2TokenizerFast`].
     See the [`~OvisProcessor.__call__`] and [`~OvisProcessor.decode`]
     for more information.
+
     Args:
         image_processor ([`Qwen2VLImageProcessor`], *optional*):
             The image processor is a required input.
@@ -48,6 +48,7 @@ class Ovis2_5Processor(ProcessorMixin):
         chat_template (`str`, *optional*): A Jinja template which will
             be used to convert lists of messages in a chat into
             a tokenizable string.
+
     """
 
     attributes = ["image_processor", "tokenizer"]
@@ -110,15 +111,15 @@ class Ovis2_5Processor(ProcessorMixin):
         | list[PreTokenizedInput] = None,
         **kwargs: Unpack[Ovis2_5ProcessorKwargs],
     ) -> BatchFeature:
-        """
-        Main method to prepare for the model one or several sequences(s)
+        """Main method to prepare for the model one or several sequences(s)
         and image(s). This method forwards the `text`and `kwargs` arguments
         to Qwen2TokenizerFast's [`~Qwen2TokenizerFast.__call__`] if `text`
         is not `None` to encode the text. To prepare the vision inputs,
         this method forwards the `vision_infos` and `kwrags` arguments to
         Qwen2VLImageProcessor's [`~Qwen2VLImageProcessor.__call__`]
         if `vision_infos` is not `None`.
-            Args:
+
+        Args:
                 images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`,
                     `list[PIL.Image.Image]`, `list[np.ndarray]`,
                     `list[torch.Tensor]`):
@@ -146,7 +147,8 @@ class Ovis2_5Processor(ProcessorMixin):
                     - `'pt'`: Return PyTorch `torch.Tensor` objects.
                     - `'np'`: Return NumPy `np.ndarray` objects.
                     - `'jax'`: Return JAX `jnp.ndarray` objects.
-            Returns:
+
+        Returns:
                 [`BatchFeature`]: A [`BatchFeature`] with the following fields:
                 - **input_ids** -- list of token ids to be fed to a model.
                   Returned when `text` is not `None`.
@@ -164,6 +166,7 @@ class Ovis2_5Processor(ProcessorMixin):
                   when `videos` is not `None`.
                 - **second_per_grid_ts** -- list of video seconds per time grid.
                   Returned when `videos` is not `None`.
+
         """
         output_kwargs = self._merge_kwargs(
             Ovis2_5ProcessorKwargs,

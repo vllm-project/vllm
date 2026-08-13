@@ -37,8 +37,7 @@ logger = init_logger(__name__)
 
 
 class TrtLlmFp8ExpertsBase:
-    """
-    Fp8 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic
+    """Fp8 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic
     interfaces.
     """
 
@@ -150,8 +149,7 @@ class TrtLlmFp8ExpertsBase:
 
 
 class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
-    """
-    Fp8 TRTLLM-Gen MoE kernels. Supports modular interface.
+    """Fp8 TRTLLM-Gen MoE kernels. Supports modular interface.
     """
 
     @staticmethod
@@ -283,8 +281,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
 
 
 class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolithic):
-    """
-    Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
+    """Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """
 
     def supports_routing_replay_capture(self) -> bool:

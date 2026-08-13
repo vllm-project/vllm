@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Thread-safe wrapper for sparse tensor invariant validation.
+"""Thread-safe wrapper for sparse tensor invariant validation.
 
 PyTorch's `torch.sparse.check_sparse_tensor_invariants()` context manager
 manipulates a **process-global** flag (save/enable/restore). When multiple

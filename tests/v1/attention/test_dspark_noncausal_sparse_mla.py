@@ -435,7 +435,8 @@ def test_dspark_noncausal_sparse_mla_matches_sdpa(
     num_heads,
 ):
     """Non-causal (window ∪ block, future-pointing) per-token indices must match
-    a dense SDPA reference over the same indices, for both sparse-MLA backends."""
+    a dense SDPA reference over the same indices, for both sparse-MLA backends.
+    """
     _skip_if_backend_unavailable(backend_cls, kv_cache_dtype, block_size)
 
     window, block, topk_width = _DSPARK_CONFIGS[config_name]

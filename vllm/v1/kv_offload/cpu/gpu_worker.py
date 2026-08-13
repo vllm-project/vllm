@@ -80,8 +80,7 @@ def compute_sub_block_ptrs(
     tensor: torch.Tensor,
     skip_count: int = 0,
 ):
-    """
-    Compute byte pointers for sub-blocks of the given block IDs.
+    """Compute byte pointers for sub-blocks of the given block IDs.
 
     Each block in block_ids contains blocks_per_chunk sub-blocks.
     The pointer for sub-block j of block b is:
@@ -98,6 +97,7 @@ def compute_sub_block_ptrs(
         output: pre-allocated pointer array to write pointers into.
         tensor: the source or destination tensor.
         skip_count: sub-blocks to skip in the first block.
+
     """
     assert skip_count < blocks_per_chunk
 
@@ -126,7 +126,8 @@ def compute_sub_block_ptrs(
 class CopyPlan(NamedTuple):
     """Precomputed fragment-copy template for one data ref under the canonical
     CPU layout, unrolled from the ref's mapped runs. Offsets are relative to
-    the per-block base pointers on each side."""
+    the per-block base pointers on each side.
+    """
 
     frag_offsets_src: np.ndarray
     frag_offsets_dst: np.ndarray
@@ -164,7 +165,8 @@ def _canonical_page_ids(
 ) -> np.ndarray:
     """Global canonical page ids matching compute_sub_block_ptrs' enumeration.
     These identify canonical pages consistently across ranks, so they key
-    CanonicalPageMapping.is_writer rotation."""
+    CanonicalPageMapping.is_writer rotation.
+    """
     if blocks_per_chunk == 1:
         return block_ids[:count]
     flat = (
@@ -177,7 +179,8 @@ def _canonical_block_sizes(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]], num_tensors: int
 ) -> list[int]:
     """Canonical CPU bytes per GPU block for each tensor, taken from the refs'
-    mappings. Requires every ref to carry a mapping."""
+    mappings. Requires every ref to carry a mapping.
+    """
     canonical_bytes_per_block = [0] * num_tensors
     for layer_refs in layer_refs_per_group:
         for ref in layer_refs:
@@ -234,8 +237,7 @@ def _new_descriptor_buffers(
 
 
 class SingleDirectionOffloadingHandler:
-    """
-    Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
+    """Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
     Transfers are guaranteed to be executed in order of their submission.
     Each transfer uses a unique CUDA stream, and its stream will start
     executing only after the streams of previous transfers have finished.
@@ -250,8 +252,7 @@ class SingleDirectionOffloadingHandler:
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
     ):
-        """
-        Initialize a SingleDirectionOffloadingHandler.
+        """Initialize a SingleDirectionOffloadingHandler.
 
         Args:
             gpu_tensors: list of GPU KV cache tensors.
@@ -263,6 +264,7 @@ class SingleDirectionOffloadingHandler:
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
             canonical_layout: if True, CPU pages use the canonical layout
                 described by the refs' mappings.
+
         """
         assert len(gpu_tensors) == len(cpu_tensors)
         assert len(gpu_tensors) > 0
@@ -340,7 +342,8 @@ class SingleDirectionOffloadingHandler:
         """Upper bound on the number of copy descriptors for a transfer.
 
         Exact for the direct layout. The canonical path may fill fewer:
-        writer rotation later drops the blocks this rank does not write."""
+        writer rotation later drops the blocks this rank does not write.
+        """
         num_copy_ops = 0
         for g_idx, (group_size, layer_refs) in enumerate(
             zip(group_sizes, self.layer_refs_per_group)
@@ -369,7 +372,8 @@ class SingleDirectionOffloadingHandler:
         """Fill one group's copy descriptors for the direct (worker-private)
         layout: one whole-page copy per (block, ref).
 
-        Returns (op_idx past the filled descriptors, bytes added)."""
+        Returns (op_idx past the filled descriptors, bytes added).
+        """
         num_bytes = 0
         for data_ref in self.layer_refs_per_group[g_idx]:
             t_idx = data_ref.tensor_idx
@@ -412,7 +416,8 @@ class SingleDirectionOffloadingHandler:
         scatter each block through the ref's precomputed CopyPlan, keeping
         only the blocks this rank writes.
 
-        Returns (op_idx past the filled descriptors, bytes added)."""
+        Returns (op_idx past the filled descriptors, bytes added).
+        """
         assert self._canonical_copy_plans is not None
         # Zero-copy reinterpretation for pointer arithmetic: uint64 and the
         # buffers' int64 are bit-equivalent for addresses
@@ -499,7 +504,8 @@ class SingleDirectionOffloadingHandler:
     ) -> tuple[np.ndarray, np.ndarray]:
         """Keep only the blocks this rank writes: replicated ranks take turns
         writing shared canonical pages, keyed by the rank-consistent CPU-side
-        canonical page id."""
+        canonical page id.
+        """
         cpu_page_ids = _canonical_page_ids(
             group_dst,
             self.dst_blocks_per_chunk,

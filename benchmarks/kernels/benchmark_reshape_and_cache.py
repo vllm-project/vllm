@@ -32,7 +32,6 @@ def run_benchmark(
     device: str = "cuda",
 ) -> float:
     """Return latency (seconds) for given num_tokens."""
-
     if kv_cache_dtype == "fp8" and head_size % 16:
         raise ValueError("fp8 kv-cache requires head_size to be a multiple of 16.")
 

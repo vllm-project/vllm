@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fine-grained partial prefix-cache hits for hybrid (full attention + mamba
 "align") models: scheduler chunk splitting, partial tail registration, CoW
-on partial hits, and same-step deferral."""
+on partial hits, and same-step deferral.
+"""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -72,7 +73,8 @@ def test_mamba_align_split_partial_tail_schedule():
     """Chunk ends with partial hits on: block-aligned chunks, one extra stop
     at the prompt's last hash boundary (registering the partial tail), then
     the remaining tokens. block=512, hash=32, prompt=10000, budget=8192:
-    0 -> 8192 -> 9728 -> 9984 -> 10000."""
+    0 -> 8192 -> 9728 -> 9984 -> 10000.
+    """
     block_size = 512
     hash_block_size = 32
     mock = SimpleNamespace(
@@ -336,7 +338,8 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
 
 def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     """An external mid-block hit must become a running request even when its
-    first continuation does not need another Mamba block."""
+    first continuation does not need another Mamba block.
+    """
     hash_block_size = 2
     mamba_block_size = 4 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -409,7 +412,8 @@ def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
 def test_take_partial_tail_offloads_returns_cow_target():
     """The connector offload hand-off exposes the mamba CoW *target* block Y
     (the durable boundary state), not the overwritten source X, and only at
-    the CoW step."""
+    the CoW step.
+    """
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -489,7 +493,8 @@ def test_partial_tail_pin_survives_released_cow_retention():
     """If the CoW retention is released before the hand-off is drained
     (immediate-free mode), the drain must rescue the cow block from the free
     queue: a raw ref increment would leave a ref>0 block allocatable, and the
-    next allocation would pop it and assert."""
+    next allocation would pop it and assert.
+    """
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -550,7 +555,8 @@ def test_partial_tail_pin_survives_released_cow_retention():
 def test_partial_tail_offload_dropped_when_request_freed_before_drain():
     """A hand-off recorded in the same scheduling pass as the request's death
     must not be drained: its release hook has already run, so draining would
-    leak a pinned block."""
+    leak a pinned block.
+    """
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -597,7 +603,8 @@ def test_partial_tail_offload_dropped_when_request_freed_before_drain():
 
 def test_take_partial_tail_offloads_empty_without_partial_tail():
     """A prompt ending on a block boundary registers no partial tail, so there
-    is nothing to offload."""
+    is nothing to offload.
+    """
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -646,7 +653,8 @@ def test_take_partial_tail_offloads_empty_without_partial_tail():
 def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
     """truncate_computed_blocks slices each group by its own block size,
     keeps null placeholders in the retained prefix, and leaves the original
-    lookup result untouched (pure view, no refcount changes)."""
+    lookup result untouched (pure view, no refcount changes).
+    """
     hash_block_size = 2
     kv_cache_config = KVCacheConfig(
         num_blocks=24,
@@ -701,7 +709,8 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
 
 def test_truncate_computed_blocks_allows_short_mamba_group_only():
     """External state may replace a short Mamba hit, but other groups must
-    cover the aligned local endpoint."""
+    cover the aligned local endpoint.
+    """
     hash_block_size = 2
     kv_cache_config = KVCacheConfig(
         num_blocks=24,
@@ -843,7 +852,8 @@ def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
 def test_hybrid_mamba_moved_partial_entry_defers_same_step_hit():
     """The owner's move re-arms the same-step guard: the moved entry is
     filled by this step's copy, and chained same-step copies read stale
-    sources, so a request hitting it in the move step must be deferred."""
+    sources, so a request hitting it in the move step must be deferred.
+    """
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -1133,7 +1143,8 @@ def test_hybrid_partial_hash_truncates_full_attention_hit_length():
 
 def test_cow_retained_blocks_returned_for_release():
     """new_step_starts returns the CoW copy retentions instead of freeing
-    them; the scheduler owns releasing them once the copy has run."""
+    them; the scheduler owns releasing them once the copy has run.
+    """
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -1186,7 +1197,8 @@ def test_cow_retained_blocks_returned_for_release():
 
 def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     """Scheduler releases CoW retentions immediately when the copy's step has
-    been processed (or deferral is off), and defers them otherwise."""
+    been processed (or deferral is off), and defers them otherwise.
+    """
     from collections import deque
 
     freed: list = []
@@ -1223,7 +1235,8 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
 def test_full_attention_eagle_drops_one_hash_unit():
     """With fine-grained partial hits, eagle rewinds the hit by one hash unit
     instead of a whole cache block: the tail block's KV is append-only, so it
-    still covers the reduced length and stays in the hit as a partial block."""
+    still covers the reduced length and stays in the hit as a partial block.
+    """
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
@@ -1299,7 +1312,8 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
     """Regression: with eagle, the mamba group must not receive the eagle
     lookup margin — its finder never applies the drop, so it could return a
     hit past the blocks the (dropped) full-attention group covers, crashing
-    the consumer's CoW with block_idx >= len(req_blocks)."""
+    the consumer's CoW with block_idx >= len(req_blocks).
+    """
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(

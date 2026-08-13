@@ -23,8 +23,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 # --8<-- [start:qwen2_decoder]
 @PluggableLayer.register("qwen2_decoder")
 class CustomQwen2Decoder(PluggableLayer):
-    """
-    Qwen2 visual encoder
+    """Qwen2 visual encoder
     non-causal attention + causal attention
     token_type_ids ：0=non-causal, 1=causal
     """
@@ -194,11 +193,11 @@ class CustomQwen2Decoder(PluggableLayer):
         attention_mask: torch.Tensor = None,
         **kwargs,
     ):
-        """
-        Args:
-            inputs_embeds: [batch_size, seq_len, hidden_dim]
-            token_type_ids: [batch_size, seq_len], 0=non-causal, 1=causal
-            attention_mask: [batch_size, seq_len], optional
+        """Args:
+        inputs_embeds: [batch_size, seq_len, hidden_dim]
+        token_type_ids: [batch_size, seq_len], 0=non-causal, 1=causal
+        attention_mask: [batch_size, seq_len], optional
+
         """
         return self.model(
             inputs_embeds=inputs_embeds,
@@ -209,8 +208,7 @@ class CustomQwen2Decoder(PluggableLayer):
 
 
 class Qwen2Decoder2Encoder(nn.Module):
-    """
-    Decoder based on Multilingual BART
+    """Decoder based on Multilingual BART
     Set the initial weights and configuration with a pretrained multilingual BART model,
     and modify the detailed configurations as a Nougat decoder
     """

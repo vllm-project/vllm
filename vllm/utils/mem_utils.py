@@ -59,6 +59,7 @@ def release_device_memory_under_pressure(device: torch.device) -> bool:
 
     Returns:
         True if memory was released.
+
     """
     if device.type != "cuda" or not current_platform.is_integrated_gpu(device.index):
         return False
@@ -235,8 +236,7 @@ def memory_profiling(
     baseline_snapshot: MemorySnapshot,
     weights_memory: int = 0,
 ) -> Generator[MemoryProfilingResult, None, None]:
-    """
-    Memory profiling context manager.
+    """Memory profiling context manager.
 
     baseline_snapshot: the memory snapshot before the current vLLM instance.
     weights_memory: memory used by PyTorch when loading the model weights.

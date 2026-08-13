@@ -165,7 +165,8 @@ REPLACEMENT_CHAR = "\ufffd"
 def _token_deltas(tokenizer, text: str) -> list[str]:
     """Progressively decode the token sequence and return per-step string
     deltas.  Incomplete multi-byte sequences (trailing U+FFFD) are buffered
-    until the next token completes them, matching real streaming behaviour."""
+    until the next token completes them, matching real streaming behaviour.
+    """
     ids = tokenizer.encode(text, add_special_tokens=False)
     deltas: list[str] = []
     prev = ""

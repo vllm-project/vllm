@@ -24,8 +24,7 @@ logger = logging.get_logger(__name__)
 
 
 class NemotronConfig(PretrainedConfig):
-    r"""
-    This is the configuration class to store the configuration of a
+    r"""This is the configuration class to store the configuration of a
     [`NemotronModel`]. It is used to instantiate a Nemotron model
     according to the specified arguments, defining the model architecture.
     Instantiating a configuration with the defaults will yield a similar
@@ -114,7 +113,9 @@ class NemotronConfig(PretrainedConfig):
     >>> model = NemotronModel(configuration)
     >>> # Accessing the model configuration
     >>> configuration = model.config
-    ```"""
+    ```
+
+    """
 
     model_type = "nemotron"
     keys_to_ignore_at_inference = ["past_key_values"]
@@ -193,8 +194,7 @@ class NemotronConfig(PretrainedConfig):
         )
 
     def _rope_parameters_validation(self):
-        """
-        Validate the `rope_parameters` configuration.
+        """Validate the `rope_parameters` configuration.
         """
         if self.rope_parameters is None:
             return

@@ -65,12 +65,11 @@ IMAGE_TOKEN = "<|imgpad|>"
 
 
 class DotsOCRImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: The total number of patches over each image over each prompt in
-              the batch
-        - ni: Number of images
-        - cps: Number of channels * patch_size * patch_size
+    """Dimensions:
+    - np: The total number of patches over each image over each prompt in
+          the batch
+    - ni: Number of images
+    - cps: Number of channels * patch_size * patch_size
     """
 
     type: Literal["pixel_values"]
@@ -80,11 +79,10 @@ class DotsOCRImagePixelInputs(TensorSchema):
 
 
 class DotsOCRImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - nf: Number of image features
-        - hs: Hidden size
-        - ni: Number of images
+    """Dimensions:
+    - nf: Number of image features
+    - hs: Hidden size
+    - ni: Number of images
     """
 
     type: Literal["image_embeds"]
@@ -763,8 +761,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",

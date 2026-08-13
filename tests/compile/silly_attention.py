@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Shared PyTorch custom silly attention for compilation tests.
+"""Shared PyTorch custom silly attention for compilation tests.
 Centralizes custom operation definitions to avoid duplicate registrations.
 """
 
@@ -34,8 +33,7 @@ def reset_global_counter():
 def silly_attention(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor
 ) -> None:
-    """
-    Unified attention implementation that depends on
+    """Unified attention implementation that depends on
     all inputs and affects the output.
     Always increments a global counter that tests can use or ignore.
     """

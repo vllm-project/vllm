@@ -111,7 +111,8 @@ def test_basic_embed(server: RemoteOpenAIServer, model_name: str):
 
 def test_unsupported_input_type_rejected(server: RemoteOpenAIServer, model_name: str):
     """An input_type not defined in the model's prompt config should be
-    rejected with a 400 error."""
+    rejected with a 400 error.
+    """
     body = {
         "model": model_name,
         "input_type": "nonexistent_type",
@@ -138,7 +139,8 @@ def test_omitted_input_type_accepted(server: RemoteOpenAIServer, model_name: str
 
 def test_v1_v2_parity(server: RemoteOpenAIServer, model_name: str):
     """v1 (OpenAI) and v2 (Cohere) endpoints should produce the same
-    float embeddings for a generic model."""
+    float embeddings for a generic model.
+    """
     texts = ["hello world"]
     v2 = _cohere_embed(server, model_name, texts=texts, embedding_types=["float"])
     v1 = _openai_embed(server, model_name, texts)

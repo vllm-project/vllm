@@ -80,8 +80,7 @@ from .utils import (
 
 @pytest.fixture(scope="module", autouse=True)
 def clear_kv_transfer():
-    """
-    The test cases in this file use `VLLM_ENABLE_V1_MULTIPROCESSING=0`,
+    """The test cases in this file use `VLLM_ENABLE_V1_MULTIPROCESSING=0`,
     causing the global variable `_KV_CONNECTOR_AGENT`
     to be assigned but never deleted.
 
@@ -244,7 +243,6 @@ nixl_agent = FakeNixlWrapper
 
 def test_basic_interface():
     """Unit test for basic NixlConnector interface functionality."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -283,8 +281,7 @@ def test_basic_interface():
 
 
 def test_prompt_less_than_block_size():
-    """
-    Test that we can handle case where prompt is < block.
+    """Test that we can handle case where prompt is < block.
 
     In this case, the P worker will still send remote_block_ids of the
     partial block. The D worker should schedule an async read
@@ -320,7 +317,8 @@ def test_abort_immediately_remote_prefill_enqueues_empty_recv():
     """A remote-prefill request added with abort_immediately=True should
     be added to the scheduler's waiting queue then immediately aborted, so the
     NIXL connector's request_finished hook enqueues an empty recv to notify
-    the prefill instance to free its blocks."""
+    the prefill instance to free its blocks.
+    """
     from vllm.v1.request import RequestStatus
 
     scheduler = create_scheduler(create_vllm_config())
@@ -673,7 +671,6 @@ class TestNixlHandshake:
         prefill_tp_size,
     ):
         """Test that NixlConnector's start_load_kv should be non-blocking."""
-
         vllm_config = create_vllm_config()
         vllm_config.parallel_config.tensor_parallel_size = decode_tp_size
 
@@ -728,8 +725,7 @@ class TestNixlHandshake:
     def test_prefill_tp_size_greater_than_decode_tp_size(
         self, local_tp_size: int, default_vllm_config, dist_init, monkeypatch
     ):
-        """
-        Verify remote TP > local TP handshake succeeds with different
+        """Verify remote TP > local TP handshake succeeds with different
         remote configurations.
         """
         monkeypatch.setattr(
@@ -802,8 +798,7 @@ class TestNixlHandshake:
     def test_prefill_tp_size_greater_than_decode_tp_size_mla(
         self, default_vllm_config, dist_init
     ):
-        """
-        Verify remote TP > local TP handshake succeeds with different
+        """Verify remote TP > local TP handshake succeeds with different
         remote configurations for an MLA model.
         """
         vllm_config = create_vllm_config()
@@ -909,7 +904,6 @@ class TestNixlHandshake:
         dist_init,
     ):
         """Test that multiple start_load_kv calls should occur concurrently."""
-
         vllm_config = create_vllm_config()
 
         # Test worker role in decode server.
@@ -970,8 +964,7 @@ class TestNixlHandshake:
     def test_handshake_fails_on_kv_cache_layout_mismatch(
         self, default_vllm_config, dist_init
     ):
-        """
-        Verify that adding a remote agent fails if kv_cache_layout differs.
+        """Verify that adding a remote agent fails if kv_cache_layout differs.
         This test is only relevant for heterogeneous TP.
         """
         vllm_config = create_vllm_config()
@@ -1025,8 +1018,7 @@ class TestNixlHandshake:
     def test_handshake_succeed_on_kv_cache_layout_mismatch_with_experimental(
         self, default_vllm_config, dist_init
     ):
-        """
-        Verify that adding a remote agent fails if kv_cache_layout differs.
+        """Verify that adding a remote agent fails if kv_cache_layout differs.
         This test is only relevant for heterogeneous TP.
         """
         vllm_config = create_vllm_config(enable_permute_local_kv=True)
@@ -1447,11 +1439,9 @@ def test_reqs_to_send_deadline_rebased_to_worker_clock(default_vllm_config, dist
 
 
 def test_kv_connector_stats_aggregation():
-    """
-    Test KV transfer stats aggregation across TP ranks using
+    """Test KV transfer stats aggregation across TP ranks using
     KVOutputAggregator (used by MultiprocExecutor).
     """
-
     # Create KVOutputAggregator for 3 workers (simulating TP=3), same thing
     # done in MultiprocExecutor.execute_model
     aggregator = KVOutputAggregator(expected_finished_count=3)
@@ -1514,11 +1504,9 @@ def test_kv_connector_stats_aggregation():
 
 
 def test_multi_kv_connector_stats_aggregation():
-    """
-    Test MultiKVConnectorStats aggregation across TP ranks using
+    """Test MultiKVConnectorStats aggregation across TP ranks using
     KVOutputAggregator (used by MultiprocExecutor).
     """
-
     aggregator = KVOutputAggregator(expected_finished_count=3)
 
     from dataclasses import dataclass
@@ -1658,8 +1646,7 @@ def test_scheduler_kv_connector_stats_aggregation():
     FakeNixlWrapper,
 )
 def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
-    """
-    Test lifecycle of an aborted Remote Prefill request hitting the timeout.
+    """Test lifecycle of an aborted Remote Prefill request hitting the timeout.
     -----> P
             |  {process request}
      <-/--- |  {result is NOT delivered, eg proxy is down}
@@ -1801,8 +1788,7 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
 def test_register_kv_caches(
     default_vllm_config, dist_init, attn_backend, enable_cross_layers
 ):
-    """
-    Test that register_kv_caches() properly calls nixl_wrapper methods with
+    """Test that register_kv_caches() properly calls nixl_wrapper methods with
     correct data.
 
     This test verifies:
@@ -1811,7 +1797,6 @@ def test_register_kv_caches(
     2. nixl_wrapper.get_xfer_descs() is called with blocks_data containing
        block layout info
     """
-
     vllm_config = create_vllm_config(attention_backend=attn_backend)
 
     # Enable cross layers blocks
@@ -2044,16 +2029,14 @@ class FakePlatform(Platform):
 
     @classmethod
     def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
-        """
-        Returns a mapping from device_type to a tuple of supported
+        """Returns a mapping from device_type to a tuple of supported
         kv_buffer_device for nixl.
         """
         return {"oot": ("oot",)}
 
     @classmethod
     def get_nixl_memory_type(cls) -> str | None:
-        """
-        Returns the nixl memory type for the current platform.
+        """Returns the nixl memory type for the current platform.
         """
         return "VRAM"
 
@@ -2067,8 +2050,7 @@ class FakePlatform(Platform):
 def test_kv_buffer_to_nixl_memory_types(
     default_vllm_config, dist_init, kv_buffer_device, nixl_memory_type
 ):
-    """
-    Test that register_kv_caches() passes the correct memory types from the
+    """Test that register_kv_caches() passes the correct memory types from the
     config to the nixl_wrapper.
     """
     vllm_config = create_vllm_config()
@@ -2296,8 +2278,7 @@ def test_transfer_topology_unregister():
     FakeNixlWrapper,
 )
 def test_aborted_request_removed_from_worker_in_batch(default_vllm_config, dist_init):
-    """
-    Create and schedule a request so that P adds it to in-batch tracking via
+    """Create and schedule a request so that P adds it to in-batch tracking via
     the real scheduler, then simulate an abort (request not in next scheduler
     iteration) and verify the worker no longer tracks it as in-batch.
     """
@@ -2628,7 +2609,8 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
 )
 def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init):
     """Test that transfer setup failures mark blocks invalid
-    and return via get_finished."""
+    and return via get_finished.
+    """
     vllm_config = create_vllm_config()
 
     connector = NixlConnector(
@@ -2941,15 +2923,16 @@ def test_compatibility_hash_validation(
     should_fail,
     enforce_handshake_compat,
 ):
-    """
-    Test NIXL compatibility hash validation during handshake.
+    """Test NIXL compatibility hash validation during handshake.
 
-    Parameters:
+    Parameters
+    ----------
         mismatch_type: description of what is being tested
         config_overrides: dict of config to override for the remote instance
         version_override: version dict e.g. {"vllm_version": "0.6.1"}
         should_fail: whether the handshake should fail
         enforce_handshake_compat: whether to enforce compatibility checking
+
     """
     local_vllm_config = create_vllm_config(
         model="facebook/opt-125m",
@@ -3079,8 +3062,7 @@ def test_compatibility_hash_validation(
     FakeNixlWrapper,
 )
 def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario):
-    """
-    Test that msgspec decode errors are properly handled during handshake.
+    """Test that msgspec decode errors are properly handled during handshake.
 
     Tests both DecodeError and ValidationError for both decoders:
     - NixlHandshakePayload decoder

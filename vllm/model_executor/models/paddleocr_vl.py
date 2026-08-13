@@ -98,7 +98,6 @@ def smart_resize(
     3. The aspect ratio of the image is maintained as closely as possible.
 
     """
-
     if height < factor:
         width = round((width * factor) / height)
         height = factor
@@ -1011,14 +1010,14 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
     ) -> Iterator[tuple[int, int, int, int, float]]:
-        """
-        Iterate over multimodal features and yield grid information.
+        """Iterate over multimodal features and yield grid information.
 
         Args:
             mm_features: List of multimodal feature specifications
 
         Yields:
             Tuple of (offset, grid_t, grid_h, grid_w, t_factor) for each frame/image
+
         """
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)

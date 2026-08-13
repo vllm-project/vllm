@@ -261,11 +261,13 @@ def flash_attn_varlen_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+
     Return:
         out: (total, nheads, headdim).
         softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen). The
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
+
     """
     assert cu_seqlens_k is not None or seqused_k is not None, (
         "cu_seqlens_k or seqused_k must be provided"
@@ -543,11 +545,13 @@ def sparse_attn_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+
     Return:
         out: (batch_size, seqlen, nheads, headdim).
         softmax_lse [optional, if return_softmax_lse=True]: (batch_size, nheads, seqlen). The
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
+
     """
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
@@ -629,11 +633,13 @@ def sparse_attn_varlen_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+
     Return:
         out: (total, nheads, headdim).
         softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen). The
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
+
     """
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)

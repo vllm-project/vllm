@@ -135,7 +135,8 @@ def _process_granite_speech(separator: str):
 
 def test_audio_multiple_inputs():
     """Multiple audios per prompt are each detected as a separate placeholder
-    and multi-modal item by the Transformers modelling backend."""
+    and multi-modal item by the Transformers modelling backend.
+    """
     result = _process_granite_speech(separator=" and ")
 
     assert len(result["mm_placeholders"]["audio"]) == 2

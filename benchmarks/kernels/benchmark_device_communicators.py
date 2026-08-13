@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Benchmark script for device communicators:
+"""Benchmark script for device communicators:
 CustomAllreduce (oneshot, twoshot), PyNcclCommunicator,
 and SymmMemCommunicator (multimem, two-shot).
 
@@ -17,6 +16,7 @@ Usage:
 Example:
     torchrun --nproc_per_node=2 benchmark_device_communicators.py
     --sequence-lengths 512 1024 2048 --num-warmup 10 --num-trials 100
+
 """
 
 import json
@@ -185,7 +185,6 @@ class CommunicatorBenchmark:
         self, sequence_length: int, num_warmup: int, num_trials: int
     ) -> dict[str, float]:
         """Benchmark allreduce operations for all available communicators."""
-
         results = {}
 
         # Define communicators with their benchmark functions
@@ -408,7 +407,6 @@ def print_results(
     results: dict[str, dict[str, float]], sequence_lengths: list[int], world_size: int
 ):
     """Print benchmark results in a formatted table."""
-
     print(f"\n{'=' * 130}")
     print("Device Communicator Benchmark Results")
     print(

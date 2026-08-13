@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-FireRedLID feature extractor and processor.
+"""FireRedLID feature extractor and processor.
 
 The FeatureExtractor handles:
   - Raw waveform → 80-dim log-mel filterbank (via kaldi_native_fbank)
@@ -91,8 +90,7 @@ class KaldifeatFbank:
 
 
 class FireRedLIDFeatureExtractor(SequenceFeatureExtractor):
-    """
-    Extracts 80-dim log-mel filterbank features from raw waveforms,
+    """Extracts 80-dim log-mel filterbank features from raw waveforms,
     applies CMVN, and returns padded feature tensors with lengths.
 
     Also computes ``fake_token_lengths`` — the actual encoder output
@@ -227,8 +225,7 @@ class FireRedLIDFeatureExtractor(SequenceFeatureExtractor):
 
 
 class FireRedLIDProcessor(ProcessorMixin):
-    """
-    Wraps FireRedLIDFeatureExtractor + a tokenizer.
+    """Wraps FireRedLIDFeatureExtractor + a tokenizer.
     """
 
     feature_extractor_class = "FireRedLIDFeatureExtractor"

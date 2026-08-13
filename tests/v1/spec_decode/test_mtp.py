@@ -66,7 +66,6 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
 @mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_model")
 def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_group):
     """Test MTP-specific model loading with unified model approach."""
-
     # Setup mocks
     mock_model = mock.MagicMock()
     mock_model.model.embed_tokens.weight.shape = (131072, 4096)
@@ -118,7 +117,6 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
 @pytest.mark.parametrize("num_speculative_tokens", [1])
 def test_mtp_propose(num_speculative_tokens, monkeypatch):
     """Test that MTP's forward method returns hidden states directly"""
-
     device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]

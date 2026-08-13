@@ -186,7 +186,8 @@ class MiniMaxM3IndexerPrefillMetadata:
 @dataclass
 class MiniMaxM3IndexerDecodeMetadata:
     """Per-decode state (cudagraph-safe). ``decode_query_len`` is the uniform
-    per-request query length (1, or 1 + num_speculative_tokens)."""
+    per-request query length (1, or 1 + num_speculative_tokens).
+    """
 
     seq_lens: torch.Tensor  # [num_decodes] int32
     block_table: torch.Tensor
@@ -219,7 +220,8 @@ class MiniMaxM3IndexerMetadataBuilder(
     AttentionMetadataBuilder[MiniMaxM3IndexerMetadata]
 ):
     """Abstract base: shared setup only. The Triton and MSA builders are
-    parallel subclasses that each own their full ``build`` (no shared code)."""
+    parallel subclasses that each own their full ``build`` (no shared code).
+    """
 
     # Full cudagraphs for uniform decode batches (incl. spec-decode verify).
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH

@@ -16,8 +16,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
 
 
 class AiterSharedRoutedFusedMoERouter(BaseRouter):
-    """
-    ROCm AITER router for models with fused shared experts (e.g. Qwen3-MoE).
+    """ROCm AITER router for models with fused shared experts (e.g. Qwen3-MoE).
 
     When the AITER topk_softmax kernel supports sigmoid fusion, the routing
     softmax and shared-expert sigmoid are computed in a single kernel launch.

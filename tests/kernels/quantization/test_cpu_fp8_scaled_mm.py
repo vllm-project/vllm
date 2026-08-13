@@ -33,6 +33,7 @@ def quantize_weight_block_fp8(
     Returns:
         fp8_weight: [N, K] float8_e4m3fn
         scales: [n_tiles, k_tiles] float32
+
     """
     N, K = weight.shape
     block_n, block_k = block_size

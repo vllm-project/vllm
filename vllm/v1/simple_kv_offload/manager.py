@@ -188,7 +188,8 @@ class SimpleCPUOffloadScheduler:
         gpu_config: "KVCacheConfig", cpu_capacity_bytes: int
     ) -> "KVCacheConfig":
         """Derive a CPU KVCacheConfig from the GPU config.
-        Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio."""
+        Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio.
+        """
         # Import here to avoid potential circular imports
         from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
         from vllm.v1.kv_cache_interface import KVCacheTensor
@@ -243,14 +244,14 @@ class SimpleCPUOffloadScheduler:
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         """Bind GPU block pool so that we can touch blocks during stores.
-        Called by Scheduler after kv_cache_manager is ready."""
+        Called by Scheduler after kv_cache_manager is ready.
+        """
         self._gpu_block_pool = gpu_block_pool
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         """Return (num_new_tokens, is_async) from consecutive CPU cache hits."""
-
         # Pins found CPU blocks so they survive LRU eviction until
         # update_state_after_alloc() consumes them. Any pin from an earlier
         # call on the same request (e.g. retry after a failed allocate_slots)
@@ -539,8 +540,8 @@ class SimpleCPUOffloadScheduler:
 
         Returns:
             (gpu_block_ids, cpu_block_ids, req_ids) for the store event.
-        """
 
+        """
         merged_gpu_block_ids: list[int] = []
         merged_cpu_block_ids: list[int] = []
         req_ids: list[str] = []
@@ -773,7 +774,8 @@ class SimpleCPUOffloadScheduler:
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """Always returns (False, None). GPU blocks are protected by ref_cnt,
-        so the scheduler can free blocks immediately."""
+        so the scheduler can free blocks immediately.
+        """
         req_id = request.request_id
 
         # Release any temp CPU hit pin from get_num_new_matched_tokens()
@@ -879,7 +881,6 @@ class SimpleCPUOffloadScheduler:
         the transfer finished, then release refs without caching abandoned
         store results.
         """
-
         self._abandoned_store_event_to_blocks.update(self._store_event_to_blocks)
         self._store_event_to_blocks.clear()
         self._in_flight_store_gpu_blocks.clear()

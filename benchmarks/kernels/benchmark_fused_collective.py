@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Benchmark for FlashInfer fused collective operations vs standard operations.
+"""Benchmark for FlashInfer fused collective operations vs standard operations.
 
 This benchmark compares:
 1. FlashInfer's allreduce_fusion with trtllm backend
@@ -449,6 +448,7 @@ def run_benchmarks(
         allreduce_params: Shared parameters for FlashInfer fused allreduce.
         workspaces: Dict mapping backend name ("trtllm", "mnnvl") to workspace.
         quant_modes: Set of quantization modes: "none", "fp8", "fp4".
+
     """
     (
         input_tensor,

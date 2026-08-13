@@ -215,8 +215,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-        """
-        Key differences to default dummy_run:
+        """Key differences to default dummy_run:
         - Only one forward pass due to parallel drafting
         - DFlash uses context states as unpadded metadata, so hidden_states will
         use the unpadded num_tokens instead of num_input_tokens

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Embedding shape validation in multimodal APIs.
+"""Embedding shape validation in multimodal APIs.
 
 Tests verify that embeddings with correct ndim but incorrect hidden_size
 are rejected before they can cause crashes during model inference.
@@ -178,8 +177,7 @@ class TestShapeValidationIntegration:
     """Integration tests verifying attack scenarios are blocked."""
 
     def test_attack_scenario_multimodal_image(self):
-        """
-        Simulate attack through Chat API with image embeddings.
+        """Simulate attack through Chat API with image embeddings.
 
         Verifies validation occurs in multimodal parser path.
         """
@@ -193,8 +191,7 @@ class TestShapeValidationIntegration:
             parser.parse_mm_data({"image": attack_tensor})
 
     def test_attack_scenario_multimodal_audio(self):
-        """
-        Simulate attack through Chat API with audio embeddings.
+        """Simulate attack through Chat API with audio embeddings.
 
         Verifies validation occurs in multimodal parser path.
         """
@@ -208,8 +205,7 @@ class TestShapeValidationIntegration:
             parser.parse_mm_data({"audio": attack_tensor})
 
     def test_attack_scenario_multimodal_video(self):
-        """
-        Simulate attack through Chat API with video embeddings.
+        """Simulate attack through Chat API with video embeddings.
 
         Verifies validation occurs in multimodal parser path.
         """

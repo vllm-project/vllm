@@ -22,6 +22,7 @@ def set_weight_attrs(
     Args:
         weight: The weight tensor.
         weight_attrs: A dictionary of attributes to set on the weight tensor.
+
     """
     if weight_attrs is None:
         return
@@ -50,8 +51,7 @@ def replace_parameter(
     new_tensor: torch.Tensor | None,
     prefer_copy: bool = False,
 ):
-    """
-    Replace a parameter of a layer while maintaining the ability to reload the weight.
+    """Replace a parameter of a layer while maintaining the ability to reload the weight.
     Called within implementations of the `process_weights_after_loading` method.
 
     Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
@@ -74,6 +74,7 @@ def replace_parameter(
             a new parameter. This preserves the parameter's storage address
             (``data_ptr``), which is required for captured CUDA graphs to
             remain valid across weight updates (e.g. in RL training loops).
+
     """
     # should not be used on a tied/shared param
 
@@ -150,7 +151,8 @@ def get_moe_expert_mapping(
 
     It will be retrieved from the first module that has a `get_expert_mapping` method.
     If the model manually implements `get_expert_mapping`, it will be used.
-    Otherwise, it will use the first RoutedExperts layer."""
+    Otherwise, it will use the first RoutedExperts layer.
+    """
     for _, module in model.named_modules():
         get_mapping = getattr(module, "get_expert_mapping", None)
         if get_mapping is not None:

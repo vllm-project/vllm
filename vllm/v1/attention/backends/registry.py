@@ -136,6 +136,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Raises:
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         path = _ATTN_OVERRIDES.get(self, self.value)
         if not path:
@@ -156,6 +157,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         Raises:
             ImportError: If the backend class cannot be imported
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         return resolve_obj_by_qualname(self.get_path())
 
@@ -164,6 +166,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Returns:
             True if the backend has a registered override
+
         """
         return self in _ATTN_OVERRIDES
 
@@ -199,6 +202,7 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Raises:
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         path = _MAMBA_ATTN_OVERRIDES.get(self, self.value)
         if not path:
@@ -219,6 +223,7 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         Raises:
             ImportError: If the backend class cannot be imported
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         return resolve_obj_by_qualname(self.get_path())
 
@@ -227,6 +232,7 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Returns:
             True if the backend has a registered override
+
         """
         return self in _MAMBA_ATTN_OVERRIDES
 
@@ -275,6 +281,7 @@ def register_backend(
             AttentionBackendEnum.CUSTOM,
             "my.module.MyCustomBackend"
         )
+
     """
 
     def decorator(cls: type) -> type:

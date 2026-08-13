@@ -46,8 +46,7 @@ class UnquantizedMoeBackend(Enum):
 
 
 def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
+    """Get available backends in priority order based on platform and config.
 
     This function can be extended to become more complex as needed.
     """
@@ -208,11 +207,9 @@ def _trtllm_bf16_lora_supported(moe_config: FusedMoEConfig) -> bool:
 def select_unquantized_moe_backend(
     moe_config: FusedMoEConfig,
 ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the primary Unquantized MoE backend.
+    """Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
 

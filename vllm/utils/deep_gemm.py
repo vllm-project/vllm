@@ -538,6 +538,7 @@ def fp8_fp4_mqa_logits(
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
+
     """
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
@@ -570,6 +571,7 @@ def get_paged_mqa_logits_metadata(
     Returns:
         Backend-specific tensor consumed by `fp8_fp4_paged_mqa_logits` to
         schedule work across SMs.
+
     """
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
@@ -619,6 +621,7 @@ def fp8_fp4_paged_mqa_logits(
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
+
     """
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
@@ -644,8 +647,7 @@ def tf32_hc_prenorm_gemm(
     sqrsum: torch.Tensor,
     num_split: int,
 ) -> torch.Tensor:
-    """
-    Perform the following computation:
+    """Perform the following computation:
         out = x.float() @ fn.T
         sqrsum = x.float().square().sum(-1)
 
@@ -712,7 +714,6 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     and report `1 - sim`.  Once kernel accuracy improves this helper can be
     removed.
     """
-
     x, y = x.double(), y.double()
     denominator = (x * x + y * y).sum()
     sim = 2 * (x * y).sum() / denominator

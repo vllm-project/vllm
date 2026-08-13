@@ -41,8 +41,7 @@ logger = init_logger(__name__)
 
 
 class ToolParser:
-    """
-    Abstract ToolParser class that should not be used directly. Provided
+    """Abstract ToolParser class that should not be used directly. Provided
     properties and methods should be used in
     derived classes.
     """
@@ -187,8 +186,7 @@ class ToolParser:
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """
-        Static method that should be implemented for extracting tool calls from
+        """Static method that should be implemented for extracting tool calls from
         a complete model-generated string.
         Used for non-streaming responses where we have the entire model response
         available before sending to the client.
@@ -208,8 +206,7 @@ class ToolParser:
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        """
-        Instance method that should be implemented for extracting tool calls
+        """Instance method that should be implemented for extracting tool calls
         from an incomplete response; for use when handling tool calls and
         streaming. Has to be an instance method because  it requires state -
         the current tokens/diffs, but also the information about what has
@@ -221,8 +218,7 @@ class ToolParser:
 
 
 class ToolParserManager:
-    """
-    Central registry for ToolParser implementations.
+    """Central registry for ToolParser implementations.
 
     Supports two modes:
       - Eager (immediate) registration via `register_module`
@@ -234,8 +230,7 @@ class ToolParserManager:
 
     @classmethod
     def get_tool_parser(cls, name: str) -> type[ToolParser]:
-        """
-        Retrieve a registered or lazily registered ToolParser class.
+        """Retrieve a registered or lazily registered ToolParser class.
 
         If the parser is lazily registered,
         it will be imported and cached on first access.
@@ -302,8 +297,7 @@ class ToolParserManager:
 
     @classmethod
     def register_lazy_module(cls, name: str, module_path: str, class_name: str) -> None:
-        """
-        Register a lazy module mapping.
+        """Register a lazy module mapping.
 
         Example:
             ToolParserManager.register_lazy_module(
@@ -311,6 +305,7 @@ class ToolParserManager:
                 module_path="vllm.tool_parsers.kimi_k2_parser",
                 class_name="KimiK2ToolParser",
             )
+
         """
         cls.lazy_parsers[name] = (module_path, class_name)
 
@@ -321,8 +316,7 @@ class ToolParserManager:
         force: bool = True,
         module: type[ToolParser] | None = None,
     ) -> type[ToolParser] | Callable[[type[ToolParser]], type[ToolParser]]:
-        """
-        Register module immediately or lazily (as a decorator).
+        """Register module immediately or lazily (as a decorator).
 
         Usage:
             @ToolParserManager.register_module("kimi_k2")
@@ -368,7 +362,6 @@ class ToolParserManager:
     @classmethod
     def import_tool_parser(cls, plugin_path: str) -> None:
         """Import a user-defined parser file from arbitrary path."""
-
         module_name = os.path.splitext(os.path.basename(plugin_path))[0]
         try:
             import_from_path(module_name, plugin_path)

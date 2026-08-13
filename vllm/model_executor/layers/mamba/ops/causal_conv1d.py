@@ -497,7 +497,7 @@ def causal_conv1d_fn(
     metadata=None,
     validate_data=False,
 ):
-    """support varlen + continuous batching when x is 2D tensor
+    """Support varlen + continuous batching when x is 2D tensor
 
     x: (dim,cu_seq_len)
         cu_seq_len = total tokens of all seqs in that batch
@@ -1109,8 +1109,7 @@ def causal_conv1d_update(
     validate_data=False,
     out: torch.Tensor | None = None,
 ):
-    """
-    x: Input tensor which can take the following shapes:
+    """x: Input tensor which can take the following shapes:
 
     - `[batch, dim]` - single token prediction
     - `[batch, dim, seqlen]` - single or multiple tokens prediction

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-The actual execution of the rearrangement.
+"""The actual execution of the rearrangement.
 
 This involves the exchange of expert weights between GPUs.
 """
@@ -40,8 +39,7 @@ class TransferMetadata:
 
 @dataclass
 class AsyncEplbLayerResult:
-    """
-    The result of one completed async EPLB layer transfer.
+    """The result of one completed async EPLB layer transfer.
     """
 
     layer_idx: int
@@ -68,8 +66,7 @@ def get_ep_ranks_with_experts_batch(
     old_indices: np.ndarray,
     new_indices: np.ndarray,
 ) -> tuple[dict[int, list[int]], dict[int, list[int]]]:
-    """
-    Get the ranks of the experts that need to be exchanged.
+    """Get the ranks of the experts that need to be exchanged.
 
     Args:
         expert_ids: 1D array of expert indices to query.
@@ -81,6 +78,7 @@ def get_ep_ranks_with_experts_batch(
         A tuple of two dictionaries mapping expert_id to:
         - ranks_to_send: The ranks that have this expert and need to send.
         - ranks_to_recv: The ranks that need to receive this expert.
+
     """
     ranks_to_send_map: dict[int, list[int]] = {}
     ranks_to_recv_map: dict[int, list[int]] = {}
@@ -180,8 +178,7 @@ def move_to_buffer(
     communicator: EplbCommunicator,
     layer_idx: int = 0,
 ) -> TransferMetadata:
-    """
-    Rearranges expert weights during EPLB rebalancing.
+    """Rearranges expert weights during EPLB rebalancing.
 
     Args:
         num_local_experts: Number of local experts.
@@ -198,6 +195,7 @@ def move_to_buffer(
 
     Returns:
         TransferMetadata: Metadata needed for completing remote weight transfers.
+
     """
     assert old_indices.shape == new_indices.shape
     recv_primary_mask = np.zeros((num_local_experts,), dtype=np.bool_)
@@ -354,8 +352,7 @@ def move_from_buffer(
     new_indices: np.ndarray,
     ep_rank: int,
 ) -> None:
-    """
-    Copies expert weights from communication buffers back to the target weight tensors
+    """Copies expert weights from communication buffers back to the target weight tensors
     after EPLB rebalancing.
 
     Args:
@@ -366,6 +363,7 @@ def move_from_buffer(
         new_indices: (num_experts_total,) mapping from local rows to desired
             (possibly global) expert id, after rebalance.
         ep_rank: Rank of the process in the expert parallel group.
+
     """
     is_unchanged = transfer_metadata.is_unchanged
     is_received_locally = transfer_metadata.is_received_locally
@@ -436,8 +434,7 @@ def transfer_layer(
     rank_mapping: dict[int, int] | None = None,
     layer_idx: int = 0,
 ) -> TransferMetadata:
-    """
-    Rearranges the expert weights in place according to the new expert indices.
+    """Rearranges the expert weights in place according to the new expert indices.
 
     The value of the indices arguments are logical indices of the experts,
     while keys are physical.
@@ -461,6 +458,7 @@ def transfer_layer(
     Returns:
         TransferMetadata: Metadata needed for completing remote weight transfers,
             including is_unchanged and is_received_locally masks.
+
     """
     ep_size = ep_group.size()
     if rank_mapping is not None:
@@ -518,8 +516,7 @@ def rearrange_expert_weights_inplace(
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
 ) -> None:
-    """
-    Rearranges the expert weights in place according to the new expert indices.
+    """Rearranges the expert weights in place according to the new expert indices.
 
     The value of the indices arguments are logical indices of the experts,
     while keys are physical.
@@ -539,6 +536,7 @@ def rearrange_expert_weights_inplace(
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
         rank_mapping: A dictionary mapping old rank to new rank.
+
     """
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
@@ -620,8 +618,7 @@ def _map_old_expert_indices_with_rank_mapping(
     rank_mapping: dict[int, int],
     new_ep_size: int,
 ) -> torch.Tensor:
-    """
-    Map the old global expert indices to the new global expert indices.
+    """Map the old global expert indices to the new global expert indices.
 
     Args:
         old_global_expert_indices:
@@ -632,6 +629,7 @@ def _map_old_expert_indices_with_rank_mapping(
     Returns:
         Mapped expert indices with shape
         (num_layers, new_ep_size * num_local_physical_experts).
+
     """
     num_layers, old_num_physical_experts = old_global_expert_indices.shape
     assert rank_mapping, "Rank mapping is required"

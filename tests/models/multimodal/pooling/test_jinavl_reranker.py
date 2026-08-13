@@ -108,8 +108,7 @@ def _normalize_image(image_val: str) -> str:
 def create_score_multimodal_param(
     content_parts: list[dict],
 ) -> list[ScoreMultiModalParam]:
-    """
-    Create a ScoreMultiModalParam from a list of content dictionaries.
+    """Create a ScoreMultiModalParam from a list of content dictionaries.
 
     Each dict supports the following formats:
     - Text: {'text': 'content'}

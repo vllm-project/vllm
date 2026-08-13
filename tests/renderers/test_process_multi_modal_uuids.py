@@ -49,7 +49,8 @@ def _build_text_only_renderer() -> HfRenderer:
 
 def test_text_only_model_mm_data_maps_to_bad_request():
     """Sending multimodal data to a text-only model is a client mistake, so it
-    must surface as a ValueError and reach the client as HTTP 400, not 500."""
+    must surface as a ValueError and reach the client as HTTP 400, not 500.
+    """
     renderer = _build_text_only_renderer()
 
     with pytest.raises(ValueError, match="text-only") as exc_info:

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-LoRA-aware FlashInfer TRT-LLM MoE experts (BF16).
+"""LoRA-aware FlashInfer TRT-LLM MoE experts (BF16).
 
 Reuses the routed API + ``gemm1_lora_delta`` path from FlashInfer PR #3153:
 

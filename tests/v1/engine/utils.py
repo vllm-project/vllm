@@ -54,6 +54,7 @@ def _create_random_top_logprob_test_vector(
 
     Returns:
       1D length-`num_logprobs` torch Tensor of float logprob values
+
     """
     return torch.rand(num_logprobs) * (upper - lower) + lower
 
@@ -79,6 +80,7 @@ def _create_random_top_logprob_test_matrix(
 
     Returns:
       2D num_tokens x num_logprobs torch Tensor of float logprob values
+
     """
     return torch.rand(*shape) * (upper - lower) + lower
 
@@ -117,8 +119,8 @@ def _create_random_top_token_test_vector(
       sampled_token_rank: the rank of sampled_token_id in the vocab
                           vector when sorted in descending order by
                           logprob
-    """
 
+    """
     # Calculate the final number of logprobs required
     total_logprobs = num_logprobs + 1 if adjust_num_logprobs else num_logprobs
 
@@ -164,6 +166,7 @@ def _create_random_top_token_test_matrix(
       - 2D num_tokens x num_logprobs+1 torch Tensor of token ids
       - 1D tensor of ranks of prompt tokens in their respective
         rows, or random values
+
     """
     num_elements = shape[0] * shape[1]
     choice_tensor = torch.randperm(upper - lower)[:num_elements] + lower
@@ -203,6 +206,7 @@ def decode_token(
 
     Returns:
       string representation of token
+
     """
     return tokenizer.convert_ids_to_tokens(tok_id)
 
@@ -222,13 +226,14 @@ def generate_dummy_sample_logprobs(
       num_logprobs: return `num_logprobs` or `num_logprobs+1` logprobs per token
       tokenizer: model tokenizer to use for detokenization
 
-    Returns
+    Returns:
       list of (top token ids vector, logprobs vector, sampled token rank)
       Python lists tuples; in each tuple the logprobs and top token ids
       vectors have the same length which is either `num_logprobs` or
       `num_logprobs+1`. Sampled token rank is the rank (index+1) of the
       sampled token within the vocab vector when sorted by logprob in
       descending order.
+
     """
     res = []
     for sampled_token_id in sampled_tokens_list:
@@ -272,10 +277,11 @@ def generate_dummy_prompt_logprobs_tensors(
       num_logprobs: return `num_logprobs` logprobs per token
       tokenizer: model tokenizer to use for detokenization
 
-    Returns
+    Returns:
       Single tuple of (logprobs matrix, top token ids matrix) torch Tensor,
       where both matrices have dimensions
       num_prompt_tokens x num_logprobs
+
     """
     # For now, assume the whole prompt is processed in one chunk; thus,
     # the number of non-`None` prompt logprobs is `len(prompt_tokens_list)-1`.

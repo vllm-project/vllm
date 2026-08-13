@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Shared constants for vLLM entrypoints.
+"""Shared constants for vLLM entrypoints.
 """
 
 # HTTP header limits for h11 parser

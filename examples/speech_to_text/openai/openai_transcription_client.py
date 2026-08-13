@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This script demonstrates how to use the vLLM API server to perform audio
+"""This script demonstrates how to use the vLLM API server to perform audio
 transcription with the `openai/whisper-large-v3` model.
 
 Before running this script, you must start the vLLM server with the following command:
@@ -35,8 +34,7 @@ def sync_openai(
     hotwords: str = None,
     prompt: str | None = None,
 ):
-    """
-    Perform synchronous transcription using OpenAI-compatible API.
+    """Perform synchronous transcription using OpenAI-compatible API.
 
     The optional ``prompt`` is the OpenAI-API ``prompt`` field (style /
     vocabulary hint). It is wired through model-by-model: Whisper uses it
@@ -69,8 +67,7 @@ async def stream_openai_response(
     hotwords: str = None,
     prompt: str | None = None,
 ):
-    """
-    Perform asynchronous transcription using OpenAI-compatible API.
+    """Perform asynchronous transcription using OpenAI-compatible API.
     """
     print("\ntranscription result [stream]:", end=" ")
     with open(audio_path, "rb") as f:
@@ -98,8 +95,7 @@ async def stream_openai_response(
 
 
 def stream_api_response(audio_path: str, model: str, openai_api_base: str):
-    """
-    Perform streaming transcription using raw HTTP requests to the vLLM API server.
+    """Perform streaming transcription using raw HTTP requests to the vLLM API server.
     """
     import json
     import os

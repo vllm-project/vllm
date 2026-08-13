@@ -203,8 +203,7 @@ def reference_moe(
     activation: str = "swiglu",
     use_interleaved_layout: bool = False,
 ):
-    """
-    Reference MoE implementation for accuracy testing.
+    """Reference MoE implementation for accuracy testing.
 
     Args:
         activation: One of "swiglu", "silu", "relu2". Controls the activation
@@ -213,6 +212,7 @@ def reference_moe(
             (gate=x[..., ::2], up=x[..., 1::2]) as used by SWIGLUOAI.
             If False, uses chunked layout (gate, up = chunk(x, 2)) as used
             by standard swiglu/silu.
+
     """
     # renormalize routing
     experts = torch.topk(roouting_logits, k=topk, dim=-1, sorted=True)
@@ -1318,8 +1318,7 @@ def test_rocm_mxfp4_moe_oracle(
     intermediate_size: int,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    Test ROCm MXFP4 MoE using oracle functions.
+    """Test ROCm MXFP4 MoE using oracle functions.
 
     This test validates that the oracle functions work end-to-end:
     - select_mxfp4_moe_backend() selects a valid backend
@@ -1700,8 +1699,7 @@ def test_mxfp4_emulation_rounds_up_to_block_size(
 def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    select_mxfp4_moe_backend() must raise NotImplementedError, with the
+    """select_mxfp4_moe_backend() must raise NotImplementedError, with the
     collected per-backend unsupported reasons in the message, when no
     backend supports the requested deployment configuration.
     """

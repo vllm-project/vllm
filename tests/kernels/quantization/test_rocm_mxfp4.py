@@ -208,7 +208,8 @@ def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
 @pytest.mark.parametrize("shape", LLAMA_SHAPES)
 def test_vllm_quant_dequant_mxfp4_matches_reference_on_large_shapes(shape, dtype):
     """The public vLLM MXFP4 QDQ helper should stay exact against the torch
-    reference even on larger Llama-like shapes."""
+    reference even on larger Llama-like shapes.
+    """
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         quant_dequant_mxfp4,
     )
@@ -503,7 +504,7 @@ def test_aiter_fp4_gemm_a4w4_determinism():
     ],
 )
 def test_aiter_hardware_fp4_dynamic_quant_format(shape):
-    """aiter hardware FP4 dynamic quant produces correct output format.
+    """Aiter hardware FP4 dynamic quant produces correct output format.
 
     Tests gfx950 hardware-accelerated FP4 quantization (OCP MXFP4 E2M1).
     Parity with B200 scaled_fp4_quant: block_size=32, packed uint8 output.

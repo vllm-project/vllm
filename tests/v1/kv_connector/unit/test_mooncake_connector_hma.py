@@ -216,7 +216,6 @@ def test_metadata_hma_block_ids():
 )
 async def test_build_transfer_params_multi_group_trimming(monkeypatch):
     """_build_transfer_params trims per-group blocks when local > remote."""
-
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
@@ -313,7 +312,6 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
 )
 async def test_build_transfer_params_group_count_mismatch(monkeypatch):
     """_build_transfer_params reports an error when group counts differ."""
-
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"

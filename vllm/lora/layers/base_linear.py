@@ -240,8 +240,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_async_impl(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """
-        Forward pass with base linear and LoRA on separate CUDA streams
+        """Forward pass with base linear and LoRA on separate CUDA streams
         for overlap, using maybe_execute_in_parallel.
         Base layer runs on default stream; LoRA runs on aux stream.
         """

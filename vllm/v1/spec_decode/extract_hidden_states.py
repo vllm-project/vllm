@@ -117,6 +117,7 @@ class ExtractHiddenStatesProposer:
             Tuple of:
                 - Draft tokens matching sampled tokens, shape [batch_size, 1]
                 - KV connector output (if KV transfer is active), else None
+
         """
         assert num_speculative_tokens == self.num_speculative_tokens
         assert self.model is not None and isinstance(target_hidden_states, list)
@@ -318,14 +319,12 @@ class ExtractHiddenStatesProposer:
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Prepare next token IDs for speculative decoding.
+        """Prepare next token IDs for speculative decoding.
 
         Since num_speculative_tokens == 1, sampled_token_ids has shape
         (batch_size, 1). For each request we either use the sampled token
         (if valid and not discarded) or a backup token from the request state.
         """
-
         # Precompute backup token IDs for discarded requests.
         num_reqs = gpu_input_batch.num_reqs
         for i in range(num_reqs):
@@ -359,6 +358,7 @@ class ExtractHiddenStatesProposer:
         Args:
             target_model: The target model (passed for compatibility with
                          EagleProposer interface, but not used here)
+
         """
         # Get the target model's attention layers before loading draft model
         target_attn_layer_names = set(
@@ -395,7 +395,8 @@ class ExtractHiddenStatesProposer:
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """Validate all drafting layers belong to the same KV cache group
-        and record the group index for common_attn_metadata selection."""
+        and record the group index for common_attn_metadata selection.
+        """
         assert len(self.attn_layer_names) == 1
         layer = self.attn_layer_names[0]
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):

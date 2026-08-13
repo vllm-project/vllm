@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark: Fused FP8 output quantization in merge_attn_states
+"""Benchmark: Fused FP8 output quantization in merge_attn_states
 
 Compares fused vs unfused approaches for producing FP8-quantized merged
 attention output:
@@ -85,7 +84,8 @@ def make_inputs(
 
 def build_configs(head_configs, num_tokens_list, input_dtypes, tp_sizes):
     """Build (num_tokens, num_heads, head_size, dtype_str) config tuples,
-    applying TP division to num_heads and skipping invalid combos."""
+    applying TP division to num_heads and skipping invalid combos.
+    """
     configs = []
     for (_, nh, hs), nt, dtype, tp in itertools.product(
         head_configs, num_tokens_list, input_dtypes, tp_sizes

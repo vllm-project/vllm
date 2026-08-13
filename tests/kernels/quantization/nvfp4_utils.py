@@ -110,6 +110,7 @@ def dequant_nvfp4_kv_cache(
 
     Returns:
         [..., num_heads, block_size, head_size] float32.
+
     """
     data_dim = head_size // 2
     scale_dim = head_size // 16

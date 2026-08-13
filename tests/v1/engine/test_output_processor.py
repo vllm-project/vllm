@@ -42,6 +42,7 @@ def _ref_convert_id_to_token(
 
     Returns:
       String representation of input token id
+
     """
     return tokenizer.decode([token_id]) or ""
 
@@ -146,7 +147,8 @@ def test_request_stream_interval_raises_but_not_below_engine_default(
 ):
     """A per-request stream_interval can raise the interval above the engine
     default but not below it (values under the default clamp up), without
-    altering the generated text."""
+    altering the generated text.
+    """
     engine_stream_interval = 5
     # Request 0 (below the default) clamps up to 5; request 1 raises it to 10.
     request_stream_intervals = [1, 10]
@@ -710,6 +712,7 @@ def test_stop_token(
         stop_token_type: "eos_token_id" for EOS, "stop_token_ids" for stop token
         ignore_eos: if True, EOS stops are disabled
         dummy_test_vectors: dummy engine core outputs and other data structures
+
     """
     model_id = dummy_test_vectors.tokenizer.name_or_path
     if model_id != "meta-llama/Llama-3.2-1B":

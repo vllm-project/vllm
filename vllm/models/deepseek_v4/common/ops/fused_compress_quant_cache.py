@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Fused compressor + FP8/MXFP4 UE8M0 quantization + KV cache insert kernels.
+"""Fused compressor + FP8/MXFP4 UE8M0 quantization + KV cache insert kernels.
 
 Three specialized kernels:
   - _fused_kv_compress_norm_rope_insert_sparse_attn:

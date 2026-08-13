@@ -145,6 +145,7 @@ def fused_qk_rmsnorm_rope_gate(
     Returns:
         (q_out, k_out, gate_out) -- all contiguous (n_tokens, heads * head_dim).
         ``gate_out`` is the raw (pre-sigmoid) gate.
+
     """
     if rotary_dim <= 0 or rotary_dim > head_dim or rotary_dim % 2 != 0:
         raise ValueError(

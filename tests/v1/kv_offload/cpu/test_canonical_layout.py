@@ -126,7 +126,8 @@ def _canonical_handler(gpu_tensor, cpu_tensor, mapping, gpu_to_cpu):
 def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
     """Two TP2-style rank handlers must scatter into one shared canonical
     CPU page such that each rank reloads bit-exact and a whole-page (TP1)
-    reader sees both shards — the cross-topology contract."""
+    reader sees both shards — the cross-topology contract.
+    """
     torch.manual_seed(0)
     num_blocks = 4
     gpu_rank = [
@@ -203,7 +204,8 @@ def _nhd_shard_mapping(tp: int, rank: int) -> CanonicalPageMapping:
 
 def _head_shard(full_kv: torch.Tensor, tp: int, rank: int) -> torch.Tensor:
     """This rank's local page rows out of the (blocks, 2, tokens, heads,
-    head_bytes) ground truth."""
+    head_bytes) ground truth.
+    """
     local_heads = _TOTAL_HEADS // tp
     shard = full_kv[:, :, :, rank * local_heads : (rank + 1) * local_heads, :]
     return shard.reshape(full_kv.shape[0], -1).contiguous()
@@ -214,7 +216,8 @@ def _head_shard(full_kv: torch.Tensor, tp: int, rank: int) -> torch.Tensor:
 def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
     """KV written at one tp must be readable at another: writer ranks scatter
     head shards into a shared canonical region, reader ranks gather their own
-    shards, and every reader must see the writers' ground-truth bytes."""
+    shards, and every reader must see the writers' ground-truth bytes.
+    """
     torch.manual_seed(0)
     num_blocks = 3
     full_kv = torch.randint(

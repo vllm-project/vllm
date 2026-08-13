@@ -33,7 +33,6 @@ def _worker_forward_qk(
     eps,
 ):
     """Per-rank worker: compare NCCL allreduce path vs Lamport fused kernel."""
-
     if not hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
         cleanup_dist_env_and_memory()
         return

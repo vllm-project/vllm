@@ -836,11 +836,13 @@ class TestConstructChatMessagesCombinePolicy:
 
 class TestConstructInputMessagesInstructionsLeak:
     """Regression tests for #37697: instructions from a prior response
-    should NOT leak through previous_response_id."""
+    should NOT leak through previous_response_id.
+    """
 
     def test_old_instructions_stripped_from_prev_msg(self):
         """System message in prev_msg must be dropped so the new request's
-        instructions are the only system message in the conversation."""
+        instructions are the only system message in the conversation.
+        """
         prev = [
             {"role": "system", "content": "old instructions"},
             {"role": "user", "content": "What is 2+2?"},
@@ -857,7 +859,8 @@ class TestConstructInputMessagesInstructionsLeak:
 
     def test_no_instructions_in_new_request(self):
         """If the new request has no instructions, old ones should still
-        be stripped -- they must not carry over."""
+        be stripped -- they must not carry over.
+        """
         prev = [
             {"role": "system", "content": "old instructions"},
             {"role": "user", "content": "Hi"},

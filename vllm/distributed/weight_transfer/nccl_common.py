@@ -57,8 +57,7 @@ def stateless_init_process_group(
     world_size: int,
     device,
 ) -> "PyNcclCommunicator":
-    """
-    vLLM provides `StatelessProcessGroup` to create a process group
+    """VLLM provides `StatelessProcessGroup` to create a process group
     without considering the global process group in torch.distributed.
     It is recommended to create `StatelessProcessGroup`, and then initialize
     the data-plane communication (NCCL) between external (train processes)
@@ -105,8 +104,7 @@ def worker_init_process_group(
 def trainer_init(
     init_info: NCCLRendezvous | dict,
 ) -> "PyNcclCommunicator":
-    """
-    Initialize NCCL process group for trainer-side weight transfer.
+    """Initialize NCCL process group for trainer-side weight transfer.
 
     The trainer is always rank 0 in the process group. Uses the current
     CUDA device (torch.accelerator.current_device_index()).
@@ -120,6 +118,7 @@ def trainer_init(
 
     Returns:
         PyNcclCommunicator for weight transfer.
+
     """
     if isinstance(init_info, dict):
         master_address = init_info["master_address"]

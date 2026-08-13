@@ -91,7 +91,8 @@ def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     CUDA_VISIBLE_DEVICES has already been set to the desired value.
 
     # This can be removed and simply replaced with torch.cuda.get_device_count
-    # after https://github.com/pytorch/pytorch/pull/122815 is released."""
+    # after https://github.com/pytorch/pytorch/pull/122815 is released.
+    """
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
     # LRU Cache purposes.
 
@@ -126,7 +127,8 @@ def _get_wsl_kernel_version() -> tuple[int, ...] | None:
 
 def _sync_hip_cuda_env_vars():
     """Ensure HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are consistent.
-    Treats empty string as unset. Raises on genuine conflicts."""
+    Treats empty string as unset. Raises on genuine conflicts.
+    """
     hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
     cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
 
@@ -197,8 +199,7 @@ def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
 
 
 def _get_gcn_arch() -> str:
-    """
-    Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
+    """Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
     Called once at module level; result stored in _GCN_ARCH.
     """
     try:
@@ -233,8 +234,7 @@ _ON_RDNA4 = any(arch in _GCN_ARCH for arch in ["gfx1200", "gfx1201"])
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
-    """
-    Parse (major, minor) from a GCN arch string, mirroring how
+    """Parse (major, minor) from a GCN arch string, mirroring how
     HIP derives hipDeviceProp_t.major / .minor.
 
     Format: gfx<MAJOR><MINOR><STEPPING>
@@ -248,6 +248,7 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
     Returns None only when the string is not gfx-prefixed at all
     (i.e. not a ROCm arch string). Raises on any string that looks
     like a GCN arch but does not match a known layout.
+
     """
     m = re.match(r"gfx(\d+)", gcn_arch)
     if not m:
@@ -769,8 +770,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
+        """Set the device for the current platform.
         """
         torch.cuda.set_device(device)
 
@@ -796,8 +796,7 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
-        """
-        Query if the set of gpus are fully connected by xgmi (1 hop)
+        """Query if the set of gpus are fully connected by xgmi (1 hop)
         """
         handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
         for i, handle in enumerate(handles):

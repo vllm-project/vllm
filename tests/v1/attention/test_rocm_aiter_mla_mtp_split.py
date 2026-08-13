@@ -130,7 +130,6 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
     Sweeping num_heads asserts the max(16, num_heads) clamp is what sizes the
     metadata, covering the fp8 nhead=32 (TP4) fold path.
     """
-
     dtypes = SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16")
     info_calls = []
 
@@ -252,7 +251,6 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
     monkeypatch,
 ):
     """Full-CG zero-qo rows follow rocm_aiter_mla.py:608-657,717-759."""
-
     get_mla_metadata_v1 = mock.MagicMock()
     monkeypatch.setitem(
         sys.modules,
@@ -314,7 +312,6 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
 
 def test_decode_expands_kernel_block_page_indices(monkeypatch):
     """kernel_block_size>1 expands b -> b*K+offset at rocm_aiter_mla.py:696-704."""
-
     expand_kernel = _ExpandPageIndicesKernel()
     monkeypatch.setattr(rocm_aiter_mla, "_expand_page_indices_kernel", expand_kernel)
     # qlen==1 now takes the persistent-metadata path, which imports

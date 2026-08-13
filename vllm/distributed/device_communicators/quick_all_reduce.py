@@ -62,8 +62,7 @@ class QuickAllReduce:
     }
 
     def __init__(self, group: ProcessGroup, device: int | str | torch.device) -> None:
-        """
-        Custom allreduce provides non-destructive acceleration and is
+        """Custom allreduce provides non-destructive acceleration and is
         available for CUDA and ROCm MI300 series.
 
         Custom quick allreduce leverages quantization for further
@@ -86,6 +85,7 @@ class QuickAllReduce:
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
+
         """
         self.disabled = True
         if not self._rocm_arch_available():
@@ -301,8 +301,7 @@ class QuickAllReduce:
             return False
 
     def create_shared_buffer(self):
-        """
-        Creates a shared buffer for quickreduce.
+        """Creates a shared buffer for quickreduce.
         Has to be called after init_custom_qr
         """
         handle = ops.qr_get_handle(self._ptr)
@@ -312,8 +311,7 @@ class QuickAllReduce:
         ops.qr_open_handles(self._ptr, handles)
 
     def should_quick_allreduce(self, inp: torch.Tensor):
-        """
-        Check if quickreduce is available
+        """Check if quickreduce is available
         """
         if self.disabled:
             return False

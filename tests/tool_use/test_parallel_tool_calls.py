@@ -237,10 +237,8 @@ async def test_parallel_tool_calls_with_results(
 async def test_parallel_tool_calls_false(
     client: openai.AsyncOpenAI, server_config: ServerConfig
 ):
+    """Ensure only one tool call is returned when parallel_tool_calls is False.
     """
-    Ensure only one tool call is returned when parallel_tool_calls is False.
-    """
-
     models = await client.models.list()
     model_name: str = models.data[0].id
     messages = apply_parallel_tool_system_prompt(

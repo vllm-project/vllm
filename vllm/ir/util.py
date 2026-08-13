@@ -10,11 +10,12 @@ from typing import Any
 
 
 def hash_source(*srcs: str | Any) -> str:
-    """
-    Utility method to hash the sources of functions or objects.
+    """Utility method to hash the sources of functions or objects.
+
     Args:
         srcs: strings or objects to add to the hash.
             Objects and functions have their source inspected.
+
     """
     hasher = hashlib.sha256()
     for src in srcs:
@@ -34,8 +35,7 @@ def hash_source(*srcs: str | Any) -> str:
 
 
 def weak_lru_cache(maxsize: int | None = 128, typed: bool = False):
-    """
-    LRU Cache decorator that keeps a weak reference to 'self'.
+    """LRU Cache decorator that keeps a weak reference to 'self'.
     This avoids memory leakage, which happens when functools.lru_cache
     stores a reference to self in the global cache.
 

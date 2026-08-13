@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Isolated GSM8K evaluation script for vLLM serve endpoint.
+"""Isolated GSM8K evaluation script for vLLM serve endpoint.
 """
 
 import argparse
@@ -91,6 +90,7 @@ async def call_vllm_api(
 
     Returns:
         Tuple of (response_text, completion_tokens)
+
     """
     data = {
         "prompt": prompt,
@@ -221,8 +221,7 @@ def evaluate_gsm8k(
     gen_prefix: str = "",
     max_concurrency: int | None = None,
 ) -> dict[str, float | int]:
-    """
-    Evaluate GSM8K accuracy using vLLM serve endpoint.
+    """Evaluate GSM8K accuracy using vLLM serve endpoint.
 
     Returns dict with accuracy, invalid_rate, latency, etc.
     """

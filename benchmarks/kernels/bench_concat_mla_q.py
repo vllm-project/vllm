@@ -27,6 +27,7 @@ def make_inputs(num_tokens, dtype):
         contiguous_nope: If False, simulate the transposed BMM output
                          (non-contiguous nope with stride pattern from
                          [N,B,L].transpose(0,1)).
+
     """
     # Simulate: bmm output [N, B, L].transpose(0, 1) -> [B, N, L]
     raw = torch.randn(NUM_HEADS, num_tokens, NOPE_DIM, dtype=dtype, device="cuda")

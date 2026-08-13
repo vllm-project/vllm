@@ -41,8 +41,7 @@ def test_rms_norm_batch_invariant_vs_reference(
     eps: float,
     seed: int,
 ):
-    """
-    Compare batch-invariant Triton RMS norm against a PyTorch reference.
+    """Compare batch-invariant Triton RMS norm against a PyTorch reference.
 
     Tests that the Triton-based batch-invariant RMS norm produces numerically
     equivalent results to an independent implementation across configurations.
@@ -90,8 +89,7 @@ def test_fused_add_rms_norm_batch_invariant_residual_path(
     n_extra: int,
     seed: int,
 ):
-    """
-    Test the batch-invariant fused residual-add + RMSNorm helper directly.
+    """Test the batch-invariant fused residual-add + RMSNorm helper directly.
     """
     device = torch.device(DEVICE_TYPE)
 
@@ -278,7 +276,8 @@ def test_rms_norm_per_block_quant_batch_invariant(
     hidden_size: int, dtype: torch.dtype, seed: int
 ):
     """C++ ``rms_norm_per_block_quant`` must be batch invariant across the
-    block threshold (compiled fp8 block-quant path; block pinned to 512)."""
+    block threshold (compiled fp8 block-quant path; block pinned to 512).
+    """
     import vllm._custom_ops as ops
 
     device = torch.device(DEVICE_TYPE)
@@ -313,8 +312,7 @@ def test_rms_norm_per_block_quant_batch_invariant(
 def test_rms_norm_3d_input(
     default_vllm_config, batch_size: int, seq_len: int, hidden_size: int
 ):
-    """
-    Test RMS norm with 3D input tensors (batch, seq_len, hidden_size).
+    """Test RMS norm with 3D input tensors (batch, seq_len, hidden_size).
 
     Ensures that the batch-invariant RMS norm correctly handles multi-dimensional
     inputs that are common in transformer models.
@@ -349,8 +347,7 @@ def test_rms_norm_3d_input(
 
 @skip_if_not_cuda
 def test_rms_norm_numerical_stability(default_vllm_config):
-    """
-    Test RMS norm numerical stability with extreme values.
+    """Test RMS norm numerical stability with extreme values.
 
     Ensures that both implementations handle edge cases like very small or large
     values without producing NaN or Inf.
@@ -406,8 +403,7 @@ def test_rms_norm_numerical_stability(default_vllm_config):
 
 @skip_unsupported
 def test_rms_norm_formula(default_vllm_config):
-    """
-    Test that RMS norm follows the correct mathematical formula.
+    """Test that RMS norm follows the correct mathematical formula.
 
     Verifies: output = input / sqrt(mean(input^2) + eps) * weight
     """
@@ -440,8 +436,7 @@ def test_rms_norm_formula(default_vllm_config):
 @skip_if_not_cuda
 @pytest.mark.parametrize("hidden_size", [128, 1024, 4096, 16384])
 def test_rms_norm_different_hidden_sizes(default_vllm_config, hidden_size: int):
-    """
-    Test RMS norm with various hidden sizes to ensure block size handling.
+    """Test RMS norm with various hidden sizes to ensure block size handling.
 
     The Triton kernel uses a fixed BLOCK_SIZE=1024, so this tests that it
     correctly handles hidden sizes both smaller and larger than the block size.
@@ -474,8 +469,7 @@ def test_rms_norm_different_hidden_sizes(default_vllm_config, hidden_size: int):
 
 @skip_unsupported
 def test_rms_norm_determinism(default_vllm_config):
-    """
-    Test that batch-invariant RMS norm produces deterministic results.
+    """Test that batch-invariant RMS norm produces deterministic results.
 
     Runs the same input through the kernel multiple times and verifies
     identical outputs.

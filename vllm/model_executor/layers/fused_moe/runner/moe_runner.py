@@ -216,8 +216,7 @@ def _unpack(
 
 
 class MoERunner(MoERunnerInterface):
-    """
-    Standard MoE runner implementation for executing Mixture of Experts layers.
+    """Standard MoE runner implementation for executing Mixture of Experts layers.
 
     This is the primary concrete implementation of MoE execution logic, providing
     comprehensive support for standard MoE operations. It handles:
@@ -687,7 +686,6 @@ class MoERunner(MoERunnerInterface):
         1. pytorch cannot handle union types in custom op signatures so
            _moe_forward and _moe_forward_shared must be split.
         """
-
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
         # outside the runner (e.g. to overlap it on a separate stream), it
@@ -976,8 +974,7 @@ class MoERunner(MoERunnerInterface):
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
     ) -> None:
-        """
-        Register the EPLB state in this layer.
+        """Register the EPLB state in this layer.
 
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.

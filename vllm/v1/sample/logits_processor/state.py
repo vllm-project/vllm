@@ -69,7 +69,8 @@ class BatchUpdateBuilder:
     @property
     def removed(self) -> list[RemovedRequest]:
         """Removed request indices sorted in
-        descending order"""
+        descending order
+        """
         self._ensure_removed_sorted()
         return self._removed
 
@@ -81,6 +82,7 @@ class BatchUpdateBuilder:
 
         Args:
           index: request index
+
         """
         if self._is_removed_sorted:
             raise RuntimeError(
@@ -125,6 +127,7 @@ class BatchUpdateBuilder:
 
         Returns:
           Frozen logitsprocs batch update instance; `None` if no updates
+
         """
         # Reset removal-sorting logic
         self._is_removed_sorted = False

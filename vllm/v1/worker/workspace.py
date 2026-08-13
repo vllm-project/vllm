@@ -99,6 +99,7 @@ class WorkspaceManager:
 
         Returns:
             List of tensor views into the workspace buffer, one per shape/dtype pair.
+
         """
         actual_bytes = [_compute_bytes(s, d) for s, d in shapes_and_dtypes]
         aligned_bytes = [round_up(actual, 256) for actual in actual_bytes]
@@ -124,6 +125,7 @@ class WorkspaceManager:
 
         Returns:
             The current workspace tensor.
+
         """
         ubatch_id = dbo_current_ubatch_id()
         current_workspace = self._current_workspaces[ubatch_id]
@@ -196,6 +198,7 @@ def is_workspace_manager_initialized() -> bool:
 
     Returns:
         True if workspace manager is initialized, False otherwise.
+
     """
     return _manager is not None
 
@@ -205,6 +208,7 @@ def current_workspace_manager() -> "WorkspaceManager":
 
     Raises:
         AssertionError: If workspace manager has not been initialized.
+
     """
     assert _manager is not None, (
         "WorkspaceManager not initialized. Call init_workspace_manager() "
@@ -224,6 +228,7 @@ def init_workspace_manager(
     Args:
         device: The device to allocate workspace on.
         num_ubatches: Number of workspace ubatch slots. Defaults to 1.
+
     """
     global _manager
     if _manager is not None:
@@ -254,6 +259,7 @@ def lock_workspace() -> None:
         lock_workspace()
 
         # Now all get_workspace calls must fit in pre-allocated size
+
     """
     current_workspace_manager().lock()
 

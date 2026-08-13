@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests verify that malicious sparse tensors are rejected before they can trigger
+"""Tests verify that malicious sparse tensors are rejected before they can trigger
 out-of-bounds memory writes during to_dense() operations.
 """
 
@@ -42,8 +41,7 @@ def _encode_tensor(tensor: torch.Tensor) -> bytes:
 
 
 def _create_malicious_sparse_tensor() -> torch.Tensor:
-    """
-    Create a malicious sparse COO tensor with out-of-bounds indices.
+    """Create a malicious sparse COO tensor with out-of-bounds indices.
 
     This tensor has indices that point beyond the declared shape, which would
     cause an out-of-bounds write when converted to dense format without
@@ -148,7 +146,8 @@ class TestPromptEmbedsValidation:
 
     def test_hidden_size_mismatch_rejected(self, model_config):
         """Tensors whose trailing dim doesn't match the model's hidden_size
-        must be rejected at parse time."""
+        must be rejected at parse time.
+        """
         # opt-125m has hidden_size=768, passing 512 triggers the check.
         wrong_hidden = torch.randn(10, 512, dtype=torch.float32)
         encoded = _encode_tensor(wrong_hidden)
@@ -159,7 +158,8 @@ class TestPromptEmbedsValidation:
     def test_float_dtype_mismatch_cast_to_model_dtype(self, model_config):
         """Tensors whose dtype doesn't match the model's dtype but are still
         floating-point are cast, since API clients generally can't know the
-        server's `--dtype` setting ahead of time."""
+        server's `--dtype` setting ahead of time.
+        """
         # Fixture pins model dtype to float32, upload a bfloat16 tensor.
         mismatched_float = torch.randn(10, 768, dtype=torch.bfloat16)
         encoded = _encode_tensor(mismatched_float)
@@ -172,7 +172,8 @@ class TestPromptEmbedsValidation:
     def test_non_float_dtype_rejected(self, model_config):
         """Non-floating-point dtypes cannot be safely cast for embeddings
         (e.g. integer tensors almost certainly indicate caller confusion),
-        so they are rejected at parse time."""
+        so they are rejected at parse time.
+        """
         non_float = torch.randint(0, 100, (10, 768), dtype=torch.int32)
         encoded = _encode_tensor(non_float)
 
@@ -181,7 +182,8 @@ class TestPromptEmbedsValidation:
 
     def test_non_2d_tensor_rejected(self, model_config):
         """Tensors that aren't 2D (even after squeezing a leading dim)
-        must be rejected with a clear error."""
+        must be rejected with a clear error.
+        """
         # A 1D tensor cannot be interpreted as (num_tokens, hidden_size).
         bad = torch.randn(768, dtype=torch.float32)
         encoded = _encode_tensor(bad)
@@ -191,7 +193,8 @@ class TestPromptEmbedsValidation:
 
     def test_non_tensor_payload_rejected(self, model_config):
         """Deserializing to a non-Tensor object must raise a clear error
-        instead of propagating an AssertionError."""
+        instead of propagating an AssertionError.
+        """
         # `torch.save` will serialize a plain dict; `weights_only=True` allows
         # loading built-in containers, so this exercises the isinstance check.
         buffer = io.BytesIO()
@@ -255,7 +258,7 @@ class TestImageEmbedsValidation:
             io_handler.load_bytes(buffer.read())
 
     def test_valid_numpy_tensor_accepted(self):
-        """numpy .npy format should load and return correct tensor."""
+        """Numpy .npy format should load and return correct tensor."""
         io_handler = ImageEmbeddingMediaIO()
 
         arr = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
@@ -270,8 +273,7 @@ class TestImageEmbedsValidation:
         assert torch.allclose(result, torch.from_numpy(arr))
 
     def test_numpy_int32_tensor_accepted(self):
-        """numpy int32 arrays should round-trip correctly."""
-
+        """Numpy int32 arrays should round-trip correctly."""
         io_handler = ImageEmbeddingMediaIO()
 
         arr = np.arange(280, dtype=np.int32)
@@ -285,8 +287,7 @@ class TestImageEmbedsValidation:
         assert (result == torch.from_numpy(arr)).all()
 
     def test_load_file_numpy_tensor_accepted(self, tmp_path):
-        """numpy .npy files should load correctly via load_file."""
-
+        """Numpy .npy files should load correctly via load_file."""
         io_handler = ImageEmbeddingMediaIO()
 
         arr = np.array([[1.5, 2.5], [3.5, 4.5]], dtype=np.float32)
@@ -353,13 +354,11 @@ class TestAudioEmbedsValidation:
 
 
 class TestSparseTensorValidationIntegration:
-    """
-    These tests verify the complete attack chain is blocked at all entry points.
+    """These tests verify the complete attack chain is blocked at all entry points.
     """
 
     def test_attack_scenario_completions_api(self, model_config):
-        """
-        Simulate a complete attack through the Completions API.
+        """Simulate a complete attack through the Completions API.
 
         Attack scenario:
         1. Attacker crafts malicious sparse tensor
@@ -375,8 +374,7 @@ class TestSparseTensorValidationIntegration:
             safe_load_prompt_embeds(model_config, attack_payload)
 
     def test_attack_scenario_chat_api_image(self):
-        """
-        Simulate attack through Chat API with image_embeds.
+        """Simulate attack through Chat API with image_embeds.
 
         Verifies the image embeddings path is protected.
         """
@@ -387,8 +385,7 @@ class TestSparseTensorValidationIntegration:
             io_handler.load_base64("", attack_payload.decode("utf-8"))
 
     def test_attack_scenario_chat_api_audio(self):
-        """
-        Simulate attack through Chat API with audio_embeds.
+        """Simulate attack through Chat API with audio_embeds.
 
         Verifies the audio embeddings path is protected.
         """

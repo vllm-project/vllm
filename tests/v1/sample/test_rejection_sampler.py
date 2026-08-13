@@ -54,7 +54,8 @@ def create_logits_tensor(
     token_idx_to_override: int | None = None,
 ) -> torch.Tensor:
     """Helper function to create logits tensor that
-    will produce desired token ids on argmax"""
+    will produce desired token ids on argmax
+    """
     token_ids = [tokens[:-1] for tokens in output_token_ids]
     num_total_tokens = sum(len(tokens) for tokens in token_ids)
     logits = torch.full((num_total_tokens, vocab_size), -100.0, device=DEVICE_TYPE)
@@ -486,6 +487,7 @@ def estimate_rejection_sampling_pdf(
 
     Returns:
         Estimated probability distribution of the output tokens.
+
     """
     mock_sampler = Mock(spec=Sampler)
     mock_sampler.logprobs_mode = "raw_logprobs"

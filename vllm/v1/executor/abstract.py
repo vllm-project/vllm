@@ -137,8 +137,7 @@ class Executor(ABC):
             )
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
-        """
-        Register a function to be called if the executor enters a permanent
+        """Register a function to be called if the executor enters a permanent
         failed state.
         """
         pass
@@ -158,8 +157,7 @@ class Executor(ABC):
         kwargs: dict | None = None,
         non_block: Literal[False] = False,
     ) -> list[_R]:
-        """
-        Execute an RPC call on all workers.
+        """Execute an RPC call on all workers.
 
         Args:
             method: Name of the worker method to execute, or a callable that
@@ -181,6 +179,7 @@ class Executor(ABC):
         Note:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
+
         """
         pass
 
@@ -270,7 +269,8 @@ class Executor(ABC):
     @abstractmethod
     def check_health(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an
-        exception."""
+        exception.
+        """
         raise NotImplementedError
 
     def shutdown(self) -> None:
@@ -362,8 +362,7 @@ class Executor(ABC):
 
     @classmethod
     def supports_async_scheduling(cls) -> bool:
-        """
-        Whether the executor supports async scheduling.
+        """Whether the executor supports async scheduling.
         """
         return False
 

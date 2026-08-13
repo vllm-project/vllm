@@ -38,8 +38,7 @@ logger = init_logger(__name__)
 def is_valid_flashinfer_cutlass_fused_moe(
     hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
 ) -> bool:
-    """
-    Check if the given problem size is supported by the FlashInfer CUTLASS MoE
+    """Check if the given problem size is supported by the FlashInfer CUTLASS MoE
     kernel.
     """
     if not has_flashinfer_cutlass_fused_moe():
@@ -225,8 +224,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
-        """
-        Compute the shapes for the temporary and final outputs of the two gemms
+        """Compute the shapes for the temporary and final outputs of the two gemms
         and activation in the fused expert function.  Since the gemms are
         independent, the workspace for the first gemm can be shared with the
         workspace for the last gemm.

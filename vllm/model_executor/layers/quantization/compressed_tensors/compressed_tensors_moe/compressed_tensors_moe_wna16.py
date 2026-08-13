@@ -137,8 +137,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         num_groups_w2: int | None = None,
         num_groups_w13: int | None = None,
     ) -> tuple[int, int, int]:
-        """
-        Get the shape of the weight based on the weight name, number of experts
+        """Get the shape of the weight based on the weight name, number of experts
         hidden size, intermediate size per partition, number of groups for w2,
         and number of groups for w13. Pass in num_groups_w2 and num_groups_w13
         for weight scales/zero_points.

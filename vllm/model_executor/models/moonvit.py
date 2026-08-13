@@ -79,13 +79,14 @@ def _apply_rope_input_validation(x, freqs_cis):
 def apply_rope(
     xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Args: (The leading dimensions of all inputs should be the same)
+    """Args: (The leading dimensions of all inputs should be the same)
         xq: query, tensor of shape (..., num_heads, head_dim)
         xk: key, tensor of shape (..., num_heads, head_dim)
         freqs_cis: tensor of shape (..., head_dim/2), dtype=torch.complex64. It contains the precomputed cis(freqs) for each position in the 2D grid.
+
     Returns:
         xq_out, xk_out: tensors of shape (..., num_heads, head_dim)
+
     """
     _apply_rope_input_validation(xq, freqs_cis)
     _apply_rope_input_validation(xk, freqs_cis)
@@ -187,8 +188,7 @@ class MoonVisionPatchEmbed(nn.Module):
         *,
         pos_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             x (L, Channels): input tensor
             grid_hw (N, 2): grid height and width
             pos_embeds: precomputed positional embeddings of shape
@@ -198,6 +198,7 @@ class MoonVisionPatchEmbed(nn.Module):
 
         Returns:
             (L, Cout) tensor
+
         """
         x = self.proj(x).view(x.size(0), -1)
         if pos_embeds is not None:
@@ -225,6 +226,7 @@ class Rope2DPosEmb(nn.Module):
         max_width (int): the maximum width of the 2D grid
         theta_base (float): the base of the theta
         device (str): the device to store the precomputed cis
+
     """
 
     def __init__(
@@ -305,24 +307,26 @@ class Rope2DPosEmb(nn.Module):
         return freqs_cis
 
     def get_freqs_cis_by_seqlens(self, grid_hws: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             grid_hws (torch.Tensor): containing list of (height, width) or (t, height, width) tuples.
+
         Returns:
             freqs_cis: tensor of shape (sum(t * height * width), dim//2)
+
         """
         return self.get_freqs_cis_by_seqlens_list(grid_hws.tolist())
 
     def get_freqs_cis_by_idx(
         self, pos_idx: torch.Tensor, pos_idx_mask: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             pos_idx: tensor of shape (..., 2), It contains the (h, w) position indices of each 2D token.
             pos_idx_mask: a mask of shape (...), the leading dimensions should be the same as pos_idx.
                 Rope will only be applied to the tokens with True mask. `freqs_cis` for the tokens with False mask with be ones.
+
         Return:
             freqs_cis: tensor of shape (..., dim//2)
+
         """
         assert (
             pos_idx.shape[:-1] == pos_idx_mask.shape
@@ -342,10 +346,10 @@ class Rope2DPosEmb(nn.Module):
 
 
 class MLP2(nn.Module):
-    """
-    Args:
-        dims: [in_dim, hidden_dim, out_dim]
-        bias: whether to use bias in linear layer.
+    """Args:
+    dims: [in_dim, hidden_dim, out_dim]
+    bias: whether to use bias in linear layer.
+
     """
 
     def __init__(
@@ -440,13 +444,13 @@ class MoonVitEncoderLayer(nn.Module):
         rope_freqs_cis: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,
     ):
-        """
-        Args:
-            x (torch.Tensor): (seqlen, hidden_dim)
-            cu_seqlens (torch.Tensor):
-            max_seqlen: Optional precomputed scalar tensor. When omitted it
-                is derived from ``cu_seqlens``, which produces a GPU scalar
-                that breaks CUDA graph capture.
+        """Args:
+        x (torch.Tensor): (seqlen, hidden_dim)
+        cu_seqlens (torch.Tensor):
+        max_seqlen: Optional precomputed scalar tensor. When omitted it
+            is derived from ``cu_seqlens``, which produces a GPU scalar
+            that breaks CUDA graph capture.
+
         """
         seq_length = x.size(0)
         xqkv, _ = self.wqkv(x)
@@ -486,13 +490,13 @@ class MoonVitEncoderLayer(nn.Module):
         rope_freqs_cis: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             hidden_states: non-packed (B, N, D) or packed (L, D). if non-packed, seqlens should be None, if packed, seqlens should be set
             max_seqlen: optional precomputed max-sequence-length scalar.
 
         Returns:
             output: same shape of input, non-packed (B, N, D) for non-packed input, (L, D) for packed input
+
         """
         residual = hidden_states
         hidden_states = self.norm0(hidden_states)
@@ -721,6 +725,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
                 graph.
             device: Device for the metadata tensors. Defaults to the
                 model's parameter device.
+
         """
         if device is None:
             device = next(self.parameters()).device
@@ -782,18 +787,18 @@ class MoonVitPretrainedModel(PreTrainedModel):
         *,
         encoder_metadata: dict[str, Any] | None = None,
     ) -> torch.Tensor | list[torch.Tensor]:
-        """
-        Args:
-            pixel_values (torch.Tensor): The input pixel values.
-            grid_hw (torch.Tensor): The grid height and width.
-            encoder_metadata: Optional precomputed metadata produced by
-                :meth:`prepare_encoder_metadata`. When provided every
-                ``.tolist()`` call in the forward path is skipped, the
-                returned tensor is the packed
-                ``(sum(new_h*new_w), kh*kw, hidden_size)`` form (suitable
-                for CUDA graph capture/replay), and ``grid_hw`` is unused.
-                When ``None`` the legacy path runs and returns a list of
-                per-image tensors.
+        """Args:
+        pixel_values (torch.Tensor): The input pixel values.
+        grid_hw (torch.Tensor): The grid height and width.
+        encoder_metadata: Optional precomputed metadata produced by
+            :meth:`prepare_encoder_metadata`. When provided every
+            ``.tolist()`` call in the forward path is skipped, the
+            returned tensor is the packed
+            ``(sum(new_h*new_w), kh*kw, hidden_size)`` form (suitable
+            for CUDA graph capture/replay), and ``grid_hw`` is unused.
+            When ``None`` the legacy path runs and returns a list of
+            per-image tensors.
+
         """
         if encoder_metadata is not None:
             hidden_states = self.patch_embed(

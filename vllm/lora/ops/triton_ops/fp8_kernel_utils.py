@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Utilities for Punica kernel construction.
+"""Utilities for Punica kernel construction.
 """
 
 from vllm.triton_utils import tl, triton
@@ -21,8 +20,7 @@ def _accumulate_mm(
     group_n: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
 ):
-    """
-    Core matrix multiplication and accumulation logic with quantization support.
+    """Core matrix multiplication and accumulation logic with quantization support.
 
     Args:
         tiled_a (tl.tensor): Loaded tile from A matrix
@@ -36,8 +34,8 @@ def _accumulate_mm(
         group_k: Block size for K dimension in block-wise quantization
         group_n: Block size for N dimension in block-wise quantization
         use_fp8_w8a8: Whether using FP8 W8A8 quantization
-    """
 
+    """
     if use_fp8_w8a8:
         if group_k > 0 and group_n > 0:
             # Block-wise quantization: scales are loaded per block
@@ -85,8 +83,7 @@ def fp8_mm_k(
     USE_GDC: tl.constexpr,
     base_k,
 ):
-    """
-    FP8-compatible matrix multiplication kernel with quantization support.
+    """FP8-compatible matrix multiplication kernel with quantization support.
     Given a_ptr and b_ptr, that identify the rows of A (m x k) and columns of
     B (k x n), iterate through the K dimension to compute the partial/complete
     matrix block product with proper dequantization.
@@ -120,6 +117,7 @@ def fp8_mm_k(
         b_dtype: datatype of the B matrix
         USE_GDC: Whether to use PDL. True indicates use.
         base_k (int): Base offset along K dimension for current SPLIT_K group
+
     """
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
@@ -238,13 +236,11 @@ def do_shrink_kernel_fp8(
     per_channel_quant: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
-    """
-    Given an array of integers that identifies the rows of A, ram,
+    """Given an array of integers that identifies the rows of A, ram,
     a lora index that identifies which LoRA to use from lora_ptr, lora_index,
     a slice_id that identifies the input/output slice, compute the
     matrix product and store in the appropriate output location.
     """
-
     # Identify the lora_ptr from slice_id.
     if SLICE_NUM == 1:
         cur_lora_ptr = lora_ptr
@@ -432,8 +428,7 @@ def do_expand_kernel_fp8(
     use_fp8_w8a8: tl.constexpr,
     per_channel_quant: tl.constexpr,
 ):
-    """
-    FP8-compatible expand kernel for LoRA.
+    """FP8-compatible expand kernel for LoRA.
     Given an array of integers that identifies the rows of A, ram,
     a lora index that identifies which LoRA to use from lora_ptr, lora_index,
     a slice_id that identifies the input/output slice,
@@ -449,7 +444,6 @@ def do_expand_kernel_fp8(
     - Per-channel quantization
     - Tensor-wise quantization
     """
-
     # ls_d*_ptr can be either an integer or a pointer
     if SAME_STRIDE:
         cur_lora_d0_stride = ls_d0_ptr

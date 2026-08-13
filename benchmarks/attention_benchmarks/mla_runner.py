@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-MLA benchmark runner - shared utilities for MLA benchmarks.
+"""MLA benchmark runner - shared utilities for MLA benchmarks.
 
 This module provides helpers for running MLA backends without
 needing full VllmConfig integration.
@@ -93,8 +92,7 @@ def _ensure_single_rank_model_parallel() -> None:
 
 
 def _add_mock_methods_to_model_config(model_config: ModelConfig) -> None:
-    """
-    Add mock methods for layer-specific queries to ModelConfig.
+    """Add mock methods for layer-specific queries to ModelConfig.
 
     These methods are needed by metadata builders but aren't normally
     present on ModelConfig when used in benchmark contexts.
@@ -125,8 +123,7 @@ def create_minimal_vllm_config(
     kv_cache_dtype: str = "auto",
     sparse_mla_force_mqa: bool = False,
 ) -> VllmConfig:
-    """
-    Create minimal VllmConfig for MLA benchmarks.
+    """Create minimal VllmConfig for MLA benchmarks.
 
     Args:
         model_name: Model name (deepseek-v2, deepseek-v3, etc.) - used if mla_dims not
@@ -145,6 +142,7 @@ def create_minimal_vllm_config(
 
     Returns:
         VllmConfig for benchmarking
+
     """
     # Get MLA dimensions - use provided or load from model name
     if mla_dims is None:
@@ -317,8 +315,7 @@ _BACKEND_PROPERTIES = {
 
 
 def _get_backend_config(backend: str) -> dict:
-    """
-    Get backend configuration from AttentionBackendEnum.
+    """Get backend configuration from AttentionBackendEnum.
 
     Uses the registry to get the backend class and extract configuration
     from its methods (get_impl_cls, get_builder_cls, is_sparse, etc.).
@@ -329,6 +326,7 @@ def _get_backend_config(backend: str) -> dict:
 
     Returns:
         Dict with backend configuration
+
     """
     from vllm.v1.attention.backend import MultipleOf
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -378,8 +376,7 @@ def _build_attention_metadata(
     device: torch.device,
     builder_instance,
 ) -> tuple:
-    """
-    Build attention metadata from batch requests.
+    """Build attention metadata from batch requests.
 
     Args:
         requests: List of BatchRequest objects
@@ -389,6 +386,7 @@ def _build_attention_metadata(
 
     Returns:
         Tuple of (metadata, kv_cache_num_blocks)
+
     """
     q_lens = [r.q_len for r in requests]
     kv_lens = [r.kv_len for r in requests]
@@ -475,8 +473,7 @@ def _create_input_tensors(
     device: torch.device,
     dtype: torch.dtype,
 ):
-    """
-    Create input tensors for both decode and prefill modes.
+    """Create input tensors for both decode and prefill modes.
 
     MLA requires different tensor formats for decode vs prefill:
     - Decode: Uses kv_lora_rank (512) dimension
@@ -493,6 +490,7 @@ def _create_input_tensors(
         Tuple of (decode_inputs, prefill_inputs)
         - decode_inputs: Query tensor(s) for decode mode
         - prefill_inputs: Dict with 'q', 'k_c_normed', 'k_pe', 'k_scale' for prefill
+
     """
     if query_format == "tuple":
         # Decode mode format: (q_nope, q_pe) where q_nope has kv_lora_rank dim
@@ -586,8 +584,7 @@ def _create_backend_impl(
     index_topk: int | None = None,
     kv_cache_dtype: str = "auto",
 ):
-    """
-    Create backend implementation instance.
+    """Create backend implementation instance.
 
     Args:
         backend_cfg: Backend configuration dict from _get_backend_config()
@@ -599,6 +596,7 @@ def _create_backend_impl(
 
     Returns:
         Tuple of (impl, layer, builder_instance, indexer)
+
     """
     # Get classes from backend config (already resolved by _get_backend_config)
     impl_class = backend_cfg["impl_class"]
@@ -704,14 +702,14 @@ def _create_backend_impl(
 
 
 def _extract_mla_dims_from_config(config) -> dict | None:
-    """
-    Extract MLA dimensions from BenchmarkConfig if all required fields are present.
+    """Extract MLA dimensions from BenchmarkConfig if all required fields are present.
 
     Args:
         config: BenchmarkConfig instance
 
     Returns:
         Dict with MLA dimensions if all fields are provided, None otherwise
+
     """
     # Check if all MLA-specific fields are provided
     if all(
@@ -765,8 +763,7 @@ def _run_single_benchmark(
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
 ) -> BenchmarkResult:
-    """
-    Run a single benchmark iteration.
+    """Run a single benchmark iteration.
 
     Args:
         config: BenchmarkConfig instance
@@ -785,6 +782,7 @@ def _run_single_benchmark(
 
     Returns:
         BenchmarkResult with timing statistics
+
     """
     # Parse batch spec
     requests = parse_batch_spec(config.batch_spec)
@@ -1047,8 +1045,7 @@ def _run_mla_benchmark_batched(
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
 ) -> list[BenchmarkResult]:
-    """
-    Unified batched MLA benchmark runner for all backends.
+    """Unified batched MLA benchmark runner for all backends.
 
     Works for: flashattn_mla, flashmla, flashinfer_mla, cutlass_mla,
                flashinfer_mla_sparse, flashmla_sparse
@@ -1069,6 +1066,7 @@ def _run_mla_benchmark_batched(
 
     Returns:
         List of BenchmarkResult objects
+
     """
     if not configs_with_params:
         return []
@@ -1251,8 +1249,7 @@ def run_mla_benchmark(
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
 ) -> BenchmarkResult | list[BenchmarkResult]:
-    """
-    Unified MLA benchmark runner for all backends.
+    """Unified MLA benchmark runner for all backends.
 
     Works for: flashattn_mla, flashmla, flashinfer_mla, cutlass_mla,
                flashinfer_mla_sparse, flashmla_sparse
@@ -1277,6 +1274,7 @@ def run_mla_benchmark(
 
     Returns:
         BenchmarkResult (single mode) or list of BenchmarkResult (batched mode)
+
     """
     # Normalize to batched mode: (config, threshold, num_splits)
     if isinstance(config, list):

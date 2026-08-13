@@ -36,7 +36,8 @@ logger = init_logger(__name__)
 
 class CompilationMode(enum.IntEnum):
     """The compilation approach used for torch.compile-based compilation of the
-    model."""
+    model.
+    """
 
     NONE = 0
     """No torch.compile compilation is applied, model runs in fully eager pytorch mode.
@@ -185,12 +186,10 @@ class PassConfig:
     # TODO(luka) better pass enabling system.
 
     def flashinfer_max_size(self, world_size: int) -> int | None:
-        """
-        Returns the max communication size in bytes for flashinfer
+        """Returns the max communication size in bytes for flashinfer
         allreduce fusion for the given world size. Returns None if world size
         is not supported by configs as it's not supported by flashinfer.
         """
-
         MiB = 1024 * 1024
         FI_SUPPORTED_WORLD_SIZES = [2, 4, 8, 16]
         if world_size not in FI_SUPPORTED_WORLD_SIZES:
@@ -216,12 +215,10 @@ class PassConfig:
         return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {})
 
     def compute_hash(self) -> str:
-        """
-        Produces a hash unique to the pass configuration.
+        """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
-
         return hash_factors(get_hash_factors(self, set()))
 
     @field_validator(
@@ -310,8 +307,7 @@ class PassConfig:
             self.fuse_rope_kvcache_cat_mla = False
 
     def log_enabled_passes(self) -> None:
-        """
-        Log the enabled custom fusion passes.
+        """Log the enabled custom fusion passes.
         This is called at the end of VLLMConfig post_init,
         after all defaults are finalized.
         TODO also log the compile ranges for which this is enabled.
@@ -334,7 +330,8 @@ class PassConfig:
 class DynamicShapesType(str, enum.Enum):
     """Types of dynamic shapes handling in torch.compile().
     see  Dynamic shapes and vllm guard dropping in torch_compile.md
-    for more details."""
+    for more details.
+    """
 
     BACKED = "backed"
     """Use backed dynamic shapes. torch.compile() guards on backed dynamic
@@ -384,10 +381,8 @@ class DynamicShapesConfig:
     """
 
     def compute_hash(self) -> str:
+        """Provide a hash for DynamicShapesConfig
         """
-        Provide a hash for DynamicShapesConfig
-        """
-
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, set())
@@ -778,8 +773,7 @@ class CompilationConfig:
     ]
 
     def compute_hash(self) -> str:
-        """
-        Provide a hash that uniquely identifies all the configs
+        """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
@@ -842,8 +836,7 @@ class CompilationConfig:
     @field_validator("mode", mode="before")
     @classmethod
     def validate_mode_before(cls, value: Any) -> Any:
-        """
-        Enable parsing the `mode` field from string mode names.
+        """Enable parsing the `mode` field from string mode names.
         Accepts both integers (0-3) and string names, like NONE, STOCK_TORCH_COMPILE,
         DYNAMO_TRACE_ONCE, VLLM_COMPILE.
         """
@@ -1065,15 +1058,17 @@ class CompilationConfig:
         prefix: str = "",
         is_encoder: bool = False,
     ) -> str | Callable:
-        """
-        Initialize the backend for the compilation config from a vllm config.
+        """Initialize the backend for the compilation config from a vllm config.
+
         Arguments:
             vllm_config: The vllm config to initialize the backend from.
             prefix: Cache directory prefix for this compiled module.
             is_encoder: Whether this module is used in an encoder (as
                 opposed to a text backbone).
+
         Returns:
             The backend for the compilation config.
+
         """
         if self.mode is None:
             raise ValueError(
@@ -1108,7 +1103,6 @@ class CompilationConfig:
         configs are set. This includes:
         - initialize compile_sizes
         """
-
         computed_compile_sizes: list[int] = []
         if self.compile_sizes is not None:
             # de-duplicate the sizes provided by the config
@@ -1307,13 +1301,11 @@ class CompilationConfig:
         return self.backend == "inductor" and self.mode != CompilationMode.NONE
 
     def custom_op_log_check(self):
-        """
-        This method logs the enabled/disabled custom ops and checks that the
+        """This method logs the enabled/disabled custom ops and checks that the
         passed custom_ops field only contains relevant ops.
         It is called at the end of set_current_vllm_config,
         after the custom ops have been instantiated.
         """
-
         if len(self.enabled_custom_ops) + len(self.disabled_custom_ops) == 0:
             logger.debug("No custom ops found in model.")
             return

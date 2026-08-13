@@ -168,8 +168,7 @@ async def test_max_tokens_with_tool_choice_required(
 @pytest.mark.asyncio
 async def test_named_tool_use(client: openai.AsyncOpenAI):
     def get_weather(latitude: float, longitude: float) -> str:
-        """
-        Mock function to simulate getting weather data.
+        """Mock function to simulate getting weather data.
         In a real application, this would call an external weather API.
         """
         return f"Current temperature at ({latitude}, {longitude}) is 20°C."

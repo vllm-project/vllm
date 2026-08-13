@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test deepep dispatch-combine logic
+"""Test deepep dispatch-combine logic
 """
 
 import dataclasses
@@ -56,8 +55,7 @@ MAX_TOKENS_PER_RANK = 64
 def make_weights(
     e, n, k, dtype
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Return weights w1, w2, w1_scale, w2_scale
+    """Return weights w1, w2, w1_scale, w2_scale
     """
     if dtype in [torch.float16, torch.bfloat16]:
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10

@@ -603,8 +603,10 @@ class TritonAttentionImpl(AttentionImpl):
             kv_cache: shape =
                 [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_block_scale is not None:
             raise NotImplementedError(
@@ -764,6 +766,7 @@ class TritonAttentionImpl(AttentionImpl):
             output: shape = [num_encoder_tokens, num_heads, head_size]
             attn_metadata: Encoder attention metadata
             layer: The attention layer
+
         """
         # Quantized KV cache is not supported for encoder attention.
         if is_quantized_kv_cache(self.kv_cache_dtype):

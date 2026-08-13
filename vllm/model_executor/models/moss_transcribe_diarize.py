@@ -88,12 +88,11 @@ _MOSS_DIARIZED_END_RE = re.compile(r"\[(?P<end>[0-9.]{1,32})\]\s*\Z")
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - c: Audio chunks
-        - m: Mel bins
-        - f: Mel frames
-        - n: Number of audio items
+    """Dimensions:
+    - c: Audio chunks
+    - m: Mel bins
+    - f: Mel frames
+    - n: Number of audio items
     """
 
     type: Literal["audio_features"] = "audio_features"
@@ -113,11 +112,10 @@ class MossTranscribeDiarizeAudioInputs(TensorSchema):
 
 
 class MossTranscribeDiarizeEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of audio items
-        - t: Number of audio tokens
-        - h: Hidden size
+    """Dimensions:
+    - n: Number of audio items
+    - t: Number of audio tokens
+    - h: Hidden size
     """
 
     type: Literal["audio_embeds"] = "audio_embeds"

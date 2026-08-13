@@ -111,19 +111,19 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
     ):
-        """
-        Args:
-            offloading_spec: Offloading configuration.
-            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-            tier_type: Tier type identifier, set by SecondaryTierFactory.
-            store_config: Object store connection parameters (see ObjStoreConfig).
-            prefix: Key prefix prepended to all object keys.
-            io_threads: Number of NIXL I/O threads.
-            enable_kv_events: Emit BlockStored KV events for blocks
-                successfully stored to this tier. Effective only when KV
-                cache events are enabled globally (kv_events_config).
-            locality: Whether this tier's storage is LOCAL or REMOTE relative
-                to the publishing vLLM instance.
+        """Args:
+        offloading_spec: Offloading configuration.
+        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        tier_type: Tier type identifier, set by SecondaryTierFactory.
+        store_config: Object store connection parameters (see ObjStoreConfig).
+        prefix: Key prefix prepended to all object keys.
+        io_threads: Number of NIXL I/O threads.
+        enable_kv_events: Emit BlockStored KV events for blocks
+            successfully stored to this tier. Effective only when KV
+            cache events are enabled globally (kv_events_config).
+        locality: Whether this tier's storage is LOCAL or REMOTE relative
+            to the publishing vLLM instance.
+
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
         self.locality = Locality(locality) if locality is not None else None
@@ -305,7 +305,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def _poll_active_transfers(self) -> None:
         """Poll all in-flight transfers once; move newly-completed (success or
-        failure) into ``_pending_results`` and release their NIXL handles."""
+        failure) into ``_pending_results`` and release their NIXL handles.
+        """
         for job_id, entry in list(self._transfers.items()):
             try:
                 state = self._agent.check_xfer_state(entry.xfer_handle)
@@ -360,7 +361,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Poll transfers; a failed promotion marks its cached verdicts False
-        here (scheduler thread)."""
+        here (scheduler thread).
+        """
         self._poll_active_transfers()
         results = self._pending_results
         self._pending_results = []

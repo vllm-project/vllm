@@ -26,8 +26,7 @@ logger = init_logger(__name__)
 
 
 class BaseDummyInputsBuilder(ABC, Generic[_I]):
-    """
-    Abstract base class that constructs the dummy data to profile
+    """Abstract base class that constructs the dummy data to profile
     multi-modal models.
     """
 
@@ -38,8 +37,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
 
     @abstractmethod
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        """
-        Build the text input corresponding to `mm_counts`.
+        """Build the text input corresponding to `mm_counts`.
         """
         raise NotImplementedError
 
@@ -50,8 +48,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
-        """
-        Build the multimodal input which, after processing, results in
+        """Build the multimodal input which, after processing, results in
         the maximum possible number of placeholder tokens.
 
         Args:
@@ -61,6 +58,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                        If None, use model defaults for backward compatibility.
                        If provided, models can use these to customize dummy
                        data generation.
+
         """
         raise NotImplementedError
 
@@ -70,14 +68,14 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions],
     ) -> ProcessorInputs:
-        """
-        Build the input which, after processing, results in
+        """Build the input which, after processing, results in
         the maximum possible number of placeholder tokens.
 
         Args:
             seq_len: Sequence length
             mm_counts: Count of items per modality
             mm_options: Configurable options per modality (optional)
+
         """
         dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)

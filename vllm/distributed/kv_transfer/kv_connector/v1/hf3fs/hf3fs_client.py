@@ -67,6 +67,7 @@ class Hf3fsClient:
             size: Total size of the storage file in bytes
             bytes_per_page: Size of each page in bytes
             entries: Maximum number of concurrent operations
+
         """
         if not HF3FS_AVAILABLE:
             raise ImportError(
@@ -192,6 +193,7 @@ class Hf3fsClient:
 
         Returns:
             List of operation results (0 for success, non-zero for error)
+
         """
         self.check(offsets, tensors)
         assert self.ior_r is not None
@@ -231,8 +233,8 @@ class Hf3fsClient:
 
         Returns:
             List of operation results (0 for success, non-zero for error)
-        """
 
+        """
         self.check(offsets, tensors)
         assert self.ior_w is not None
         assert self.iov_w is not None
@@ -282,6 +284,7 @@ class Hf3fsClient:
 
         Returns:
             Size of the file in bytes
+
         """
         return self.size
 

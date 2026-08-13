@@ -76,8 +76,7 @@ _memory_fence_lock = threading.Lock()
 
 
 def memory_fence():
-    """
-    Full memory barrier for shared memory synchronization.
+    """Full memory barrier for shared memory synchronization.
 
     Ensures all prior memory writes are visible to other processes before
     any subsequent reads. This is critical for lock-free producer-consumer
@@ -110,8 +109,7 @@ LONG_WAIT_TIME_LOG_MSG = (
 
 
 class SpinCondition:
-    """
-    This class implements an interface similar to a threading.Condition. It
+    """This class implements an interface similar to a threading.Condition. It
     allows a writer to notify readers to wake up and read from the shared memory
     buffer. This notification is done over a zmq socket.
 
@@ -233,6 +231,7 @@ def check_shm_free_space(required_bytes: int, shm_path: str = SHM_PATH) -> None:
 
     Raises:
         RuntimeError: If ``required_bytes`` exceeds the free space.
+
     """
     if not os.path.isdir(shm_path):
         return
@@ -639,7 +638,8 @@ class MessageQueue:
 
     def shutdown(self):
         """If this is an idle reader, wakes it up so it can clean up and shut
-        down"""
+        down
+        """
         self.shutting_down = True
         if self._spin_condition is not None:
             self._spin_condition.cancel()
@@ -749,7 +749,8 @@ class MessageQueue:
 
         def should_warn(self) -> bool:
             """Returns true if it's time to log a warning for a timeout that is not
-            indefinite"""
+            indefinite
+            """
             if self._should_warn:
                 elapsed = time.monotonic() - self.started
                 if elapsed >= VLLM_RINGBUFFER_WARNING_INTERVAL * self.n_warning:
@@ -929,8 +930,7 @@ class MessageQueue:
         reader_rank: int = 0,
         blocking: bool = False,
     ) -> tuple["MessageQueue", list[Handle]]:
-        """
-        Creates a MessageQueue for a process group with a single reader.
+        """Creates a MessageQueue for a process group with a single reader.
 
         This method is designed for scenarios where only one process (the reader)
         will consume messages, and all other processes are writers. It sets up
@@ -950,6 +950,7 @@ class MessageQueue:
             tuple[MessageQueue, list[Handle]]:
             The MessageQueue instance for the calling process,
             and a list of handles (only non-empty for the reader process).
+
         """
         from vllm.platforms.interface import get_assigned_physical_gpu_ids
 
@@ -982,8 +983,7 @@ class MessageQueue:
         external_writer_handle=None,
         blocking: bool = True,
     ) -> "MessageQueue":
-        """
-        Creates a MessageQueue for a distributed process group with one writer and
+        """Creates a MessageQueue for a distributed process group with one writer and
         multiple readers.
 
         This method is designed for scenarios where one process (the writer) sends

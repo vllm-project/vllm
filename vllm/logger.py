@@ -107,17 +107,16 @@ def _should_log_with_scope(scope: LogScope) -> bool:
 
 
 class _VllmLogger(Logger):
-    """
-    Note:
-        This class is just to provide type information.
-        We actually patch the methods directly on the [`logging.Logger`][]
-        instance to avoid conflicting with other libraries such as
-        `intel_extension_for_pytorch.utils._logger`.
+    """Note:
+    This class is just to provide type information.
+    We actually patch the methods directly on the [`logging.Logger`][]
+    instance to avoid conflicting with other libraries such as
+    `intel_extension_for_pytorch.utils._logger`.
+
     """
 
     def debug_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
-        """
-        As [`debug`][logging.Logger.debug], but subsequent calls with
+        """As [`debug`][logging.Logger.debug], but subsequent calls with
         the same message are silently dropped.
         """
         if not _should_log_with_scope(scope):
@@ -125,8 +124,7 @@ class _VllmLogger(Logger):
         _print_debug_once(self, msg, *args)
 
     def info_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
-        """
-        As [`info`][logging.Logger.info], but subsequent calls with
+        """As [`info`][logging.Logger.info], but subsequent calls with
         the same message are silently dropped.
         """
         if not _should_log_with_scope(scope):
@@ -136,8 +134,7 @@ class _VllmLogger(Logger):
     def warning_once(
         self, msg: str, *args: Hashable, scope: LogScope = "local"
     ) -> None:
-        """
-        As [`warning`][logging.Logger.warning], but subsequent calls with
+        """As [`warning`][logging.Logger.warning], but subsequent calls with
         the same message are silently dropped.
         """
         if not _should_log_with_scope(scope):
@@ -204,8 +201,8 @@ def _configure_vllm_root_logger() -> None:
 def init_logger(name: str) -> _VllmLogger:
     """The main purpose of this function is to ensure that loggers are
     retrieved in such a way that we can be sure the root vllm logger has
-    already been configured."""
-
+    already been configured.
+    """
     logger = logging.getLogger(name)
 
     for method_name, method in _METHODS_TO_PATCH.items():
@@ -292,8 +289,7 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
 
 
 def enable_trace_function_call(log_file_path: str, root_dir: str | None = None):
-    """
-    Enable tracing of every function call in code under `root_dir`.
+    """Enable tracing of every function call in code under `root_dir`.
     This is useful for debugging hangs or crashes.
     `log_file_path` is the path to the log file.
     `root_dir` is the root directory of the code to trace. If None, it is the

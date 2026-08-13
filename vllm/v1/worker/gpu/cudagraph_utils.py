@@ -48,7 +48,8 @@ class AttentionState(NamedTuple):
 @dataclass(frozen=True)
 class BatchExecutionDescriptor:
     """Describes the shape of the batch and CG mode to run; this is used to make shape
-    matches between the capture and runtime."""
+    matches between the capture and runtime.
+    """
 
     cg_mode: CUDAGraphMode
     num_tokens: int
@@ -63,7 +64,8 @@ class BatchExecutionDescriptor:
 class CreateForwardFn(Protocol):
     """Factory that prepares inputs (OUTSIDE the graph) and returns a
     forward_fn. Called with warmup=True for the warmup pass and warmup=False
-    for the captured pass."""
+    for the captured pass.
+    """
 
     def __call__(
         self,
@@ -317,6 +319,7 @@ class CudaGraphManager:
                 it is invoked once with warmup=True and again with warmup=False
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
+
         """
         with graph_capture(device=self.device):
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
@@ -388,7 +391,6 @@ class CudaGraphManager:
         max_query_len: int | None = None,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
-
         effective_loras = self._resolve_effective_loras(num_active_loras)
         key = (num_tokens, effective_loras)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:

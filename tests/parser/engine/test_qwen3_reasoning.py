@@ -499,7 +499,8 @@ class TestTrailingWhitespaceStripping:
 
 class TestWhitespaceStrippingDisabled:
     """When strip_trailing_reasoning_whitespace is False,
-    trailing whitespace in reasoning must be preserved."""
+    trailing whitespace in reasoning must be preserved.
+    """
 
     @pytest.fixture
     def parser_no_strip(self):
@@ -557,7 +558,8 @@ class TestThinkingDisabled:
     def test_thinking_disabled_streaming_content_only(self, mock_tokenizer):
         """Plain text with thinking disabled must stream as content, not
         reasoning.  Before the fix, the REASONING initial state caused all
-        output to be emitted as reasoning chunks."""
+        output to be emitted as reasoning chunks.
+        """
         p = Qwen3Parser(
             mock_tokenizer,
             chat_template_kwargs={"enable_thinking": False},

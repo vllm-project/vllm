@@ -106,8 +106,7 @@ def backend_to_kernel_cls(
 
 
 def _get_priority_backends() -> list[WNA16MoEBackend]:
-    """
-    Get available backends in priority order based on platform and config.
+    """Get available backends in priority order based on platform and config.
     """
     if current_platform.is_cpu():
         return [WNA16MoEBackend.CPU]
@@ -216,8 +215,8 @@ def select_wna16_moe_backend(
 
     Returns:
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
-    """
 
+    """
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
@@ -504,7 +503,8 @@ def _process_weights_flashinfer(
 
 def _pad_w13_shard_cols(x: torch.Tensor, unit: int, padded_unit: int) -> torch.Tensor:
     """Zero-pad each of the two gate/up shards of a ``(E, rows, 2 * unit)``
-    tensor along its last dim, from ``unit`` to ``padded_unit`` columns."""
+    tensor along its last dim, from ``unit`` to ``padded_unit`` columns.
+    """
     if padded_unit == unit:
         return x
     e, rows, _ = x.shape
@@ -1085,7 +1085,8 @@ def _humming_wna16_weight_schema(
     quant_config: QuantizationConfig | QuantizationArgs | None,
 ) -> dict[str, Any]:
     """Humming weight schema for a WNA16 checkpoint, derived from the quant
-    config rather than the running kernel."""
+    config rather than the running kernel.
+    """
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 
@@ -1187,6 +1188,7 @@ def _unpack_and_dequant_int4_gptq(
 
     Returns:
         Dequantized weight tensor in the requested layout.
+
     """
     E, K_packed, N = w_int32.shape
     K = K_packed * 8
@@ -1249,6 +1251,7 @@ def _unpack_and_dequant_int4_awq(
 
     Returns:
         Dequantized weight tensor in the requested layout.
+
     """
     E, K, N_packed = w_int32.shape
     N = N_packed * 8
@@ -1449,6 +1452,7 @@ def convert_to_wna16_moe_kernel_format(
         layer: the ``MoERunner`` layer whose parameters are being prepared.
         quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
+
     """
     if backend == WNA16MoEBackend.HUMMING:
         from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config

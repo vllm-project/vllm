@@ -20,8 +20,7 @@ from .punica_base import PunicaWrapperBase
 # The platforms that are compatible with the PyTorch-native implementation can
 # inherit this class
 class PunicaWrapperCPU(PunicaWrapperBase):
-    """
-    PunicaWrapperCPU is designed to manage and provide metadata for the punica
+    """PunicaWrapperCPU is designed to manage and provide metadata for the punica
     kernel. The main function is to maintain the state information for
     Multi-LoRA, and to provide the interface for the pytorch punica ops.
     """
@@ -133,12 +132,10 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool = True,
     ):
-        """
-        Perform the ` y[:,y_offset:y_offset+y_slice_size]+=x@w_t_all`
+        """Perform the ` y[:,y_offset:y_offset+y_slice_size]+=x@w_t_all`
         computation, which is suitable for the
         GEMM of lora'b.
         """
-
         expand_slice_fun: Callable = (
             self._expand_slice_prefill if self.is_prefill else self._expand_slice_decode
         )
@@ -147,8 +144,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
     def _apply_shrink(
         self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float
     ):
-        """
-        Perform the ` y+=x@w_t_all` computation, which is suitable for the
+        """Perform the ` y+=x@w_t_all` computation, which is suitable for the
         GEMM of lora'a.
         When `is_prefill is` true, it indicates that it is currently the
         prefill stage, and the `_shrink_prefill` function should be called.
@@ -171,8 +167,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         scale: float,
         **kwargs,
     ):
-        """
-        Performs GEMM  for multiple slices of lora_a.
+        """Performs GEMM  for multiple slices of lora_a.
         When `is_prefill is` true, it indicates that it is currently the
         prefill stage, and the `_shrink_prefill` function should be called.
         Otherwise, it is the decode stage, and the _shrink_decode function
@@ -187,8 +182,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
-        """
 
+        """
         x = x.view(-1, x.shape[-1])
         # TODO fuse these kernels
         for slice_idx in range(len(lora_a_stacked)):
@@ -204,8 +199,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         add_inputs=True,
         **kwargs,
     ) -> None:
-        """
-        Performs GEMM for multiple slices of lora_b.
+        """Performs GEMM for multiple slices of lora_b.
 
         Semantics:
             for i in range(len(lora_b_stacked)):
@@ -219,6 +213,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
             output_slices (tuple[int, ...]): Every slice's size
             add_inputs (bool):  Defaults to True.
+
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
@@ -243,8 +238,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         add_inputs: bool = True,
         **kwargs,
     ) -> None:
-        """
-        Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
+        """Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
 
         Semantics:
             y += x @ lora_b_stacked
@@ -254,8 +248,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
-        """
 
+        """
         # Embedding layer only need expand op
         expand_fun: Callable = (
             self._expand_prefill if self.is_prefill else self._expand_decode
@@ -274,8 +268,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         buffer: tuple[torch.Tensor, ...] | None = None,
         **kwargs,
     ) -> None:
-        """
-        Applicable to linear-related lora.
+        """Applicable to linear-related lora.
 
         Semantics:
             for i in range(len(lora_a_stacked)):
@@ -294,8 +287,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[tuple[torch.Tensor, ...]]): Defaults to None.
-        """
 
+        """
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
 
         if buffer is None:
@@ -322,8 +315,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> None:
-        """
-        Applies lora  specifically for LogitsProcessorWithLoRA.
+        """Applies lora  specifically for LogitsProcessorWithLoRA.
 
         Semantics:
             buffer = (x @ lora_a_stacked) * scale
@@ -336,6 +328,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor):lora_b's weights.
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
+
         """
         y_org = y
         y = y.view(-1, y.shape[-1])

@@ -65,8 +65,7 @@ from vllm.sequence import IntermediateTensors
 
 
 class Olmo3Attention(nn.Module):
-    """
-    This is the attention block where the output is computed as
+    """This is the attention block where the output is computed as
     `Attention(LN(x))` in `MLP(LN(x + Attention(LN(x))))`
     (plus another skip connection).
     """
@@ -184,8 +183,7 @@ class Olmo3Attention(nn.Module):
 
 
 class Olmo3MLP(nn.Module):
-    """
-    This is the MLP block where the output is computed as
+    """This is the MLP block where the output is computed as
     `MLP(x)` in `LN(MLP(x + LN(Attention(x))))`
     (plus another skip connection).
     """
@@ -229,8 +227,7 @@ class Olmo3MLP(nn.Module):
 
 
 class Olmo3DecoderLayer(nn.Module):
-    """
-    This is a typical transformer block where the output is
+    """This is a typical transformer block where the output is
     computed as `MLP(LN(x + Attention(LN(x))))`
     (plus another skip connection).
     """
@@ -310,9 +307,9 @@ class Olmo3Model(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        """
-        Args:
-            input_ids: A tensor of shape `(batch_size, seq_len)`.
+        """Args:
+        input_ids: A tensor of shape `(batch_size, seq_len)`.
+
         """
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -342,8 +339,7 @@ class Olmo3Model(nn.Module):
 
 
 class Olmo3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
-    """
-    Extremely barebones HF model wrapper.
+    """Extremely barebones HF model wrapper.
     """
 
     hf_to_vllm_mapper = WeightsMapper(

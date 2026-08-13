@@ -142,8 +142,7 @@ def silu_mul_quant(
 
 
 def pack_scales(x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
-    """
-    pack float32 scales into a int32 tensor
+    """Pack float32 scales into a int32 tensor
     """
     assert x.dtype == torch.float32
     E, T, G = x.size()
@@ -170,8 +169,7 @@ def ref_with_scale_fmt(
     up: torch.Tensor,
     scale_fmt: DeepGemmQuantScaleFMT,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    The precision types of the operations triggered by this function
+    """The precision types of the operations triggered by this function
     match closely with the kernel implementation so we compare more
     accurately.
     """
@@ -204,8 +202,7 @@ def ref_with_scale_fmt(
 
 
 def token_random(E, T, H2, tokens_per_expert):
-    """
-    Initialize each token in a random range so we test a range of
+    """Initialize each token in a random range so we test a range of
     scale values.
     """
     y = torch.empty((E, T, H2), dtype=torch.bfloat16, device=DEVICE)

@@ -236,7 +236,8 @@ class MLAFuser(StackedFuser):
     def update_forward(self, module: nn.Module) -> None:
         """Merge `q_a_proj` and `kv_a_proj` into one fused down proj then split.
         Bypass the KV expansion method so the compressed latent reaches the `vllm_mla`
-        attention interface unexpanded."""
+        attention interface unexpanded.
+        """
         funcdef, fn = recover_forward(type(module))
         if self.has_q_lora:
             # q_a_proj is usually inside the `else` of `if self.q_lora_rank is None`.

@@ -35,7 +35,6 @@ _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
-
     if socket_type not in (zmq.ROUTER, zmq.REQ):
         raise ValueError(f"Unexpected socket type: {socket_type}")
 

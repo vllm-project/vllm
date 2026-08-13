@@ -43,17 +43,20 @@ class BaseFuser(ABC):
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> nn.Module:
         """Apply the fusion to an already-validated `module`, returning the
-        module to install in its place (mutated in place, or freshly built)."""
+        module to install in its place (mutated in place, or freshly built).
+        """
 
     def orig_to_new_stacked(self, prefix: str) -> dict[str, tuple[str, ShardId]]:
         """`WeightsMapper.orig_to_new_stacked` entries this fuser contributes
-        (none unless it stacks weights)."""
+        (none unless it stacks weights).
+        """
         return {}
 
     @property
     def packed_modules_mapping(self) -> dict[str, list[str]]:
         """`packed_modules_mapping` entries this fuser contributes (none unless
-        it stacks weights)."""
+        it stacks weights).
+        """
         return {}
 
 
@@ -107,7 +110,8 @@ class RewriteFuser(BaseFuser):
     ) -> nn.Module:
         """Fuse an already-validated `module` in place (see `Fusers.__getitem__`).
 
-        Builds the merged submodule and binds the compiled forward."""
+        Builds the merged submodule and binds the compiled forward.
+        """
         self.update_attrs(module, prefix, vllm_config)
         module.forward = types.MethodType(self.fused_forward, module)
         return module
@@ -116,7 +120,8 @@ class RewriteFuser(BaseFuser):
 @dataclass
 class StackedFuser(RewriteFuser):
     """A fuser that merges sibling projections into one stacked linear and
-    rewrites the forward to call it."""
+    rewrites the forward to call it.
+    """
 
     merged_name: ClassVar[str]
     """Attribute name of the merged module created by `update_attrs`."""
@@ -135,14 +140,16 @@ class StackedFuser(RewriteFuser):
     def shards(self) -> list[tuple[str, ShardId]]:
         """Each projection's original name and its shard id in the merged module.
 
-        Source for both `orig_to_new_stacked` and `packed_modules_mapping`."""
+        Source for both `orig_to_new_stacked` and `packed_modules_mapping`.
+        """
 
     def orig_to_new_stacked(self, prefix: str) -> dict[str, tuple[str, ShardId]]:
         """`WeightsMapper.orig_to_new_stacked` entries for one fused instance.
 
         Maps each checkpoint name to `(merged_name, shard_id)`, keyed by qualname
         so only this exact layer is remapped, never a same-named projection
-        elsewhere (e.g. an unfused MoE expert's `gate_proj`)."""
+        elsewhere (e.g. an unfused MoE expert's `gate_proj`).
+        """
         merged = maybe_prefix(prefix, self.merged_name)
         return {
             maybe_prefix(prefix, name): (merged, shard) for name, shard in self.shards
@@ -151,5 +158,6 @@ class StackedFuser(RewriteFuser):
     @property
     def packed_modules_mapping(self) -> dict[str, list[str]]:
         """`{merged_name: [projection names]}` so quantization can unpack the
-        fused layer into its per-shard configs."""
+        fused layer into its per-shard configs.
+        """
         return {self.merged_name: [name for name, _ in self.shards]}

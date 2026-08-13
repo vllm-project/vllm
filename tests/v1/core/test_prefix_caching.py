@@ -105,7 +105,8 @@ def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheMa
     """Build a ``KVCacheManager``, deriving ``scheduler_block_size`` from the
     config (LCM of group block sizes) unless explicitly provided. This mirrors
     ``resolve_kv_cache_block_sizes`` for the non-context-parallel case used by
-    these tests, so callers don't have to pass it at every site."""
+    these tests, so callers don't have to pass it at every site.
+    """
     kwargs.setdefault(
         "scheduler_block_size",
         lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
@@ -727,8 +728,7 @@ def _test_partial_request_hit(
 def _make_hybrid_kv_cache_config(
     block_size: int, num_blocks: int, spec_types: list[str]
 ) -> KVCacheConfig:
-    """
-    Create a KVCacheConfig with the specified spec types.
+    """Create a KVCacheConfig with the specified spec types.
 
     Args:
         block_size: The block size for KV cache.
@@ -738,6 +738,7 @@ def _make_hybrid_kv_cache_config(
             - "sliding_window": SlidingWindowSpec with window=2*block_size
             - "sliding_window_large": SlidingWindowSpec with window=4*block_size
             - "mamba": MambaSpec
+
     """
     spec_map = {
         "full": lambda: FullAttentionSpec(
@@ -839,8 +840,7 @@ _HYBRID_MODEL_TEST_CASES = [
 
 @pytest.mark.parametrize("spec_types", _HYBRID_MODEL_TEST_CASES)
 def test_prefill_hybrid_model_combinations(spec_types: list[str]):
-    """
-    Test prefix caching with hybrid models containing various combinations of
+    """Test prefix caching with hybrid models containing various combinations of
     KV cache spec types.
 
     This unified test covers:
@@ -922,8 +922,7 @@ _EAGLE_HYBRID_MODEL_TEST_CASES = [
 def test_prefill_hybrid_model_combinations_eagle(
     spec_types: list[str], expect_hit_length: int
 ):
-    """
-    Test prefix caching with hybrid models (1 full attn + 1 other) with EAGLE.
+    """Test prefix caching with hybrid models (1 full attn + 1 other) with EAGLE.
     More complex hybrid models with EAGLE are not yet supported (see issue #32802).
     """
     block_size = 16
@@ -1387,8 +1386,7 @@ def test_evict():
 
 
 def test_hash_block_correct_reuse():
-    """
-    This tests when a previously cached block is reused as a new block,
+    """This tests when a previously cached block is reused as a new block,
     its hash metadata should be correctly reset.
     """
     block_size = 16
@@ -1428,8 +1426,7 @@ def test_hash_block_correct_reuse():
 
 
 def test_computed_blocks_not_evicted():
-    """
-    Test that the computed blocks are not evicted when getting new blocks
+    """Test that the computed blocks are not evicted when getting new blocks
     for a request if there are any other free blocks.
     """
     block_size = 16
@@ -1488,8 +1485,7 @@ def test_computed_blocks_not_evicted():
 
 
 def test_basic_prefix_caching_disabled():
-    """
-    This tests that the prefix caching is disabled.
+    """This tests that the prefix caching is disabled.
     """
     block_size = 4
     manager = make_kv_cache_manager(
@@ -1537,11 +1533,9 @@ def test_basic_prefix_caching_disabled():
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_cache_blocks(hash_fn):
-    """
-    This is a unit test that tests the correctness of the _cache_full_blocks
+    """This is a unit test that tests the correctness of the _cache_full_blocks
     function of KVCacheManager.
     """
-
     block_size = 4
     block_pool = BlockPool(
         num_gpu_blocks=5,
@@ -1586,8 +1580,7 @@ def test_cache_blocks(hash_fn):
 
 
 def test_cache_blocks_multi_group():
-    """
-    This tests that blocks are cached correctly for different kv cache groups.
+    """This tests that blocks are cached correctly for different kv cache groups.
     """
     block_size = 4
     block_pool = BlockPool(
@@ -1671,10 +1664,8 @@ def test_cache_blocks_multi_group():
 
 
 def test_mm_prefix_caching():
+    """This tests that the multi-modal prefix caching is correct.
     """
-    This tests that the multi-modal prefix caching is correct.
-    """
-
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, 11),
@@ -1779,8 +1770,7 @@ def test_mm_prefix_caching():
 
 
 def test_cache_key_salting():
-    """
-    This tests that cache salts are applied during hashing and the cache
+    """This tests that cache salts are applied during hashing and the cache
     is separated cache as expected.
     """
     block_size = 16
@@ -1859,8 +1849,7 @@ def test_cache_key_salting():
 
 
 def test_prefill_not_enough_free_blocks_with_computed_blocks():
-    """
-    This is a unit test that tests the correctness of the allocate_slots
+    """This is a unit test that tests the correctness of the allocate_slots
     when there is not enough free blocks. Specifically, when a request
     has computed blocks but cannot be allocated due to not enough free blocks,
     the computed blocks should not be touched.
@@ -2242,7 +2231,8 @@ def test_kv_cache_events_with_lora(blocks_to_cache: int):
 @pytest.mark.parametrize("group_id", [0, 1, 2])
 def test_block_stored_event_group_idx(group_id: int):
     """Test BlockStored events emitted by cache_full_blocks carry the correct
-    group_idx."""
+    group_idx.
+    """
     block_size = 4
     num_tokens = block_size * 2
 
@@ -2295,8 +2285,7 @@ def test_block_stored_event_group_idx(group_id: int):
 
 
 def test_block_stored_event_group_idx_multiple_groups():
-    """
-    Test BlockStored events for separate HMA groups that each carry the
+    """Test BlockStored events for separate HMA groups that each carry the
     correct group_idx.
 
     Simulates the HMA scenario where full-attention blocks (group 0) and
@@ -2418,8 +2407,7 @@ def test_block_stored_event_group_idx_out_of_bounds(monkeypatch):
 
 @pytest.mark.parametrize("group_id", [0, 1, 2])
 def test_block_removed_event_group_idx(group_id: int):
-    """
-    Test BlockRemoved events emitted on eviction carry the group_idx extracted
+    """Test BlockRemoved events emitted on eviction carry the group_idx extracted
     from the evicted block's BlockHashWithGroupId via get_group_id().
     """
     block_size = 4
@@ -2472,7 +2460,8 @@ def test_block_removed_event_group_idx(group_id: int):
 def test_emit_cached_block_events():
     """emit_cached_block_events emits one BlockStored for already-cached
     (reused) prefix blocks, carrying the correct group_idx /
-    parent_block_hash / token_ids, and without mutating block state."""
+    parent_block_hash / token_ids, and without mutating block state.
+    """
     block_size = 4
     num_cached_blocks = 3
     kv_cache_group_id = 1
@@ -2583,7 +2572,8 @@ def test_emit_cached_block_events_zero_cached():
 
 def test_eagle_enabled_removes_last_block():
     """Verify Eagle does NOT remove blocks when request
-    length is divisible by block size."""
+    length is divisible by block size.
+    """
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, num_blocks=10),
@@ -2986,7 +2976,8 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
     (its right-to-left scan stops once a contiguous match is found). Blocks
     earlier in the segment can never serve a hit, so
     ``HybridKVCacheCoordinator.cache_blocks`` should skip them rather than
-    polluting the prefix-cache hash map."""
+    polluting the prefix-cache hash map.
+    """
     block_size = 8
     # Full attn block_size=32, SWA block_size=8, sw=8 -> lcm=32.
     # tail = ceil(7/8) = 1; per_segment = 32/8 = 4.
@@ -3057,7 +3048,8 @@ def test_hybrid_cache_blocks_clamped_to_lcm():
     Chunks past the last lcm-aligned boundary can never participate in a
     cache hit (find_longest_cache_hit always returns lcm-aligned hits), so
     caching them only pollutes the prefix-cache hash map and keeps blocks
-    on the LRU list that could otherwise return to the free pool."""
+    on the LRU list that could otherwise return to the free pool.
+    """
     block_size = 16
     # Full attn block_size=32, SWA block_size=16 -> lcm=32.
     kv_cache_config = KVCacheConfig(
@@ -3194,7 +3186,8 @@ def test_hybrid_local_kv_retention_interval_rejects_invalid(
     monkeypatch, interval, expected_match
 ):
     """A retention interval that is negative or not a multiple of
-    scheduler_block_size errors out at construction time."""
+    scheduler_block_size errors out at construction time.
+    """
     monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", interval)
     block_size = 8
     kv_cache_config = KVCacheConfig(
@@ -3541,7 +3534,8 @@ def test_block_lookup_cache_multi_blocks_per_key():
 def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
     """Hybrid full+SWA model with a pool sized at the startup minimum should
     admit a prompt longer than the SWA cap, because SlidingWindowManager
-    recycles blocks during chunked prefill (issue #39734)."""
+    recycles blocks during chunked prefill (issue #39734).
+    """
     block_size = 16
     sliding_window = 4 * block_size  # 64 tokens
     max_num_batched_tokens = 8 * block_size  # 128 tokens
@@ -3600,7 +3594,8 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
 
 def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     """The cap only loosens the SWA group; a prompt that exceeds the
-    full-attention pool capacity must still be rejected."""
+    full-attention pool capacity must still be rejected.
+    """
     block_size = 16
     sliding_window = 4 * block_size
     max_num_batched_tokens = 8 * block_size
@@ -3695,7 +3690,8 @@ def _take_free_blocks(manager: KVCacheManager, num_blocks: int) -> list[KVCacheB
     without removing them. These ref_cnt==0 blocks stand in for evictable
     cache-hit blocks left behind by a previous (e.g. preempted) request, and
     sitting at the head guarantees a later group's external ``get_new_blocks``
-    would contend for them on unpatched code (issue #33775)."""
+    would contend for them on unpatched code (issue #33775).
+    """
     blocks: list[KVCacheBlock] = []
     head = manager.block_pool.free_block_queue.fake_free_list_head
     for _ in range(num_blocks):
@@ -3706,7 +3702,8 @@ def _take_free_blocks(manager: KVCacheManager, num_blocks: int) -> list[KVCacheB
 
 def _assert_no_double_allocation(manager: KVCacheManager, req_id: str) -> None:
     """No physical block may be handed out twice across groups, and every
-    block referenced by the request must have a live ref_cnt."""
+    block referenced by the request must have a live ref_cnt.
+    """
     block_ids = manager.get_blocks(req_id).get_block_ids()
     flat = [block_id for group in block_ids for block_id in group]
     assert len(set(flat)) == len(flat), "Block IDs are not unique across groups"
@@ -3733,7 +3730,8 @@ def _cross_group_cache_hit(
 ) -> Request:
     """Allocate ``req_id`` with a per-group local prefix hit plus external
     (connector) computed tokens, driving the coordinator's two-phase path.
-    Returns the allocated request so callers can free it (e.g. to preempt)."""
+    Returns the allocated request so callers can free it (e.g. to preempt).
+    """
     block_size = _two_phase_block_size(manager)
     hit_blocks = _take_free_blocks(manager, num_groups * local_blocks_per_group)
     cache_hit = KVCacheBlocks(
@@ -3828,7 +3826,8 @@ def test_swa_free_split_keeps_cached_tail_ahead_of_scratch(monkeypatch):
     """Default path (no retention): freeing an SWA request must place its
     uncached scratch blocks at the front of the free queue (recycled first)
     and keep its cached checkpoint blocks at the back (retained for prefix
-    hits). This split is always-on, independent of the retention interval."""
+    hits). This split is always-on, independent of the retention interval.
+    """
     monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
     block_size = 8
     kv_cache_config = KVCacheConfig(
@@ -3940,7 +3939,8 @@ def _make_pure_swa_manager(block_size, sliding_window, num_blocks=100, **kwargs)
 def test_pure_swa_retention_interval_caches_sparse_tails(monkeypatch):
     """Sparse retention must work for a pure-SWA single-group model, not just
     hybrid models: only the per-interval tails plus the latest replay tail are
-    cached, and a replay still hits the latest replayable boundary."""
+    cached, and a replay still hits the latest replayable boundary.
+    """
     monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "64")
     block_size = 16
     manager = _make_pure_swa_manager(block_size, sliding_window=block_size)
@@ -4010,7 +4010,8 @@ def test_pure_swa_retention_latest_only(monkeypatch):
 
 def test_pure_swa_retention_dense_default_caches_all(monkeypatch):
     """With retention unset, a pure-SWA model must keep the dense behavior:
-    every block boundary is a potential hit, so all blocks are cached."""
+    every block boundary is a potential hit, so all blocks are cached.
+    """
     monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
     block_size = 16
     manager = _make_pure_swa_manager(block_size, sliding_window=block_size)
@@ -4040,7 +4041,8 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
     """Mamba state-snapshot retention: with VLLM_PREFIX_CACHE_RETENTION_INTERVAL
     the manager keeps one cached state per interval-sized segment (plus the
     latest replay boundary) instead of a snapshot per block, which is what
-    lets a small attention block_size avoid Mamba dominating the KV pool."""
+    lets a small attention block_size avoid Mamba dominating the KV pool.
+    """
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
     block_size = 16
@@ -4078,7 +4080,8 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     """A Marconi-detected shared prefix (``shared_prefix_boundary``) lands before
     ``num_prompt`` so the replay-boundary rule alone would drop it. The mask must
     pin the single state block ending on that boundary so sparse retention does
-    not defeat cross-request shared-prefix reuse."""
+    not defeat cross-request shared-prefix reuse.
+    """
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
     block_size = 16
@@ -4126,7 +4129,8 @@ def test_mamba_shared_prefix_survives_zero_retention(monkeypatch):
     detection) keeps its Mamba state block cached under
     ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``, which otherwise retains only the
     end-of-prompt replay boundary. Without this, a shared prefix (junction
-    before ``num_prompt``) would be recomputed by every sharing request."""
+    before ``num_prompt``) would be recomputed by every sharing request.
+    """
     monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
     block_size = 16
 
@@ -4168,7 +4172,8 @@ def test_mamba_shared_prefix_reuse_under_zero_retention(monkeypatch):
     detecting request must stay reusable by a later request under
     ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``. Without the pin the junction is
     masked out and the later request misses; with it (and under dense) the reuse
-    is preserved."""
+    is preserved.
+    """
     block_size = 16
 
     def last_req_hit(retention, pin):
@@ -4219,7 +4224,8 @@ def test_mamba_shared_prefix_reuse_under_zero_retention(monkeypatch):
 def test_swa_reachable_block_mask_pins_shared_prefix():
     """SWA analog of the Mamba pin: the shared-prefix junction must keep the
     ``need``-block sliding-window tail ending on that boundary (not a single
-    block), so a windowed hit can land there under sparse retention."""
+    block), so a windowed hit can land there under sparse retention.
+    """
     from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
     block_size = 16
@@ -4265,7 +4271,8 @@ def test_swa_shared_prefix_reuse_under_zero_retention(monkeypatch):
     """SWA cross-request analog: a partial shared prefix's sliding-window tail
     must stay reusable under ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``. Without
     the pin the junction window is masked out and a later request misses; with
-    it (and under dense) reuse is preserved."""
+    it (and under dense) reuse is preserved.
+    """
     block_size = 16
 
     def last_req_hit(retention, pin):

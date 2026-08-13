@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Expert parallelism load balancer (EPLB) metrics and states.
+"""Expert parallelism load balancer (EPLB) metrics and states.
 
 # Glossary
 
@@ -71,8 +70,7 @@ def _compute_eplb_load_stats(
 
 @dataclass
 class EplbStats:
-    """
-    Model stats used in EPLB rebalancing algorithm.
+    """Model stats used in EPLB rebalancing algorithm.
     """
 
     global_expert_load_window: torch.Tensor
@@ -226,8 +224,7 @@ class EplbModelState:
 
 
 class EplbState:
-    """
-    EplbState of each expert parallel model. Key is the model config hash.
+    """EplbState of each expert parallel model. Key is the model config hash.
     """
 
     def __init__(self, parallel_config: ParallelConfig, device: torch.device):
@@ -306,14 +303,14 @@ class EplbState:
         num_routed_experts: int,
         num_redundant_experts: int,
     ) -> Sequence[int]:
-        """
-        Build an initial expert arrangement using the following structure:
+        """Build an initial expert arrangement using the following structure:
         [original routed experts, redundant experts]
 
         Returns:
             physical_to_logical_map (Sequence[int]): A list of integers,
                 where each integer is the index of the logical expert
                 that the corresponding physical expert maps to.
+
         """
         global_physical_to_logical_map = list(range(num_routed_experts))
         global_physical_to_logical_map += [
@@ -322,8 +319,7 @@ class EplbState:
         return global_physical_to_logical_map
 
     def validate_ep_configuration(self, new_model: MixtureOfExperts):
-        """
-        Validate that the expert parallel configuration of
+        """Validate that the expert parallel configuration of
         the new model is the same as the existing models.
         """
         if len(self.model_states) > 0:
@@ -362,8 +358,7 @@ class EplbState:
         model: MixtureOfExperts,
         model_config: ModelConfig,
     ):
-        """
-        Build the initial EPLB state.
+        """Build the initial EPLB state.
         """
         self.validate_ep_configuration(model)
         self.is_async = self.parallel_config.eplb_config.use_async
@@ -516,6 +511,7 @@ class EplbState:
             ubatch_slices: When DBO is active, a list of
                 ``UBatchSlice`` objects describing each micro-batch's
                 token range.  When ``None``, only ``tensors[0]`` is filled.
+
         """
         model_state = self.model_states.get(compute_hash_cached(model_config))
         if model_state is None or model_state.num_unpadded_tokens_tensors is None:
@@ -538,8 +534,7 @@ class EplbState:
         is_profile: bool = False,
         log_stats: bool = False,
     ) -> None:
-        """
-        Step the EPLB state.
+        """Step the EPLB state.
 
         Args:
             is_dummy (bool): If `True`, this is a dummy step and the load
@@ -556,6 +551,7 @@ class EplbState:
             - `avg_tokens`: The average load across ranks.
             - `max_tokens`: The maximum load across ranks.
             - `balancedness`: The ratio of average load to maximum load.
+
         """
         ep_group = get_ep_group().device_group
         if is_profile:
@@ -733,8 +729,7 @@ class EplbState:
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
-        """
-        Rearrange the experts according to the current load.
+        """Rearrange the experts according to the current load.
 
         Args:
             is_profile (bool): If `True`, perform a dummy rearrangement.
@@ -742,8 +737,8 @@ class EplbState:
                 no memory movement will be performed. Default is False.
             rank_mapping (dict[int, int] | None): The rank mapping
                 when scaling is done in EEP.
-        """
 
+        """
         ep_group = get_ep_group().device_group
         ep_rank = ep_group.rank()
 
@@ -1012,8 +1007,7 @@ class EplbState:
         return int(flag.item()) == device_group.size()
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
-        """
-        All-reduce a list of tensors.
+        """All-reduce a list of tensors.
         """
         ep_group = get_ep_group().device_group
         if len(tensor_list) == 1:
@@ -1039,8 +1033,7 @@ class EplbState:
         return all_reduce_list
 
     def _sync_load_pass(self) -> list[torch.Tensor]:
-        """
-        Sync the expert load pass across all ranks for log stats.
+        """Sync the expert load pass across all ranks for log stats.
         Doesn't update the expert load pass in eplb_model_state.
         """
         load_pass_list = []
@@ -1169,8 +1162,7 @@ def compute_logical_maps(
     physical_to_logical_map: torch.Tensor,
     num_logical_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Derive logical_to_physical_map and logical_replica_count from
+    """Derive logical_to_physical_map and logical_replica_count from
     physical_to_logical_map.
 
     Args:
@@ -1183,6 +1175,7 @@ def compute_logical_maps(
             physical slots per logical expert; -1 where unused
         logical_replica_count: [num_layers, num_logical_experts], number of
             physical replicas per logical expert
+
     """
     device = physical_to_logical_map.device
     assert physical_to_logical_map.device.type == "cpu"
@@ -1256,13 +1249,11 @@ def _commit_eplb_maps_for_layer(
     new_physical_to_logical_map: torch.Tensor,
     layer: int,
 ) -> None:
-    """
-    Per-layer version of _commit_eplb_maps that's used by the sync portion of EPLB
+    """Per-layer version of _commit_eplb_maps that's used by the sync portion of EPLB
     when running async EPLB. Copies all of the new_* maps into model_state. After this
     function completes, the new mappings will become the current mappings and will be
     visible to the model.
     """
-
     # Commit physical_to_logical_map
     src = new_physical_to_logical_map
     dst = model_state.physical_to_logical_map[layer]
@@ -1292,12 +1283,10 @@ def _commit_eplb_maps(
     model_state: EplbModelState,
     new_physical_to_logical_map: torch.Tensor,
 ) -> None:
-    """
-    Copies all of the new_* maps into model_state. After this function completes,
+    """Copies all of the new_* maps into model_state. After this function completes,
     the new mappings will become the current mappings and will be visible to the
     model.
     """
-
     # Commit physical_to_logical_map
     src = new_physical_to_logical_map
     dst = model_state.physical_to_logical_map

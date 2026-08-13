@@ -17,8 +17,7 @@ logger = init_logger(__name__)
 
 
 class FixFunctionalizationPass(VllmInductorPass):
-    """
-    This pass defunctionalizes certain nodes to avoid redundant tensor copies.
+    """This pass defunctionalizes certain nodes to avoid redundant tensor copies.
     After this pass, DCE (dead-code elimination) should never be run,
     as de-functionalized nodes may appear as dead code.
 
@@ -246,8 +245,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         self.nodes_to_remove.clear()
 
     def _remove(self, node_or_nodes: torch.fx.Node | Iterable[torch.fx.Node]) -> None:
-        """
-        Stage a node (or nodes) for removal at the end of the pass.
+        """Stage a node (or nodes) for removal at the end of the pass.
         """
         if isinstance(node_or_nodes, torch.fx.Node):
             self.nodes_to_remove.append(node_or_nodes)
@@ -261,8 +259,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         mutated_args: dict[int, torch.fx.Node | str],
         args: tuple[torch.fx.Node | str, ...] | None = None,
     ) -> None:
-        """
-        De-functionalize a node by replacing it with a call to the original.
+        """De-functionalize a node by replacing it with a call to the original.
         It also replaces the getitem users with the mutated arguments.
         See replace_users_with_mutated_args and insert_defunctionalized.
         """
@@ -273,14 +270,14 @@ class FixFunctionalizationPass(VllmInductorPass):
     def replace_users_with_mutated_args(
         self, node: torch.fx.Node, mutated_args: dict[int, torch.fx.Node | str]
     ) -> None:
-        """
-        Replace mutated getitem users of the auto-functionalized node with the
+        """Replace mutated getitem users of the auto-functionalized node with the
         mutated arguments.
 
         Args:
             node: The auto-functionalized node
             mutated_args: The mutated arguments, indexed by getitem index.
                 If the value of an arg is a string, `node.kwargs[arg]` is used.
+
         """
         for idx, user in self.getitem_users(node).items():
             # Some functionalized nodes may return both a result at getitem[0]
@@ -296,8 +293,7 @@ class FixFunctionalizationPass(VllmInductorPass):
             self._remove(user)
 
     def getitem_users(self, node: torch.fx.Node) -> dict[int, torch.fx.Node]:
-        """
-        Returns the operator.getitem users of the auto-functionalized node,
+        """Returns the operator.getitem users of the auto-functionalized node,
         indexed by the index they are getting.
         """
         users = {}
@@ -313,8 +309,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         node: torch.fx.Node,
         args: tuple[torch.fx.Node | str, ...] | None = None,
     ) -> None:
-        """
-        Insert a new defunctionalized node into the graph before node.
+        """Insert a new defunctionalized node into the graph before node.
         If one of the kwargs is 'out', provide args directly,
         as node.kwargs cannot be used.
         See https://github.com/pytorch/pytorch/blob/a00faf440888ffb724bad413f329a49e2b6388e7/torch/_inductor/lowering.py#L351
@@ -324,6 +319,7 @@ class FixFunctionalizationPass(VllmInductorPass):
             node: The auto-functionalized node to defunctionalize
             args: If we cannot use kwargs, specify args directly.
                 If an arg is a string, `node.kwargs[arg]` is used.
+
         """  # noqa: E501
         assert is_func(node, auto_functionalized), (
             f"node must be auto-functionalized, is {node} instead"

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for max_tokens_per_doc and max_tokens_per_query.
+"""Tests for max_tokens_per_doc and max_tokens_per_query.
 """
 
 import json

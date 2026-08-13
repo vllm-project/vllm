@@ -17,8 +17,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class KVConnectorStats:
-    """
-    Base class for KV Connector Stats, a container for transfer performance
+    """Base class for KV Connector Stats, a container for transfer performance
     metrics or otherwise important telemetry from the connector.
     All sub-classes need to be serializable as stats are sent from worker to
     logger process.
@@ -31,14 +30,12 @@ class KVConnectorStats:
         raise NotImplementedError
 
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
-        """
-        Aggregate stats with another `KVConnectorStats` object.
+        """Aggregate stats with another `KVConnectorStats` object.
         """
         raise NotImplementedError
 
     def reduce(self) -> dict[str, int | float]:
-        """
-        Reduce the observations collected during a time interval to one or
+        """Reduce the observations collected during a time interval to one or
         more representative values (eg avg/median/sum of the series).
         This is meant to be called by the logger to produce a summary of the
         stats for the last time interval.
@@ -107,8 +104,7 @@ class KVConnectorLogging:
 
 
 class KVConnectorPromMetrics:
-    """
-    A base class for per-connector Prometheus metric registration
+    """A base class for per-connector Prometheus metric registration
     and recording.
     """
 
@@ -127,8 +123,7 @@ class KVConnectorPromMetrics:
         self.per_engine_labelvalues = per_engine_labelvalues
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
-        """
-        Record the supplied transfer statistics to Prometheus metrics. These
+        """Record the supplied transfer statistics to Prometheus metrics. These
         statistics are engine-specific, and should be recorded to a metric
         with the appropriate 'engine' label. These metric instances can be
         created using the create_metric_per_engine() helper method.
@@ -137,8 +132,7 @@ class KVConnectorPromMetrics:
 
 
 class KVConnectorProm:
-    """
-    Support for registering per-connector Prometheus metrics, and
+    """Support for registering per-connector Prometheus metrics, and
     recording transfer statistics to those metrics. Uses
     KVConnectorBase.build_prom_metrics().
     """

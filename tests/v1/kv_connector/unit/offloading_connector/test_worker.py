@@ -70,8 +70,7 @@ def _allocate_and_reshape_kv_caches(
     attn_groups: list[list],
     device: torch.device,
 ):
-    """
-    Use the real GPUModelRunner allocation and reshape methods to produce
+    """Use the real GPUModelRunner allocation and reshape methods to produce
     kv_caches, just like the model runner does during initialization.
     """
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -103,7 +102,8 @@ def _allocate_and_reshape_kv_caches(
 
 def _single_rank_vllm_config(total_kv_heads: int):
     """A one-rank (TP=1) parallel config, as canonical mappings are derived
-    from it."""
+    from it.
+    """
     vllm_config = MagicMock()
     parallel_config = vllm_config.parallel_config
     parallel_config.tensor_parallel_size = 1
@@ -121,8 +121,7 @@ def _make_worker(
     replicated_layout: bool = False,
     rank: int = 0,
 ):
-    """
-    Create an OffloadingConnectorWorker with mocked dependencies.
+    """Create an OffloadingConnectorWorker with mocked dependencies.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
         OffloadingConnectorWorker,

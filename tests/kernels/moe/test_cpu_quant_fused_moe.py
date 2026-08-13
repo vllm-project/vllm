@@ -696,6 +696,7 @@ def _make_int4_moe_weights(E, N, K, group_size, quant_algo):
         w1_zeros, w2_zeros,
         w1_zeros_packed, w2_zeros_packed,
         w1_s, w2_s
+
     """
     w1_int4 = torch.randint(0, 16, (E, K, 2 * N), dtype=torch.int32)
     w2_int4 = torch.randint(0, 16, (E, N, K), dtype=torch.int32)

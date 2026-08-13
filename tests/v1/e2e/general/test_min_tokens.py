@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Comprehensive end-to-end tests for `min_tokens` in the V1 engine.
+"""Comprehensive end-to-end tests for `min_tokens` in the V1 engine.
 
 Addresses #21950: verify and add CI coverage.
 
@@ -204,8 +203,7 @@ def assert_min_tokens_satisfied(
     ids=lambda tc: tc.name,
 )
 def test_min_tokens_comprehensive(llm_v1: LLM, test_case: MinTokensTestCase):
-    """
-    Comprehensive test for min_tokens functionality in V1 engine.
+    """Comprehensive test for min_tokens functionality in V1 engine.
 
     This test covers all critical scenarios for min_tokens:
     - Basic functionality (should work)
@@ -216,6 +214,7 @@ def test_min_tokens_comprehensive(llm_v1: LLM, test_case: MinTokensTestCase):
     Args:
         llm_v1: V1 LLM instance
         test_case: Test scenario parameters
+
     """
     # Known failing cases are handled via param-level xfail marks above.
 
@@ -255,8 +254,7 @@ def test_min_tokens_comprehensive(llm_v1: LLM, test_case: MinTokensTestCase):
 
 
 def test_min_tokens_basic_functionality(llm_v1: LLM):
-    """
-    Test basic min_tokens functionality without stop conditions.
+    """Test basic min_tokens functionality without stop conditions.
 
     This is a baseline test that should always pass and validates
     that min_tokens works correctly in the simple case.
@@ -278,8 +276,7 @@ def test_min_tokens_basic_functionality(llm_v1: LLM):
     strict=False,
 )
 def test_min_tokens_stop_strings_bug(llm_v1: LLM):
-    """
-    Test the specific bug where stop strings bypass min_tokens.
+    """Test the specific bug where stop strings bypass min_tokens.
 
     This test specifically reproduces the bug Calvin is fixing in PR #22014.
     It should fail until that fix is merged.
@@ -329,8 +326,7 @@ def test_min_tokens_stop_strings_bug(llm_v1: LLM):
     strict=False,
 )
 def test_min_tokens_stop_strings_guaranteed_early_trigger(llm_v1: LLM):
-    """
-    Guaranteed test for stop strings bypassing min_tokens bug.
+    """Guaranteed test for stop strings bypassing min_tokens bug.
 
     Strategy: Use very low temperature and multiple common stop strings
     to virtually guarantee early detection, combined with long min_tokens
@@ -384,8 +380,7 @@ def test_min_tokens_stop_strings_guaranteed_early_trigger(llm_v1: LLM):
     strict=False,
 )
 def test_min_tokens_eos_behavior(llm_v1: LLM):
-    """
-    Verify EOS handling with and without min_tokens.
+    """Verify EOS handling with and without min_tokens.
 
     - Without min_tokens: expect early EOS -> finish_reason == "stop",
       stop_reason is None, and generated tokens < max_tokens (25).
@@ -468,8 +463,7 @@ def test_min_tokens_eos_behavior(llm_v1: LLM):
 
 
 def test_min_tokens_validation():
-    """
-    Test that SamplingParams correctly validates min_tokens parameters.
+    """Test that SamplingParams correctly validates min_tokens parameters.
 
     This tests the parameter validation logic in SamplingParams.
     """

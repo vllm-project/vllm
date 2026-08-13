@@ -13,8 +13,7 @@ from .protocol import TokenizerLike
 
 
 def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
-    """
-    Wraps a tokenizer to use the custom DeepSeek V4 chat template encoding.
+    """Wraps a tokenizer to use the custom DeepSeek V4 chat template encoding.
     """
     dsv4_tokenizer = copy.copy(tokenizer)
 

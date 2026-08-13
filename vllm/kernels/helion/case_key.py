@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Structured key for identifying kernel config/autotune/benchmark cases.
+"""Structured key for identifying kernel config/autotune/benchmark cases.
 """
 
 from __future__ import annotations

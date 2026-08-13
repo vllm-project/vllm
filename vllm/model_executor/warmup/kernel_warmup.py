@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Warmup kernels used during model execution.
+"""Warmup kernels used during model execution.
 This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
@@ -220,8 +219,7 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
-    """
-    Autotune FlashInfer operations.
+    """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
     autotuning runs benchmarks for each implementation and stores
     the results. The results are cached transparently and

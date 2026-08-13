@@ -308,6 +308,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
 
     Args:
         quant_config: The AutoGPTQ quantization config.
+
     """
 
     _kernel_backends_being_used: set[str] = set()
@@ -765,7 +766,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
         """Build the FusedMoEKernel for this layer."""
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,

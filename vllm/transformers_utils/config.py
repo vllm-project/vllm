@@ -204,7 +204,6 @@ def _patch_hf_transformers_validate_rope():
     validate_rope() with the ignore_keys parameter work with newer versions of
     hf transformers (from v5 onwards)
     """
-
     if hasattr(PretrainedConfig.validate_rope, "__vllm_patched__"):
         return
 
@@ -420,10 +419,11 @@ def register_config_parser(config_format: str):
     """Register a customized vllm config parser.
      When a config format is not supported by vllm, you can register a customized
     config parser to support it.
-     Args:
-         config_format (str): The config parser format name.
-     Examples:
 
+    Args:
+         config_format (str): The config parser format name.
+
+    Examples:
          >>> from vllm.transformers_utils.config import (get_config_parser,
                                                          register_config_parser)
          >>> from vllm.transformers_utils.config_parser_base import ConfigParserBase
@@ -442,6 +442,7 @@ def register_config_parser(config_format: str):
          >>>
          >>> type(get_config_parser("custom_config_parser"))
          <class 'CustomConfigParser'>
+
     """  # noqa: E501
 
     def _wrapper(config_parser_cls):
@@ -469,7 +470,8 @@ def register_config_parser(config_format: str):
 
 def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> None:
     """Some models may have no rope_theta in their config but still use RoPE.
-    This function sets a default rope_theta if it's missing."""
+    This function sets a default rope_theta if it's missing.
+    """
     if getattr(config, "rope_parameters", None) is None:
         config.rope_parameters = {"rope_type": "default"}
     if "rope_theta" not in config.rope_parameters:
@@ -478,8 +480,8 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 
 def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
     """Patch legacy RoPE type fields for backwards compatibility with
-    older custom models which would otherwise fail to load."""
-
+    older custom models which would otherwise fail to load.
+    """
     # No RoPE parameters to patch
     if rope_parameters is None:
         return
@@ -606,8 +608,7 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
 
 
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
-    """
-    Update kwargs for AutoConfig initialization based on model_type
+    """Update kwargs for AutoConfig initialization based on model_type
     """
     if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
         kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
@@ -633,8 +634,7 @@ def maybe_override_with_speculators(
     hf_token: bool | str | None = None,
     **kwargs,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
-    """
-    Resolve model configuration when speculators are detected.
+    """Resolve model configuration when speculators are detected.
 
     Checks if the provided model is a speculators model and if so, extracts
     the target model configuration and builds the speculative config.
@@ -649,6 +649,7 @@ def maybe_override_with_speculators(
 
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
+
     """
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
     config_dict, _ = PretrainedConfig.get_config_dict(
@@ -817,8 +818,7 @@ def get_pooling_config(
     model: str,
     revision: str | None = "main",
 ) -> dict[str, Any] | None:
-    """
-    This function gets the pooling and normalize
+    """This function gets the pooling and normalize
     config from the model - only applies to
     sentence-transformers models.
 
@@ -830,6 +830,7 @@ def get_pooling_config(
     Returns:
         A dictionary containing the pooling type and whether
             normalization is used, or None if no pooling configuration is found.
+
     """
     modules_file_name = "modules.json"
 
@@ -904,19 +905,21 @@ def parse_pooling_type(pooling_name: str):
 def get_sentence_transformer_tokenizer_config(
     model: str | Path, revision: str | None = "main"
 ) -> dict[str, Any] | None:
-    """
-    Returns the tokenization configuration dictionary for a
+    """Returns the tokenization configuration dictionary for a
     given Sentence Transformer BERT model.
 
-    Parameters:
+    Parameters
+    ----------
     - model (str|Path): The name of the Sentence Transformer
     BERT model.
     - revision (str, optional): The revision of the m
     odel to use. Defaults to 'main'.
 
-    Returns:
+    Returns
+    -------
     - dict: A dictionary containing the configuration parameters
     for the Sentence Transformer BERT model.
+
     """
     sentence_transformer_config_files = [
         "sentence_bert_config.json",
@@ -1179,8 +1182,7 @@ def get_safetensors_params_metadata(
     *,
     revision: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Get the safetensors parameters metadata for remote/local model repository.
+    """Get the safetensors parameters metadata for remote/local model repository.
     """
     if (model_path := Path(model)).exists():
         return _read_safetensors_metadata_in_dir(model_path)

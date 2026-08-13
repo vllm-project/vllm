@@ -115,7 +115,8 @@ def test_prompt_embeds_keys_registered():
 
 def test_ensure_placeholder_token_is_single_token_and_idempotent(tokenizer):
     """Ensure the placeholder token is a single token and that multiple calls to
-    "ensure" are idempotent, across all tokenizer families."""
+    "ensure" are idempotent, across all tokenizer families.
+    """
     tid1 = _ensure_prompt_embeds_placeholder_token(tokenizer)
     tid2 = _ensure_prompt_embeds_placeholder_token(tokenizer)
     assert tid1 == tid2
@@ -468,7 +469,8 @@ def test_build_mixed_prompt_embeds(stream):
 @pytest.mark.parametrize("role", ["user", "system"])
 async def test_end_to_end_expand_and_build(tokenizer, parse_fn, role):
     """Full renderer pipeline: parse -> chat template -> expand -> locate
-    -> build mixed prompt, across tokenizers, roles, and sync/async."""
+    -> build mixed prompt, across tokenizers, roles, and sync/async.
+    """
     tokenizer.chat_template = _SIMPLE_CHAT_TEMPLATE
     tid = _ensure_prompt_embeds_placeholder_token(tokenizer)
 
@@ -523,7 +525,8 @@ async def test_end_to_end_expand_and_build(tokenizer, parse_fn, role):
 @pytest.mark.asyncio
 async def test_end_to_end_multi_message_conversation(tokenizer, parse_fn):
     """Full pipeline with prompt_embeds spread across system + user messages,
-    verifying ordering and positioning in the final token stream."""
+    verifying ordering and positioning in the final token stream.
+    """
     tokenizer.chat_template = _SIMPLE_CHAT_TEMPLATE
     tid = _ensure_prompt_embeds_placeholder_token(tokenizer)
 

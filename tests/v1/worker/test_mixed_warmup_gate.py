@@ -16,7 +16,8 @@ def _fail(*args, **kwargs):
 @pytest.mark.parametrize("max_num_reqs", [1, 0])
 def test_mixed_warmup_skipped_for_single_seq(max_num_reqs):
     """A mixed prefill+decode step needs >=2 requests; with max_num_reqs < 2
-    the warmup must be skipped without touching the worker callbacks."""
+    the warmup must be skipped without touching the worker callbacks.
+    """
     runner = SimpleNamespace(is_pooling_model=False, max_num_reqs=max_num_reqs)
 
     assert (

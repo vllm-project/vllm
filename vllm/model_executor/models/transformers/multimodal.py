@@ -313,8 +313,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        """
-        In contrast to the base class, this method requests
+        """In contrast to the base class, this method requests
         `return_mm_token_type_ids` and remaps the `audios` key to `audio` for
         audio models.
         """
@@ -420,8 +419,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalInput:
-        """
-        Process multi-modal inputs to be used in vLLM.
+        """Process multi-modal inputs to be used in vLLM.
 
         Apply HF Processor on prompt text and multi-modal data together,
         outputting token IDs and processed tensors.
@@ -518,7 +516,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         self, model: "PreTrainedModel"
     ) -> dict[str, type["PreTrainedModel"]]:
         """Modalities whose encoder cannot be told apart from the model itself are
-        omitted, as are those `get_encoder` rejects."""
+        omitted, as are those `get_encoder` rejects.
+        """
         encoder_classes: dict[str, type[PreTrainedModel]] = {}
         for modality in _MODALITY_TO_TOKEN_TYPE_ID:
             try:
@@ -579,8 +578,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             yield
 
     def _decorate_for_torch_compile(self):
-        """
-        Decorate the model's decoder and encoder classes to indicate to vLLM that they
+        """Decorate the model's decoder and encoder classes to indicate to vLLM that they
         support torch compile if `can_enable_torch_compile` and
         `should_torch_compile_mm_encoder` are True respectively.
         """
@@ -638,8 +636,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     def get_language_model(self) -> torch.nn.Module:
         """Transformers modeling backend multimodal classes do not contain a separate
         vLLM language model class. Therefore, in order to return a language model vLLM
-        class, we use a wrapper to give `self` the same interface as a text model."""
-
+        class, we use a wrapper to give `self` the same interface as a text model.
+        """
         # Exclude self and object
         bases = self.__class__.mro()[1:-1]
         # Keep only classes defined in `vllm.model_executor.models.transformers`
@@ -657,8 +655,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         return LanguageModel(self)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         for name in ("language_model", "text_model"):
             if getattr(self.model, name, None) is not None:

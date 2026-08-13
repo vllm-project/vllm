@@ -657,7 +657,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         slot_mapping: torch.Tensor,
     ) -> torch.Tensor:
         """Fused decode query-concat + latent cache insert, dispatched by cache
-        dtype (same policy as prefill: fp8 cache -> fp8 query)."""
+        dtype (same policy as prefill: fp8 cache -> fp8 query).
+        """
         if self.kv_cache_dtype == "fp8_ds_mla":
             cache = self.kv_cache
             if cache.dtype != torch.uint8:

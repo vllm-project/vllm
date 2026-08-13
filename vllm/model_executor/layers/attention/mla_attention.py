@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-# MLA Common Components
+"""# MLA Common Components
 
 This file implements common components for MLA implementations.
 
@@ -1195,8 +1194,7 @@ def unified_mla_kv_cache_update(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Returns a dummy that is passed to unified_attention to signal a side effect and
+    """Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
@@ -1341,8 +1339,7 @@ def dynamic_per_batched_tensor_quant(
     dynamic_arg_dims={"decode_ql_nope": 0, "decode_q_pe": 0},
 )
 class _DecodeConcatQuantFP8(QuantFP8):
-    """
-    QuantFP8 variant that concatenates decode_ql_nope and decode_q_pe before
+    """QuantFP8 variant that concatenates decode_ql_nope and decode_q_pe before
     quantization. When disabled, forward_native is compiled via torch.compile,
     fusing cat/reshape/quant/view together.
     """
@@ -1757,6 +1754,7 @@ def build_mla_chunked_context_metadata(
 
     Returns:
         The chunked-context metadata, or None when no prefill has any context.
+
     """
     # NOTE: it is recommended you read the `Chunked Prefill` section in the
     # comment at the top of the file before trying to understand this code.
@@ -1947,8 +1945,7 @@ def build_mla_chunked_context_metadata(
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
+    """NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
 
@@ -2005,8 +2002,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         vllm_config: VllmConfig,
         model_dtype: torch.dtype,
     ) -> torch.dtype:
-        """
-        Determine the query data type for prefill queries.
+        """Determine the query data type for prefill queries.
         Return FP8 dtype if cache is FP8 and prefill query quantization
         is enabled, else model dtype.
         """
@@ -2172,8 +2168,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> M:
-        """
-        This method builds the metadata for full cudagraph capture.
+        """This method builds the metadata for full cudagraph capture.
         Currently, only decode is supported for full cudagraphs with MLA.
         """
         m = common_attn_metadata
@@ -2353,13 +2348,13 @@ def reorg_kvcache(
     max_seq_len: int,
     toks: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    reorg and unpad kvcache after cp local gather to tp layout for attn kernel.
+    """Reorg and unpad kvcache after cp local gather to tp layout for attn kernel.
     e.g.
     allgatered_kv_c_normed = [T0_0, T0_1, T0_2, T0_3, T1_0, T1_1, ...,
                               T0_4, T0_5, pad, pad, T1_2, pad, ...]
     -> reorganized_kv_c_normed = [T0_0, T0_1, T0_2, T0_3, T0_4, T0_5,
                                   T1_0, T1_1, T1_2, ...]
+
     Args:
         padded_local_chunk_seq_lens_lst: local chunk context lengths
             under current CP rank.
@@ -2369,6 +2364,7 @@ def reorg_kvcache(
         sum_seq_len: the sum of cp_chunk_seq_lens_lst.
         max_seq_len: the max value of cp_chunk_seq_lens_lst.
         toks: the number of tokens for local gather cache.
+
     """
     kv_c_segments = []
     k_pe_segments = []
@@ -2475,6 +2471,7 @@ def accumulate_mla_context_chunk(
             ``output[chunk.token_slice]`` because the backend was handed it as
             ``out``, leaving only the lse to fold. Invalid for a continuation
             chunk, whose leading tokens must be merged rather than overwritten.
+
     """
     token_start = chunk.token_slice.start
     token_end = chunk.token_slice.stop
@@ -2501,8 +2498,7 @@ def accumulate_mla_context_chunk(
 
 
 class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
-    """
-    Shared MLA base providing dense-MHA prefill (via the selected
+    """Shared MLA base providing dense-MHA prefill (via the selected
     MLAPrefillBackend) for both dense and sparse impls; subclasses add decode
     (``forward_mqa``).
     """
@@ -2538,8 +2534,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Efficiently concatenate k_nope and k_pe tensors along the last dimension.
+        """Efficiently concatenate k_nope and k_pe tensors along the last dimension.
 
         This function avoids the performance penalty of torch.cat with expanded
         non-contiguous tensors by pre-allocating the output and using direct copies.
@@ -2551,6 +2546,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
         Returns:
             Tensor of shape [..., nope_dim + pe_dim]
+
         """
         k = torch.empty(
             (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
@@ -2890,8 +2886,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
 
 class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
+    """NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
 

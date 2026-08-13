@@ -24,8 +24,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""
-Memory-efficient attention for decoding.
+"""Memory-efficient attention for decoding.
 It supports page size >= 1.
 """
 

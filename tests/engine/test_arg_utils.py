@@ -288,8 +288,7 @@ def test_media_io_kwargs_parser(arg, expected):
     ],
 )
 def test_optimization_level(args, expected):
-    """
-    Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
+    """Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
     optimization_level.
     """
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
@@ -308,8 +307,7 @@ def test_optimization_level(args, expected):
     ],
 )
 def test_mode_parser(args, expected):
-    """
-    Test compilation config modes (-cc.mode=int) map to compilation_config.
+    """Test compilation config modes (-cc.mode=int) map to compilation_config.
     """
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     parsed_args = parser.parse_args(args)
@@ -674,7 +672,8 @@ def test_expand_json_human_readable_numbers(input_json, expected_json):
 )
 def test_cloud_storage_uri_skips_get_model_path(uri, monkeypatch):
     """Cloud storage URIs should not be passed to get_model_path()
-    when HF_HUB_OFFLINE=1, as they are not valid HF repo IDs."""
+    when HF_HUB_OFFLINE=1, as they are not valid HF repo IDs.
+    """
     import huggingface_hub
 
     monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
@@ -686,7 +685,8 @@ def test_cloud_storage_uri_skips_get_model_path(uri, monkeypatch):
 
 def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
     """Cloud storage tokenizer URI should not be passed to
-    get_model_path() when HF_HUB_OFFLINE=1."""
+    get_model_path() when HF_HUB_OFFLINE=1.
+    """
     import huggingface_hub
 
     monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
@@ -848,7 +848,8 @@ class TestDpDeviceIdSharding:
     def test_dp_supervisor_device_ids_stay_env_relative(self):
         """Regression test: the DP supervisor must pass env-relative indices,
         not physical IDs, because each child re-resolves --device-ids
-        against its inherited device-control env var."""
+        against its inherited device-control env var.
+        """
         import argparse
 
         from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
@@ -875,7 +876,8 @@ class TestDpDeviceIdSharding:
 
     def test_dp_rank_shards_user_assigned_gpu_ids(self):
         """get_physical_gpu_ids_for_local_dp_rank slices the user-provided
-        --device-ids list instead of recomputing from the env var."""
+        --device-ids list instead of recomputing from the env var.
+        """
         from vllm.platforms import current_platform
         from vllm.v1.engine.utils import get_physical_gpu_ids_for_local_dp_rank
 

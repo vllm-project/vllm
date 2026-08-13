@@ -19,8 +19,7 @@ from vllm.entrypoints.openai.responses.harmony import (
 
 
 class TestResponsePreviousInputToHarmony:
-    """
-    Tests for scenarios that are specific to the Responses API
+    """Tests for scenarios that are specific to the Responses API
     response_previous_input_to_harmony function.
     """
 

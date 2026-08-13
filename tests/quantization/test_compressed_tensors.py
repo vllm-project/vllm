@@ -558,8 +558,7 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
     reason="This test is not for non-CUDA platforms",
 )
 def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
-    """
-    Integration test for MoE layer ignore functionality with a real model.
+    """Integration test for MoE layer ignore functionality with a real model.
 
     This test would verify that when loading a compressed-tensors quantized
     MoE model where some MoE layers are in the ignore list, those layers
@@ -571,7 +570,6 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     - Config with ignore list containing specific MoE layers
     - Multiple MoE layers where some are quantized and some are not
     """
-
     # model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only" # CT 12.3
     model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"  # CT 12.2
 

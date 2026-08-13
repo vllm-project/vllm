@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for the analytic estimators in metrics/flops.py.
+"""Tests for the analytic estimators in metrics/flops.py.
 """
 
 import types
@@ -147,8 +146,7 @@ def test_base_attention_config_parser_with_gqa():
 
 
 def test_base_attention_config_parser_without_gqa():
-    """
-    Test BaseAttentionConfigParser defaults to MHA when num_key_value_heads not
+    """Test BaseAttentionConfigParser defaults to MHA when num_key_value_heads not
     specified.
     """
     hf_config = Qwen3Config(
@@ -698,8 +696,7 @@ def test_ffn_per_gpu_with_pipeline_parallelism():
 
 
 def test_moe_per_gpu_with_expert_parallelism():
-    """
-    Test MoE metrics with expert parallelism - verifies num_activated_experts bug fix.
+    """Test MoE metrics with expert parallelism - verifies num_activated_experts bug fix.
     """
     hf_config = Qwen3MoeConfig(
         hidden_size=2048,
@@ -756,8 +753,7 @@ def test_moe_per_gpu_with_expert_parallelism():
 
 
 def test_moe_per_gpu_expert_activation_accounting():
-    """
-    Test that MoE correctly accounts for expert activations with small batch sizes.
+    """Test that MoE correctly accounts for expert activations with small batch sizes.
     """
     hf_config = Qwen3MoeConfig(
         hidden_size=2048,
@@ -1239,7 +1235,8 @@ def test_mla_per_gpu_with_pipeline_parallelism():
 
 def test_mla_model_metrics_excludes_standard_attention():
     """Test that ModelMetrics uses MLAAttentionMetrics, not AttentionMetrics,
-    for DeepSeek MLA models."""
+    for DeepSeek MLA models.
+    """
     hf_config = DeepseekV3Config(
         hidden_size=7168,
         num_attention_heads=128,

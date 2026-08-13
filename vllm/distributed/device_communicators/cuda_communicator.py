@@ -717,11 +717,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and router logits to the appropriate device.
+        """Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
-
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch_router_logits(
             hidden_states,
@@ -741,8 +739,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        """Dispatch the hidden states and topk weights/ids to the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
@@ -757,8 +754,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Combine the hidden states and router logits from the appropriate device.
+        """Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None

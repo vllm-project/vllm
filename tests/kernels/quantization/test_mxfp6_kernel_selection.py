@@ -41,7 +41,8 @@ def test_can_implement_is_abstract():
 
 def test_emulation_kernel_rejects_non_mxfp6_weights():
     """EmulationMxfp6LinearKernel must not implement a non-MXFP6 weight
-    format."""
+    format.
+    """
     config = MxFp6LinearLayerConfig(weight_quant_key=kMxfp4Static)
     can_implement, reason = EmulationMxfp6LinearKernel.can_implement(config)
     assert not can_implement
@@ -57,7 +58,8 @@ def test_emulation_kernel_accepts_any_supported_config(
     weight_quant_key, activation_quant_key
 ):
     """EmulationMxfp6LinearKernel is the only backend today: it must accept
-    every supported weight/activation format combination."""
+    every supported weight/activation format combination.
+    """
     config = MxFp6LinearLayerConfig(
         weight_quant_key=weight_quant_key, activation_quant_key=activation_quant_key
     )
@@ -102,7 +104,8 @@ class OOTMxFp6LinearKernel(MxFp6LinearKernel):
 def test_init_mxfp6_linear_kernel_dispatches_to_registered_kernel(platform_mock):
     """init_mxfp6_linear_kernel should select a registered kernel that
     reports itself as supported/able to implement the given config, and
-    construct it with that exact config."""
+    construct it with that exact config.
+    """
     platform_mock._enum = PlatformEnum.OOT
     register_linear_kernel(OOTMxFp6LinearKernel, PlatformEnum.OOT, "mxfp6")
 

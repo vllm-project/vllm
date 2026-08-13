@@ -216,6 +216,7 @@ def _generate_mixed_logitsprocs_batch_params(
     Returns:
       List of per-request params which configure the engine for that request's
       enabled logitproc
+
     """
     batch_size = len(logitsprocs_types) * reqs_per_logitproc
     # Generate multiple repeats of key params for each logitproc;
@@ -1232,7 +1233,8 @@ def test_thinking_budget_invalid_budget_rejected(invalid_budget):
 
 def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index():
     """Test thinking budget enforced for a long thinking run,
-    then a natural end marker."""
+    then a natural end marker.
+    """
     h = ThinkingBudgetStateHolder(
         MockReasoningConfig(), 8, 0, torch.device("cpu"), False
     )

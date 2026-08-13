@@ -192,8 +192,7 @@ def test_engine_core():
 
 @create_new_process_for_each_test()
 def test_engine_core_advanced_sampling():
-    """
-    A basic end-to-end test to verify that the engine functions correctly
+    """A basic end-to-end test to verify that the engine functions correctly
     when additional sampling parameters, such as top_p, min_tokens, and
     presence_penalty, are set.
     """
@@ -241,8 +240,7 @@ def test_engine_core_advanced_sampling():
 
 @create_new_process_for_each_test()
 def test_engine_core_concurrent_batches():
-    """
-    Test that the engine can handle multiple concurrent batches.
+    """Test that the engine can handle multiple concurrent batches.
     """
 
     def make_request_with_max_tokens(req_id: str, max_tokens: int) -> EngineCoreRequest:
@@ -264,7 +262,6 @@ def test_engine_core_concurrent_batches():
             non_block=False,
         ) -> Future[ModelRunnerOutput | None]:
             """Make execute_model non-blocking."""
-
             # DummyExecutor used only for testing async case.
             assert non_block
 
@@ -281,7 +278,6 @@ def test_engine_core_concurrent_batches():
             self, grammar_output, non_block=False
         ) -> Future[ModelRunnerOutput]:
             """Make sample_tokens non-blocking."""
-
             # DummyExecutor used only for testing async case.
             assert non_block
 
@@ -400,10 +396,8 @@ def test_engine_core_concurrent_batches():
 
 @multi_gpu_test(num_gpus=2)
 def test_engine_core_tp():
+    """Test engine can initialize worker in tp properly
     """
-    Test engine can initialize worker in tp properly
-    """
-
     """Setup the EngineCore."""
     engine_args = EngineArgs(
         model=MODEL_NAME,

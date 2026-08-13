@@ -172,8 +172,7 @@ def _get_reserved_port_range() -> range:
 
 
 def get_open_port() -> int:
-    """
-    Get an open port for the vLLM process to listen on.
+    """Get an open port for the vLLM process to listen on.
     An edge case to handle, is when we run data parallel,
     we need to avoid ports that are potentially used by
     the data parallel master process.
@@ -298,6 +297,7 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 
     Returns:
         A properly formatted ZMQ path string.
+
     """
     if port is None:
         return f"{scheme}://{host}"
@@ -317,7 +317,6 @@ def make_zmq_socket(
     router_handover: bool = False,
 ) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
-
     mem = psutil.virtual_memory()
     socket = ctx.socket(socket_type)
 
@@ -378,7 +377,6 @@ def zmq_socket_ctx(
     router_handover: bool = False,
 ) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
-
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
         yield make_zmq_socket(

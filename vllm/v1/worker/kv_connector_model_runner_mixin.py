@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Define KV connector functionality mixin for model runners.
+"""Define KV connector functionality mixin for model runners.
 """
 
 from collections.abc import Generator
@@ -115,8 +114,7 @@ class KVConnectorModelRunnerMixin:
     def use_uniform_kv_cache(
         attn_groups: list[list[AttentionGroup]],
     ) -> bool:
-        """
-        Determines whether a uniform KV layout should be used.
+        """Determines whether a uniform KV layout should be used.
         A uniform layout means all layers KV caches will share the same
         underlying tensor, where for a given block number, the respective
         KV data for all layers will be contiguous.
@@ -141,8 +139,8 @@ class KVConnectorModelRunnerMixin:
             attn_groups: The list of attention groups for this model
         Returns:
             True if we should use a uniform KV cache layout.
-        """
 
+        """
         if not has_kv_transfer_group():
             return False
         if not get_kv_transfer_group().prefer_cross_layer_blocks:
@@ -169,8 +167,7 @@ class KVConnectorModelRunnerMixin:
         device: torch.device,
         kernel_block_sizes: list[int],
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor, type[AttentionBackend]]:
-        """
-        Initializes and reshapes KV caches for the simple case where all
+        """Initializes and reshapes KV caches for the simple case where all
         layers have the same layout.
 
         This function assumes use_uniform_kv_cache() returned True.
@@ -181,12 +178,14 @@ class KVConnectorModelRunnerMixin:
             cache_dtype: The KV cache dtype
             device: The torch device to allocate on.
             kernel_block_sizes: The kernel block sizes for each KV cache group.
+
         Returns:
             A tuple (kv_caches, cross_layers_kv_cache, attn_backend) where:
                 kv_caches is a dict mapping between layer names to their
                     corresponding memory buffer for KV cache.
                 cross_layers_kv_cache is the cross layers kv cache tensor
                 attn_backend is the attention backend matching this tensor
+
         """
         attn_group = attn_groups[0][0]
         kv_cache_spec = attn_group.kv_cache_spec

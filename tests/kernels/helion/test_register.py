@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for Helion kernel registration.
+"""Unit tests for Helion kernel registration.
 
 Tests ConfiguredHelionKernel, HelionKernelWrapper, and PresetConfigSearch
 including config picker registration and custom autotuner integration.
@@ -599,7 +598,8 @@ class TestHelionKernelWrapper:
     )
     def test_init_eagerly_initializes_hop_path(self):
         """Test that register_kernel eagerly builds the configured kernel
-        on the HOP path (no custom op registration needed)."""
+        on the HOP path (no custom op registration needed).
+        """
         from vllm.kernels.helion.utils import get_canonical_gpu_name
 
         configs: dict[CaseKey, helion.Config] = {
@@ -634,7 +634,8 @@ class TestHelionKernelWrapper:
     )
     def test_init_eagerly_initializes(self):
         """Test that register_kernel eagerly loads configs and detects GPU
-        during construction so __call__ needs no further initialization."""
+        during construction so __call__ needs no further initialization.
+        """
         from vllm.kernels.helion.utils import get_canonical_gpu_name
 
         with (
@@ -962,7 +963,8 @@ class TestTorchCompileHOP:
 
     def test_compiled_graph_contains_helion_hop(self):
         """Verify torch.compile on a HelionKernelWrapper emits a
-        helion_kernel_wrapper_mutation HOP node in the FX graph."""
+        helion_kernel_wrapper_mutation HOP node in the FX graph.
+        """
         configs: dict[CaseKey, helion.Config] = {
             CaseKey.default(): helion.Config(block_sizes=[4, 4])
         }
@@ -1020,7 +1022,6 @@ class TestTorchCompileHOP:
     )
     def test_inductor_backend_compiles_helion_hop(self):
         """Test torch.compile with inductor backend and Helion fusion enabled."""
-
         configs: dict[CaseKey, helion.Config] = {
             CaseKey.default(): helion.Config(block_sizes=[4, 4])
         }

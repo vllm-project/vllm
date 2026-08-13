@@ -137,7 +137,8 @@ def test_v1_block_table_move_row_clears_vacated_row():
     not keep stale block ids. Padded dummy-run batches dereference stale rows
     as mamba state slots (bypassing the NULL_BLOCK_ID fill of real decode
     padding) and write state in place there — corrupting the blocks' new
-    owner once they are reallocated, e.g. to an in-flight NIXL load."""
+    owner once they are reallocated, e.g. to an in-flight NIXL load.
+    """
     from vllm.v1.worker.block_table import BlockTable
 
     block_table = BlockTable(
@@ -169,7 +170,8 @@ def test_get_dummy_block_tables_returns_zeroed_rows():
     PAD-filled, state indices are not), so stale rows would direct dummy
     state writes at freed — possibly reallocated — blocks.
     get_dummy_block_tables must hand out zeroed (null block) rows while
-    preserving the persistent storage address for CUDA graphs."""
+    preserving the persistent storage address for CUDA graphs.
+    """
     device = torch.device("cuda")
     block_tables = BlockTables(
         block_sizes=[16],

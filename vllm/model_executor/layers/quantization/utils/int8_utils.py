@@ -183,6 +183,7 @@ def per_token_group_quant_int8(
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
             scaling factor for quantization.
+
     """
     assert x.shape[-1] % group_size == 0, (
         "the last dimension of `x` cannot be divisible by `group_size`"
@@ -266,7 +267,6 @@ def _w8a8_block_int8_matmul(
     product) on input tensors `A` and `B` with block-wise quantization, and
     store the result in output tensor `C`.
     """
-
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -319,15 +319,13 @@ def _w8a8_block_int8_matmul(
 def get_w8a8_block_int8_configs(
     N: int, K: int, block_n: int, block_k: int
 ) -> dict[int, Any] | None:
-    """
-    Return optimized configurations for the w8a8 block fp8 kernel.
+    """Return optimized configurations for the w8a8 block fp8 kernel.
 
     The return value will be a dictionary that maps an irregular grid of
     batch sizes to configurations of the w8a8 block fp8 kernel. To evaluate the
     kernel on a given batch size bs, the closest batch size in the grid should
     be picked and the associated configuration chosen to invoke the kernel.
     """
-
     # First look up if an optimized configuration is available in the configs
     # directory
     device_name = get_device_name_as_file_name()
@@ -382,6 +380,7 @@ def w8a8_block_int8_matmul(
 
     Returns:
         torch.Tensor: The result of matmul.
+
     """
     assert len(block_size) == 2
     block_n, block_k = block_size[0], block_size[1]

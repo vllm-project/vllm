@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark the performance of the cutlass_moe_fp8 kernel vs the triton_moe
+"""Benchmark the performance of the cutlass_moe_fp8 kernel vs the triton_moe
 kernel. Both kernels take in fp8 quantized weights and 16-bit activations,
 but use different quantization strategies and backends.
 """

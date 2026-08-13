@@ -34,7 +34,6 @@ def test_batched_deepgemm_vs_triton(
     E: int, T: int, K: int, N: int, topk: int, monkeypatch, workspace_init
 ):
     """Compare BatchedDeepGemmExperts to BatchedTritonExperts."""
-
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
 
     device = "cuda"

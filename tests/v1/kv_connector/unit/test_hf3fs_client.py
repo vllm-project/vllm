@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for resource management in hf3fs_client.py: constructor failure cleanup
+"""Tests for resource management in hf3fs_client.py: constructor failure cleanup
 and idempotent close().  Tests use mock to replace real I/O operations
 (hf3fs_fuse.io, SharedMemory, os, CUDA).
 Requires hf3fs_fuse.io to be installed; skipped otherwise.
@@ -132,7 +131,8 @@ class TestHf3fsClientResourceManagement:
 
     def test_close_idempotent_and_handles_cleared(self, tmp_path):
         """Multiple close() calls must not raise; deregister_fd called exactly
-        once, all handles set to None, shm.close() invoked."""
+        once, all handles set to None, shm.close() invoked.
+        """
         client, shm_r, shm_w = self._make_client(tmp_path)
 
         with (
@@ -238,7 +238,8 @@ class TestHf3fsClientResourceManagement:
 
     def test_constructor_failure_does_not_close_unallocated_shm(self, tmp_path):
         """Failure before SharedMemory is created must not raise AttributeError
-        or TypeError from cleanup."""
+        or TypeError from cleanup.
+        """
         with (
             patch(f"{self._MOD}.HF3FS_AVAILABLE", True),
             patch(f"{self._MOD}.register_fd"),

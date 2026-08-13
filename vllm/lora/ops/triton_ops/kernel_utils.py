@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Utilities for Punica kernel construction.
+"""Utilities for Punica kernel construction.
 """
 
 from vllm.triton_utils import tl, triton
@@ -25,13 +24,13 @@ def mm_k(
     USE_GDC: tl.constexpr,
     base_k,
 ):
-    """
-    Given a_ptr and b_ptr, that identify the rows of A (m x k) and columns of
+    """Given a_ptr and b_ptr, that identify the rows of A (m x k) and columns of
     B (k x n), iterate, through the K dimension to compute the partial/complete
     matrix block product.
     If SPLIT_K == 1, the output m x n product is complete.
     If SPLIT_K > 1, the thread block computes partial outputs. The partial
     outputs are then atomically summed in the caller code.
+
     Args:
         a_ptr: Array of pointers, identifying rows of A
         b_ptr: Array of pointers, identifying columns of B
@@ -49,6 +48,7 @@ def mm_k(
         b_dtype: datatype of the B matrix
         USE_GDC: Whether to use PDL. True indicates use.
         base_k: Base offset along K dimension for current SPLIT_K group
+
     """
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
@@ -142,15 +142,13 @@ def do_expand_kernel(
     ADD_INPUTS: tl.constexpr,
     USE_GDC: tl.constexpr,
 ):
-    """
-    Given an array of integers that identifies the rows of A, ram,
+    """Given an array of integers that identifies the rows of A, ram,
     a lora index that identifies which LoRA to use from lora_ptr, lora_index,
     a slice_id that identifies the input/output slice,
     compute the matrix product and store in the appropriate output location.
     Given that this is an expand kernel, we don't perform any split-K reduction
     as the K dimension is assumed to be small.
     """
-
     # ls_d*_ptr can be either an integer or a pointer
     if SAME_STRIDE:
         # integer
@@ -267,13 +265,11 @@ def do_shrink_kernel(
     SLICE_NUM: tl.constexpr,
     USE_GDC: tl.constexpr,
 ):
-    """
-    Given an array of integers that identifies the rows of A, ram,
+    """Given an array of integers that identifies the rows of A, ram,
     a lora index that identifies which LoRA to use from lora_ptr, lora_index,
     a slice_id that identifies the input/output slice, compute the
     matrix product and store in the appropriate output location.
     """
-
     # Identify the lora_ptr from slice_id.
     if SLICE_NUM == 1:
         # current lora ptr

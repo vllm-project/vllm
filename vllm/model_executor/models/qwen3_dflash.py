@@ -66,7 +66,8 @@ def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
 
 def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     """Whether the draft needs a non-causal-capable backend, resolved from config
-    (config mirror of the model's ``get_draft_attn_causal``, usable pre-build)."""
+    (config mirror of the model's ``get_draft_attn_causal``, usable pre-build).
+    """
     return not all(
         _dflash_layer_causal(config, i) for i in range(config.num_hidden_layers)
     )
@@ -151,7 +152,8 @@ class DFlashQwen3Attention(nn.Module):
 
     Context KVs are pre-inserted into the KV cache before the forward pass.
     This layer handles only query tokens via standard attention.
-    Adapted from Qwen3Attention."""
+    Adapted from Qwen3Attention.
+    """
 
     def __init__(
         self,
@@ -243,7 +245,8 @@ class DFlashQwen3Attention(nn.Module):
         """DFlash attention assumes that the KV cache is already populated
         with the context K/V from the target model's hidden states. This forward op
         computes attention for the query tokens only.
-        See also: precompute_and_store_context_kv"""
+        See also: precompute_and_store_context_kv
+        """
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -716,7 +719,8 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
 
     def get_draft_attn_causal(self) -> list[bool]:
         """Per-layer attention causality, aligned with
-        get_draft_kv_cache_layer_names."""
+        get_draft_kv_cache_layer_names.
+        """
         return [layer.self_attn.causal for layer in self.model.layers]
 
     def compute_logits(

@@ -198,8 +198,7 @@ def memory_plan_reuse_patched(self):
 def get_graph_partition_signature_patched(
     self, partitions, skip_cudagraphs: list[bool]
 ):
-    """
-    Gets signature for each graph partition, including input nodes, output nodes, and
+    """Gets signature for each graph partition, including input nodes, output nodes, and
     whether deallocating an input within graph partition.
     """
     from torch._inductor import dependencies
@@ -213,8 +212,7 @@ def get_graph_partition_signature_patched(
     name_to_node = self.get_name_to_nodes()
 
     def is_none_layout(buf_name: str) -> bool:
-        """
-        Checks if buf_name is NoneLayout. Buffers with NoneLayout is not allocated
+        """Checks if buf_name is NoneLayout. Buffers with NoneLayout is not allocated
         so graph partition should not take it as inputs or outputs.
         """
         buf = self.name_to_buf.get(buf_name, None)
@@ -363,7 +361,6 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
     # the following piece of code so that we always return True:
     # https://github.com/pytorch/pytorch/blob/ecb53078faf86ca1b33277df33b82985675bb011/torch/_inductor/scheduler.py#L4712-L4724
     """Return True if we should partition the inductor graph on this node"""
-
     import torch._inductor.ir as ir
     from torch._inductor.scheduler import (
         BaseSchedulerNode,
@@ -444,8 +441,7 @@ def _update_scheduler_patched(self) -> None:
     # Copied from torch._inductor.graph.GrahLowering._update_scheduler. Patches
     # this method so that we can patch Scheduler.should_partition with the
     # function above
-    """
-    (Re)initializes the scheduler member.  When initializing the scheduler, no CUBIN
+    """(Re)initializes the scheduler member.  When initializing the scheduler, no CUBIN
     files should be generated (to avoid biasing any benchmarks and pessimizing
     fusion decisions).
     """
@@ -522,7 +518,8 @@ _constrain_to_fx_strides_patched = False
 def _apply_constrain_to_fx_strides_patch():
     """Patch lowering.constrain_to_fx_strides globally. Safe to call
     multiple times; only the first call does anything.
-    Only applies for torch >= 2.11 and < 2.12."""
+    Only applies for torch >= 2.11 and < 2.12.
+    """
     global _constrain_to_fx_strides_patched
     if _constrain_to_fx_strides_patched:
         return

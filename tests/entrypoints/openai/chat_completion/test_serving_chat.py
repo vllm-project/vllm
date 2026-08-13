@@ -1132,7 +1132,6 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     """Regression test: when the Mistral tokenizer path returns token IDs
     directly, we must still apply input length + max_tokens validation.
     """
-
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
@@ -1171,7 +1170,6 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
     """Regression test: MistralTokenizer token-id prompts must still enforce
     the max context length for the input itself (token_num >= max_model_len).
     """
-
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
@@ -1308,7 +1306,8 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
 @pytest.mark.asyncio
 async def test_serving_chat_data_parallel_rank_extraction():
     """Test that data_parallel_rank is properly extracted from header and
-    passed to engine."""
+    passed to engine.
+    """
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -1412,8 +1411,7 @@ async def _render_chat_prompt_token_ids(
 
 
 class TestServingChatWithHarmony:
-    """
-    These tests ensure Chat Completion requests are being properly converted into
+    """These tests ensure Chat Completion requests are being properly converted into
     Harmony messages and Harmony response messages back into Chat Completion responses.
     These tests are not exhaustive, but each one was created to cover a specific case
     that we got wrong but is now fixed.
@@ -1631,7 +1629,8 @@ class TestServingChatWithHarmony:
     @pytest.mark.asyncio
     async def test_system_message_without_tools(self, serving_chat, stream):
         """Leading system message produces a developer message with
-        DeveloperContent (# Instructions header)."""
+        DeveloperContent (# Instructions header).
+        """
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
@@ -1653,7 +1652,8 @@ class TestServingChatWithHarmony:
     @pytest.mark.asyncio
     async def test_system_message_with_tools(self, serving_chat, stream, weather_tools):
         """Leading system message is folded into the developer message
-        alongside tool definitions."""
+        alongside tool definitions.
+        """
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "What's the weather?"},
@@ -2068,7 +2068,8 @@ class TestServingChatWithHarmony:
 @pytest.mark.asyncio
 async def test_tool_choice_validation_without_parser():
     """Test that tool_choice='required' or named tool without tool_parser
-    returns an appropriate error message."""
+    returns an appropriate error message.
+    """
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()

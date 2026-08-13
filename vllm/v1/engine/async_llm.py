@@ -87,8 +87,7 @@ class AsyncLLM(EngineClient):
         client_count: int = 1,
         client_index: int = 0,
     ) -> None:
-        """
-        Create an AsyncLLM.
+        """Create an AsyncLLM.
 
         Args:
             vllm_config: global configuration.
@@ -105,6 +104,7 @@ class AsyncLLM(EngineClient):
 
         Returns:
             None
+
         """
         # Ensure we can serialize custom transformer configs
         maybe_register_config_serialize_by_value()
@@ -240,7 +240,6 @@ class AsyncLLM(EngineClient):
         stat_loggers: list[StatLoggerFactory] | None = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
-
         # Create the engine configs.
         vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
@@ -300,7 +299,6 @@ class AsyncLLM(EngineClient):
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
-
         if self.errored:
             raise EngineDeadError()
 
@@ -566,8 +564,7 @@ class AsyncLLM(EngineClient):
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
-        """
-        Main function called by the API server to kick off a request
+        """Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
             * 2) Processing the Input.
             * 3) Adding the Request to the Detokenizer.
@@ -580,7 +577,6 @@ class AsyncLLM(EngineClient):
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
         """
-
         q: RequestOutputCollector | None = None
         try:
             q = await self.add_request(
@@ -664,7 +660,6 @@ class AsyncLLM(EngineClient):
 
     def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
-
         if self.output_handler is not None:
             return
 
@@ -750,7 +745,6 @@ class AsyncLLM(EngineClient):
         self, request_id: str | Iterable[str], internal: bool = False
     ) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
-
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
@@ -769,7 +763,8 @@ class AsyncLLM(EngineClient):
     ) -> None:
         """Submit a pre-aborted request so the connector's request_finished
         hook runs to free any pre-admission KV-transfer resources (e.g. NIXL
-        prefill blocks pinned on the P node)."""
+        prefill blocks pinned on the P node).
+        """
         request = EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=[0],
@@ -794,8 +789,7 @@ class AsyncLLM(EngineClient):
         wait_for_inflight_requests: bool | None = None,
         clear_cache: bool = True,
     ) -> None:
-        """
-        Pause generation to allow model weight updates.
+        """Pause generation to allow model weight updates.
 
         All mode handling (abort / wait / keep) and cache clearing is done
         in the engine. New generation/encoding requests will not be scheduled
@@ -811,6 +805,7 @@ class AsyncLLM(EngineClient):
             wait_for_inflight_requests: DEPRECATED: use mode argument.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
+
         """
         if wait_for_inflight_requests:
             warnings.warn(
@@ -851,8 +846,7 @@ class AsyncLLM(EngineClient):
         tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """
-        Main function called by the API server to kick off a request
+        """Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
             * 2) Processing the Input.
             * 3) Adding the Request to the EngineCore (separate process).
@@ -864,7 +858,6 @@ class AsyncLLM(EngineClient):
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
         """
-
         q: RequestOutputCollector | None = None
         try:
             q = await self.add_request(
@@ -1014,8 +1007,7 @@ class AsyncLLM(EngineClient):
         args: tuple = (),
         kwargs: dict | None = None,
     ):
-        """
-        Perform a collective RPC call to the given path.
+        """Perform a collective RPC call to the given path.
         """
         return await self.engine_core.collective_rpc_async(
             method, timeout, args, kwargs
@@ -1096,7 +1088,7 @@ class AsyncLLM(EngineClient):
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
-        """send fault tolerance instruction to the engine"""
+        """Send fault tolerance instruction to the engine"""
         return await self.engine_core.handle_fault(fault_tolerance_request)
 
     async def get_status(self):
@@ -1122,11 +1114,11 @@ class AsyncLLM(EngineClient):
     async def init_weight_transfer_engine(
         self, request: WeightTransferInitRequest
     ) -> None:
-        """
-        Initialize weight transfer for RL training.
+        """Initialize weight transfer for RL training.
 
         Args:
             request: Weight transfer initialization request with backend-specific info
+
         """
         await self.collective_rpc(
             "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
@@ -1141,11 +1133,11 @@ class AsyncLLM(EngineClient):
         await self.collective_rpc("start_draft_weight_update")
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
-        """
-        Batched weight update for RL training.
+        """Batched weight update for RL training.
 
         Args:
             request: Weight update request with backend-specific update info
+
         """
         await self.collective_rpc(
             "update_weights", kwargs={"update_info": request.update_info}

@@ -11,8 +11,7 @@ from vllm.multimodal.processing import InputProcessingContext
 
 # Helper function to print input IDs with coalesced audio/video tokens.
 def print_input_ids(input_ids):
-    """
-    Print input IDs, compressing consecutive special tokens.
+    """Print input IDs, compressing consecutive special tokens.
     - 151675: <|audio_pad|>
     - 151656: <|video_pad|>
     """
@@ -132,7 +131,6 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     mock_image_processor,
 ):
     """Test the get_updates_use_audio_in_video method directly."""
-
     from vllm.model_executor.models.qwen3_omni_moe_thinker import (
         Qwen3OmniMoeThinkerMultiModalProcessor,
         Qwen3OmniMoeThinkerProcessingInfo,

@@ -775,7 +775,8 @@ def test_compile_sizes_padding_validation():
 
 def test_inductor_asserts_default_disabled(monkeypatch):
     """Test that inductor runtime asserts are disabled by default
-    (INFO logging level) on torch < 2.12."""
+    (INFO logging level) on torch < 2.12.
+    """
     monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
 
     import importlib
@@ -793,7 +794,8 @@ def test_inductor_asserts_default_disabled(monkeypatch):
 
 def test_inductor_asserts_enabled_in_debug(monkeypatch):
     """Test that VLLM_LOGGING_LEVEL=DEBUG enables inductor runtime asserts
-    on torch < 2.12."""
+    on torch < 2.12.
+    """
     monkeypatch.setenv("VLLM_LOGGING_LEVEL", "DEBUG")
 
     import importlib
@@ -829,7 +831,8 @@ def test_get_inductor_factors_includes_configs():
 
 def test_inductor_asserts_user_override(monkeypatch):
     """Test that explicit inductor_compile_config overrides the
-    debug-logging default."""
+    debug-logging default.
+    """
     monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
 
     import importlib

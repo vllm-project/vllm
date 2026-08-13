@@ -37,7 +37,8 @@ def _cpu_bgmv_shrink(
     inputs, lora_weight, output, seq_len_tensor, lora_indices, scaling=1.0
 ):
     """Memory-efficient shrink reference: per-LoRA matmul loop on CPU.
-    output[mask] = scaling * inputs[mask] @ weight.T"""
+    output[mask] = scaling * inputs[mask] @ weight.T
+    """
     exploded = torch.repeat_interleave(lora_indices, seq_len_tensor)
     for lid in exploded.unique():
         if lid < 0:
@@ -58,7 +59,8 @@ def _cpu_bgmv_expand(
     add_inputs=False,
 ):
     """Memory-efficient expand reference: per-LoRA matmul loop on CPU.
-    output[mask, offset:offset+n] (+)= inputs[mask] @ weight.T"""
+    output[mask, offset:offset+n] (+)= inputs[mask] @ weight.T
+    """
     exploded = torch.repeat_interleave(lora_indices, seq_len_tensor)
     for lid in exploded.unique():
         if lid < 0:
@@ -150,8 +152,7 @@ def check_lora_shrink_kernel(
     seq_length: int,
     scaling: float,
 ):
-    """
-    Compare outputs of torch_ops.sgmv_shrink and triton_ops.lora_shrink
+    """Compare outputs of torch_ops.sgmv_shrink and triton_ops.lora_shrink
     kernels.
     """
     data: PunicaTensors = generate_data_for_nslices(
@@ -224,8 +225,7 @@ def check_lora_expand_kernel(
     seq_length: int,
     add_inputs: bool,
 ):
-    """
-    Compare outputs of torch_ops.sgmv_expand and triton_ops.lora_expand
+    """Compare outputs of torch_ops.sgmv_expand and triton_ops.lora_expand
     kernels.
     """
     data: PunicaTensors = generate_data_for_nslices(
@@ -428,8 +428,7 @@ def test_kernels(
     seed: int,
     op_type: str,
 ):
-    """
-    Tests LoRA kernels.
+    """Tests LoRA kernels.
     """
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
@@ -481,8 +480,7 @@ def test_kernels_hidden_size(
     seed: int,
     op_type: str,
 ):
-    """
-    Tests SGMV and LoRA kernels.
+    """Tests SGMV and LoRA kernels.
     """
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
@@ -516,8 +514,7 @@ def test_kernels_hidden_size(
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_add_lora_fused_moe_early_exit(device):
-    """
-    Ensures add_lora_fused_moe does not invoke the LoRA kernel or
+    """Ensures add_lora_fused_moe does not invoke the LoRA kernel or
     modify the output tensor when no_lora_flag_cpu is True
     """
     from types import SimpleNamespace

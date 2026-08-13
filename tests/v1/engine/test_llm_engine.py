@@ -125,6 +125,7 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
     Args:
       vllm_model: VllmRunner instance under test.
       example_prompt: test fixture providing prompts for testing.
+
     """
     sampling_params_list, n_list = _get_test_sampling_params(example_prompts)
     llm: LLM = vllm_model.llm

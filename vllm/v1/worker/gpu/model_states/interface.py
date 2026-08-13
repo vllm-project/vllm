@@ -119,7 +119,8 @@ class ModelState(ABC):
     ) -> None:
         """Hook run on real batches before the forward pass (after block tables
         are gathered). Used by mamba "align" prefix caching to pre-copy state
-        across block boundaries. No-op by default."""
+        across block boundaries. No-op by default.
+        """
         return None
 
     def postprocess_state(

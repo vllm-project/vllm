@@ -55,8 +55,7 @@ from .vision import get_vision_encoder_info
 
 
 class LlavaNextVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - bn: Batch size * number of videos
         - f: Number of frames
         - c: Number of channels (3)
@@ -376,8 +375,7 @@ class LlavaNextVideoForConditionalGeneration(
     def _parse_and_validate_video_input(
         self, **kwargs: object
     ) -> LlavaNextVideoPixelInputs | None:
-        """
-        A legal video input should have the following dimensions:
+        """A legal video input should have the following dimensions:
         {
             "pixel_values_videos" :
                 list[b, Tensor(nb_frames, nb_channels, height, width)]
@@ -452,10 +450,12 @@ class LlavaNextVideoForConditionalGeneration(
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for LlaVA-NeXT-Video.
+
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             pixel_values_videos: Pixels in each frames for each input videos.
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -481,8 +481,7 @@ class LlavaNextVideoForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",

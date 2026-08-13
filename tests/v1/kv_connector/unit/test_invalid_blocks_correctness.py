@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Tests for correctness in invalid block handling.
+"""Tests for correctness in invalid block handling.
 
 These tests verify correct behavior in three scenarios:
 1. Sync recompute case: Blocks should not be freed for running requests
@@ -42,7 +41,7 @@ def _make_get_num_new_matched_tokens(
 
 @pytest.fixture
 def fail_scheduler():
-    """scheduler with kv_load_failure_policy='fail'"""
+    """Scheduler with kv_load_failure_policy='fail'"""
     vllm_config = create_vllm_config()
     vllm_config.kv_transfer_config.kv_load_failure_policy = "fail"
     return create_scheduler(vllm_config)
@@ -50,7 +49,7 @@ def fail_scheduler():
 
 @pytest.fixture
 def recompute_scheduler():
-    """scheduler with kv_load_failure_policy='recompute'"""
+    """Scheduler with kv_load_failure_policy='recompute'"""
     vllm_config = create_vllm_config()
     vllm_config.kv_transfer_config.kv_load_failure_policy = "recompute"
     return create_scheduler(vllm_config)
@@ -59,8 +58,7 @@ def recompute_scheduler():
 def test_sync_recompute_blocks_not_freed_for_running_requests(
     recompute_scheduler: Scheduler,
 ):
-    """
-    Test sync recompute case - blocks must not be freed for running requests.
+    """Test sync recompute case - blocks must not be freed for running requests.
 
     When a running request has invalid blocks and retry_policy is 'recompute':
     1. Request should remain in RUNNING state
@@ -180,8 +178,7 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
 
 
 def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
-    """
-    Test sync fail case - invalid blocks must be evicted from cache.
+    """Test sync fail case - invalid blocks must be evicted from cache.
 
     When a request fails with policy='fail' and has invalid blocks from sync loading:
     1. Request should be finished with FINISHED_ERROR
@@ -296,8 +293,7 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
 def test_async_recompute_blocks_not_cached_when_invalid(
     recompute_scheduler: Scheduler,
 ):
-    """
-    Test async recompute case - invalid blocks not cached after transfer.
+    """Test async recompute case - invalid blocks not cached after transfer.
 
     When async KV loading has invalid blocks and retry_policy is 'recompute':
     1. Blocks are allocated but not cached yet

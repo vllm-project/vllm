@@ -613,7 +613,8 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
 def test_canonical_layout_widens_parallelism_agnostic_to_mla():
     """The canonical layout dedups the TP-replicated MLA latent into one
     portable copy, so the gate admits MLA — but only when canonical_layout
-    is requested."""
+    is requested.
+    """
     mla_groups = [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))]
     assert not _parallelism_agnostic(mla_groups)
 
@@ -645,7 +646,8 @@ def test_canonical_layout_widens_parallelism_agnostic_to_mla():
 def test_canonical_layout_certifies_v2_model_runner():
     """Canonical bytes are certified per layer against live tensor strides at
     registration, so the static gate must not depend on the model-runner
-    version — the v2 runner is the case the canonical layout exists for."""
+    version — the v2 runner is the case the canonical layout exists for.
+    """
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
@@ -667,7 +669,8 @@ def test_canonical_layout_certifies_v2_model_runner():
 
 def test_prefer_cross_layer_blocks_yields_to_canonical_layout():
     """The connector must not request cross-layer blocks under
-    canonical_layout: cross-layer slabs have no per-layer refs to certify."""
+    canonical_layout: cross-layer slabs have no per-layer refs to certify.
+    """
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
         OffloadingConnector,

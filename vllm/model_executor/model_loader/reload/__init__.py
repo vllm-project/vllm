@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Layerwise weight reloading utilities for vLLM.
+"""Layerwise weight reloading utilities for vLLM.
 
 This module provides functionality to reload model weights layer-by-layer,
 which is useful for weight updates without full model reconstruction.

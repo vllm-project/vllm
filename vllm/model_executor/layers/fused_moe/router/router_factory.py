@@ -61,8 +61,7 @@ def create_fused_moe_router(
     num_logical_experts: int | None = None,
     hash_indices_table: torch.Tensor | None = None,
 ) -> FusedMoERouter:
-    """
-    Factory function to create the appropriate FusedMoERouter subclass based on
+    """Factory function to create the appropriate FusedMoERouter subclass based on
     the provided parameters.
 
     The selection logic follows this priority order:
@@ -109,8 +108,8 @@ def create_fused_moe_router(
 
     Returns:
         An instance of the appropriate FusedMoERouter subclass
-    """
 
+    """
     routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
     if routing_strategy != "":
         return RoutingSimulatorRouter(

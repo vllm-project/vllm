@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Regression test for DeepSeek-OCR TensorSchema validation with empty images_crop.
+"""Regression test for DeepSeek-OCR TensorSchema validation with empty images_crop.
 
 When using the Gundam preset (BASE_SIZE=1024, IMAGE_SIZE=640, CROP_MODE=True),
 images that are small enough to not require cropping produce an empty
@@ -109,7 +108,8 @@ class TestDeepseekOCREmptyImagesCrop:
 
     def test_mismatched_image_size_raises(self, processor):
         """Deliberately wrong image_size binding should still be caught
-        by TensorSchema validation."""
+        by TensorSchema validation.
+        """
         small_image = Image.new("RGB", (100, 100), color="green")
 
         result = processor(

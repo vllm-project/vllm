@@ -185,7 +185,8 @@ def test_trtllm_bf16_monolithic_routing_replay_records_valid_experts(
 ) -> None:
     """The capture callback should receive the int16 routed-expert IDs the
     kernel actually used, the values should be valid expert indices, and
-    each token should pick ``top_k`` distinct experts."""
+    each token should pick ``top_k`` distinct experts.
+    """
     if top_k > _DSV3_N_GROUP * _DSV3_TOPK_GROUP:
         pytest.skip(
             f"DSV3 requires top_k <= n_group * topk_group "
@@ -264,7 +265,8 @@ def test_trtllm_bf16_monolithic_routing_replay_non_dsv3(
     routing_method: RoutingMethodType,
 ) -> None:
     """Routing replay works for non-DeepSeekV3 routing methods too.
-    FlashInfer's ``routing_replay_out`` is routing-method-agnostic."""
+    FlashInfer's ``routing_replay_out`` is routing-method-agnostic.
+    """
     torch.manual_seed(0)
     device = torch.device("cuda:0")
 
@@ -317,7 +319,8 @@ def test_trtllm_bf16_monolithic_routing_replay_non_dsv3(
 
 def test_trtllm_bf16_monolithic_capture_disabled_skips_buffer_alloc() -> None:
     """With no callback installed the kernel should not see a
-    ``routing_replay_out`` tensor — verify the helper short-circuits."""
+    ``routing_replay_out`` tensor — verify the helper short-circuits.
+    """
     torch.manual_seed(0)
     device = torch.device("cuda:0")
     experts, _, _ = _make_bf16_monolithic_experts(
@@ -339,7 +342,8 @@ def test_trtllm_bf16_monolithic_capture_disabled_skips_buffer_alloc() -> None:
 def test_trtllm_bf16_monolithic_supports_capture_for_all_routing() -> None:
     """FlashInfer's ``routing_replay_out`` is supported by all routing
     methods, so ``supports_routing_replay_capture`` should be True
-    regardless of routing method."""
+    regardless of routing method.
+    """
     device = torch.device("cuda:0")
     for routing_method in (
         RoutingMethodType.DeepSeekV3,
@@ -361,7 +365,8 @@ def test_trtllm_bf16_monolithic_supports_capture_for_all_routing() -> None:
 
 def test_trtllm_bf16_monolithic_capture_buffer_shape_and_dtype() -> None:
     """When capture is installed, the allocated buffer is int16 and shaped
-    ``(num_tokens, experts_per_token)``."""
+    ``(num_tokens, experts_per_token)``.
+    """
     device = torch.device("cuda:0")
     experts, _, _ = _make_bf16_monolithic_experts(
         num_experts=_DSV3_NUM_EXPERTS,
@@ -592,7 +597,8 @@ def test_trtllm_fp8_block_scale_monolithic_routing_replay_records_valid_experts(
     top_k: int,
 ) -> None:
     """End-to-end: ``TrtLlmFp8ExpertsMonolithic`` (DeepSeekFp8 block-scale
-    path, DSV3 routing) captures valid expert IDs."""
+    path, DSV3 routing) captures valid expert IDs.
+    """
     if top_k > _DSV3_N_GROUP * _DSV3_TOPK_GROUP:
         pytest.skip(
             f"DSV3 requires top_k <= n_group * topk_group "
@@ -778,7 +784,8 @@ def _run_nvfp4_monolithic(
     routing_bias: torch.Tensor,
 ) -> torch.Tensor:
     """The monolithic NVFP4 apply expects packed fp4 hidden states + the
-    matching fp8 per-block scale stored in the ``a1q_scale`` slot."""
+    matching fp8 per-block scale stored in the ``a1q_scale`` slot.
+    """
     # Stash the weight tensors on the experts in the locations the apply()
     # implementation reads from (it pulls them from quant_config / scales
     # already; w1/w2 come in as args).
@@ -806,7 +813,8 @@ def test_trtllm_nvfp4_monolithic_routing_replay_records_valid_experts(
     top_k: int,
 ) -> None:
     """End-to-end: ``TrtLlmNvFp4ExpertsMonolithic`` captures valid expert IDs
-    on the DSV3 routing path."""
+    on the DSV3 routing path.
+    """
     if top_k > _DSV3_N_GROUP * _DSV3_TOPK_GROUP:
         pytest.skip(
             f"DSV3 requires top_k <= n_group * topk_group "

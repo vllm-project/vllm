@@ -27,8 +27,7 @@ from .ScaledMMLinearKernel import (
 
 
 class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    """
-    FP8 Marlin kernel for GPUs that lack FP8 hardware support.
+    """FP8 Marlin kernel for GPUs that lack FP8 hardware support.
     Leverages the Marlin kernel for fast weight-only FP8 quantization.
     """
 

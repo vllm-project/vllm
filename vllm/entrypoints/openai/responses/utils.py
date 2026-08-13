@@ -114,8 +114,7 @@ def build_response_output_items(
 def should_continue_final_message(
     request_input: str | list[ResponseInputOutputItem],
 ) -> bool:
-    """
-    Determine if the last input message is a partial assistant message
+    """Determine if the last input message is a partial assistant message
     that should be continued rather than starting a new generation.
 
     This enables partial message completion similar to Anthropic's Messages API,
@@ -131,6 +130,7 @@ def should_continue_final_message(
 
     Returns:
         True if the final message should be continued, False otherwise
+
     """
     if isinstance(request_input, str):
         # Simple string input is always a user message
@@ -225,8 +225,7 @@ def _construct_message_from_response_item(
     item: ResponseInputOutputItem,
     prev_msg: ChatCompletionMessageParam | None = None,
 ) -> ChatCompletionMessageParam | None:
-    """
-    Returns a new message or None. If `None`, `prev_msg` might be updated.
+    """Returns a new message or None. If `None`, `prev_msg` might be updated.
     If `prev_msg` is `None`, a new message is always returned.
     """
     prev_assistant_msg = (
@@ -350,8 +349,7 @@ def extract_function_tool_names(tools: list[Tool]) -> frozenset[str]:
 
 
 def extract_tool_types(tools: list[Tool]) -> set[str]:
-    """
-    Extracts the tool types from the given tools.
+    """Extracts the tool types from the given tools.
     """
     tool_types: set[str] = set()
     for tool in tools:
@@ -369,8 +367,7 @@ def extract_tool_types(tools: list[Tool]) -> set[str]:
 def convert_tool_responses_to_completions_format(
     tool: dict,
 ) -> ChatCompletionToolsParam:
-    """
-    Convert a flat Responses tool schema:
+    """Convert a flat Responses tool schema:
         {"type": "function", "name": "...", "description": "...", "parameters": {...}}
     into a Chat Completions tool param for chat-template rendering.
     """

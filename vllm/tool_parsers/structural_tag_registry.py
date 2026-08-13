@@ -106,7 +106,6 @@ def get_model_structural_tag(
     reasoning: bool,
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
-
     if not tools or tool_choice == "none":
         return None
 
@@ -144,7 +143,6 @@ def _dump_tool_for_xgrammar(
     tool: ChatCompletionToolsParam | ResponsesTool,
 ) -> dict[str, Any]:
     """Convert tool objects to xgrammar's Chat Completions tool protocol."""
-
     if isinstance(tool, FunctionTool):
         function: dict[str, Any] = {"name": tool.name}
         if tool.description is not None:
@@ -164,7 +162,6 @@ def _dump_tool_choice_for_xgrammar(
     tool_choice: ToolChoice,
 ) -> dict[str, Any] | str | None:
     """Convert tool_choice objects to xgrammar's expected protocol."""
-
     if tool_choice is None:
         return None
 

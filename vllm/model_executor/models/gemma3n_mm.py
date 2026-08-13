@@ -72,12 +72,11 @@ TOKENS_PER_AUDIO = 188
 
 
 class Gemma3nImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each patch
-        - w: Width of each patch
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each patch
+    - w: Width of each patch
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -111,6 +110,7 @@ def batch_audio_features(
 
     Returns:
         The `(bn, s_max, f)` features and their `(bn, s_max)` mask.
+
     """
     if isinstance(input_features, torch.Tensor):
         return input_features.squeeze(1), input_features_mask.squeeze(1)
@@ -131,11 +131,10 @@ def batch_audio_features(
 
 
 class Gemma3nAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of audios
-        - s: seq_length
-        - f: num_features
+    """Dimensions:
+    - bn: Batch size * number of audios
+    - s: seq_length
+    - f: num_features
     """
 
     type: Literal["audio"] = "audio"
@@ -183,8 +182,7 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Gemma3nProcessor,
     ) -> str:
-        """
-        Get the replacement text for image tokens.
+        """Get the replacement text for image tokens.
 
         For Gemma3n, this should return the full_image_sequence which includes
         BOI token, repeated image tokens, and EOI token.
@@ -198,8 +196,7 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         *,
         processor: Gemma3nProcessor,
     ) -> str:
-        """
-        Get the replacement text for audio tokens.
+        """Get the replacement text for audio tokens.
 
         For Gemma3n, this should return the full_audio_sequence which includes
         BOA token, repeated audio tokens, and EOA token.
@@ -438,7 +435,8 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
 
 class Gemma3nMultimodalEmbedder(nn.Module):
     """Embeds token ids or soft tokens for multimodal content into language
-    model space."""
+    model space.
+    """
 
     def __init__(
         self,
@@ -495,6 +493,7 @@ class Gemma3nMultimodalEmbedder(nn.Module):
 
         Returns:
             A torch.Tensor of embeddings with  shape `[batch_size, seq_len, self.config.text_config.hidden_size]`.
+
         """  # noqa: E501
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
@@ -807,8 +806,7 @@ class Gemma3nForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
@@ -827,8 +825,7 @@ class Gemma3nForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
-        """
-        Gemma3n supports "free-form" transcription.
+        """Gemma3n supports "free-form" transcription.
         We fix its prompt here to standardize transcriptions/translations
         requests.
         """

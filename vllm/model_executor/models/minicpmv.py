@@ -111,13 +111,12 @@ _MAX_FRAMES_PER_VIDEO = 16
 
 
 class MiniCPMVImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bns: Batch size * number of images * number of slices
-        - bn: Batch size * number of images
-        - c: Number of channels
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - bns: Batch size * number of images * number of slices
+    - bn: Batch size * number of images
+    - c: Number of channels
+    - h: Height
+    - w: Width
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -139,11 +138,10 @@ class MiniCPMVImagePixelInputs(TensorSchema):
 
 
 class MiniCPMVImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - ns: Number of slices
-        - hs: Hidden size (must match language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - ns: Number of slices
+    - hs: Hidden size (must match language model backbone)
     """
 
     type: Literal["image_embeds"]
@@ -287,8 +285,7 @@ class Resampler4_5(Resampler2_5):
     def get_1d_sincos_pos_embed_from_temporal_size(
         self, embed_dim: int, pos: np.ndarray
     ):
-        """
-        embed_dim: output dimension for each position
+        """embed_dim: output dimension for each position
         pos: a list of positions to be encoded: size (M,)
         out: (M, D)
         """
@@ -1144,8 +1141,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
-    """
-    The abstract class of MiniCPMV can only be inherited, but cannot be
+    """The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.
     """
 
@@ -1331,8 +1327,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         return loaded
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="llm", connector="resampler", tower_model="vpm"
@@ -1860,8 +1855,7 @@ _SUPPORT_VERSION = {
     dummy_inputs=MiniCPMVDummyInputsBuilder,
 )
 class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
-    """
-    Different versions of MiniCPMV use different visual encoders and LLMs,
+    """Different versions of MiniCPMV use different visual encoders and LLMs,
     which is not conducive to the current integration logic of LoRA and
     bitsandbytes in vLLM. Therefore, it is necessary to separate them.
     """

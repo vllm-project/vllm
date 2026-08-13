@@ -47,7 +47,8 @@ def plan_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 def test_startup_plan_fingerprint_sensitivity(plan_env):
     """The fingerprint is the OOM-safety key: stable for identical inputs,
-    different for anything the profiled value depends on."""
+    different for anything the profiled value depends on.
+    """
     fp = startup_plan.compute_plan_fingerprint
     base = fp(_plan_worker().vllm_config, 0, 1)
     assert base == fp(_plan_worker().vllm_config, 0, 1)

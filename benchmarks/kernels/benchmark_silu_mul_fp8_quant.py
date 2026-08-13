@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Comprehensive 3-way SiLU Benchmark Suite
+"""Comprehensive 3-way SiLU Benchmark Suite
 
 This benchmark compares three SiLU implementations:
 1. SiLU V2 (CUDA) - Optimized CUDA kernel implementation

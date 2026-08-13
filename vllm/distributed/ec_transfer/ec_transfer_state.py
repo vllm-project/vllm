@@ -24,10 +24,8 @@ def has_ec_transfer() -> bool:
 
 
 def ensure_ec_transfer_initialized(vllm_config: "VllmConfig") -> None:
+    """Initialize EC cache connector.
     """
-    Initialize EC cache connector.
-    """
-
     global _EC_CONNECTOR_AGENT
 
     if vllm_config.ec_transfer_config is None:

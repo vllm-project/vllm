@@ -90,7 +90,8 @@ def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
 
 class AggregateStatLoggerBase(StatLoggerBase):
     """Abstract base class for loggers that
-    aggregate across multiple DP engines."""
+    aggregate across multiple DP engines.
+    """
 
     @abstractmethod
     def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]): ...
@@ -1282,8 +1283,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
 
 def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
-    """
-    Builds a list of buckets with increasing powers of 10 multiplied by
+    """Builds a list of buckets with increasing powers of 10 multiplied by
     mantissa values until the value exceeds the specified maximum.
 
     """
@@ -1300,25 +1300,24 @@ def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
 
 
 def build_1_2_5_buckets(max_value: int) -> list[int]:
-    """
-    Example:
+    """Example:
     >>> build_1_2_5_buckets(100)
     [1, 2, 5, 10, 20, 50, 100]
+
     """
     return build_buckets([1, 2, 5], max_value)
 
 
 class StatLoggerManager:
-    """
-    StatLoggerManager:
-        Logging happens at the level of the EngineCore (per scheduler).
-         * DP: >1 EngineCore per AsyncLLM - loggers for each EngineCore.
-         * With Local Logger, just make N copies for N EngineCores.
-         * With Prometheus, we need a single logger with N "labels"
+    """StatLoggerManager:
+    Logging happens at the level of the EngineCore (per scheduler).
+     * DP: >1 EngineCore per AsyncLLM - loggers for each EngineCore.
+     * With Local Logger, just make N copies for N EngineCores.
+     * With Prometheus, we need a single logger with N "labels"
 
-        This class abstracts away this implementation detail from
-        the AsyncLLM, allowing the AsyncLLM to just call .record()
-        and .log() to a simple interface.
+    This class abstracts away this implementation detail from
+    the AsyncLLM, allowing the AsyncLLM to just call .record()
+    and .log() to a simple interface.
     """
 
     def __init__(

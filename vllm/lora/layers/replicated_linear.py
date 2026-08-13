@@ -33,6 +33,7 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         Returns:
             - output
             - bias
+
         """
         bias = self.base_layer.bias if not self.base_layer.skip_bias_add else None
 

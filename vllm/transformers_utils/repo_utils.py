@@ -66,6 +66,7 @@ def resolve_revision(
     Returns:
         The resolved revision, or `revision` unchanged if it cannot be resolved
         (local path, ModelScope, or any Hub error).
+
     """
     if Path(repo_id).exists() or envs.VLLM_USE_MODELSCOPE:
         return revision
@@ -340,8 +341,7 @@ def get_hf_file_bytes(
 def try_get_local_file(
     model: str | Path, file_name: str, revision: str | None = "main"
 ) -> Path | Any | None:
-    """
-    Try to get a local file from the HuggingFace repository.
+    """Try to get a local file from the HuggingFace repository.
 
     The possible return values are:
 
@@ -372,20 +372,21 @@ def try_get_local_file(
 def get_hf_file_to_dict(
     file_name: str, model: str | Path, revision: str | None = "main"
 ):
-    """
-    Downloads a file from the Hugging Face Hub and returns
+    """Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
 
-    Parameters:
+    Parameters
+    ----------
     - file_name (str): The name of the file to download.
     - model (str): The name of the model on the Hugging Face Hub.
     - revision (str): The specific version of the model.
 
-    Returns:
+    Returns
+    -------
     - config_dict (dict): A dictionary containing
     the contents of the downloaded file.
-    """
 
+    """
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:

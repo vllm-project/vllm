@@ -243,7 +243,8 @@ def test_replayssm_write_pos(case: ReplaySSMBuildCase):
 
 def test_resumed_request_differs_from_fresh():
     """Same token count, different decode_base: fresh (base 100) -> write_pos 5,
-    resumed (base 105) -> write_pos 0."""
+    resumed (base 105) -> write_pos 0.
+    """
     builder = _create_replayssm_builder(16)
     batch = BatchSpec(seq_lens=[106, 106], query_lens=[1, 1])
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(

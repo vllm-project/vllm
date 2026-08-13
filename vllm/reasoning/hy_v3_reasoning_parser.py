@@ -17,8 +17,7 @@ logger = init_logger(__name__)
 
 
 class HYV3ReasoningParser(BaseThinkingReasoningParser):
-    """
-    HYV3 parser that delegates to either HYV3ReasoningParser or
+    """HYV3 parser that delegates to either HYV3ReasoningParser or
     IdentityReasoningParser based on `reasoning_effort`.
 
     The HYV3 model uses <think>...</think> tokens to denote reasoning text.

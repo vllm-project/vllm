@@ -179,7 +179,8 @@ class MockSubscriber:
 @pytest.fixture
 def enable_ray_v2_backend():
     """Set env vars for the Ray V2 executor backend and shut down Ray
-    between tests."""
+    between tests.
+    """
     import ray
 
     saved = {

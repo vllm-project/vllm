@@ -74,8 +74,7 @@ def torchao_version_at_least(torchao_version: str) -> bool:
 
 
 def should_skip(prefix: str, skip_modules: list[str]) -> bool:
-    """
-    Robust skipping logic:
+    """Robust skipping logic:
     should_skip("model.model.layers.1.q_proj",
                 ["model.model.layers.1.q_proj"])  # True
     should_skip("model.model.layers.10.o_proj", ["o_proj"])  -> True
@@ -163,7 +162,7 @@ class TorchAOConfig(QuantizationConfig):
 
     @staticmethod
     def get_config_filenames() -> list[str]:
-        """torchao doesn't require additional config files, we use
+        """Torchao doesn't require additional config files, we use
         `config.json` from huggingface: `model_config.hf_config`
         """
         return []
@@ -296,6 +295,7 @@ def torchao_quantize_param_data(
         param: weight parameter of the linear module
         torchao_config: type of quantization and their arguments we want to
             use to quantize the Tensor
+
     """
     from torchao.core.config import AOBaseConfig
     from torchao.quantization import quantize_
@@ -325,6 +325,7 @@ class TorchAOLinearMethod(LinearMethodBase):
     Args:
         quant_config: The torchao quantization config, a string that encodes
             the type of quantization and all relevant arguments.
+
     """
 
     def __init__(self, quant_config: TorchAOConfig):

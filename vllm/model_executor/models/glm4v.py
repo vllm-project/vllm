@@ -65,12 +65,11 @@ from .utils import WeightsMapper
 
 
 class GLMVImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - c: Number of channels (3)
-        - h: Height of image
-        - w: Width of image
+    """Dimensions:
+    - b: Batch size
+    - c: Number of channels (3)
+    - h: Height of image
+    - w: Width of image
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -90,14 +89,15 @@ class EVA2CLIPPatchEmbedding(nn.Module):
         self.position_embedding = nn.Embedding(config.num_positions, config.hidden_size)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters:
+        """Parameters
         images : torch.Tensor
             Input image tensor with shape (B, C, H, W)
 
-        Returns:
+        Returns
+        -------
         torch.Tensor
             Transformed tensor with shape (B, L, D)
+
         """
         images = images.to(device=self.proj.weight.device, dtype=self.proj.weight.dtype)
         x = self.proj(images)
@@ -246,8 +246,7 @@ class EVA2CLIPGLU(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
-        """
-        The original implementation is the same as:
+        """The original implementation is the same as:
         ```python
         self.dense_h_to_4h = ColumnParallelLinear(
             config.hidden_size,
@@ -349,14 +348,15 @@ class EVA2CLIPModel(nn.Module):
         self.scaling_factor = vision_config.scaling_factor
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters:
+        """Parameters
         images : torch.Tensor
             Input image tensor with shape (B, C, H, W)
 
-        Returns:
+        Returns
+        -------
         torch.Tensor
             Transformed tensor with shape (B, L, D)
+
         """
         x = self.patch_embedding(images)
         x = self.transformer(x)
@@ -527,8 +527,7 @@ class GLM4VForCausalLM(
     }
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="transformer.encoder",

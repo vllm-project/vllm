@@ -180,11 +180,13 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             kv_cache: shape =
                 [num_blocks, block_size, num_kv_heads, head_size + head_size_v]
             attn_metadata: Metadata for attention.
+
         Returns:
             shape = [num_tokens, num_heads * head_size_v]
         NOTE: FP8 quantization, flash-attn expect the size of
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
+
         """
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."

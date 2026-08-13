@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-vLLM Helion kernel registration with pre-tuned config selection.
+"""vLLM Helion kernel registration with pre-tuned config selection.
 
 This module leverages Helion's internal config selection infrastructure to use
 pre-tuned configs instead of runtime autotuning.
@@ -163,8 +162,7 @@ class ConfiguredHelionKernel:
         return self._decorated_kernel(*args, **kwargs)
 
     def _create_key_computer(self):
-        """
-        Create a key computer function derived from the config picker.
+        """Create a key computer function derived from the config picker.
 
         The returned function receives kernel arguments unpacked (*args) to match
         Helion's key signature (called as self._key_fn(*args)).
@@ -434,6 +432,7 @@ def register_kernel(
                         "4096": (torch.randn(4096, device="cuda"), 0.5),
                         "8192": (torch.randn(8192, device="cuda"), 0.5),
                     }
+
     """
 
     def decorator(kernel_func: Callable) -> HelionKernelWrapper:

@@ -90,8 +90,7 @@ def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch
 
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
-    """
-    Synchronize cudagraph_mode across DP ranks by taking the minimum.
+    """Synchronize cudagraph_mode across DP ranks by taking the minimum.
     If any rank has NONE (0), all ranks use NONE.
     This ensures all ranks send consistent values (all padded or all unpadded).
     """
@@ -105,8 +104,7 @@ def _synchronize_dp_ranks(
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
 ) -> tuple[bool, torch.Tensor | None, int]:
-    """
-    1. Decides if each DP rank is going to microbatch. Either all ranks
+    """1. Decides if each DP rank is going to microbatch. Either all ranks
     run with microbatching or none of them do.
 
     2. Determines the total number of tokens that each rank will run.
@@ -169,8 +167,7 @@ def coordinate_batch_across_dp(
     uniform_decode: bool | None = None,
     cudagraph_mode: int = 0,
 ) -> tuple[bool, torch.Tensor | None, int]:
-    """
-    Coordinates amongst all DP ranks to determine if and how the full batch
+    """Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.
 
     Args:

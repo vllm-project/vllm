@@ -68,7 +68,6 @@ class CausalMixin(VllmModelForTextGeneration):
 
     def load_weights(self, weights: Iterable[tuple[str, "torch.Tensor"]]) -> set[str]:
         """A thin wrapper around `Base.load_weights` to handle the lm_head bias."""
-
         lm_head_bias = set()
 
         def auto_load_lm_head_bias(weights):

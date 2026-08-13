@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for TieringOffloadingManager and ExampleSecondaryTierManager.
+"""Unit tests for TieringOffloadingManager and ExampleSecondaryTierManager.
 
 These tests verify:
 1. Basic tiered offloading operations (store, load, lookup)
@@ -290,7 +289,8 @@ class TestTieringOffloadingManager:
 
     def test_failed_promotion_finalizes_primary_with_failure(self, manager_setup):
         """A failed promotion still finalizes the primary slots with
-        success=False; the tier corrects its own verdict."""
+        success=False; the tier corrects its own verdict.
+        """
         from unittest.mock import patch
 
         from vllm.v1.kv_offload.tiering.base import JobResult
@@ -1011,7 +1011,8 @@ class TestTieringOffloadingManager:
 
     def test_on_new_request_lifecycle(self, manager_setup):
         """Policy defaults to BLOCK_LEVEL, escalates when a tier requests it,
-        and is cleaned up on on_request_finished."""
+        and is cleaned up on on_request_finished.
+        """
         # Default: all tiers return BLOCK_LEVEL
         ctx = ReqContext(req_id="req_policy_lifecycle")
         result = self.manager.on_new_request(ctx)
@@ -1082,7 +1083,8 @@ class TestTieringOffloadingManager:
     def test_reset_cache_clears_orchestrator_state(self, manager_setup):
         """reset_cache wipes every kind of orchestrator state and resets
         primary tier; pending submissions are dropped without being sent
-        to the secondary tier. Active request state is retained."""
+        to the secondary tier. Active request state is retained.
+        """
         # Cascade — populates primary blocks and leaves cascade jobs
         # in _jobs (the synchronous example tier has already
         # queued completions); reset_cache's drain loop will pick them up.
@@ -1174,7 +1176,8 @@ class TestTieringOffloadingManager:
         self, manager_setup, load_tier_filter
     ):
         """Filter excluding secondary medium returns MISS from secondaries
-        even when they hold the block; primary is unaffected."""
+        even when they hold the block; primary is unaffected.
+        """
         blocks = to_keys(range(2))
         # Put one block in primary, one only in secondary
         self._start_request()

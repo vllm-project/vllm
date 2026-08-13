@@ -252,6 +252,7 @@ def qwen_prompt_path_encoder(
         tmp_path: Tempdir for test under consideration.
         prompt: Prompt with image placeholders.
         assets: list of image assets whose len equals the num placeholders.
+
     """
     # Ensure that the number of placeholders matches the number of assets;
     # If this is not true, the test is probably written incorrectly.
@@ -507,14 +508,12 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     2) Ensure IsaacModel.forward returns hidden_states
     for compatibility with hidden_states_to_seq_logprobs()
     """
-
     from perceptron.tensorstream import TextType
     from perceptron.tensorstream.ops import compute_mrope_pos_tensor, modality_mask
     from transformers.modeling_outputs import BaseModelOutputWithPast
 
     def compute_position_ids_input_ids(input_ids: torch.Tensor) -> torch.Tensor:
-        """
-        Create 3D positional indices for token input.
+        """Create 3D positional indices for token input.
         """
         batch_size, seq_length = input_ids.shape
         position_ids = torch.arange(seq_length, device=input_ids.device)
@@ -570,8 +569,7 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         cache_position=None,
         **kwargs,
     ):
-        """
-        Forward pass with MRoPE position embeddings.
+        """Forward pass with MRoPE position embeddings.
         Computes position embeddings once and passes them through all layers.
         """
         output_hidden_states = (
@@ -1184,7 +1182,6 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
     HfRunner.generate calls batch_decode on the full sequence (prompt +
     generated).
     """
-
     import io
 
     import pybase64 as base64

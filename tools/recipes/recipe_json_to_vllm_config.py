@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Convert a vLLM Recipes per-hardware JSON rendering into:
+"""Convert a vLLM Recipes per-hardware JSON rendering into:
 
   1) config.yml - native `vllm serve --config` YAML
   2) env.sh     - environment variables required by the recipe
@@ -38,6 +37,7 @@ by the Recipes API instead of synthesizing strategy URLs locally.
 The converter intentionally targets a single `vllm serve` process. If the
 recipe rendering is multi-node, PD-disaggregated, or another multi-process
 deployment, it exits instead of silently generating an incomplete config.
+
 """
 
 from __future__ import annotations
@@ -445,8 +445,7 @@ def merge_value(dst: dict[str, Any], path: list[str], value: Any) -> None:
 
 
 def normalize_key(raw_key: str) -> list[str]:
-    """
-    Convert the CLI key to config-file spelling.
+    """Convert the CLI key to config-file spelling.
 
     Only the top-level CLI option name gets underscore -> dash normalization.
     Nested JSON field names after a dot are preserved.

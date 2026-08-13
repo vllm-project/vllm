@@ -143,7 +143,8 @@ class CpuGpuBuffer:
 
     def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
         """NOTE: Because this method is non-blocking, explicit synchronization
-        is needed to ensure the data is copied to CPU."""
+        is needed to ensure the data is copied to CPU.
+        """
         if n is None:
             return self.cpu.copy_(self.gpu, non_blocking=True)
         return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
@@ -157,7 +158,8 @@ def get_engine_client_zmq_addr(
     """Return an IPC path (``local_only=True``) or ``tcp://host:port``.
 
     ``port=0`` lets the kernel assign the port at ``bind()`` time; the
-    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``."""
+    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``.
+    """
     if local_only:
         return get_open_zmq_ipc_path()
     return get_tcp_uri(host, port)
@@ -200,6 +202,7 @@ class APIServerProcessManager:
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
+
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -250,7 +253,8 @@ class APIServerProcessManager:
     ) -> tuple[list[str], list[str]]:
         """Return (inputs, outputs) reported by each child, indexed by
         ``client_index``. Raises ``RuntimeError`` on timeout or premature
-        child exit."""
+        child exit.
+        """
         n = len(self._address_pipes)
         inputs: list[str | None] = [None] * n
         outputs: list[str | None] = [None] * n
@@ -406,7 +410,8 @@ class RustFrontendProcessManager:
 
 class _SubprocessWrapper:
     """Wraps subprocess.Popen to provide the BaseProcess-like interface
-    needed by wait_for_completion_or_failure."""
+    needed by wait_for_completion_or_failure.
+    """
 
     def __init__(self, proc, name: str):
         self._proc = proc
@@ -502,7 +507,6 @@ def run_api_server_worker_proc(
     listen_address, sock, args, client_config=None, **uvicorn_kwargs
 ) -> None:
     """Entrypoint for individual API server worker processes."""
-
     from vllm.entrypoints.openai.api_server import run_server_worker
 
     client_config = client_config or {}
@@ -533,8 +537,8 @@ def wait_for_completion_or_failure(
             If CoreEngineProcManager, it manages local engines;
             if CoreEngineActorManager, it manages all engines.
         coordinator: The coordinator for data parallel.
-    """
 
+    """
     try:
         logger.info("Waiting for API servers to complete ...")
         # Create a mapping of sentinels to their corresponding processes
@@ -596,6 +600,7 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
     Args:
         procs: List of processes to shutdown
         timeout: Maximum time in seconds to wait for graceful shutdown
+
     """
     if timeout is None:
         # Keep a small grace period for best-effort cleanup paths that do not
@@ -650,8 +655,7 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
 def copy_slice(
     from_tensor: torch.Tensor, to_tensor: torch.Tensor, length: int
 ) -> torch.Tensor:
-    """
-    Copy the first length elements of a tensor into another tensor in a
+    """Copy the first length elements of a tensor into another tensor in a
     non-blocking manner.
 
     Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
@@ -665,7 +669,6 @@ def report_usage_stats(
     vllm_config, usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
 ) -> None:
     """Report usage statistics if enabled."""
-
     if not is_usage_stats_enabled():
         return
 
@@ -786,6 +789,7 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
 
     Returns:
         A memoryview of the tensor data as uint8.
+
     """
     return tensor.flatten().cpu().contiguous().view(torch.uint8).numpy().data
 
@@ -809,8 +813,7 @@ class IterationDetails:
 
 
 def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDetails:
-    """
-    Compute the number of context/generation requests and tokens
+    """Compute the number of context/generation requests and tokens
     for the current iteration's scheduler output. A requests is regarded
     as a context request if its output tokens are still 0, an extended chunk
     of chunked prefill falls into this category.
@@ -821,6 +824,7 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
     Returns:
         An IterationDetails object containing the number of
         context/generation requests and tokens.
+
     """
     num_context_requests = 0
     num_context_tokens = 0

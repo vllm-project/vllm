@@ -107,8 +107,7 @@ def init_otel_worker_tracer(
     process_kind: str,
     process_name: str,
 ) -> Tracer:
-    """
-    Backend-specific initialization for OpenTelemetry in a worker process.
+    """Backend-specific initialization for OpenTelemetry in a worker process.
     """
     # Initialize the tracer if an OTLP endpoint is configured.
     # The endpoint is propagated via environment variable from the main process.
@@ -133,7 +132,6 @@ def extract_trace_context(headers: Mapping[str, str] | None) -> Context | None:
 
 def instrument_otel(func, span_name, attributes, record_exception):
     """Internal wrapper logic for sync and async functions."""
-
     # Pre-calculate static code attributes once (these don't change)
     code_attrs = {
         LoadingSpanAttributes.CODE_FUNCTION: func.__qualname__,
@@ -214,8 +212,7 @@ def manual_instrument_otel(
 
 
 def _get_smart_context() -> Context | None:
-    """
-    Determines the parent context.
+    """Determines the parent context.
     1. If a Span is already active in this process, use it.
     2. If not, extract from os.environ, handling the case-sensitivity mismatch.
     """
@@ -239,8 +236,7 @@ def _get_smart_context() -> Context | None:
 
 @contextmanager
 def propagate_trace_to_env():
-    """
-    Temporarily injects the current OTel context into os.environ.
+    """Temporarily injects the current OTel context into os.environ.
     This ensures that any subprocesses (like vLLM workers) spawned
     within this context inherit the correct traceparent.
     """

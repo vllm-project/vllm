@@ -238,7 +238,8 @@ def embed_rmsnorm(
     embedding-table gather.
     ``chain_weight`` additionally emits ``rmsnorm(out, chain_weight)`` (the
     first decoder layer's pre-attention norm) as a second output, still one
-    launch. Bit-exact vs the unfused module sequence."""
+    launch. Bit-exact vs the unfused module sequence.
+    """
     ids = input_ids.view(-1)
     (T,) = ids.shape
     n = embed_table.shape[1]
@@ -332,7 +333,8 @@ def embed_dual_rmsnorm_cat(
     (draft decode steps) or precomputed ``embeds`` ([T, N], the target-merged
     multimodal embeddings at draft prefill); ``pre_norm_weight`` chains the
     backbone embed_norm in front of the depth embed_norm (bit-exact vs the
-    unfused sequence). The concat copies collapse into direct writes."""
+    unfused sequence). The concat copies collapse into direct writes.
+    """
     T, n = hidden.shape
     if embeds is not None:
         assert embeds.shape == hidden.shape

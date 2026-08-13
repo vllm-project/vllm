@@ -216,7 +216,8 @@ def test_request_logger_log_outputs_integration():
 
 def test_streaming_complete_logs_full_text_content():
     """Test that streaming complete logging includes
-    full accumulated text, not just token count."""
+    full accumulated text, not just token count.
+    """
     mock_logger = MagicMock()
 
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):

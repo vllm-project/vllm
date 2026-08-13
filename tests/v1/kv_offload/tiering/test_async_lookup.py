@@ -165,7 +165,8 @@ class TestAsyncLookupManager:
         subsequent lookup then returns False (MISS) directly, WITHOUT enqueuing
         a fresh batch_lookup — that is what makes the request unable to loop.
         The entry is retained (as False) not dropped, so cleanup()'s reverse
-        index stays consistent; an unknown key is a no-op."""
+        index stays consistent; an unknown key is a no-op.
+        """
         mgr = InMemoryLookupManager(existing_keys={_key(1), _key(2)})
         ctx = _ctx("reqA")
         assert mgr.lookup(_key(1), ctx) is None
@@ -205,7 +206,8 @@ class TestAsyncLookupManager:
         receive at most one result per key. Normal operation resolves a key a
         single time; a second result for an already-decided key trips the assert
         that guards the invariant (a silent overwrite could flip a corrected
-        miss back to True and reopen the failed-load livelock)."""
+        miss back to True and reopen the failed-load livelock).
+        """
         mgr = InMemoryLookupManager(existing_keys={_key(1)})
         ctx = _ctx("reqA")
 

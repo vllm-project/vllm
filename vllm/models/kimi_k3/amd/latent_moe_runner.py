@@ -59,8 +59,7 @@ class ROCmLatentMoERunner(MoERunner):
         shared_output: torch.Tensor,
         trunc_size: int | None,
     ) -> torch.Tensor:
-        """
-        Tier 2: column-parallel up-projection folded into the final reduce.
+        """Tier 2: column-parallel up-projection folded into the final reduce.
         """
         if not self._logged_sharded_tail:
             self._logged_sharded_tail = True

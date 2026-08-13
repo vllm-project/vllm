@@ -123,7 +123,8 @@ def _quantize_to_fp8(tensor: torch.Tensor):
 @pytest.mark.parametrize("PAGE_SIZE", [1, 16])
 def test_decode_attention_fp8(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE):
     """Test FP8 KV cache path: quantize K/V to FP8, run kernel with scales,
-    and compare against BF16 reference output."""
+    and compare against BF16 reference output.
+    """
     assert CACHE_SIZE % PAGE_SIZE == 0
     dtype = torch.bfloat16
     seq_len = L
@@ -246,7 +247,8 @@ def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SI
     """The kernel must honor the cache's page-dim stride, not assume pages are
     packed back-to-back. A per-layer view into a cross-layer (block-major)
     cache has stride(0) inflated by num_layers; outputs must match a
-    contiguous cache holding the same data exactly."""
+    contiguous cache holding the same data exactly.
+    """
     B = 3
     seq_len = 1027
     CACHE_SIZE = 16384

@@ -224,7 +224,7 @@ class LayerwiseProfileResults(profile):
         return next(iterator, None)
 
     def _cumulative_cuda_time(self, node: _ModuleTreeNode):
-        "Return cuda time in microseconds"
+        """Return cuda time in microseconds"""
 
         def _cumulative_cuda_time_recursive(node: _ModuleTreeNode):
             if node.is_leaf and (gpu_kineto_event := self._get_kineto_gpu_event(node)):
@@ -372,13 +372,13 @@ class LayerwiseProfileResults(profile):
 
 class layerwise_profile(profile):
     def __init__(self, num_running_seqs: int | None = None):
-        """
-        layerwise profile constructor.
+        """Layerwise profile constructor.
 
         Args:
             num_running_seqs (Optional[int], optional): When given,
                 num_running_seqs will be passed to LayerProfileResults
                 for metadata update. Defaults to None.
+
         """
         super().__init__(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],

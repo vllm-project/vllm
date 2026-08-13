@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Config definitions for ExtractHiddenStatesModel, to be used with
-the extract_hidden_states spec decoding method."""
+the extract_hidden_states spec decoding method.
+"""
 
 import os
 

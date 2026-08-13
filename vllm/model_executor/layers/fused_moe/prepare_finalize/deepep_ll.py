@@ -34,8 +34,7 @@ logger = init_logger(__name__)
 def dequant_fp8(
     expert_x_fp8: torch.Tensor, expert_x_scales: torch.Tensor
 ) -> torch.Tensor:
-    """
-    Return dequantized tensor in fp32
+    """Return dequantized tensor in fp32
     """
     # TODO (varun) : Optimize leverage num_tokens_per_expert counts
     assert expert_x_fp8.is_contiguous()
@@ -50,8 +49,7 @@ def dequant_fp8(
 
 
 class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    Prepare/Finalize using DeepEP low-latency kernels.
+    """Prepare/Finalize using DeepEP low-latency kernels.
     """
 
     # DeepEP low-latency kernels are compiled only for certain

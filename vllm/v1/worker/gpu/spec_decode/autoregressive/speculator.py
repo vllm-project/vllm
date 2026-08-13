@@ -70,8 +70,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
     @property
     def advance_draft_positions(self) -> bool:
-        """
-        Whether to increment positions and seq_lens between draft steps.
+        """Whether to increment positions and seq_lens between draft steps.
 
         True for Eagle/standard MTP (each step produces new KV).
         False for Gemma4 MTP (Q-only, shares target KV, constant positions).

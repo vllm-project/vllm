@@ -31,8 +31,7 @@ logger = init_logger(__name__)
 
 
 class PythonicToolParser(ToolParser):
-    """
-    Tool call parser for models that produce tool calls in a pythonic style,
+    """Tool call parser for models that produce tool calls in a pythonic style,
     such as Llama 3.2 and Llama 4 models.
 
     Used when --enable-auto-tool-choice --tool-call-parser pythonic are all set
@@ -69,8 +68,7 @@ class PythonicToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """
-        Extract the tool calls from a complete model response.
+        """Extract the tool calls from a complete model response.
         """
         is_tool_call_pattern = False
         try:

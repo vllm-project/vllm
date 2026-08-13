@@ -12,8 +12,7 @@ from ..parse import MultiModalDataItems, MultiModalUUIDItems
 
 @dataclass
 class ProcessorInputs:
-    """
-    Represents the keyword arguments to
+    """Represents the keyword arguments to
     [`vllm.multimodal.processing.BaseMultiModalProcessor.apply`][].
     """
 

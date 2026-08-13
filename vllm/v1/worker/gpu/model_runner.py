@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-NOTE: Coding style guide for this file:
+"""NOTE: Coding style guide for this file:
 This model runner is shared by all models: text and multimodal, generative
 and embedding, public and private. As a result, this file must only contain
 code that is common to every model. Model-specific behavior belongs in the
@@ -1876,7 +1875,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
-        memory is reclaimable when running in the same process."""
+        memory is reclaimable when running in the same process.
+        """
         torch.accelerator.synchronize()
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()

@@ -139,6 +139,7 @@ def scatter_kv_caches(
             - MLA format: [num_layers, num_tokens_in_block, hidden_size]
         token_indices: List of token positions to update
         is_mla: Whether using MLA model format
+
     """
     num_layers = len(kv_caches_ptrs)
     num_tokens_in_block = len(token_indices)
@@ -194,6 +195,7 @@ def gather_kv_caches(
             - MLA format: [num_layers, num_tokens_in_block, hidden_size]
         token_indices: List of token positions to gather
         is_mla: Whether using MLA model format
+
     """
     num_layers = kv_caches_ptrs.shape[0]
     num_tokens_in_block = len(token_indices)

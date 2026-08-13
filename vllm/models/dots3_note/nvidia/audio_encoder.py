@@ -346,16 +346,16 @@ class WhisperEncoderLayer(nn.Module):
         rotary_cos: torch.Tensor | None = None,
         rotary_sin: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(seq_len, batch, embed_dim)`
-            attention_mask (`torch.FloatTensor`): attention mask of size
-                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
-            layer_head_mask (`torch.FloatTensor`): mask for attention heads in a given layer of size
-                `(encoder_attention_heads,)`.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
+        """Args:
+        hidden_states (`torch.FloatTensor`): input to the layer of shape `(seq_len, batch, embed_dim)`
+        attention_mask (`torch.FloatTensor`): attention mask of size
+            `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
+        layer_head_mask (`torch.FloatTensor`): mask for attention heads in a given layer of size
+            `(encoder_attention_heads,)`.
+        output_attentions (`bool`, *optional*):
+            Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+            returned tensors for more detail.
+
         """
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
@@ -426,12 +426,12 @@ class DotsSpeechPreTrainedModel(PreTrainedModel):
 
 
 class DotsSpeechEncoder(DotsSpeechPreTrainedModel):
-    """
-    Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
+    """Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
     [`WhisperEncoderLayer`].
 
     Args:
         config: WhisperConfig
+
     """
 
     def __init__(self, config: WhisperConfig):

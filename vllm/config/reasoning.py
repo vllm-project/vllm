@@ -47,13 +47,15 @@ class ReasoningConfig:
     @property
     def enabled(self) -> bool:
         """Returns True if reasoning is enabled (i.e. if token IDs have been
-        initialized), False otherwise."""
+        initialized), False otherwise.
+        """
         return self._enabled
 
     @property
     def reasoning_start_token_ids(self) -> list[int] | None:
         """Token IDs derived from `reasoning_start_str`. Set automatically by
-        `initialize_token_ids`. Not intended to be configured directly."""
+        `initialize_token_ids`. Not intended to be configured directly.
+        """
         return self._reasoning_start_token_ids
 
     @property

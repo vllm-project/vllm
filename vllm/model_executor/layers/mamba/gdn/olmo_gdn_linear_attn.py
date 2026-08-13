@@ -45,8 +45,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 @PluggableLayer.register("olmo_hybrid_gated_delta_net_attention")
 class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
-    """
-    Gated DeltaNet linear attention layer for OLMo Hybrid.
+    """Gated DeltaNet linear attention layer for OLMo Hybrid.
 
     This implements the linear attention mechanism that replaces sliding window
     attention in the hybrid architecture.
@@ -294,8 +293,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
     ):
-        """
-        Core attention computation (called by custom op).
+        """Core attention computation (called by custom op).
         """
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata

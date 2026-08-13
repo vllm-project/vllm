@@ -194,8 +194,7 @@ def _compare_directories(dir1: Path, dir2: Path) -> bool:
 
 
 def test_multi_example_connector_consistency():
-    """
-    Tests that MultiConnector with two ExampleConnectors saves
+    """Tests that MultiConnector with two ExampleConnectors saves
     identical KV cache data to separate storage locations.
     """
     storage_1_path = Path("storage_1/")
@@ -440,8 +439,7 @@ def test_engine_id_conflict():
 
 
 def test_multi_connector_handle_preemptions_integration():
-    """
-    Integration test: verify MultiConnector delegates handle_preemptions
+    """Integration test: verify MultiConnector delegates handle_preemptions
     to all sub-connectors.
 
     Uses TestExampleConnector which logs all method calls to temp files.
@@ -542,7 +540,8 @@ class TestMultiConnectorStats:
 
     def test_build_kv_connector_stats_reconstructs_nixl_stats(self):
         """Test that NixlConnector stats are properly reconstructed with
-        correct data."""
+        correct data.
+        """
         serialized_data = {
             "NixlConnector": {
                 "data": {
@@ -854,8 +853,7 @@ class TestMultiConnectorStats:
 
 
 def test_multi_connector_overrides_all_base_methods():
-    """
-    Ensure MultiConnector overrides all public methods from KVConnectorBase_V1.
+    """Ensure MultiConnector overrides all public methods from KVConnectorBase_V1.
     """
     # These are fine to inherit from KVConnectorBase_V1
     # TODO(https://github.com/vllm-project/vllm/pull/31811): Remove
@@ -1046,12 +1044,10 @@ def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
 
 
 def test_multi_connector_hma_support_detection():
-    """
-    At runtime, _all_support_hma is True only when every sub-connector
+    """At runtime, _all_support_hma is True only when every sub-connector
     implements SupportsHMA. Test all combinations of HMA / non-HMA
     sub-connectors.
     """
-
     assert supports_hma(MultiConnector)
 
     # -- All non-HMA connectors => _all_support_hma is False --
@@ -1093,8 +1089,7 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
     not torch.cuda.is_available(), reason="Requires GPU to instantiate LLM"
 )
 def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
-    """
-    When MultiConnector wraps a mix of HMA (NixlConnector) and non-HMA
+    """When MultiConnector wraps a mix of HMA (NixlConnector) and non-HMA
     (MockConnector) sub-connectors, verify that:
     1. The scheduler's MultiConnector has _all_support_hma == False.
     2. vLLM auto-disables the hybrid KV cache manager (no preference expressed by user)

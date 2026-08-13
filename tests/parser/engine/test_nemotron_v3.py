@@ -56,7 +56,8 @@ def parser():
 class TestNemotronSwap:
     def test_enable_thinking_false_swaps(self, parser):
         """When enable_thinking=False, model output without think tags
-        should have reasoning swapped to content."""
+        should have reasoning swapped to content.
+        """
         text = "The answer is 42."
         request = _make_request(enable_thinking=False)
         reasoning, content = parser.extract_reasoning(text, request)
@@ -73,7 +74,8 @@ class TestNemotronSwap:
 
     def test_no_swap_when_content_exists(self, parser):
         """With enable_thinking=False but real </think> giving content,
-        no swap occurs."""
+        no swap occurs.
+        """
         text = "Some reasoning.</think>Actual content here."
         request = _make_request(enable_thinking=False)
         reasoning, content = parser.extract_reasoning(text, request)
@@ -180,11 +182,13 @@ class TestStreaming:
 
 class TestParseDeltaTokenIdFiltering:
     """parse_delta must not trigger tool call parsing when <tool_call>
-    appears as regular text rather than as a special token ID."""
+    appears as regular text rather than as a special token ID.
+    """
 
     def test_tool_call_text_in_reasoning_is_not_parsed(self, parser):
         """Literal <tool_call> in model reasoning should be content,
-        not a tool call."""
+        not a tool call.
+        """
         request = _make_request()
 
         text = (
@@ -210,7 +214,8 @@ class TestParseDeltaTokenIdFiltering:
 
     def test_special_token_id_still_triggers_tool_call(self, parser):
         """When the scanner matches a special token ID, the tool call
-        must still be parsed correctly."""
+        must still be parsed correctly.
+        """
         request = _make_request()
 
         parser.parse_delta(
@@ -250,7 +255,8 @@ class TestParseDeltaTokenIdFiltering:
 
     def test_text_discussion_then_real_tool_call(self, parser):
         """Model discusses tool syntax in reasoning, then makes a real
-        tool call via special tokens."""
+        tool call via special tokens.
+        """
         request = _make_request()
 
         r1 = parser.parse_delta(

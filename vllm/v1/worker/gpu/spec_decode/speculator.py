@@ -197,7 +197,8 @@ class DraftModelSpeculator(BaseSpeculator):
     @property
     def attn_vllm_config(self) -> VllmConfig:
         """Config for the draft's attention metadata builders. Overridden by
-        speculators whose attention mode differs from the target's."""
+        speculators whose attention mode differs from the target's.
+        """
         return self.vllm_config
 
     def set_attn(

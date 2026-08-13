@@ -18,8 +18,7 @@ class CheersProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call
 
 
 class CheersProcessor(ProcessorMixin):
-    """
-    Constructs a Cheers processor which wraps a
+    """Constructs a Cheers processor which wraps a
     SigLIP image processor and a Qwen2 tokenizer.
     """
 

@@ -103,8 +103,7 @@ def should_ignore_layer(
 
 
 def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
-    """
-    Checks whether a layer_name is exactly equal or a regex match for
+    """Checks whether a layer_name is exactly equal or a regex match for
     if target starts with 're:' to any target in list.
     """
     return any(_is_equal_or_regex_match(layer_name, target) for target in targets)
@@ -116,8 +115,7 @@ def find_matched_target(
     targets: Iterable[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
 ) -> str | None:
-    """
-    Helper function to look up which "target" in the compressed-tensors
+    """Helper function to look up which "target" in the compressed-tensors
     config that a layer corresponds to.
 
     Recall that a compressed-tensors configs has a concept of
@@ -138,8 +136,8 @@ def find_matched_target(
         module: torch.nn.Module
         targets: list of targets to match the layer against
         fused_mapping: map from fused layer names to its components
-    """
 
+    """
     if layer_name is None:
         layer_name = ""
 
@@ -155,8 +153,7 @@ def find_matched_target(
 def _find_first_match(
     value: str, targets: Iterable[str], check_contains: bool = False
 ) -> str | None:
-    """
-    Returns first element of target that matches value either
+    """Returns first element of target that matches value either
     exactly or as a regex after 're:'. If check_contains is set to True,
     additionally checks if the target string is contained within the value.
 
@@ -164,8 +161,8 @@ def _find_first_match(
         value: string to compare the list of targets against
         targets: list of targets to match the layer against
         check_contains: whether or not to do a substring match
-    """
 
+    """
     for target in targets:
         if _is_equal_or_regex_match(value, target, check_contains=check_contains):
             return target
@@ -175,12 +172,10 @@ def _find_first_match(
 def _is_equal_or_regex_match(
     value: str, target: str, check_contains: bool = False
 ) -> bool:
-    """
-    Checks whether a value is exactly equal or a regex match for target
+    """Checks whether a value is exactly equal or a regex match for target
     if target starts with 're:'. If check_contains is set to True,
     additionally checks if the target string is contained within the value.
     """
-
     if target.startswith("re:"):
         pattern = target[3:]
         if re.match(pattern, value):
@@ -198,8 +193,7 @@ def _match_fused_layer(
     target_layers: Iterable[str],
     fused_mapping: Mapping[str, list[str]],
 ) -> str | None:
-    """
-    Match a fused layer name to its corresponding individual layer in
+    """Match a fused layer name to its corresponding individual layer in
     target_layers. Returns first value in fused_mapping which matches targets
 
     Implements an "all" matching strategy where a fused layer matches iff
@@ -215,6 +209,7 @@ def _match_fused_layer(
         target_layers = ["model.layers.0.self_attn.q_proj",
                         "model.layers.0.self_attn.k_proj",
                         "model.layers.0.self_attn.v_proj"]
+
     """
     # find layer_name in mapping
     fused = next((key for key in fused_mapping if layer_name.endswith(key)), None)

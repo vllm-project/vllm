@@ -511,11 +511,9 @@ class AudioProjectorSubsample(nn.Module):
 
 # === Audio Inputs === #
 class MiDashengLMAudioInputs(TensorSchema):
-    """
-
-    Dimensions:
-        - bn: Batch size * number of audios
-        - p: Number of sampling points
+    """Dimensions:
+    - bn: Batch size * number of audios
+    - p: Number of sampling points
     """
 
     input_values: Annotated[torch.Tensor, TensorShape("n", "p")]

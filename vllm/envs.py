@@ -378,8 +378,7 @@ def env_with_choices(
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
 ) -> Callable[[], str | None]:
-    """
-    Create a lambda that validates environment variable against allowed choices
+    """Create a lambda that validates environment variable against allowed choices
 
     Args:
         env_name: Name of the environment variable
@@ -389,6 +388,7 @@ def env_with_choices(
 
     Returns:
         Lambda function for environment_variables dict
+
     """
 
     def _get_validated_env() -> str | None:
@@ -423,8 +423,7 @@ def env_list_with_choices(
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
 ) -> Callable[[], list[str]]:
-    """
-    Create a lambda that validates environment variable
+    """Create a lambda that validates environment variable
     containing comma-separated values against allowed choices
 
     Args:
@@ -436,6 +435,7 @@ def env_list_with_choices(
     Returns:
         Lambda function for environment_variables
         dict that returns list of strings
+
     """
 
     def _get_validated_env_list() -> list[str]:
@@ -478,8 +478,7 @@ def env_set_with_choices(
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
 ) -> Callable[[], set[str]]:
-    """
-    Creates a lambda which that validates environment variable
+    """Creates a lambda which that validates environment variable
     containing comma-separated values against allowed choices which
     returns choices as a set.
     """
@@ -498,6 +497,7 @@ def get_vllm_port() -> int | None:
 
     Raises:
         ValueError: If VLLM_PORT is a URI, suggest k8s service discovery issue.
+
     """
     if "VLLM_PORT" not in os.environ:
         return None
@@ -523,8 +523,7 @@ def get_env_or_set_default(
     env_name: str,
     default_factory: Callable[[], str],
 ) -> Callable[[], str]:
-    """
-    Create a lambda that returns an environment variable value if set,
+    """Create a lambda that returns an environment variable value if set,
     or generates and sets a default value using the provided factory function.
     """
 
@@ -2116,8 +2115,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
 
 def __getattr__(name: str):
-    """
-    Gets environment variables lazily.
+    """Gets environment variables lazily.
 
     NOTE: After enable_envs_cache() invocation (which triggered after service
     initialization), all environment variables will be cached.
@@ -2134,8 +2132,7 @@ def _is_envs_cache_enabled() -> bool:
 
 
 def enable_envs_cache() -> None:
-    """
-    Enables caching of environment variables. This is useful for performance
+    """Enables caching of environment variables. This is useful for performance
     reasons, as it avoids the need to re-evaluate environment variables on
     every call.
 
@@ -2156,8 +2153,7 @@ def enable_envs_cache() -> None:
 
 
 def disable_envs_cache() -> None:
-    """
-    Resets the environment variables cache. It could be used to isolate environments
+    """Resets the environment variables cache. It could be used to isolate environments
     between unit tests.
     """
     global __getattr__
@@ -2191,8 +2187,8 @@ def compile_factors() -> dict[str, object]:
     """Return env vars used for torch.compile cache keys.
 
     Start with every known vLLM env var; drop entries in `ignored_factors`;
-    hash everything else. This keeps the cache key aligned across workers."""
-
+    hash everything else. This keeps the cache key aligned across workers.
+    """
     ignored_factors: set[str] = {
         "MAX_JOBS",
         "VLLM_RPC_BASE_PATH",

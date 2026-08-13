@@ -172,7 +172,8 @@ class MiniMaxM3SparsePrefillMetadata:
 @dataclass
 class MiniMaxM3SparseDecodeMetadata:
     """Per-decode state (cudagraph-safe). ``decode_query_len`` is the uniform
-    per-request query length (1, or 1 + num_speculative_tokens)."""
+    per-request query length (1, or 1 + num_speculative_tokens).
+    """
 
     seq_lens: torch.Tensor  # [num_decodes] int32
     block_table: torch.Tensor

@@ -605,7 +605,8 @@ class OffloadingConnectorScheduler:
         start_chunk_idx: int,
     ) -> int | None:
         """Return the number of consecutive offloaded chunks from the start,
-        or None if the backend deferred a lookup."""
+        or None if the backend deferred a lookup.
+        """
         hit_count = 0
         defer_lookup = False
         for local_idx, key in enumerate(keys):
@@ -638,7 +639,8 @@ class OffloadingConnectorScheduler:
     ) -> int | None:
         """Return the end index (in `keys`) of the last run of
         `sliding_window_size` consecutive hits, scanning from the end.
-        Returns 0 on miss, None if the backend deferred a lookup."""
+        Returns 0 on miss, None if the backend deferred a lookup.
+        """
         defer_lookup = False
         consecutive_hits = 0
         for idx in range(len(keys) - 1, -1, -1):
@@ -695,8 +697,7 @@ class OffloadingConnectorScheduler:
             )
 
     def _lookup_complete_chunks(self, req_status: RequestOffloadState) -> int | None:
-        """
-        Find how many tokens beyond num_locally_computed_tokens can be loaded.
+        """Find how many tokens beyond num_locally_computed_tokens can be loaded.
 
         Iterates full-attention groups first (prefix lookup), then sliding-window
         groups (suffix lookup). Each group may tighten max_hit_size_tokens, which
@@ -936,8 +937,7 @@ class OffloadingConnectorScheduler:
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded beyond the
+        """Get number of new tokens that can be loaded beyond the
         num_computed_tokens.
 
         Args:
@@ -954,6 +954,7 @@ class OffloadingConnectorScheduler:
                   should query for this request again later.
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
+
         """
         req_status = self._req_status[request.request_id]
         for group_state in req_status.group_states:
@@ -1101,10 +1102,8 @@ class OffloadingConnectorScheduler:
         req_status.partial_tail_boundary = None
 
     def _update_req_states(self, scheduler_output: SchedulerOutput) -> None:
+        """Update request states from the Scheduler's output.
         """
-        Update request states from the Scheduler's output.
-        """
-
         # new_block_ids_end[req_id][i] = end of pre-existing block_ids for
         # the i-th sliding window group (before this step's extend).
         # Used to detect sliding window blocks that got re-allocated.
@@ -1505,12 +1504,12 @@ class OffloadingConnectorScheduler:
         return bool(self._jobs) or self.manager.has_pending_work()
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        """
-        Update KVConnector state from worker-side connectors output.
+        """Update KVConnector state from worker-side connectors output.
 
         Args:
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
+
         """
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, OffloadingWorkerMetadata):
@@ -1603,8 +1602,7 @@ class OffloadingConnectorScheduler:
         self,
         request: Request,
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Called when a request has finished, before its blocks are freed.
+        """Called when a request has finished, before its blocks are freed.
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
@@ -1612,6 +1610,7 @@ class OffloadingConnectorScheduler:
             get_finished().
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
+
         """
         req_status = self._req_status.get(request.request_id)
 
@@ -1650,12 +1649,12 @@ class OffloadingConnectorScheduler:
         Yields:
             ``BlockStored`` or ``BlockRemoved`` events corresponding to
             the underlying :class:`OffloadingEvent` stream.
+
         """
         yield from self._events_tracker.take_events(self.manager.take_events())
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""
-
         # reset_cache cannot be called in the middle of a schedule step
         assert not self._current_batch_load_jobs
         assert not self._current_batch_jobs_to_flush

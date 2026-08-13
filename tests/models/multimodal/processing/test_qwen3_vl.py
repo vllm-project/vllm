@@ -29,7 +29,8 @@ def _build_video_mm_data(
 
     ``total_num_frames`` is set equal to the ndarray frame count so
     that HF's ``sample_frames`` indices stay within bounds of the
-    actual tensor that is passed."""
+    actual tensor that is passed.
+    """
     video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
     metadata = {
         "fps": original_fps,

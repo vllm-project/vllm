@@ -60,8 +60,7 @@ def _cuda_memcpy_d2d(dst: int, src: int, size: int):
 
 
 class IpcBuffer:
-    """
-    Allocates CUDA device memory and exchanges IPC handles with all ranks
+    """Allocates CUDA device memory and exchanges IPC handles with all ranks
     so that every rank holds a valid device pointer to every other rank's buffer.
     """
 
@@ -133,8 +132,7 @@ class IpcBuffer:
 
 
 def _lamport_fill_neg_zero(device_ptr: int, size_bytes: int):
-    """
-    Fill device memory with IEEE-754 negative zero (-0.0f = 0x80000000).
+    """Fill device memory with IEEE-754 negative zero (-0.0f = 0x80000000).
     This is the "slot empty" sentinel for the Lamport protocol: the kernel
     spin-waits until a value is *not* negative zero.
     """
@@ -153,8 +151,7 @@ def _lamport_fill_neg_zero(device_ptr: int, size_bytes: int):
 
 
 class LamportWorkspace:
-    """
-    Self-contained workspace for Lamport-based cross-GPU AllReduce.
+    """Self-contained workspace for Lamport-based cross-GPU AllReduce.
 
     Parameters
     ----------
@@ -170,6 +167,7 @@ class LamportWorkspace:
     process_group : optional
         ``torch.distributed`` process group for IPC handle exchange.
         ``None`` uses the default group.
+
     """
 
     def __init__(self, rank: int, world_size: int, comm_size: int, process_group=None):
@@ -212,7 +210,8 @@ class LamportWorkspace:
     @property
     def workspace(self) -> torch.Tensor:
         """Device tensor (int64) that can be passed to the kernel
-        as ``void** workspace``."""
+        as ``void** workspace``.
+        """
         return self._workspace
 
     # ------------------------------------------------------------------
@@ -225,8 +224,7 @@ class LamportWorkspace:
         world_size: int,
         fused_qk: bool = True,
     ) -> int:
-        """
-        Return a safe ``comm_size`` (in bytes) for MiniMaxReduceRMSKernel.
+        """Return a safe ``comm_size`` (in bytes) for MiniMaxReduceRMSKernel.
 
         The kernel stores per-token variance scalars in the Lamport buffer:
           - single-matrix path: ``world_size × max_tokens × 4`` bytes per slot
@@ -271,8 +269,7 @@ def get_allreduce_workspace(
     max_tokens: int = 16384,
     process_group=None,
 ) -> torch.Tensor:
-    """
-    Return a cached workspace tensor for the given (rank, world_size) pair.
+    """Return a cached workspace tensor for the given (rank, world_size) pair.
 
     On first call the workspace is allocated and IPC handles are exchanged;
     subsequent calls with the same arguments return the cached tensor.
@@ -288,6 +285,7 @@ def get_allreduce_workspace(
         Maximum number of tokens per batch (used when ``comm_size is None``).
     process_group : optional
         ``torch.distributed`` process group.
+
     """
     if comm_size is None:
         comm_size = LamportWorkspace.compute_comm_size_for_minimax(

@@ -465,8 +465,7 @@ class RequestRunner:
         complete_transfers: bool,
         post_step_fn: Callable[[], None] | None = None,
     ):
-        """
-        Runs multiple engine (scheduler + worker) steps.
+        """Runs multiple engine (scheduler + worker) steps.
         Assumes a single request is running.
 
         Args:
@@ -474,8 +473,8 @@ class RequestRunner:
             complete_transfers: complete transfers immediately
             post_step_fn: optional callback invoked after each step's
                 update_from_output(), before the next schedule().
-        """
 
+        """
         tokens_iter = iter(decoded_tokens)
         token_id = next(tokens_iter, None)
         prev_scheduler_output = None
@@ -607,8 +606,7 @@ class RequestRunner:
         expected_flushed: tuple[int | tuple[int, int], ...] = (),
         post_step_fn: Callable[[], None] | None = None,
     ):
-        """
-        Runs multiple engine (scheduler + worker) steps.
+        """Runs multiple engine (scheduler + worker) steps.
         Assumes a single request is running.
 
         Args:
@@ -624,8 +622,8 @@ class RequestRunner:
             A GPU block is either a (group_idx: int, request_block_offset: int)
             or just request_block_offset: int.
             The latter case is a convenience for representing all groups.
-        """
 
+        """
         expected_stored_gpu_blocks = self._to_gpu_blocks(expected_stored)
         expected_loaded_gpu_blocks = self._to_gpu_blocks(expected_loaded)
         expected_flushed_gpu_blocks = self._to_gpu_blocks(expected_flushed)

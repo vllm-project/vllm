@@ -54,8 +54,7 @@ def _verify_expert_level_sorting(
     valid_length: int,
     total_tokens: int,
 ):
-    """
-    Verify that actual_sorted_ids follows the correct expert-level sorting.
+    """Verify that actual_sorted_ids follows the correct expert-level sorting.
     The kerne limplementation may or may not preserve original token order
     in topk_ids in the final sorted_ids however this does not impact quality.
     """
@@ -96,8 +95,7 @@ def torch_moe_align_block_size(
     expert_map: torch.Tensor | None = None,
     pad_sorted_ids: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Golden torch implementation of moe_align_block_size.
+    """Golden torch implementation of moe_align_block_size.
 
     This function aligns the token distribution across experts to be compatible
     with block size for matrix multiplication by sorting tokens by expert and

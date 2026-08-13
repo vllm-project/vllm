@@ -15,15 +15,13 @@ if TYPE_CHECKING:
 def compute_meta(
     token_lora_tensor: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, bool]:
-    """
-    Get the information required for the sgmv kernel. With the  features:
+    """Get the information required for the sgmv kernel. With the  features:
     1. If consecutive requests in the batch use the same LoRA, this function
     will combine them into a single request, improving sgmv kernel inference
     performance.
     2. At the beginning of each prefill stage inference, recalculations are
     needed based on the input, but only once.
     """
-
     lora_indices_tensor, seq_length_tensor = torch.unique_consecutive(
         token_lora_tensor, return_counts=True
     )
@@ -87,6 +85,7 @@ def convert_mapping(
             indices_len: List of lengths of the above tensors. It contains
                 (base_indices, sampler_indices, sampler_indices_padded,
                 embeddings_indices).
+
     """
     index_mapping_indices: list[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()

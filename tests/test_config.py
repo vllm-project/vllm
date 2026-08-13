@@ -973,7 +973,8 @@ class MockConfig:
 @patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
 def test_s3_url_model_tokenizer_paths(mock_pull_files, s3_url):
     """Test that S3 URLs create deterministic local directories for model and
-    tokenizer."""
+    tokenizer.
+    """
     # Mock pull_files to avoid actually downloading files during tests
     mock_pull_files.return_value = None
 
@@ -1071,7 +1072,8 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
 @patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
 def test_s3_url_different_model_and_tokenizer(mock_pull_files):
     """Test that when model and tokenizer are different cloud URIs,
-    pull_files receives the correct URI for each."""
+    pull_files receives the correct URI for each.
+    """
     mock_pull_files.return_value = None
 
     model_url = "s3://bucket/model/"
@@ -1432,7 +1434,6 @@ def test_validate_mamba_align_subblock_prefill():
 )
 def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
     """Test that optimization-level defaults are correctly applied."""
-
     model_config = None
     if model_id is not None:
         model_config = ModelConfig(model_id)
@@ -1616,8 +1617,8 @@ def test_vllm_config_explicit_overrides():
 
 def test_fusion_pass_op_priority():
     """This test checks that custom op enablement & IR op priority
-    correctly control default fusions"""
-
+    correctly control default fusions
+    """
     # Default config, O2, rms_norm+quant fusion disabled
     cfg1 = VllmConfig()
     assert not cfg1.compilation_config.pass_config.fuse_norm_quant
@@ -1701,7 +1702,8 @@ def test_needs_dp_coordination(
 
 def test_fault_tolerance_requires_single_api_server():
     """Fault tolerance assumes one AsyncMPClient manages all engines, so it
-    is incompatible with API server scale-out (_api_process_count > 1)."""
+    is incompatible with API server scale-out (_api_process_count > 1).
+    """
     with pytest.raises(ValueError, match="single API server"):
         ParallelConfig(enable_fault_tolerance=True, _api_process_count=2)
 
@@ -1711,7 +1713,8 @@ def test_fault_tolerance_requires_single_api_server():
 
 def test_renderer_num_workers_with_mm_cache():
     """Disallow renderer_num_workers > 1 with the mm processor cache only for
-    pooling models, whose preprocessing runs on the renderer workers."""
+    pooling models, whose preprocessing runs on the renderer workers.
+    """
     mm_model = "Qwen/Qwen2-VL-2B-Instruct"
 
     # Should raise: pooling + multi-worker + cache enabled (default cache_gb=4)

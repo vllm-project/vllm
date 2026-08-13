@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # mypy: ignore-errors
-"""
-vLLM gRPC Server
+"""vLLM gRPC Server
 
 Starts a gRPC server backed by AsyncLLM, using the VllmEngineServicer
 from the smg-grpc-servicer package.
@@ -16,6 +15,7 @@ Example:
         --model meta-llama/Llama-2-7b-hf \
         --host 0.0.0.0 \
         --port 50051
+
 """
 
 import argparse
@@ -54,11 +54,11 @@ logger = init_logger(__name__)
 
 
 async def serve_grpc(args: argparse.Namespace):
-    """
-    Main gRPC serving function.
+    """Main gRPC serving function.
 
     Args:
         args: Parsed command line arguments
+
     """
     log_version_and_model(logger, VLLM_VERSION, args.model)
     logger.info("vLLM gRPC server args: %s", args)

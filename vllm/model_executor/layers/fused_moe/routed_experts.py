@@ -42,8 +42,7 @@ class FusedMoeWeightScaleSupported(Enum):
 
 @PluggableLayer.register("routed_experts")
 class RoutedExperts(PluggableLayer):
-    """
-    Container for routed expert weights and execution logic.
+    """Container for routed expert weights and execution logic.
 
     This module owns the expert weight parameters (w13_weight, w2_weight, scales, etc.)
     and handles:
@@ -192,8 +191,7 @@ class RoutedExperts(PluggableLayer):
         quant_config: QuantizationConfig | None,
         moe_config: FusedMoEConfig,
     ) -> FusedMoEMethodBase:
-        """
-        Helper method to ensure quant_method is never None and
+        """Helper method to ensure quant_method is never None and
         of the proper type.
         """
         quant_method = None
@@ -330,8 +328,7 @@ class RoutedExperts(PluggableLayer):
         param: torch.Tensor,
         tp_rank: int,
     ):
-        """
-        Load w13 weight scales assuming that w1 weight scales and w3 weight
+        """Load w13 weight scales assuming that w1 weight scales and w3 weight
         scales are stored in the same loaded_weight tensor.
         """
         shard_size = param.shape[shard_dim]
@@ -349,8 +346,7 @@ class RoutedExperts(PluggableLayer):
         tp_rank: int,
         load_full_w2: bool = False,
     ):
-        """
-        Load grouped weight scales for group quantization or model weights
+        """Load grouped weight scales for group quantization or model weights
 
         Args:
             shard_dim: dimension to shard
@@ -359,6 +355,7 @@ class RoutedExperts(PluggableLayer):
             loaded_weight: checkpoint weight to load into the param
             tp_rank: tensor parallel rank
             load_full_w2: whether or not the w2 loaded should be sharded.
+
         """
         if shard_id == "w2":
             # In the case where we have actorder/g_idx, we do not partition the
@@ -461,6 +458,7 @@ class RoutedExperts(PluggableLayer):
                 Must be non-negative.
             shard_dim: The dimension index corresponding to the shard
                 (intermediate) dimension. Defaults to `None`.
+
         """
         dims = (hidden_dim,) if shard_dim is None else (hidden_dim, shard_dim)
         if loaded_weight.ndim > 0:
@@ -1022,8 +1020,7 @@ class RoutedExperts(PluggableLayer):
         lora_base_layer_prefix: str = "",
         include_fused: bool = False,
     ) -> list[tuple[str, str, int, str]]:
-        """
-        Create expert parameter mapping for weight loading with redundant experts.
+        """Create expert parameter mapping for weight loading with redundant experts.
 
         This mapping handles the physical-to-logical expert ID conversion needed
         when loading weights with EPLB redundant experts.
@@ -1044,6 +1041,7 @@ class RoutedExperts(PluggableLayer):
             - weight_name: Weight name in checkpoint
             - expert_id: Physical expert ID
             - shard_id: Shard identifier (w1, w2, w3)
+
         """
         num_physical_experts = num_experts + num_redundant_experts
 
@@ -1120,8 +1118,7 @@ class RoutedExperts(PluggableLayer):
         def _maybe_make_contiguous(
             name: str, p: torch.nn.Parameter
         ) -> torch.nn.Parameter:
-            """
-            In some cases, the last 2 dimensions (the non-expert dimensions)
+            """In some cases, the last 2 dimensions (the non-expert dimensions)
             of the weight scale tensor are transposed. This function
             transforms the tensor (view update) so the tensor is contiguous().
             Example: A non-contiguous scale tensor,
@@ -1201,8 +1198,7 @@ class RoutedExperts(PluggableLayer):
         shared_experts: "SharedExperts | None" = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Execute routed experts using the quantization method's apply function.
+        """Execute routed experts using the quantization method's apply function.
 
         This is called by the runner after router selection (for modular kernels)
         quant_method.apply() which accesses the weights on this RoutedExperts
@@ -1217,6 +1213,7 @@ class RoutedExperts(PluggableLayer):
 
         Returns:
             Output tensor from routed experts
+
         """
         assert not self.quant_method.is_monolithic
 
@@ -1236,8 +1233,7 @@ class RoutedExperts(PluggableLayer):
         router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Execute routed experts using the quantization method's apply function.
+        """Execute routed experts using the quantization method's apply function.
 
         This is called by the runner after router selection (for modular kernels)
         or with router logits (for monolithic kernels). It delegates to
@@ -1251,6 +1247,7 @@ class RoutedExperts(PluggableLayer):
 
         Returns:
             Output tensor from routed experts
+
         """
         assert self.quant_method.is_monolithic
 

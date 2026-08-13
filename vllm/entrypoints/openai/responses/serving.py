@@ -111,8 +111,7 @@ logger = init_logger(__name__)
 def _extract_allowed_tools_from_mcp_requests(
     tools: list[Tool],
 ) -> dict[str, list[str] | None]:
-    """
-    Extract allowed_tools mapping from MCP tool requests.
+    """Extract allowed_tools mapping from MCP tool requests.
 
     Returns a dictionary mapping server_label to allowed_tools list.
     Handles both list format and McpAllowedToolsMcpToolFilter object format.

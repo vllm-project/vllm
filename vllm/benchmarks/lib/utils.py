@@ -25,8 +25,7 @@ def extract_field(
 
 
 def use_compile(args: argparse.Namespace, extra_info: dict[str, Any]) -> bool:
-    """
-    Check if the benchmark is run with torch.compile
+    """Check if the benchmark is run with torch.compile
     """
     return not (
         extract_field(args, extra_info, "compilation_config.mode") == "0"
@@ -38,8 +37,7 @@ def use_compile(args: argparse.Namespace, extra_info: dict[str, Any]) -> bool:
 def convert_to_pytorch_benchmark_format(
     args: argparse.Namespace, metrics: dict[str, list], extra_info: dict[str, Any]
 ) -> list:
-    """
-    Save the benchmark results in the format used by PyTorch OSS benchmark with
+    """Save the benchmark results in the format used by PyTorch OSS benchmark with
     on metric per record
     https://github.com/pytorch/pytorch/wiki/How-to-integrate-with-PyTorch-OSS-benchmark-database
     """

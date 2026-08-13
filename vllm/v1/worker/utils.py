@@ -302,8 +302,7 @@ def select_common_block_size(
     kv_manager_block_size: int,
     backends: list[type[AttentionBackend]],
 ) -> int:
-    """
-    Select a block size that is supported by all backends and is a factor of
+    """Select a block size that is supported by all backends and is a factor of
     kv_manager_block_size.
 
     If kv_manager_block_size is supported by all backends, return it directly.
@@ -318,6 +317,7 @@ def select_common_block_size(
 
     Raises:
         ValueError: If no valid block size found.
+
     """
 
     def block_size_is_supported(
@@ -370,8 +370,7 @@ def select_common_block_size(
 def prepare_kernel_block_sizes(
     kv_cache_config: KVCacheConfig, attn_groups: list[list[AttentionGroup]]
 ) -> list[int]:
-    """
-    Generate kernel_block_sizes that matches each block_size.
+    """Generate kernel_block_sizes that matches each block_size.
 
     For attention backends that support virtual block splitting,
     use the supported block sizes from the backend.
@@ -383,6 +382,7 @@ def prepare_kernel_block_sizes(
 
     Returns:
         List of kernel block sizes for each cache group.
+
     """
     kernel_block_sizes = []
     for kv_cache_gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
@@ -415,8 +415,7 @@ def sanity_check_mm_encoder_outputs(
     mm_embeddings: MultiModalEmbeddings,
     expected_num_items: int,
 ) -> None:
-    """
-    Perform sanity checks for the result of
+    """Perform sanity checks for the result of
     [`vllm.model_executor.models.SupportsMultiModal.embed_multimodal`][].
     """
     assert isinstance(mm_embeddings, (list, tuple, torch.Tensor)), (
@@ -442,8 +441,7 @@ def sanity_check_mm_encoder_outputs(
 
 
 def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
-    """
-    Calculate the amount of memory required by vLLM, then validate
+    """Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
     """
     requested_memory = math.ceil(
@@ -469,8 +467,7 @@ def add_kv_sharing_layers_to_kv_cache_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     runner_only_attn_layers: set[str] | None = None,
 ) -> None:
-    """
-    Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
+    """Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
     for layers that do not allocate its own KV cache, based on the mapping in
     `shared_kv_cache_layers`. Adds these layers to the corresponding KV cache
     group, which is needed to ensure that attention metadata is assigned later.
@@ -481,6 +478,7 @@ def add_kv_sharing_layers_to_kv_cache_groups(
             means this layer will perform attention using the keys and values
             from the KV cache of `shared_kv_cache_layers[layer_name]`.
         kv_cache_groups: The KV cache groups of the model.
+
     """
     if not shared_kv_cache_layers:
         return
@@ -504,8 +502,7 @@ def bind_kv_cache(
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
 ) -> None:
-    """
-    Bind the allocated KV cache to both ModelRunner and forward context so
+    """Bind the allocated KV cache to both ModelRunner and forward context so
     that the KV cache can be used in the forward pass.
 
     This function:
@@ -519,6 +516,7 @@ def bind_kv_cache(
         forward_context: The global forward context containing all Attention
             layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
+
     """
     # Bind kv_caches to ModelRunner
     assert len(runner_kv_caches) == 0

@@ -88,8 +88,7 @@ def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
 
 
 def is_strictly_contiguous(t: torch.Tensor) -> bool:
-    """
-    Check if tensor is contiguous AND has no degenerate strides.
+    """Check if tensor is contiguous AND has no degenerate strides.
 
     A degenerate stride occurs when a dimension has size 1 but the stride
     doesn't match the canonical contiguous layout. This can cause issues
@@ -206,7 +205,8 @@ def _cgroup_cpu_limit() -> float | None:
 
 def available_cpu_count() -> int:
     """CPUs actually usable by this process: scheduling affinity capped by
-    the cgroup CPU quota (unlike `os.cpu_count()`, which is quota-blind)."""
+    the cgroup CPU quota (unlike `os.cpu_count()`, which is quota-blind).
+    """
     if sys.platform != "linux":
         return os.cpu_count() or 1
     count = len(os.sched_getaffinity(0))
@@ -269,8 +269,7 @@ def set_torch_threads_for_runtime() -> None:
 
 @contextlib.contextmanager
 def set_default_torch_num_threads(num_threads: int | None = None):
-    """
-    Sets the default number of threads for PyTorch to the given value.
+    """Sets the default number of threads for PyTorch to the given value.
 
     `None` means using the value of the environment variable `OMP_NUM_THREADS`
     (or `1` if that is not available).
@@ -338,8 +337,7 @@ def _get_precision_level(dtype: torch.dtype) -> int:
 
 
 def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
-    """
-    Test whether it is lossless to cast a tensor from
+    """Test whether it is lossless to cast a tensor from
     `src_dtype` to `tgt_dtype`.
     """
     if src_dtype == tgt_dtype:
@@ -370,8 +368,7 @@ def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
 
 
 def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
-    """
-    Get the common `dtype` where all of the other `dtypes` can be
+    """Get the common `dtype` where all of the other `dtypes` can be
     cast to it without losing any information.
     """
     return max(
@@ -551,6 +548,7 @@ def nvfp4_split_data_scale(
     Returns:
         ``(data, scale)`` where *data* is uint8 and *scale* is
         float8_e4m3fn, both views of the same storage.
+
     """
     num_pages = kv_side.shape[0]
     dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
@@ -715,8 +713,7 @@ def make_ndarray_with_pad(
     *,
     max_len: int | None = None,
 ) -> npt.NDArray:
-    """
-    Make a padded array from 2D inputs.
+    """Make a padded array from 2D inputs.
 
     The padding is applied to the end of each inner list until it reaches
     `max_len`.
@@ -742,8 +739,7 @@ def make_tensor_with_pad(
     device: str | torch.device | None = None,
     pin_memory: bool = False,
 ) -> torch.Tensor:
-    """
-    Make a padded tensor from 2D inputs.
+    """Make a padded tensor from 2D inputs.
 
     The padding is applied to the end of each inner list until it reaches
     `max_len`.
@@ -777,8 +773,7 @@ class _StreamPlaceholder:
 
 
 def current_stream() -> torch.cuda.Stream:
-    """
-    replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
+    """Replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
     it turns out that `torch.cuda.current_stream()` is quite expensive,
     as it will construct a new stream object at each call.
     here we patch `torch.cuda.set_stream` to keep track of the current stream
@@ -826,8 +821,7 @@ _aux_stream: torch.cuda.Stream | None = None
 
 
 def aux_stream() -> torch.cuda.Stream | None:
-    """
-    Ensures aux_stream is initialized only once
+    """Ensures aux_stream is initialized only once
     """
     global _aux_stream
 
@@ -840,8 +834,7 @@ def aux_stream() -> torch.cuda.Stream | None:
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
-    """
-    Create a weak reference to a tensor.
+    """Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     This ignores 0-size tensors as those don't allocate any memory.
@@ -858,8 +851,7 @@ def weak_ref_tensors(
     | tuple[torch.Tensor]
     | IntermediateTensors,
 ) -> torch.Tensor | list[Any] | tuple[Any] | Any:
-    """
-    Convenience function to create weak references to tensors,
+    """Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
     """
     if isinstance(tensors, torch.Tensor):
@@ -881,8 +873,7 @@ def weak_ref_tensors(
 
 
 def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
-    """
-    Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
+    """Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
     """
     from vllm.platforms import current_platform
 
@@ -919,6 +910,7 @@ def is_torch_equal_or_newer(target: str) -> bool:
 
     Returns:
         Whether the condition meets.
+
     """
     try:
         return _is_torch_equal_or_newer(str(torch.__version__), target)
@@ -947,6 +939,7 @@ def is_torch_equal(target: str) -> bool:
 
     Returns:
         Whether the condition meets.
+
     """
     try:
         return _is_torch_equal(target)
@@ -1032,8 +1025,7 @@ def direct_register_custom_op(
     dispatch_key: str | None = None,
     tags: tuple[torch.Tag, ...] = (),
 ):
-    """
-    `torch.library.custom_op` can have significant overhead because it
+    """`torch.library.custom_op` can have significant overhead because it
     needs to consider complicated dispatching logic. This function
     directly registers a custom op and dispatches it to the CUDA backend.
     See https://gist.github.com/youkaichao/ecbea9ec9fc79a45d2adce1784d7a9a5

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Shared utilities for benchmark dataset sampling.
+"""Shared utilities for benchmark dataset sampling.
 """
 
 import logging
@@ -46,8 +45,7 @@ def get_sampling_params(
     output_len: int,
     tokenizer: TokenizerLike,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Sample per-request input/output token lengths and vocab offsets.
+    """Sample per-request input/output token lengths and vocab offsets.
 
     Lengths are drawn uniformly from integer ranges around the configured
     means, controlled by *range_ratio*.  It may be a single ``float``
@@ -60,6 +58,7 @@ def get_sampling_params(
     Returns:
         (input_lens, output_lens, offsets) – three 1-D ``np.ndarray`` of
         shape ``(num_requests,)``.
+
     """
     input_range_ratio, output_range_ratio = _resolve_range_ratios(range_ratio)
 

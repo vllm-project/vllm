@@ -164,7 +164,8 @@ def apply_split_decodes_and_prefills(
     treat_short_extends_as_decodes: bool = True,
 ):
     """Helper function to apply split_decodes_and_prefills and return
-    the results."""
+    the results.
+    """
     device = torch.device("cpu")
     seq_lens = [10 * (i + 1) for i in range(len(query_lens))]
     common_metadata = create_common_attn_metadata(
@@ -297,7 +298,7 @@ def test_split_decodes_and_prefills_uniform_mixed_batch_non_uniform_decodes():
 
 
 def test_split_decodes_and_prefills_uniform_padded_batch_all_same():
-    """uniform batch where all query lengths are identical with 0 length padded reqs."""
+    """Uniform batch where all query lengths are identical with 0 length padded reqs."""
     # All query lengths are 2, with decode_threshold=3 (so 2 <= 3)
     # This triggers the padded uniform path at line 891
     query_lens = [2, 2, 2, 0]

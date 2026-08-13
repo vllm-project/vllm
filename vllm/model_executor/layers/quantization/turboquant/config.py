@@ -83,6 +83,7 @@ class TurboQuantConfig:
         norm_correction: Re-normalize centroid vectors to unit norm before
             inverse rotation during dequant. Fixes quantization-induced norm
             distortion, improving PPL by ~0.8% at 4-bit.
+
     """
 
     head_dim: int = 128

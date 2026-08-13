@@ -40,8 +40,7 @@ _I_co = TypeVar("_I_co", bound=BaseProcessingInfo, covariant=True)
 
 
 class ProcessingInfoFactory(Protocol[_I_co]):
-    """
-    Constructs a
+    """Constructs a
     [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor]
     instance from the context.
     """
@@ -53,8 +52,7 @@ class ProcessingInfoFactory(Protocol[_I_co]):
 
 
 class DummyInputsBuilderFactory(Protocol[_I]):  # type: ignore[misc]
-    """
-    Constructs a
+    """Constructs a
     [`BaseDummyInputsBuilder`][vllm.multimodal.processing.BaseDummyInputsBuilder]
     instance from the context.
     """
@@ -63,8 +61,7 @@ class DummyInputsBuilderFactory(Protocol[_I]):  # type: ignore[misc]
 
 
 class MultiModalProcessorFactory(Protocol[_I]):  # type: ignore[misc]
-    """
-    Constructs a
+    """Constructs a
     [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor]
     instance from the context.
     """
@@ -96,13 +93,11 @@ class _ProcessorFactories(Generic[_I]):
 
 
 class MultiModalRegistry:
-    """
-    A registry that dispatches data processing according to the model.
+    """A registry that dispatches data processing according to the model.
     """
 
     def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
-        """
-        Checks if the model supports multimodal inputs.
+        """Checks if the model supports multimodal inputs.
         Returns True if the model is multimodal with any non-zero supported
         modalities, otherwise returns False, effectively running in
         text-only mode.
@@ -153,8 +148,7 @@ class MultiModalRegistry:
         info: ProcessingInfoFactory[_I],
         dummy_inputs: DummyInputsBuilderFactory[_I],
     ):
-        """
-        Register a multi-modal processor to a model class. The processor
+        """Register a multi-modal processor to a model class. The processor
         is constructed lazily, hence a factory method should be passed.
 
         When the model receives multi-modal data, the provided function is
@@ -222,8 +216,7 @@ class MultiModalRegistry:
         tokenizer: TokenizerLike | None = None,
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
-        """
-        Create a multi-modal processor for a specific model and tokenizer.
+        """Create a multi-modal processor for a specific model and tokenizer.
         """
         if not model_config.is_multimodal_model:
             model_name = model_config.served_model_name or model_config.model
@@ -244,8 +237,7 @@ class MultiModalRegistry:
         cache: BaseMultiModalProcessorCache | None = None,
         processor: BaseMultiModalProcessor | None = None,
     ) -> MultiModalInput:
-        """
-        Create dummy data for profiling the memory usage of a model.
+        """Create dummy data for profiling the memory usage of a model.
 
         The model is identified by `model_config`.
         """

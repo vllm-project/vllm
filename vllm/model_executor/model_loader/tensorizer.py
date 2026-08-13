@@ -404,7 +404,6 @@ class TensorizerArgs:
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Tensorizer CLI arguments"""
-
         # Tensorizer options arg group
         group = parser.add_argument_group(
             "tensorizer options",
@@ -498,7 +497,8 @@ def _check_tensors_on_meta_device(model: nn.Module) -> None:
 
 def _resize_lora_embeddings(model: nn.Module):
     """Modify LoRA embedding layers to use bigger tensors
-    to allow for adapter added tokens."""
+    to allow for adapter added tokens.
+    """
     for child in model.modules():
         if (
             isinstance(child, VocabParallelEmbedding)
@@ -593,8 +593,7 @@ def tensorizer_weights_iterator(
 
 
 def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
-    """
-    Infer if the model is a vLLM model by checking the weights for
+    """Infer if the model is a vLLM model by checking the weights for
     a vLLM tensorized marker.
 
     Args:
@@ -603,6 +602,7 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
 
     Returns:
         bool: True if the model is a vLLM model, False otherwise.
+
     """
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
     deserializer = TensorDeserializer(
@@ -773,8 +773,7 @@ def tensorize_vllm_model(
 
 
 def tensorize_lora_adapter(lora_path: str, tensorizer_config: TensorizerConfig):
-    """
-    Uses tensorizer to serialize a LoRA adapter. Assumes that the files
+    """Uses tensorizer to serialize a LoRA adapter. Assumes that the files
     needed to load a LoRA adapter are a safetensors-format file called
     adapter_model.safetensors and a json config file called adapter_config.json.
 

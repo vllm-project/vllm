@@ -42,7 +42,8 @@ def set_assigned_physical_gpu_ids(ids: list[int]) -> None:
     Idempotent: a second call with the same value is a no-op.
     Raises RuntimeError if called again with a different value.
 
-    This is expected to run during single-threaded worker initialization."""
+    This is expected to run during single-threaded worker initialization.
+    """
     global _assigned_physical_gpu_ids
     if _assigned_physical_gpu_ids is not None:
         if _assigned_physical_gpu_ids != ids:
@@ -122,8 +123,7 @@ class DeviceCapability(NamedTuple):
         return f"{self.major}.{self.minor}"
 
     def to_int(self) -> int:
-        """
-        Express device capability as an integer `<major><minor>`.
+        """Express device capability as an integer `<major><minor>`.
 
         It is assumed that the minor version is always a single digit.
         """
@@ -238,23 +238,20 @@ class Platform:
 
     @classmethod
     def get_pass_manager_cls(cls) -> str:
-        """
-        Get the pass manager class for this platform.
+        """Get the pass manager class for this platform.
         It will be registered as a custom pass under the current_platform.pass_key.
         """
         return "vllm.compilation.passes.pass_manager.PostGradPassManager"
 
     @classmethod
     def get_compile_backend(cls) -> str:
-        """
-        Get the custom compile backend for current platform.
+        """Get the custom compile backend for current platform.
         """
         return cls.simple_compile_backend
 
     @classmethod
     def import_ir_kernels(cls) -> None:
-        """
-        The default implementation imports ``vllm.kernels``, which registers
+        """The default implementation imports ``vllm.kernels``, which registers
         the built-in IR op implementations. Out-of-tree (OOT) platforms should
         override this method to import their own kernel modules.
         """
@@ -392,8 +389,7 @@ class Platform:
         dtype: torch.dtype,
         backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
-        """
-        Get the vision attention backend class of a device.
+        """Get the vision attention backend class of a device.
 
         NOTE: ViT Attention should be checked and override in the platform-specific
         implementation. we should not override this in any other places, like
@@ -426,6 +422,7 @@ class Platform:
         Args:
             device_id: Device index in the visible device namespace, matching
                 the argument accepted by torch.cuda.
+
         """
         return None
 
@@ -435,8 +432,7 @@ class Platform:
         capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
-        """
-        Test whether this platform is compatible with a device capability.
+        """Test whether this platform is compatible with a device capability.
 
         The `capability` argument can either be:
 
@@ -459,8 +455,7 @@ class Platform:
         capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
-        """
-        Test whether this platform has exactly the specified device capability.
+        """Test whether this platform has exactly the specified device capability.
 
         The `capability` argument can either be:
 
@@ -483,8 +478,7 @@ class Platform:
         capability: int,
         device_id: int = 0,
     ) -> bool:
-        """
-        Returns True if the device capability is any <major>.x.
+        """Returns True if the device capability is any <major>.x.
         Mirrors CUDA 13 'family' architecture semantics (e.g. 10.x, 11.x, 12.x).
         """
         current_capability = cls.get_device_capability(device_id=device_id)
@@ -532,8 +526,7 @@ class Platform:
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
+        """Set the device for the current platform.
         """
         raise NotImplementedError
 
@@ -546,8 +539,7 @@ class Platform:
     def pre_register_and_update(
         cls, parser: FlexibleArgumentParser | None = None
     ) -> None:
-        """
-        Do some pre-registration or update action for the current platform.
+        """Do some pre-registration or update action for the current platform.
 
         This function is called before global VllmConfig is initialized or cli
         arguments are parsed. It's used for out-of-tree platforms to register or
@@ -560,8 +552,7 @@ class Platform:
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Apply the platform-specific default values to the config.
+        """Apply the platform-specific default values to the config.
 
         This function is called during the initialization of global VllmConfig, after
         parsing cli arguments.
@@ -574,8 +565,7 @@ class Platform:
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Check and update the configuration for the current platform.
+        """Check and update the configuration for the current platform.
 
         It can raise an exception if the configuration is not compatible with
         the current platform, or it can update the configuration to make it
@@ -607,8 +597,7 @@ class Platform:
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Ensure block_size is compatible with the attention backend.
+        """Ensure block_size is compatible with the attention backend.
         For hybrid models, also aligns block_size with mamba page sizes.
         """
         from vllm.config.cache import CacheConfig
@@ -767,8 +756,7 @@ class Platform:
         vllm_config: "VllmConfig",
         backend_cls: "type[AttentionBackend]",
     ) -> None:
-        """
-        For hybrid attention/mamba models, ensure that the attention page
+        """For hybrid attention/mamba models, ensure that the attention page
         size is >= the mamba page size, and pad the mamba page size to match.
         """
         from math import lcm
@@ -941,15 +929,13 @@ class Platform:
 
     @classmethod
     def register_custom_kv_cache_specs(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Register custom KVCacheSpec class on current platform.
+        """Register custom KVCacheSpec class on current platform.
         """
         pass
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
-        """
-        Verify whether the current platform supports the specified model
+        """Verify whether the current platform supports the specified model
         architecture.
 
         - This will raise an Error or Warning based on the model support on
@@ -960,8 +946,7 @@ class Platform:
 
     @classmethod
     def verify_quantization(cls, quant: str) -> None:
-        """
-        Verify whether the quantization is supported by the current platform.
+        """Verify whether the quantization is supported by the current platform.
         """
         if cls.supported_quantization and quant not in cls.supported_quantization:
             raise ValueError(
@@ -970,8 +955,7 @@ class Platform:
 
     @classmethod
     def get_cpu_architecture(cls) -> CpuArchEnum:
-        """
-        Determine the CPU architecture of the current system.
+        """Determine the CPU architecture of the current system.
         Returns CpuArchEnum indicating the architecture type.
         """
         machine = platform.machine().lower()
@@ -1009,50 +993,43 @@ class Platform:
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
-        """
-        Return the memory usage in bytes.
+        """Return the memory usage in bytes.
         """
         raise NotImplementedError
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        """
-        Return the punica wrapper for current platform.
+        """Return the punica wrapper for current platform.
         """
         raise NotImplementedError
 
     @classmethod
     def get_infinity_values(cls, dtype: torch.dtype) -> tuple[float, float]:
-        """
-        Return the platform specific values for (-inf, inf)
+        """Return the platform specific values for (-inf, inf)
         """
         return float("-inf"), float("inf")
 
     @classmethod
     def can_update_inplace(cls) -> bool:
-        """
-        Checks if the platform allows inplace memory updates
+        """Checks if the platform allows inplace memory updates
         """
         return True
 
     @classmethod
     def get_lora_vocab_padding_size(cls) -> int:
-        """
-        Returns how much padding the LoRA logits need for kernels
+        """Returns how much padding the LoRA logits need for kernels
         """
         return 256
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        """
-        Get device specific communicator class for distributed communication.
+        """Get device specific communicator class for distributed communication.
         """
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
     def is_integrated_gpu(cls, device_id: int = 0) -> bool:
-        """
-        Returns whether the GPU is an integrated (UMA) device that shares
+        """Returns whether the GPU is an integrated (UMA) device that shares
         system memory with the CPU.
 
         On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
@@ -1063,22 +1040,19 @@ class Platform:
 
     @classmethod
     def supports_mx(cls) -> bool:
-        """
-        Returns whether the current platform supports MX types.
+        """Returns whether the current platform supports MX types.
         """
         return False
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        """
-        Returns whether the current platform supports FP8 types.
+        """Returns whether the current platform supports FP8 types.
         """
         return False
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
-        """
-        Returns whether the preferred FP8 type is FNUZ on the current platform.
+        """Returns whether the preferred FP8 type is FNUZ on the current platform.
 
         There are two representations of FP8, OCP FP8 and FNUZ FP8.
         The OCP specification can be found at https://tinyurl.com/b7jvwpft.
@@ -1091,8 +1065,7 @@ class Platform:
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
-        """
-        Returns the preferred FP8 type on the current platform.
+        """Returns the preferred FP8 type on the current platform.
 
         See the documentation for is_fp8_fnuz for details.
         """
@@ -1100,22 +1073,19 @@ class Platform:
 
     @classmethod
     def use_all_gather(cls) -> bool:
-        """
-        Whether to use allgather in LogitsProcessor to gather the logits.
+        """Whether to use allgather in LogitsProcessor to gather the logits.
         """
         return True
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
-        """
-        Returns if custom allreduce is supported on the current platform
+        """Returns if custom allreduce is supported on the current platform
         """
         return False
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
-        """
-        Returns True if we register attention as one giant opaque custom op
+        """Returns True if we register attention as one giant opaque custom op
         on the current platform
         """
         return False
@@ -1150,8 +1120,7 @@ class Platform:
         return None
 
     def get_global_graph_pool(self) -> Any:
-        """
-        Return the global graph pool for this platform.
+        """Return the global graph pool for this platform.
         """
         cls = self.__class__
         if cls._global_graph_pool is None:
@@ -1160,8 +1129,7 @@ class Platform:
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
-        """
-        Get static graph wrapper class for static graph.
+        """Get static graph wrapper class for static graph.
         """
         return "vllm.compilation.base_static_graph.AbstractStaticGraphWrapper"
 
@@ -1174,43 +1142,37 @@ class Platform:
         group_size: int,
         timeout: timedelta,
     ) -> "ProcessGroup":
-        """
-        Init platform-specific torch distributed process group.
+        """Init platform-specific torch distributed process group.
         """
         raise NotImplementedError
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
-        """
-        Check if the dtype is supported by the current platform.
+        """Check if the dtype is supported by the current platform.
         """
         raise NotImplementedError
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
-        """
-        Returns if the hybrid kv cache is supported by the current platform.
+        """Returns if the hybrid kv cache is supported by the current platform.
         """
         return False
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        """
-        Returns if the graph mode is supported by the current platform.
+        """Returns if the graph mode is supported by the current platform.
         """
         return False
 
     @classmethod
     def support_deep_gemm(cls) -> bool:
-        """
-        Returns if DeepGEMM is supported by the current platform.
+        """Returns if DeepGEMM is supported by the current platform.
         """
         return False
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
-        """
-        Whether this platform should use torch.ops.vllm.* custom ops for collectives.
+        """Whether this platform should use torch.ops.vllm.* custom ops for collectives.
 
         Returns False by default - platforms must explicitly opt-in.
         """
@@ -1218,15 +1180,13 @@ class Platform:
 
     @classmethod
     def use_sync_weight_loader(cls) -> bool:
-        """
-        Returns if the current platform needs to sync weight loader.
+        """Returns if the current platform needs to sync weight loader.
         """
         return False
 
     @classmethod
     def make_synced_weight_loader(cls, original_weight_loader):
-        """
-        Wrap the original weight loader to make it synced.
+        """Wrap the original weight loader to make it synced.
         """
         if not cls.use_sync_weight_loader():
             return original_weight_loader
@@ -1241,37 +1201,32 @@ class Platform:
 
     @classmethod
     def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
-        """
-        Returns a mapping from device_type to a tuple of supported
+        """Returns a mapping from device_type to a tuple of supported
         kv_buffer_device for nixl.
         """
         return {}
 
     @classmethod
     def get_nixl_memory_type(cls) -> str | None:
-        """
-        Returns the nixl memory type for the current platform.
+        """Returns the nixl memory type for the current platform.
         """
         return None
 
     @classmethod
     def check_max_model_len(cls, max_model_len: int) -> int:
-        """
-        Check max_model_len for the current platform.
+        """Check max_model_len for the current platform.
         """
         return max_model_len
 
     @classmethod
     def set_additional_forward_context(cls, *args, **kwargs) -> dict[str, Any]:
-        """
-        Set some additional forward context for the current platform if needs.
+        """Set some additional forward context for the current platform if needs.
         """
         return {}
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
-        """
-        Get the number of compute units for the current platform.
+        """Get the number of compute units for the current platform.
         (NVIDIA SM / AMD CU / Intel EU)
         """
         raise NotImplementedError(
@@ -1290,8 +1245,7 @@ class Platform:
 
     @classmethod
     def is_arch_support_pdl(cls) -> bool:
-        """
-        Does the current platform support PDL (Programmatic Dependent Launch)?
+        """Does the current platform support PDL (Programmatic Dependent Launch)?
         """
         return False
 

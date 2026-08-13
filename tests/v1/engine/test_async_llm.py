@@ -413,7 +413,6 @@ async def test_customize_loggers(monkeypatch):
     If a customized logger is provided at the init, it should
     be added to the default loggers.
     """
-
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(
@@ -598,7 +597,6 @@ async def test_check_health():
 @pytest.mark.asyncio
 async def test_abort_final_output(output_kind: RequestOutputKind):
     """Test that abort() returns a final output with correct information."""
-
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)

@@ -27,7 +27,8 @@ class WorkerLoRAManager:
     """WorkerLoRAManager that manages LoRA models on the worker side.
 
     Every request, the requested LoRAs will be loaded (unless they are already
-    loaded), and every other LoRA will be unloaded."""
+    loaded), and every other LoRA will be unloaded.
+    """
 
     _manager_cls: type[LoRAModelManager] = LoRAModelManager
 
@@ -73,7 +74,8 @@ class WorkerLoRAManager:
     @contextmanager
     def dummy_lora_cache(self):
         """Use this context manager to reuse the dummy lora model
-        to avoid creating it repeatedly."""
+        to avoid creating it repeatedly.
+        """
         self._cached_dummy_lora = None
         yield
         self._cached_dummy_lora = False
@@ -243,7 +245,8 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
 
     Uses an LRU Cache. Every request, the requested LoRAs will be loaded
     (unless they are already loaded) and least recently used LoRAs will
-    be unloaded if the cache is above capacity."""
+    be unloaded if the cache is above capacity.
+    """
 
     _manager_cls: type[LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
 

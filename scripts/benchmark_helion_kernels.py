@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark a registered Helion kernel against a baseline.
+"""Benchmark a registered Helion kernel against a baseline.
 
 For each input case produced by the kernel's registered input generator, this
 checks the Helion kernel's numerics once against its eager reference, measures
@@ -394,6 +393,7 @@ def check_kernel_correctness(
         ``passed=False`` with the exception text in ``error``; iteration
         continues regardless. An empty input mapping returns an empty list, which
         the CLI reports as a skipped check.
+
     """
     if inputs_dict is None:
         inputs_dict = kernel.get_inputs()

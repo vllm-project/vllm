@@ -38,7 +38,8 @@ def rgba_to_rgb(
 
 def _has_transparency(image: Image.Image) -> bool:
     """Detect whether an image carries transparency data (RGBA, LA, PA,
-    or tRNS chunk in P/L/RGB PNGs)."""
+    or tRNS chunk in P/L/RGB PNGs).
+    """
     if image.mode in ("RGBA", "LA", "PA"):
         return True
     return "transparency" in getattr(image, "info", {})

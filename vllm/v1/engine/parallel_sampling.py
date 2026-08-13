@@ -64,6 +64,7 @@ class ParentRequest:
 
         Returns:
           Child `sampling_params` instance.
+
         """
         seed = self.sampling_params.seed
         if self.cached_child_sampling_params:
@@ -88,6 +89,7 @@ class ParentRequest:
 
         Returns:
           (request ID, sampling_params) tuple
+
         """
         child_req_id = f"{index}_{self.request_id}"
         self.child_requests.add(child_req_id)

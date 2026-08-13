@@ -33,7 +33,6 @@ def should_do_global_cleanup_after_test(request) -> bool:
     This can provide a ~10x speedup for non-GPU unit tests since they don't need
     to initialize torch.
     """
-
     return not request.node.get_closest_marker("skip_global_cleanup")
 
 
@@ -343,8 +342,7 @@ def qwen36_moe_3d_lora_files():
 
 @pytest.fixture
 def reset_default_device():
-    """
-    Some tests, such as `test_punica_ops.py`, explicitly set the
+    """Some tests, such as `test_punica_ops.py`, explicitly set the
     default device, which can affect subsequent tests. Adding this fixture
     helps avoid this problem.
     """

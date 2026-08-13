@@ -17,6 +17,7 @@ class Logprob:
         logprob: The logprob of chosen token
         rank: The vocab rank of chosen token (>=1)
         decoded_token: The decoded chosen token index
+
     """
 
     logprob: float
@@ -29,8 +30,7 @@ LogprobsOnePosition = dict[int, Logprob]
 
 @dataclass
 class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
-    """
-    Flat logprobs of a request into multiple primitive type lists.
+    """Flat logprobs of a request into multiple primitive type lists.
 
     Compared to list[dict[int, Logprob]], this data structure reduced GC
     overhead significantly. As it flattened logprob information for
@@ -78,8 +78,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         ranks: itertools.chain[int],
         decoded_tokens: Iterable[str | None],
     ) -> None:
-        """
-        Appends logprobs for the next position without creating
+        """Appends logprobs for the next position without creating
         the intermediate logprob dictionary.
         """
         self.start_indices.append(len(self.logprobs))
@@ -144,8 +143,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         raise TypeError("Cannot insert logprobs to FlatLogprobs")
 
     def __iter__(self) -> Iterator[LogprobsOnePosition]:
-        """
-        Iterates the container and yields LogprobsOnePosition for
+        """Iterates the container and yields LogprobsOnePosition for
         each position.
         """
         for i in range(0, len(self.start_indices)):

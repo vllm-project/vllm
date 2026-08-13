@@ -139,8 +139,7 @@ def moe_fused_mul_sum(
     topk_ids: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """
-    Fused kernel for MoE (Mixture of Experts) to perform weighted summation
+    """Fused kernel for MoE (Mixture of Experts) to perform weighted summation
     of expert outputs.
 
     Args:
@@ -158,6 +157,7 @@ def moe_fused_mul_sum(
     Returns:
         The fused weighted sum of expert outputs.
         Shape: (num_tokens, hidden_size).
+
     """
     assert inputs.ndim == 3
     assert topk_weights.ndim == 2

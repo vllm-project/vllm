@@ -141,7 +141,6 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         the full output[:num_actual_toks] buffer after both forward_mha and
         forward_mqa have written their results.
         """
-
         batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
         common_attn_metadata = create_common_attn_metadata(
             batch_spec, self.block_size, self.device, arange_block_indices=True

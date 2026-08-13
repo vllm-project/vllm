@@ -187,7 +187,8 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
 def test_has_initial_state_after_reclassification():
     """After reclassification, num_prefills > 0 so the prefill kernel path
     should compute has_initial_state. For the reclassified request with
-    context_lens > 0, the corresponding entry must be True."""
+    context_lens > 0, the corresponding entry must be True.
+    """
     builder = _create_gdn_builder(num_speculative_tokens=2)
     batch = BatchSpec(seq_lens=[65, 20], query_lens=[1, 3])
     meta = _build(builder, batch, num_decode_draft_tokens=[-1, 2])

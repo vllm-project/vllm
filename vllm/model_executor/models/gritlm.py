@@ -65,8 +65,7 @@ class GritLMMeanPool(SequencePoolingMethod):
         start_idx: int = 0,
         end_idx: int | None = None,
     ) -> int:
-        """
-        Find the first occurrence of `target` in `arr` starting from
+        """Find the first occurrence of `target` in `arr` starting from
         `start_idx`.
 
         Args:
@@ -77,6 +76,7 @@ class GritLMMeanPool(SequencePoolingMethod):
 
         Returns:
             The index of the first occurrence of `target` in `arr`.
+
         """
         if start_idx < 0:
             raise ValueError("`start_idx` must be non-negative")
@@ -96,8 +96,7 @@ class GritLMMeanPool(SequencePoolingMethod):
         return -1
 
     def _get_instruction_len(self, prompt_token_ids: np.ndarray) -> int:
-        """
-        Get the length of the instruction in the prompt.
+        """Get the length of the instruction in the prompt.
 
         We do a pattern matching to find the instruction in the prompt,
         and then return the length of the instruction.

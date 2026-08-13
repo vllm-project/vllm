@@ -11,7 +11,8 @@ from ...utils import compute_acceptance_len, get_test_prompts
 @single_gpu_only
 def test_synthetic_acceptance_rate(vllm_runner):
     """Verify that synthetic rejection sampling produces an acceptance
-    length close to the requested mean acceptance length."""
+    length close to the requested mean acceptance length.
+    """
     num_spec_tokens = 3
     expected_acceptance_len = 1.875
     tolerance = 0.15

@@ -111,8 +111,7 @@ def clean_cache_reset_device(reset_default_device):
 
 @pytest.fixture(autouse=True)
 def skip_cuda_with_stage_false(request):
-    """
-    On cuda-like platforms, we use the same kernels for prefill and decode
+    """On cuda-like platforms, we use the same kernels for prefill and decode
     stage, and 'stage' is generally ignored, so we only need to test once.
     """
     if current_platform.is_cuda_alike() or current_platform.is_xpu():
@@ -138,8 +137,8 @@ def get_random_id_to_index(
         num_slots: The number of slots in the mapping. Must be larger
             than num_loras.
         log: Whether to log the output.
-    """
 
+    """
     if num_loras > num_slots:
         raise ValueError(
             f"num_loras is higher than num_slots: {num_loras} > {num_slots}. "
@@ -175,8 +174,8 @@ def populate_loras(
         repeats: must only be set for column parallel packed
             layers. Indicates the number of loras to compose
             together to create a single lora layer.
-    """
 
+    """
     # Dictionary that maps the lora ID to the
     # corresponding lora weights.
     lora_dict: dict[int, LoRALayerWeights] = dict()
@@ -231,8 +230,8 @@ def create_random_inputs(
         input_range: the range of values to include in the input.
             input_range[0] <= possible input values < input_range[1]
         input_type: the type of values in the input.
-    """
 
+    """
     low, high = input_range
 
     inputs: list[torch.Tensor] = []

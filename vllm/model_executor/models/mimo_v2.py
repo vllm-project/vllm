@@ -774,8 +774,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         tp_rank: int,
         tp_size: int,
     ) -> bool:
-        """
-        The fused fp8 QKV projection weights and scale are stored separately.
+        """The fused fp8 QKV projection weights and scale are stored separately.
         Special care must be taken while sharding these tensors across TP ranks.
         See _shard_fp8_qkv_proj for more details.
 
@@ -783,6 +782,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             True if ``tensor`` was an fp8 qkv_proj weight/scale and was consumed
             (caller should skip it); False otherwise, so the caller falls
             through to its normal loading path.
+
         """
         is_weight = (
             name.endswith("qkv_proj.weight") and tensor.dtype == torch.float8_e4m3fn

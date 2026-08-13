@@ -40,7 +40,6 @@ def create_test_events(count: int) -> SampleBatch:
 
 def test_basic_publishing(publisher, subscriber):
     """Test basic event publishing works"""
-
     test_batch = create_test_events(5)
     publisher.publish(test_batch)
 
@@ -139,8 +138,7 @@ def test_buffer_limit(publisher, subscriber, publisher_config):
 
 
 def test_topic_filtering(publisher_config):
-    """
-    Test that a subscriber only receives messages matching its topic filter
+    """Test that a subscriber only receives messages matching its topic filter
     """
     publisher_config.replay_endpoint = None
 
@@ -221,7 +219,6 @@ def test_null_publisher():
 
 def test_data_parallel_rank_tagging(publisher_config):
     """Test that events are properly tagged with their data parallel rank"""
-
     publisher_config.topic = "foo"
     pub_0 = EventPublisherFactory.create(publisher_config, DP_RANK)
     pub_1 = EventPublisherFactory.create(publisher_config, DP_RANK + 1)

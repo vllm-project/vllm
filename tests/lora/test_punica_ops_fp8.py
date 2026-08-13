@@ -918,7 +918,8 @@ def test_lora_shrink_fp8(
     quant_mode: str,
 ):
     """Test FP8 shrink kernel with per-tensor, per-channel, and block-wise
-    quantization, comparing against the bf16 baseline."""
+    quantization, comparing against the bf16 baseline.
+    """
     torch.set_default_device(device)
     set_random_seed(seed)
 
@@ -973,7 +974,8 @@ def test_lora_expand_fp8(
     quant_mode: str,
 ):
     """Test FP8 expand kernel with per-tensor, per-channel, and block-wise
-    quantization, comparing against the bf16 baseline."""
+    quantization, comparing against the bf16 baseline.
+    """
     torch.set_default_device(device)
     set_random_seed(seed)
 

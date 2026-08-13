@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Warmup deep_gemm kernels.
+"""Warmup deep_gemm kernels.
 DeepGEMM JIT's the kernels. The warmup aims to JIT all the kernels that would
 be used during model execution beforehand.
 """
@@ -39,16 +38,15 @@ from vllm.utils.platform_utils import num_compute_units
 def _generate_optimal_warmup_m_values(
     max_tokens: int, n: int, device: torch.device
 ) -> list[int]:
-    """
-    Generate M values that cover all possible DeepGEMM kernel configurations.
+    """Generate M values that cover all possible DeepGEMM kernel configurations.
     Reference: https://github.com/deepseek-ai/DeepGEMM/blob/79f48ee15a82dd5fad5cd9beaa393c1f755e6b55/csrc/jit_kernels/heuristics/common.hpp
 
     Args:
         max_tokens: Maximum number of tokens to warmup for
         n: The actual N dimension from the weight tensor
         device: The torch device to get properties from.
-    """
 
+    """
     # DeepGEMM's possible block sizes
     block_ms = [64, 128, 256]
     block_ns = list(range(16, min(257, n + 1), 16))
@@ -85,8 +83,7 @@ def _generate_optimal_warmup_m_values(
 def _extract_data_from_linear_base_module(
     m: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
-    """
-    Extract weights, weight scales and quantization block sizes from the given
+    """Extract weights, weight scales and quantization block sizes from the given
     LinearBase module.
     """
     assert isinstance(m, LinearBase)
@@ -107,8 +104,7 @@ def _extract_data_from_linear_base_module(
 def _extract_data_from_fused_moe_module(
     m_: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """
-    Extract weights, weight scales and num_topk from MoERunner module.
+    """Extract weights, weight scales and num_topk from MoERunner module.
     """
     assert isinstance(m_, MoERunner)
     m = m_.routed_experts
@@ -134,8 +130,7 @@ def _extract_data_from_fused_moe_module(
 
 
 def _is_deep_gemm_backed_kernel(fp8_linear: object) -> bool:
-    """
-    Return True if the selected linear kernel dispatches to DeepGEMM, either
+    """Return True if the selected linear kernel dispatches to DeepGEMM, either
     directly or as the fallback branch of a dynamic wrapper.
     """
     if isinstance(fp8_linear, DeepGemmFp8BlockScaledMMKernel):
@@ -146,10 +141,8 @@ def _is_deep_gemm_backed_kernel(fp8_linear: object) -> bool:
 
 
 def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
+    """Return True if the input module/layer could be processed with DeepGEMM.
     """
-    Return True if the input module/layer could be processed with DeepGEMM.
-    """
-
     if not (
         isinstance(module, LinearBase)
         and isinstance(module.quant_method, Fp8LinearMethod)

@@ -47,8 +47,7 @@ def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
-    """
-    Materialize a meta tensor into an actual tensor on the current device.
+    """Materialize a meta tensor into an actual tensor on the current device.
     Should be called within the torch device context for the given rank.
     """
     tensor = torch.empty_strided(
@@ -152,8 +151,7 @@ def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
 
 
 class CopyCounter(TorchDispatchMode):
-    """
-    Tracks total number of elements modified with `copy_`.
+    """Tracks total number of elements modified with `copy_`.
 
     Useful for keeping track of weight loading where underlying weights can be
     arbitrarily transformed (such as with `narrow`) before calling copy.
@@ -179,8 +177,7 @@ class CopyCounter(TorchDispatchMode):
 def get_numel_loaded(
     weight_loader: Callable, args: inspect.BoundArguments
 ) -> tuple[int, object]:
-    """
-    Determine how many elements would be loaded by a weight loader call.
+    """Determine how many elements would be loaded by a weight loader call.
 
     Args:
         weight_loader: used to load weights
@@ -189,6 +186,7 @@ def get_numel_loaded(
     Returns:
         number of elements loaded by the weight loader, the return value of the
         weight loader
+
     """
     with CopyCounter() as counter:
         return_value = weight_loader(*args.args, **args.kwargs)

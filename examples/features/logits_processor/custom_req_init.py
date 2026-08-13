@@ -56,7 +56,8 @@ logger = init_logger(__name__)
 
 class DummyPerReqLogitsProcessor:
     """The request-level logits processor masks out all logits except the
-    token id identified by `target_token`"""
+    token id identified by `target_token`
+    """
 
     def __init__(self, target_token: int) -> None:
         """Specify `target_token`"""
@@ -75,7 +76,8 @@ class DummyPerReqLogitsProcessor:
 
 class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of overriding the wrapper class `__init__()` in order to utilize
-    info about the device type"""
+    info about the device type
+    """
 
     @classmethod
     def validate_params(cls, params: SamplingParams):
@@ -111,6 +113,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
 
         Returns:
           `Callable` request logits processor, or None
+
         """
         if (
             not self.is_cuda

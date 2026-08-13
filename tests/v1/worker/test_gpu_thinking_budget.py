@@ -249,7 +249,8 @@ def test_v2_thinking_budget_clamps_oversized_budget():
 
 def test_v2_thinking_budget_continues_end_prefix_from_prompt():
     """A resumed prompt ending with a partial forced-end marker must not
-    restart the marker sequence and duplicate its first token."""
+    restart the marker sequence and duplicate its first token.
+    """
     req_states = _make_req_states([1, START, 10, 11, END_A], prompt_len=5)
     state = ThinkingBudgetState(req_states, MockMultiTokenEndReasoningConfig())
     state.add_request(3, SamplingParams(thinking_token_budget=3))

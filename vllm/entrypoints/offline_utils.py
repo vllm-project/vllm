@@ -112,14 +112,14 @@ class OfflineInferenceMixin:
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> Sequence[EngineInput]:
-        """
-        Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
+        """Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
         a format that can be passed to `_add_request`.
 
         Refer to [LLM.generate][] for a complete description of the arguments.
 
         Returns:
             A list of `EngineInput` objects ready to be passed into LLMEngine.
+
         """
         renderer = self.renderer
         model_config = self.model_config
@@ -167,14 +167,14 @@ class OfflineInferenceMixin:
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> Sequence[EngineInput]:
-        """
-        Convert a list of conversations into prompts so that they can then
+        """Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
 
         Refer to [LLM.chat][] for a complete description of the arguments.
 
         Returns:
             A list of `EngineInput` objects ready to be passed into LLMEngine.
+
         """
         renderer = self.renderer
 

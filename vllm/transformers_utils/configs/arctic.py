@@ -36,8 +36,7 @@ class ArcticQuantizationConfig:
 
 
 class ArcticConfig(PretrainedConfig):
-    r"""
-    This is the configuration class to store the configuration of a [`ArcticModel`]. It is used to instantiate an
+    r"""This is the configuration class to store the configuration of a [`ArcticModel`]. It is used to instantiate an
     Arctic model according to the specified arguments, defining the model architecture. Instantiating a configuration
     with the defaults will yield a similar configuration to that of the #TODO(rsamdani): add what model has the default config..
 
@@ -117,7 +116,9 @@ class ArcticConfig(PretrainedConfig):
 
     >>> # Accessing the model configuration
     >>> configuration = model.config
-    ```"""
+    ```
+
+    """
 
     model_type = "arctic"
     keys_to_ignore_at_inference = ["past_key_values"]

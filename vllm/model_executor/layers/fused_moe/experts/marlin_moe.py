@@ -266,11 +266,11 @@ def fused_marlin_moe(
     input_dtype: torch.dtype | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
-    """
-    This function computes a Mixture of Experts (MoE) layer using two sets of
+    """This function computes a Mixture of Experts (MoE) layer using two sets of
     weights, w1 and w2, and top-k gating mechanism.
 
-    Parameters:
+    Parameters
+    ----------
     - hidden_states (torch.Tensor): The input tensor to the MoE layer.
     - w1 (torch.Tensor): The first set of expert weights.
     - w2 (torch.Tensor): The second set of expert weights.
@@ -288,10 +288,11 @@ def fused_marlin_moe(
     - w2_zeros (torch.Tensor|None): Optional zero points to be used for w2.
     - num_bits (bool): The number of bits in expert weights quantization.
 
-    Returns:
+    Returns
+    -------
     - torch.Tensor: The output tensor after applying the MoE layer.
-    """
 
+    """
     quant_type = ScalarType.from_id(quant_type_id)
     assert quant_type in [
         scalar_types.uint4,
@@ -430,8 +431,7 @@ def batched_fused_marlin_moe(
     activation_func: Callable[..., None] | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
-    """
-    This function massages the inputs so the batched hidden_states can be
+    """This function massages the inputs so the batched hidden_states can be
     presented as a 2D contiguous tensor that could be used with
     _fused_marlin_moe.
 
@@ -454,7 +454,6 @@ def batched_fused_marlin_moe(
     expert_ids tensors, so only relevant/valid rows of A (hidden_states)
     are accessed and are processed with the correct expert_ids.
     """
-
     assert hidden_states.ndim == 3, (
         f"hidden states must be batched. e.g. [B, MAX_TOKENS, K]."
         f"But got {hidden_states.size()}"

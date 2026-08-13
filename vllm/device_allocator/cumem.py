@@ -80,8 +80,7 @@ def use_memory_pool_with_allocator(
 
 
 class CuMemAllocator:
-    """
-    A singleton class that manages a memory pool for CUDA tensors.
+    """A singleton class that manages a memory pool for CUDA tensors.
     The memory in this pool can be offloaded or discarded when the
     allocator sleeps.
 
@@ -109,8 +108,7 @@ class CuMemAllocator:
 
     @staticmethod
     def get_instance() -> "CuMemAllocator":
-        """
-        CuMemAllocator is a singleton class.
+        """CuMemAllocator is a singleton class.
         We cannot call the constructor directly.
         Call this method to get the instance.
         """
@@ -182,9 +180,9 @@ class CuMemAllocator:
         self.release_pools()
 
     def _python_malloc_callback(self, allocation_handle: HandleType) -> None:
+        """Internal method to store the allocation data
+        when memory is allocated in the memory pool.
         """
-        Internal method to store the allocation data
-        when memory is allocated in the memory pool."""
         py_d_mem = allocation_handle[2]
         self.pointer_to_data[py_d_mem] = AllocationData(
             allocation_handle, self.current_tag
@@ -198,9 +196,9 @@ class CuMemAllocator:
         return
 
     def _python_free_callback(self, ptr: int) -> HandleType:
+        """Internal method to look up the allocation data
+        when memory is freed in the memory pool.
         """
-        Internal method to look up the allocation data
-        when memory is freed in the memory pool."""
         data = self.pointer_to_data.pop(ptr)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
@@ -227,14 +225,14 @@ class CuMemAllocator:
         return data.handle
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
-        """
-        Put the allocator in sleep mode.
+        """Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
         offloaded to CPU memory, and others will be discarded.
 
         Args:
             offload_tags: The tags of the memory allocation that will be
                 offloaded. The rest of the memory allocation will be discarded.
+
         """
         if offload_tags is None:
             # by default, allocated tensors are offloaded
@@ -281,8 +279,7 @@ class CuMemAllocator:
         torch.cuda.empty_cache()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        """
-        Wake up the allocator from sleep mode.
+        """Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory.
 
@@ -290,6 +287,7 @@ class CuMemAllocator:
             tags: The tags of the memory allocation that will be loaded
                 back to GPU memory. If None, all memory allocation will be loaded
                 back to GPU memory.
+
         """
         gc.collect()
         torch.accelerator.empty_cache()
@@ -311,14 +309,14 @@ class CuMemAllocator:
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
-        """
-        A context manager to use the memory pool.
+        """A context manager to use the memory pool.
         All memory allocation created inside the context will be allocated
         in the memory pool, and has the specified tag.
 
         Args:
             tag: The tag of the memory allocation. If None, the default tag
                 will be used.
+
         """
         if tag is None:
             tag = CuMemAllocator.default_tag
@@ -370,8 +368,7 @@ class CuMemAllocator:
                 torch.cuda.memory._set_allocator_settings("expandable_segments:True")
 
     def get_current_usage(self) -> int:
-        """
-        Get the total number of bytes allocated in the memory pool.
+        """Get the total number of bytes allocated in the memory pool.
         """
         sum_bytes: int = 0
         for ptr, data in self.pointer_to_data.items():

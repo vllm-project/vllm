@@ -295,7 +295,8 @@ def _patch_worker_runtime(
 
 def test_pool_key_to_string_without_prefix_is_unchanged():
     """Default (empty) cache_prefix keeps keys byte-identical to the
-    historical unprefixed format so existing deployments keep their hits."""
+    historical unprefixed format so existing deployments keep their hits.
+    """
     key = PoolKey(KeyMetadata("test-model", 0, 0, 0, 0), "deadbeef")
     assert (
         key.to_string() == "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
@@ -304,7 +305,8 @@ def test_pool_key_to_string_without_prefix_is_unchanged():
 
 def test_pool_key_cache_prefix_namespaces_and_disambiguates():
     """A non-empty cache_prefix is prepended, and two instances with
-    different prefixes never collide on identical block hashes."""
+    different prefixes never collide on identical block hashes.
+    """
     md_a = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depA")
     md_b = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depB")
 
@@ -320,7 +322,8 @@ def test_pool_key_cache_prefix_namespaces_and_disambiguates():
 
 def test_default_local_buffer_size_matches_pr40900():
     """PR-40900 shipped a 4 GiB default for local_buffer_size; the dual-mode
-    patch preserves it (and the JSON key) so unchanged PR-40900 configs work."""
+    patch preserves it (and the JSON key) so unchanged PR-40900 configs work.
+    """
     assert worker.DEFAULT_LOCAL_BUFFER_SIZE == 4 * 1024**3
 
 
@@ -1003,7 +1006,8 @@ def test_store_sending_thread_passes_replicate_config_when_preferred_segment_set
 def test_store_sending_thread_passes_default_replicate_config_when_no_preferred_segment():  # noqa: E501
     """Without a preferred_segment the SendingThread still forwards a
     (default-constructed) ReplicateConfig so the C++ side always sees a
-    well-defined config object."""
+    well-defined config object.
+    """
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.return_value = [256, 256]
@@ -1496,7 +1500,8 @@ def test_recv_thread_stops_after_first_failing_disk_offload_sub_batch():
 
 def test_recv_thread_skips_split_when_budget_holds_all_keys():
     """PR-36 removed the count-based split trigger; with budget for 3 keys,
-    all three should be requested in a single call."""
+    all three should be requested in a single call.
+    """
     store = MagicMock()
     store.batch_get_into_multi_buffers.return_value = [256, 256, 256]
     thread = _make_store_recving_thread(
@@ -1609,7 +1614,8 @@ def test_requester_worker_init_skips_disk_budget_when_offload_disabled(
     monkeypatch,
 ):
     """enable_offload=False zeroes out the disk budget so we don't generate
-    redundant owner GET-RPCs."""
+    redundant owner GET-RPCs.
+    """
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
@@ -1858,7 +1864,8 @@ def test_requester_worker_group_semantics_string_true_enables(
 
 def test_store_sending_thread_clamps_token_len_to_lcm():
     """Partial chunks past the last lcm boundary aren't stored — cache hits
-    are always lcm-aligned (mirrors HybridKVCacheCoordinator)."""
+    are always lcm-aligned (mirrors HybridKVCacheCoordinator).
+    """
     store = MagicMock()
     store.batch_is_exist.return_value = [0, 0]
     store.batch_put_from_multi_buffers.return_value = [256, 256]
@@ -1883,7 +1890,8 @@ def test_store_sending_thread_clamps_token_len_to_lcm():
 
 def test_store_sending_thread_skips_when_token_len_below_lcm():
     """Requests shorter than lcm_block_size cannot produce any aligned chunk,
-    so neither the existence check nor the put should be issued."""
+    so neither the existence check nor the put should be issued.
+    """
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
     store = MagicMock()
@@ -2536,7 +2544,8 @@ def test_lookup_full_hit_with_eagle_pops_once_not_twice():
     """Eagle already leaves the last block for the drafter, so a
     full-prompt re-derivation must never fire for eagle-governed hits:
     firing would anchor the search one block lower and pop a second
-    block, regressing the hit by an extra producer boundary."""
+    block, regressing the hit by an extra producer boundary.
+    """
     worker = _make_bare_worker(block_size=16)
     worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
         worker._kv_cache_groups,
@@ -2559,7 +2568,8 @@ def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
     the full hit into 48, whose SWA window needs the never-written block 1,
     so every load failed and the recompute re-entered the same lookup. The
     re-derivation must report that no stored boundary below the request end
-    is usable."""
+    is usable.
+    """
     from vllm.v1.kv_cache_interface import KVCacheGroupSpec, SlidingWindowSpec
 
     worker = _make_bare_worker(block_size=16)
@@ -2581,7 +2591,8 @@ def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
 def test_lookup_swa_single_group_returns_full_when_tail_window_present():
     """Single-SWA, sliding_window=32 (= 2 blocks): producer stored only the
     tail. Coordinator-driven lookup returns full prefix even though the
-    pre-window blocks are absent."""
+    pre-window blocks are absent.
+    """
     from vllm.v1.kv_cache_interface import KVCacheGroupSpec, SlidingWindowSpec
 
     worker = _make_bare_worker(block_size=16)
@@ -2862,7 +2873,8 @@ def test_config_defaults_to_embedded():
 
 def test_config_pr40900_unchanged(tmp_path):
     """A literal PR-40900 config (no mode, no enable_offload, no preferred_segment)
-    parses without raising and resolves to embedded mode."""
+    parses without raising and resolves to embedded mode.
+    """
     config_path = _write_mooncake_config(
         tmp_path,
         {
@@ -2970,7 +2982,8 @@ def test_config_zero_local_buffer():
 def test_topology_standalone_store_with_disk_offload(tmp_path, monkeypatch):
     """standalone-store + disk: global_segment_size=0, enable_offload=True,
     preferred_segment set. Assert setup() positional args, ReplicateConfig
-    wiring, and that the disk-offload buffer budget is allocated."""
+    wiring, and that the disk-offload buffer budget is allocated.
+    """
     store = MagicMock()
     store.setup.return_value = 0
     fake_replicate_config_cls = _install_fake_mooncake(monkeypatch, store)
@@ -3017,9 +3030,10 @@ def test_topology_standalone_store_with_disk_offload(tmp_path, monkeypatch):
 
 
 def test_topology_embedded_cpu_only(tmp_path, monkeypatch):
-    """embedded + CPU-only: no mode key (defaults to embedded),
+    """Embedded + CPU-only: no mode key (defaults to embedded),
     global_segment_size>0, enable_offload absent, no preferred_segment.
-    This is the PR-40900 baseline recipe."""
+    This is the PR-40900 baseline recipe.
+    """
     store = MagicMock()
     store.setup.return_value = 0
     fake_replicate_config_cls = _install_fake_mooncake(monkeypatch, store)
@@ -3208,7 +3222,8 @@ def test_store_worker_close_swallows_store_errors():
 def test_blob_block_hashes_wire_roundtrip():
     """The lookup wire format sends a ``hash_len`` frame plus the raw hashes
     concatenated back-to-back; the server rebuilds them through a zero-copy
-    ``BlobBlockHashes`` view over the frame buffer."""
+    ``BlobBlockHashes`` view over the frame buffer.
+    """
     hashes = [BlockHash(bytes([i]) * 16) for i in range(5)]
     hash_len = len(hashes[0])
 

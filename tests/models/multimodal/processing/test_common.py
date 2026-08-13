@@ -33,8 +33,7 @@ from ...registry import (
 
 
 def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Add metadata to video mm_data
+    """Add metadata to video mm_data
     """
 
     def create_metadata(frames: np.ndarray):
@@ -61,8 +60,7 @@ def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 
 
 def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Patch the multimodal data for GLM-ASR model.
+    """Patch the multimodal data for GLM-ASR model.
     GLM-ASR requires text and audio to match 1:1, so we limit audio to 1.
     """
     if "audio" in mm_data:

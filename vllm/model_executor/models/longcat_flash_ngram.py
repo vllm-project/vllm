@@ -156,6 +156,7 @@ class NgramEmbedding(nn.Module):
             oe_ids: ``[num_tokens, num_embedders]`` global (offset) n-gram ids,
                 as produced by the ``ngram_compute_n_gram_ids`` kernel.
         Returns: ``[num_tokens, hidden]``.
+
         """
         word = self.word_embeddings(input_ids)  # [N, H]
         flat = oe_ids.permute(1, 0).contiguous()  # [num_embedders, N]

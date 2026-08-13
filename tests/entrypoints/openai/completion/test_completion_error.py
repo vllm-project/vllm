@@ -198,7 +198,7 @@ def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
 
 @pytest.mark.asyncio
 async def test_completion_error_non_stream():
-    """test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -334,7 +334,7 @@ async def test_renderer_only_completion_request_skips_mm_cache():
 
 @pytest.mark.asyncio
 async def test_completion_error_stream():
-    """test finish_reason='error' returns 500 InternalServerError (streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -416,7 +416,8 @@ async def test_completion_error_stream():
 def test_json_schema_response_format_missing_schema():
     """When response_format type is 'json_schema' but the json_schema field
     is not provided, request construction should raise a validation error
-    so the API returns 400 instead of 500."""
+    so the API returns 400 instead of 500.
+    """
     with pytest.raises(Exception, match="json_schema.*must be provided"):
         CompletionRequest(
             model=MODEL_NAME,
@@ -615,7 +616,8 @@ class TestCompletionPromptListLimit:
 @pytest.mark.parametrize("field_name", ["prompt_logprobs", "logprobs"])
 def test_non_numeric_logprobs_rejected(field_name):
     """A non-numeric logprobs value must be a clean 400 validation error, not a
-    TypeError from the mode='before' comparison (which surfaces as HTTP 500)."""
+    TypeError from the mode='before' comparison (which surfaces as HTTP 500).
+    """
     with pytest.raises(VLLMValidationError, match=f"`{field_name}` must be an integer"):
         CompletionRequest(
             model=MODEL_NAME,

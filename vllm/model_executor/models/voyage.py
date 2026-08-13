@@ -16,8 +16,7 @@ WeightItem = tuple[str, torch.Tensor]
 
 
 class VoyageQwen3BidirectionalEmbedModel(nn.Module):
-    """
-    Qwen3Model + Voyage embedding head + bidirectional attention.
+    """Qwen3Model + Voyage embedding head + bidirectional attention.
 
     Checkpoint conventions (HF):
       - MLP: gate_proj + up_proj (unfused)

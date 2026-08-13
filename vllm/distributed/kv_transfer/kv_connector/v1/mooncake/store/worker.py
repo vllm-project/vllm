@@ -577,6 +577,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         Returns:
             True when no put is needed or every put succeeds, False otherwise.
+
         """
         if not self.coord.enable_partial_hash_hits or not req_meta.block_hashes:
             return True
@@ -2012,7 +2013,8 @@ class LookupKeyClient:
         non_block: bool = False,
     ) -> int | None:
         """If non_block is True, will return None until the result is ready,
-        so the caller retries on a later step."""
+        so the caller retries on a later step.
+        """
         future = self.futures.get(req_id)
         if future is None:
             future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))

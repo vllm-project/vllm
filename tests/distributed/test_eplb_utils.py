@@ -26,8 +26,7 @@ def _make_model_state(
 
 
 def test_commit_eplb_maps_shape_change():
-    """
-    The normal path copies the physical_to_logical map in-place. When the number of
+    """The normal path copies the physical_to_logical map in-place. When the number of
     physical experts changes, the old map should be replaced entirely.
     """
     num_layers, num_logical, num_physical = 2, 4, 6
@@ -58,8 +57,7 @@ def test_commit_eplb_maps_shape_change():
 
 
 def test_commit_eplb_maps_for_layer_logical_padding():
-    """
-    Test that logical_to_physical_map is padded with -1 to fill the
+    """Test that logical_to_physical_map is padded with -1 to fill the
     pre-allocated slots when the new map has fewer replicas than the max.
     """
     num_layers, num_logical, num_physical = 2, 4, 6

@@ -63,6 +63,7 @@ class BaseOffloader(ABC):
 
         Returns:
             List of modules, potentially with offloading hooks installed.
+
         """
         pass
 

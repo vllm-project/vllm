@@ -69,7 +69,8 @@ def _make_kv_cache_config(layer_names: set[str]) -> SimpleNamespace:
 
 def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):
     """The proposer's slot-mapping math runs against the kernel-granularity
-    block table, so block_size must come from kernel_block_sizes."""
+    block table, so block_size must come from kernel_block_sizes.
+    """
     layer_names = {"draft.0.self_attn.attn"}
     proposer = _make_proposer(monkeypatch, layer_names)
 
@@ -97,7 +98,8 @@ def test_block_size_falls_back_to_kv_cache_spec(monkeypatch: pytest.MonkeyPatch)
 
 def test_draft_layer_iteration_is_deterministic(monkeypatch: pytest.MonkeyPatch):
     """_draft_attn_layer_names is a set; the attention groups built from it
-    must not depend on its (process-random) iteration order."""
+    must not depend on its (process-random) iteration order.
+    """
     layer_names = {"draft.c.attn", "draft.a.attn", "draft.b.attn"}
     expected_order = sorted(layer_names)
 

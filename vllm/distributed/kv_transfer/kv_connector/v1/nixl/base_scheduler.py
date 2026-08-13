@@ -281,11 +281,11 @@ class NixlBaseConnectorScheduler:
     def set_xfer_handshake_metadata(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        """
-        Set the KV connector handshake metadata for this connector.
+        """Set the KV connector handshake metadata for this connector.
 
         Args:
             metadata (dict): the handshake metadata to set.
+
         """
         encoded_data: dict[tuple[int, int], bytes] = {}
         encoder = msgspec.msgpack.Encoder()
@@ -366,7 +366,8 @@ class NixlBaseConnectorScheduler:
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1)."""
+        always recomputes the last token and must start from h(N-1).
+        """
         if self._has_mamba and num_prompt_tokens > 1:
             return num_prompt_tokens - 1
         return num_prompt_tokens
@@ -377,7 +378,8 @@ class NixlBaseConnectorScheduler:
         derive h(N) correctly.
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
-        request is preempted and rescheduled."""
+        request is preempted and rescheduled.
+        """
         params = request.kv_transfer_params
         if (
             params is not None

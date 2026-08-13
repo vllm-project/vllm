@@ -1528,7 +1528,8 @@ def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling
 
 def test_loads_do_not_populate_fence_index(request_runner):
     """Loads don't populate _block_id_to_pending_jobs (protected by
-    delay_free_blocks while in flight)."""
+    delay_free_blocks while in flight).
+    """
     runner = request_runner(
         blocks_per_chunk=3,
         block_size=4,
@@ -1598,7 +1599,8 @@ def test_fence_at_update_state_after_alloc(request_runner):
 def test_fence_at_build_store_jobs(request_runner):
     """A new prefill (no load -> update_state_after_alloc returns early)
     reusing a finished request's pending-store block is flushed by
-    _build_store_jobs's fence."""
+    _build_store_jobs's fence.
+    """
     runner = request_runner(
         blocks_per_chunk=1,
         block_size=4,
@@ -1648,7 +1650,8 @@ def test_fence_at_build_store_jobs(request_runner):
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     """complete_store fires per-job, not deferred to request finish.
-    Each call carries only that store's keys."""
+    Each call carries only that store's keys.
+    """
     tokens_per_block = 4
     blocks_per_chunk = 3
     tokens_per_chunk = tokens_per_block * blocks_per_chunk
@@ -1877,7 +1880,8 @@ def test_offload_prompt_only(request_runner, async_scheduling: bool):
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_reset_cache(request_runner, async_scheduling: bool):
     """reset_cache flushes in-flight loads, calls manager.reset_cache(), resets
-    next_stored_chunk_idx for active requests and clears job tracking."""
+    next_stored_chunk_idx for active requests and clears job tracking.
+    """
     block_size = 4
     blocks_per_chunk = 3
     tokens_per_chunk = block_size * blocks_per_chunk
@@ -2300,7 +2304,8 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
     """When skip_reading_prefix_cache=True, the offloading connector must not
-    load any blocks from CPU even if a matching prefix is cached there."""
+    load any blocks from CPU even if a matching prefix is cached there.
+    """
     block_size = 4
     blocks_per_chunk = 3
     tokens_per_chunk = block_size * blocks_per_chunk
@@ -2353,7 +2358,8 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
 
 class TestEagle:
     """Tests for Eagle/MTP speculative decoding support in the offloading
-    connector scheduler — both _lookup() unit tests and integration tests."""
+    connector scheduler — both _lookup() unit tests and integration tests.
+    """
 
     # -------------------------------------------------------------------
     # Helpers
@@ -2882,7 +2888,8 @@ class TestEagle:
         self, request_runner, async_scheduling: bool
     ):
         """Eagle sliding-window group stores all prompt blocks but excludes
-        the trailing chunk while decoding."""
+        the trailing chunk while decoding.
+        """
         block_size = 4
         sliding_window = 8
         num_gpu_blocks = 100
@@ -2928,7 +2935,8 @@ class TestEagle:
         self, request_runner, async_scheduling: bool
     ):
         """An eagle group with a single-block prompt stores it at the end of
-        prefill: prompt blocks are stable, so no tail is held back."""
+        prefill: prompt blocks are stable, so no tail is held back.
+        """
         block_size = 4
         blocks_per_chunk = 1
         tokens_per_chunk = block_size * blocks_per_chunk
@@ -3351,7 +3359,8 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
 
 def test_chunked_local_attention_reports_its_chunk_window():
     """Llama 4 uses chunked local attention, which used to trip the
-    FullAttentionSpec assert and kill the engine at startup."""
+    FullAttentionSpec assert and kill the engine at startup.
+    """
     spec = ChunkedLocalAttentionSpec(
         block_size=16,
         num_kv_heads=2,

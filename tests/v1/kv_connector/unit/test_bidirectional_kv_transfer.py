@@ -146,7 +146,8 @@ def test_multiturn_lifecycle():
     (do_remote_decode=True). Finishes LENGTH_CAPPED with remote_block_ids.
     Turn 2: P receives remote_block_ids from D. P pulls KV from D because
     remote_block_ids is not None and external tokens > 0. Computes only
-    new tokens, finishes LENGTH_CAPPED."""
+    new tokens, finishes LENGTH_CAPPED.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -192,7 +193,8 @@ def test_multiturn_lifecycle():
 
 def test_first_turn_no_remote_blocks():
     """First turn: P has no remote_block_ids from D yet.
-    Standard local prefill, returns kv_transfer_params for future turns."""
+    Standard local prefill, returns kv_transfer_params for future turns.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -272,7 +274,8 @@ def test_abort_p_side_non_length_capped():
 
 def test_remote_blocks_exceed_prompt_tokens():
     """D provides more remote tokens than P's prompt needs.
-    P caps external tokens to prompt length."""
+    P caps external tokens to prompt length.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -308,7 +311,8 @@ def test_remote_blocks_exceed_prompt_tokens():
 def test_p_node_pulls_partial_last_block_from_d():
     """D sends remote_block_ids with partially filled last block.
     remote_num_tokens < len(remote_block_ids) * block_size.
-    P pulls only remote_num_tokens worth of external tokens."""
+    P pulls only remote_num_tokens worth of external tokens.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -353,7 +357,8 @@ def test_p_node_pulls_partial_last_block_from_d():
 
 def test_add_new_req_to_recv_populates_remote_meta():
     """add_new_req_to_recv correctly populates RemoteMeta for P-node
-    bi-directional KV pull from D."""
+    bi-directional KV pull from D.
+    """
     meta = NixlConnectorMetadata()
     kv_params = {
         "remote_block_ids": [[0, 1, 2]],
@@ -381,7 +386,8 @@ def test_add_new_req_to_recv_populates_remote_meta():
 
 def test_build_connector_meta_recv_entries():
     """P-node scheduler: do_remote_decode=True + remote_block_ids →
-    _reqs_need_recv populated, build_connector_meta produces reqs_to_recv."""
+    _reqs_need_recv populated, build_connector_meta produces reqs_to_recv.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -455,7 +461,8 @@ def test_p_node_pull_kv_from_d(dist_init):
 )
 def test_p_node_pull_then_send_kv(dist_init):
     """Full P-node bi-directional: pull KV from D → prefill →
-    send KV back to D via notification."""
+    send KV back to D via notification.
+    """
     connector, worker = _make_connector_with_fake_worker()
     meta = _make_p_node_recv_metadata("req-p2", [10, 11], [20, 21])
     _do_load_kv(connector, meta)
@@ -502,7 +509,8 @@ def test_p_node_deferred_pull_on_no_handshake(dist_init):
 def test_d_node_request_finished_returns_kv_params():
     """D-node request_finished returns kv_transfer_params with
     do_remote_decode=True, remote_block_ids, remote_num_tokens
-    for P to pull. These params go directly to P node."""
+    for P to pull. These params go directly to P node.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -583,7 +591,8 @@ def test_d_node_request_finished_remote_num_tokens():
 
 def test_d_node_partial_last_block_remote_num_tokens():
     """D-node: remote_num_tokens < len(remote_block_ids) * block_size
-    when last block is partially filled."""
+    when last block is partially filled.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -617,7 +626,8 @@ def test_no_double_read_blocks_after_reschedule():
     bidirectional request (once on initial schedule, once after
     WAITING_FOR_REMOTE_KVS → reschedule). The _remote_blocks_processed
     flag must prevent the request from being added to _reqs_need_recv
-    twice, which would cause P to read D's blocks twice."""
+    twice, which would cause P to read D's blocks twice.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -670,7 +680,8 @@ def test_remote_num_tokens_bounded_by_blocks():
     """Edge case 2: D-node request_finished must return
     remote_num_tokens <= len(remote_block_ids) * block_size.
     request.num_tokens includes the last sampled token which has no KV
-    in the cache, so remote_num_tokens must use num_computed_tokens."""
+    in the cache, so remote_num_tokens must use num_computed_tokens.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -706,7 +717,8 @@ def test_remote_num_tokens_bounded_by_blocks():
 def test_kv_recompute_threshold_skips_small_transfer():
     """Edge case 3: When remote tokens are below kv_recompute_threshold,
     P should skip the remote pull and compute locally instead of
-    entering WAITING_FOR_REMOTE_KVS."""
+    entering WAITING_FOR_REMOTE_KVS.
+    """
     threshold = 256
     vllm_config = create_vllm_config(
         kv_connector_extra_config={
@@ -748,7 +760,8 @@ def test_p_node_finished_holds_blocks_for_d():
     """Edge case 4: P-node finishes with FINISHED_LENGTH_CAPPED and
     do_remote_decode=True. P must hold blocks (delay_free=True) and
     return kv_transfer_params with do_remote_prefill=True so D can
-    read P's blocks."""
+    read P's blocks.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -789,7 +802,8 @@ def test_p_node_finished_holds_blocks_for_d():
 def test_cache_miss_first_turn_no_remote_pull():
     """Edge case 5: First turn with do_remote_decode=True but no
     remote_block_ids (cache MISS). P should prefill locally with
-    num_external_tokens=0 and not enter WAITING_FOR_REMOTE_KVS."""
+    num_external_tokens=0 and not enter WAITING_FOR_REMOTE_KVS.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -824,7 +838,8 @@ def test_cache_miss_first_turn_no_remote_pull():
 def test_partial_remote_tokens_less_than_prompt():
     """Edge case 6: D's remote_num_tokens covers only part of P's
     prompt. P should pull remote_num_tokens worth of external tokens
-    and compute the rest locally."""
+    and compute the rest locally.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -869,7 +884,8 @@ def test_partial_remote_tokens_less_than_prompt():
 def test_remote_blocks_processed_flag_persists():
     """Edge case 7: After recv completes and request is rescheduled,
     the _remote_blocks_processed flag in kv_transfer_params prevents
-    the bidirectional path from re-entering _reqs_need_recv."""
+    the bidirectional path from re-entering _reqs_need_recv.
+    """
     vllm_config = create_vllm_config(
         kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
     )
@@ -941,7 +957,8 @@ _REMOTE = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
 )
 def test_turn2_deadline_gate(dist_init, offset, expiry_delta, expect_declined):
     """P declines on the turn-2 readback if the deadline is known,
-    near-expiry and a handshake clock offset is known"""
+    near-expiry and a handshake clock offset is known
+    """
     connector, worker = _make_connector_with_fake_worker()
     worker._engine_clock_offset[_REMOTE] = offset
     expiry_time = None if expiry_delta is None else time.perf_counter() + expiry_delta
@@ -977,7 +994,8 @@ def test_turn2_deadline_gate(dist_init, offset, expiry_delta, expect_declined):
 )
 def test_turn2_full_prefix_hit_with_expired_deadline_skips_gate(dist_init):
     """A full local prefix hit issues no READ. The expiry gate must be skipped
-    even when D's deadline is expired."""
+    even when D's deadline is expired.
+    """
     connector, worker = _make_connector_with_fake_worker()
     worker._engine_clock_offset[_REMOTE] = 0.0
 
@@ -1030,7 +1048,8 @@ def test_d_node_request_finished_exports_blocks_expiry_time():
 
 def test_handshake_listener_appends_perf_counter_frame():
     """The handshake reply carries a 2nd frame with the listener's live
-    perf_counter."""
+    perf_counter.
+    """
     import threading
 
     import msgspec

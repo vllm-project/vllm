@@ -57,8 +57,7 @@ def make_dummy_moe_config(
     max_num_tokens: int = 512,
     activation: MoEActivation = MoEActivation.SILU,
 ) -> FusedMoEConfig:
-    """
-    This is a dummy config for the mk constructor interface
+    """This is a dummy config for the mk constructor interface
     as most kernels like DeepGEMM, CUTLASSFp4, Triton, MARLIN
     do not actually use this config.
 

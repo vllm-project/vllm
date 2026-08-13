@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This script contains:
+"""This script contains:
 1. test multi loras service with tp >= 2
 2. test multi loras request
 """
@@ -124,8 +123,7 @@ def test_multi_loras_with_tp_sync():
         return output_text
 
     def reload_lora(name: str):
-        """
-        reload a lora to simulate the case:
+        """Reload a lora to simulate the case:
         setting `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true`
         for dynamic lora loading and unloading
         """
@@ -204,8 +202,7 @@ def test_multiple_lora_requests():
 def test_load_inplace_offline_reload(
     qwen3_meowing_lora_files: str, qwen3_woofing_lora_files: str
 ) -> None:
-    """
-    Test that load_inplace=True allows reloading LoRA adapters with the same ID
+    """Test that load_inplace=True allows reloading LoRA adapters with the same ID
     in offline mode (using LLM class directly).
     """
     llm = LLM(
@@ -254,8 +251,7 @@ def test_load_inplace_offline_reload(
 def test_load_inplace_false_no_reload(
     qwen3_meowing_lora_files: str, qwen3_woofing_lora_files: str
 ) -> None:
-    """
-    Test that load_inplace=False prevents reloading when an adapter
+    """Test that load_inplace=False prevents reloading when an adapter
     with the same ID already exists.
     """
     llm = LLM(

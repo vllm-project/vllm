@@ -55,7 +55,8 @@ logger = init_logger(__name__)
 
 class DummyPerReqLogitsProcessor:
     """The request-level logits processor masks out all logits except the
-    token id identified by `target_token`"""
+    token id identified by `target_token`
+    """
 
     def __init__(self, target_token: int) -> None:
         """Specify `target_token`"""
@@ -74,7 +75,8 @@ class DummyPerReqLogitsProcessor:
 
 class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of wrapping a fake request-level logit processor to create a
-    batch-level logits processor"""
+    batch-level logits processor
+    """
 
     @classmethod
     def validate_params(cls, params: SamplingParams):
@@ -103,6 +105,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
 
         Returns:
           `Callable` request logits processor, or None
+
         """
         target_token: Any | None = params.extra_args and params.extra_args.get(
             "target_token"

@@ -67,12 +67,11 @@ from .vision import (
 
 
 class CLIPImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -409,7 +408,6 @@ class CLIPAttention(nn.Module):
         hidden_states: torch.Tensor,
     ):
         """Input shape: Batch x Time x Channel"""
-
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
         out = self.attn(query_states, key_states, value_states)
@@ -497,12 +495,12 @@ class CLIPEncoderLayer(nn.Module):
 
 
 class CLIPEncoder(nn.Module):
-    """
-    Transformer encoder consisting of `config.num_hidden_layers` self
+    """Transformer encoder consisting of `config.num_hidden_layers` self
     attention layers. Each layer is a [`CLIPEncoderLayer`].
 
     Args:
         config: CLIPConfig
+
     """
 
     def __init__(

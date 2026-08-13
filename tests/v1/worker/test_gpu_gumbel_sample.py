@@ -168,7 +168,7 @@ def test_full_vocab_distribution_fidelity():
 
 
 def test_greedy_temperature_zero_returns_argmax():
-    """temperature == 0 skips Gumbel noise and returns the exact argmax."""
+    """Temperature == 0 skips Gumbel noise and returns the exact argmax."""
     torch.manual_seed(0)
     num_reqs = 128
     logits = torch.randn(num_reqs, VOCAB_SIZE, device=DEVICE, dtype=torch.float32)

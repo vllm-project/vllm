@@ -179,8 +179,7 @@ async def _probe_endpoint(
     conn_err_failure_threshold: int = 3,
     conn_err_retry_delay: float = 5.0,
 ) -> bool:
-    """
-    Probe /health endpoint for 200 status.
+    """Probe /health endpoint for 200 status.
 
     If there is a connection error, retry every N seconds.
     """
@@ -248,8 +247,7 @@ def _run_rust_vllm_dp_server(child_args: argparse.Namespace) -> None:
 
 
 def _run_vllm_dp_server(child_args: argparse.Namespace) -> None:
-    """
-    Entrypoint function for the vLLM DP Server.
+    """Entrypoint function for the vLLM DP Server.
     """
     # Create a fresh process group for the vLLM DP Server,
     # so that CTRL-C is propagated cleanly.
@@ -317,8 +315,7 @@ class DPSupervisor:
                 await supervisor_server_task
 
     async def _start_server(self) -> tuple[uvicorn.Server, asyncio.Task[None]]:
-        """
-        Launch the DPSupervisor HTTP server.
+        """Launch the DPSupervisor HTTP server.
 
         Called only after the vLLM DP Servers are ready so that /health does
         not return 503 to external probes while the engines are initializing.
@@ -355,8 +352,7 @@ class DPSupervisor:
         return supervisor_server, supervisor_server_task
 
     async def _wait_until_ready(self, monitor_task: asyncio.Task[None]) -> None:
-        """
-        Block until the vLLM DP Servers are ready or shutdown is triggered.
+        """Block until the vLLM DP Servers are ready or shutdown is triggered.
 
         Returns early if monitoring stops (e.g. a DP Server dies during
         startup), in which case the supervisor server is never started.
@@ -368,14 +364,12 @@ class DPSupervisor:
             await asyncio.sleep(0.05)
 
     def _handle_signal(self, signum: int) -> None:
-        """
-        Signal handler that is added to the event loop.
+        """Signal handler that is added to the event loop.
 
         This catches the SIGTERM from K8s and begins graceful shutdown,
         by setting the _shutdown_event(), which is watched by the main
         coroutine monitoring the vLLM DP Servers.
         """
-
         if self._shutdown_event.is_set():
             return
 
@@ -389,8 +383,7 @@ class DPSupervisor:
         self._is_ready = False
 
     def _start_children(self) -> None:
-        """
-        Launch vLLM DP Servers on separate GPUs.
+        """Launch vLLM DP Servers on separate GPUs.
         """
         logger.info("Launching vLLM DP Servers")
         context = multiprocessing.get_context("spawn")
@@ -405,8 +398,7 @@ class DPSupervisor:
             self._processes.append(process)
 
     async def _probe_all_children(self) -> None:
-        """
-        Background coroutine: probes all child endpoints on each interval.
+        """Background coroutine: probes all child endpoints on each interval.
 
         Exits when any server becomes unhealthy after being ready, signalling
         _monitor_children to initiate shutdown.
@@ -463,8 +455,7 @@ class DPSupervisor:
                     )
 
     async def _monitor_children(self) -> None:
-        """
-        Main coroutine task that monitors the children vLLM servers.
+        """Main coroutine task that monitors the children vLLM servers.
 
         Before the vLLM servers are /ready:
         - if the pid is dead, we will shut down

@@ -61,7 +61,8 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     propagates them to the worker at `trainer_init` so the two sides cannot
     disagree. Note this defaults to packed, unlike the worker-side
     `NCCLWeightTransferInitInfo`, whose default only applies when no trainer
-    ships a value. `backend` is the factory dispatch key."""
+    ships a value. `backend` is the factory dispatch key.
+    """
 
     backend: ClassVar[str] = "nccl"
 
@@ -105,8 +106,7 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 class NCCLWeightTransferEngine(
     WeightTransferEngine[NCCLWeightTransferInitInfo, NCCLWeightTransferUpdateInfo]
 ):
-    """
-    Weight transfer engine using NCCL for communication between trainer and workers.
+    """Weight transfer engine using NCCL for communication between trainer and workers.
 
     This implementation uses NCCL broadcast operations to transfer dense
     checkpoint-format weights from the trainer (rank 0) to all inference workers
@@ -134,14 +134,14 @@ class NCCLWeightTransferEngine(
         self.packed_num_buffers = DEFAULT_PACKED_NUM_BUFFERS
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
-        """
-        Initialize NCCL process group with the trainer and record the
+        """Initialize NCCL process group with the trainer and record the
         trainer-supplied wire params so the worker decodes exactly as the
         trainer encodes.
 
         Args:
             init_info: NCCL initialization info containing master address, port,
                       rank offset, world size, and the packed wire params
+
         """
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
@@ -167,8 +167,7 @@ class NCCLWeightTransferEngine(
         finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
-        """
-        Receive weights from trainer via NCCL broadcast.
+        """Receive weights from trainer via NCCL broadcast.
 
         Whether to use packed broadcasting (and the buffer geometry) is read
         from `self.packed` / `self.packed_*`, set at the init handshake from the
@@ -178,6 +177,7 @@ class NCCLWeightTransferEngine(
         Args:
             update_info: NCCL update info containing parameter names, dtypes,
                         and shapes
+
         """
         if self.model_update_group is None:
             raise RuntimeError(
@@ -356,7 +356,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
     def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
         """Iterate the source (materializing each tensor — a collective on all
         ranks) and, on the sender, broadcast from rank 0, packed or one-by-one.
-        Non-sender ranks only replay the iteration to stay in the collective."""
+        Non-sender ranks only replay the iteration to stay in the collective.
+        """
         if not self.is_sender:
             for _ in source:
                 pass

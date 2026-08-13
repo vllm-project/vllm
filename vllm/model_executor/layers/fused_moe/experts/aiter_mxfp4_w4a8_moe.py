@@ -31,8 +31,7 @@ __all__ = [
 # _get_padding_mask and patch_gating_output after
 # https://github.com/ROCm/aiter/pull/4530 is released and consumed by vLLM.
 def _get_padding_mask() -> torch.Tensor | None:
-    """
-    Retrieves a boolean mask with non-padding (0) and padding (1) tokens.
+    """Retrieves a boolean mask with non-padding (0) and padding (1) tokens.
 
     `slot_mapping < 0` comes from:
 
@@ -249,8 +248,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
 
 
 class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
-    """
-    Monolithic MXFP4 W4A8 expert using AITER triton kernels.
+    """Monolithic MXFP4 W4A8 expert using AITER triton kernels.
 
     This backend uses:
     - aiter.ops.triton.moe_routing.routing for routing
@@ -398,8 +396,7 @@ def _aiter_w4a16_silu_via_a8w4(
     unpadded_N_w2,
     unpadded_K_w2,
 ) -> torch.Tensor:
-    """
-    MXFP4 w4a16 MoE with a SILU (concatenated ``[gate | up]``) activation.
+    """MXFP4 w4a16 MoE with a SILU (concatenated ``[gate | up]``) activation.
     """
     from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
     from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4

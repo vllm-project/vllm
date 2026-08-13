@@ -32,7 +32,8 @@ def _make_hf_config(**kwargs) -> PretrainedConfig:
 @pytest.mark.cpu_test
 def test_dict_overrides_are_not_forwarded_to_draft():
     """Dict overrides are target-specific key patches; the draft must get
-    only the architecture-mapping override."""
+    only the architecture-mapping override.
+    """
     composed = SpeculativeConfig.compose_draft_hf_overrides(
         {"max_position_embeddings": 1234}
     )
@@ -48,7 +49,8 @@ def test_none_overrides_fall_back_to_arch_mapping():
 @pytest.mark.cpu_test
 def test_callable_overrides_reach_the_draft_config():
     """A callable override (config-to-config transform) composes with the
-    architecture-mapping override and is applied to the draft config."""
+    architecture-mapping override and is applied to the draft config.
+    """
 
     def shrink(hf_config: PretrainedConfig) -> PretrainedConfig:
         hf_config.num_hidden_layers = 1
@@ -65,7 +67,8 @@ def test_callable_overrides_reach_the_draft_config():
 @pytest.mark.cpu_test
 def test_arch_mapping_applies_before_callable_override():
     """The static arch-mapping override runs first, so the user callable
-    observes (and may adjust) the post-mapping config."""
+    observes (and may adjust) the post-mapping config.
+    """
     seen_architectures: list[str] = []
 
     def record(hf_config: PretrainedConfig) -> PretrainedConfig:
@@ -124,7 +127,8 @@ def test_composed_override_is_picklable():
     the composed override must be picklable. A nested local closure is not
     (it raised ``Can't get local object`` on DFlashDraftModel); a
     ``functools.partial`` over a module-referenceable static method is.
-    Guard against regressing to a closure."""
+    Guard against regressing to a closure.
+    """
     composed = SpeculativeConfig.compose_draft_hf_overrides(_module_level_shrink)
 
     assert isinstance(composed, functools.partial)

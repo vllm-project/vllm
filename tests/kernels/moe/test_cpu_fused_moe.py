@@ -393,7 +393,8 @@ UNALIGNED_INTERMEDIATE_DIM = 176
 class _StubMoELayer(torch.nn.Module):
     """Minimal stand-in for the real MoE layer module, exposing just what
     the unquantized CPU experts read/replace (w13_weight, w2_weight, the
-    router configuration, and optionally w13_bias/w2_bias)."""
+    router configuration, and optionally w13_bias/w2_bias).
+    """
 
     def __init__(
         self,
@@ -496,8 +497,8 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
     act: MoEActivation,
 ):
     """CPU kernels handle unaligned intermediate sizes by zero-padding the
-    weights before prepacking."""
-
+    weights before prepacking.
+    """
     set_random_seed(0)
     batch_size = 64
     intermediate_size = UNALIGNED_INTERMEDIATE_DIM

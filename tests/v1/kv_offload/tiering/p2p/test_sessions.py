@@ -538,7 +538,8 @@ class TestClientFlows:
         """collect_results / has_active_loads use the _active_loads work-list,
         armed when a fetch is issued and discarded exactly when its load
         clears — a probe-only request never enters it, and completion empties
-        it while the entry may briefly linger for GC."""
+        it while the entry may briefly linger for GC.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
         client = session._client
@@ -615,7 +616,8 @@ class TestClientFlows:
     def test_load_abort_ack_clears_request(self):
         """After load timeout sends AbortFetch, an arriving AbortAckMsg from
         the peer surfaces the failure cleanly and removes the request from
-        _requests — covers the on_abort_ack arrival path."""
+        _requests — covers the on_abort_ack arrival path.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
@@ -652,7 +654,8 @@ class TestLookupFlow:
     def test_aggregate_flush_resolve_round_trip(self):
         """register_lookup → flush sends one LookupMsg → response
         resolves entries → register_lookup returns the cached bool on
-        every call, and repeat probes never re-issue a LookupMsg."""
+        every call, and repeat probes never re-issue a LookupMsg.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -705,7 +708,8 @@ class TestLookupFlow:
     def test_request_blocks_clears_probe_cache(self):
         """A resolved HIT probe is popped when its fetch is issued, so a
         re-scheduled request re-probes instead of trusting the stale True
-        (the served block is unpinned and may have been evicted)."""
+        (the served block is unpinned and may have been evicted).
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -739,7 +743,7 @@ class TestLookupFlow:
         assert fresh[0][LookupMsg.KEYS] == [b"hA"]
 
     def test_flush_uses_work_list_not_full_scan(self):
-        """flush drains a work-list rather than scanning every live request.
+        """Flush drains a work-list rather than scanning every live request.
 
         A request with no newly-registered keys is not revisited: after a
         flush the work-list is empty, an idle re-flush sends nothing, and a
@@ -791,7 +795,8 @@ class TestLookupFlow:
     def test_multiple_lookup_msgs_across_steps(self):
         """A request's block set may be discovered across scheduler steps:
         each step that registers new keys flushes its own LookupMsg for
-        the same kv_request_id, carrying only the newly-probed keys."""
+        the same kv_request_id, carrying only the newly-probed keys.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -819,7 +824,8 @@ class TestLookupFlow:
 
     def test_split_response_resolves_across_messages(self):
         """Producer may answer one LookupMsg's keys across multiple
-        LookupRespMsgs — pairs are self-describing so each lands."""
+        LookupRespMsgs — pairs are self-describing so each lands.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -866,7 +872,8 @@ class TestLookupFlow:
     def test_finish_after_flushed_lookup_sends_empty_fetch(self):
         """LookupMsg flushed but no FetchMsg sent (all-miss case) →
         finish_request emits an empty FetchMsg so the peer can drop its
-        lookup state and call parent.on_request_finished."""
+        lookup state and call parent.on_request_finished.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -884,7 +891,8 @@ class TestLookupFlow:
 
     def test_finish_without_flushed_lookup_sends_no_fetch(self):
         """No LookupMsg was ever sent → finish_request must not emit an
-        empty FetchMsg (the peer has no state to release)."""
+        empty FetchMsg (the peer has no state to release).
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -899,7 +907,8 @@ class TestLookupFlow:
 
     def test_finish_after_real_fetch_sends_no_second_fetch(self):
         """A real FetchMsg was already sent for the id → finish_request
-        must not emit a second (empty) FetchMsg."""
+        must not emit a second (empty) FetchMsg.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -930,7 +939,8 @@ class TestLookupFlow:
         """``poll()`` only enqueues an inbound LookupMsg — no response is
         sent until ``serve_external_requests``. With an all-miss parent
         the aggregated LookupRespMsg carries the same keys and
-        ``hits=[False, ...]``."""
+        ``hits=[False, ...]``.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -990,7 +1000,8 @@ class TestServerLookupHandling:
     def test_immediate_hits_create_one_store_job(self):
         """All-HIT batch: one create_store_job call with all keys, one
         LookupRespMsg with hits=[True]*N, on_request_finished fires at the
-        end of serve, and `available` is populated for the eventual fetch."""
+        end of serve, and `available` is populated for the eventual fetch.
+        """
         cb = FakeParent(stored={b"hA": 1, b"hB": 2, b"hC": 3})
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -1020,7 +1031,8 @@ class TestServerLookupHandling:
 
     def test_all_misses_no_store_job_finish_fires(self):
         """All-MISS batch: no create_store_job call; one LookupRespMsg
-        with hits=[False]*N; on_request_finished fires at end of serve."""
+        with hits=[False]*N; on_request_finished fires at end of serve.
+        """
         cb = FakeParent()
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -1040,7 +1052,8 @@ class TestServerLookupHandling:
         """HIT/MISS resolutions do not go out on first sight when any
         key is still HIT_PENDING / RETRY. The lookup parks until every
         key has settled (or the deadline fires), then one
-        LookupRespMsg carries all keys in wire order."""
+        LookupRespMsg carries all keys in wire order.
+        """
         cb = FakeParent(
             stored={b"hA": 1},
             pending={b"hB"},
@@ -1069,7 +1082,8 @@ class TestServerLookupHandling:
         the deferred aggregate response: one LookupRespMsg carrying
         both keys in wire order, and one create_store_job call per
         HIT (the second HIT is pinned when it resolves, not when the
-        response goes out)."""
+        response goes out).
+        """
         cb = FakeParent(stored={b"hA": 1}, pending={b"hB"})
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -1105,7 +1119,8 @@ class TestServerLookupHandling:
     def test_pending_timeout_replies_miss_no_store_job(self):
         """A HIT_PENDING key that stays pending past the batch
         ``deadline`` is force-MISS and never pinned; the deferred
-        aggregate response fires with hits=[False]."""
+        aggregate response fires with hits=[False].
+        """
         cb = FakeParent(pending={b"hA"})
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -1132,7 +1147,8 @@ class TestServerLookupHandling:
 
     def test_finish_request_called_per_lookup_msg_not_per_kv_request_id(self):
         """Two LookupMsgs for the same kv_request_id get distinct ctxs
-        and two on_request_finished calls (one per batch)."""
+        and two on_request_finished calls (one per batch).
+        """
         cb = FakeParent(stored={b"hA": 1, b"hB": 2})
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -1156,7 +1172,8 @@ class TestServerLookupHandling:
         """Tearing the session down with a parked batch returns the
         synthetic ctx as a failed serve (no parent handle at teardown) so
         the manager can release the TieringManager's state on its next
-        serve."""
+        serve.
+        """
         cb = FakeParent(pending={b"hA"})
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -1177,7 +1194,8 @@ class TestServerLookupHandling:
     def test_wire_finish_drops_pending_batches_for_kv_request_id(self):
         """``ServerRole.finish(kv_request_id)`` drops every parked batch
         whose kv_request_id matches and queues its ctx for the next
-        serve's on_request_finished."""
+        serve's on_request_finished.
+        """
         cb = FakeParent(pending={b"hA", b"hB"})
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -1208,7 +1226,8 @@ class TestServerLookupHandling:
     def test_incoming_fetch_drops_pending_lookups_for_kv_request_id(self):
         """A peer FetchMsg terminates the lookup phase for its id: parked
         lookups with matching kv_request_id are dropped and their
-        ctx queued for on_request_finished; other kv_request_ids untouched."""
+        ctx queued for on_request_finished; other kv_request_ids untouched.
+        """
         cb = FakeParent(pending={b"hA", b"hB"})
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -1250,7 +1269,8 @@ class TestServerLookupHandling:
     def test_lookup_then_fetch_round_trip_emits_store_result(self):
         """End-to-end: lookup pins primary slots → fetch matches them →
         NIXL transfer completes → StoreResult surfaces with the
-        create_store_job's job_id (the engine releases the pin)."""
+        create_store_job's job_id (the engine releases the pin).
+        """
         cb = FakeParent(stored={b"hA": 7, b"hB": 8})
         session, conn, transport = _make_session()
         _activate(session, conn)
@@ -1372,7 +1392,8 @@ class TestServerFlows:
 
     def test_abort_fetch_defers_ack_when_cancel_pending(self):
         """If cancel(mode='wait') reports still-inflight tids, the ack is
-        deferred and the abort is parked (abort_started_at set)."""
+        deferred and the abort is parked (abort_started_at set).
+        """
         session, conn, transport = _make_session()
         _activate(session, conn)
         # Seed an inflight transfer for req-1 that the transport pretends
@@ -1407,7 +1428,8 @@ class TestServerFlows:
 
     def test_abort_fetch_acks_after_drain(self):
         """Once the transport reports the tid as DONE the parked abort
-        completes and AbortAckMsg is sent."""
+        completes and AbortAckMsg is sent.
+        """
         session, conn, transport = _make_session()
         _activate(session, conn)
         tid = 42
@@ -1446,7 +1468,8 @@ class TestServerFlows:
 
     def test_abort_fetch_force_cancels_after_timeout(self):
         """If wait-mode never drains, the deadline forces immediate
-        cancel and an ack is still sent."""
+        cancel and an ack is still sent.
+        """
         session, conn, transport = _make_session()
         _activate(session, conn)
         tid = 42
@@ -1488,7 +1511,8 @@ class TestServerFlows:
 
     def test_abort_fetch_idempotent_while_draining(self):
         """Receiving AbortFetchMsg twice for the same kv_request_id
-        keeps a single pending entry and produces a single ack."""
+        keeps a single pending entry and produces a single ack.
+        """
         session, conn, transport = _make_session()
         _activate(session, conn)
         tid = 42
@@ -1546,7 +1570,8 @@ class TestServerFlows:
     def test_store_timeout_then_late_completion_no_duplicate(self):
         """A job timed out by _timeout_pending_store_jobs must not also
         emit a contradictory StoreResult(success=True) when the transport
-        later reports the same transfer as done."""
+        later reports the same transfer as done.
+        """
         session, conn, transport = _make_session()
         _activate(session, conn)
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
@@ -1579,7 +1604,8 @@ class TestServerFlows:
     def test_store_timeout_then_late_failure_no_duplicate(self):
         """Symmetric guard: a timed-out job must not also emit a second
         StoreResult(success=False) when the transport later reports the
-        same transfer as failed."""
+        same transfer as failed.
+        """
         session, conn, transport = _make_session()
         _activate(session, conn)
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
@@ -1622,7 +1648,8 @@ class TestFinishRequestServerSide:
 
     def test_no_inflight_unmatched_demand_sends_failure(self):
         """finish_request with unmatched demand and no inflight ->
-        immediate TransferDoneMsg(success=False); _outbound cleared."""
+        immediate TransferDoneMsg(success=False); _outbound cleared.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
         # Decoder demanded a block we never stored.
@@ -1648,7 +1675,8 @@ class TestFinishRequestServerSide:
 
     def test_with_inflight_defers_then_fires_on_last_transfer(self):
         """finish_request with inflight defers; last transfer fires the
-        early-fail message and clears _outbound."""
+        early-fail message and clears _outbound.
+        """
         session, conn, transport = _make_session()
         _activate(session, conn)
         # Demand 2 blocks; we store 1 (kicks one inflight transfer).
@@ -1685,7 +1713,8 @@ class TestFinishRequestServerSide:
 
     def test_full_demand_satisfied_still_sends_success(self):
         """finish_request must not override a fully-satisfied transfer:
-        when remaining hits 0, success=True still fires."""
+        when remaining hits 0, success=True still fires.
+        """
         session, conn, transport = _make_session()
         _activate(session, conn)
         conn.enqueue(
@@ -1714,7 +1743,8 @@ class TestFinishRequestServerSide:
         """Prefiller-first: finish_request runs before the decoder's
         fetch arrives. State is held until fetch, then
         finalized — success=True if all demand was matched against
-        available blocks, else success=False."""
+        available blocks, else success=False.
+        """
         # Case A: all demand satisfied by available blocks.
         session, conn, transport = _make_session()
         _activate(session, conn)
@@ -1775,7 +1805,8 @@ class TestFinishRequestServerSide:
         """finish_request with a stored-but-unmatched job and no inflight ->
         TransferDoneMsg(success=False) AND deferred
         StoreResult(success=False) for the submit_store'd job, instead of
-        the 30s _STORE_TIMEOUT_S path."""
+        the 30s _STORE_TIMEOUT_S path.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
         # Decoder demanded b"demand"; we never stored it.
@@ -1811,7 +1842,8 @@ class TestFinishRequestServerSide:
     def test_finish_request_remaining_zero_emits_success_via_inflight(self):
         """Deferred-via-inflight path: finish_request with inflight, last
         transfer drains remaining to 0 -> TransferDoneMsg(success=True)
-        AND StoreResult(success=True)."""
+        AND StoreResult(success=True).
+        """
         session, conn, transport = _make_session()
         _activate(session, conn)
         conn.enqueue(
@@ -2159,7 +2191,8 @@ class TestDisconnect:
     def test_send_failure_marks_connection_dead(self):
         """A raising send must mark the connection dead, not silently drop
         the message — otherwise the session lingers alive, is never reaped,
-        and in-flight lookups/loads toward the dead peer hang forever."""
+        and in-flight lookups/loads toward the dead peer hang forever.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
         assert session.alive
@@ -2172,7 +2205,8 @@ class TestDisconnect:
 
     def test_close_surfaces_inflight_lookups(self):
         """close() reports kv_request_ids whose symmetric-P2P probe is still
-        unresolved; resolved probes are not reported (their answer is in)."""
+        unresolved; resolved probes are not reported (their answer is in).
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -2280,7 +2314,8 @@ class TestDispatchErrorHandling:
 
     def test_value_error_disconnects_on_first_occurrence(self):
         """A FetchMsg that fails validate() raises ValueError and must
-        terminate the session immediately, with a DisconnectMsg sent."""
+        terminate the session immediately, with a DisconnectMsg sent.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
         # length mismatch → FetchMsg.validate raises ValueError
@@ -2307,7 +2342,8 @@ class TestDispatchErrorHandling:
 
     def test_internal_error_does_not_disconnect_once(self):
         """A non-ValueError raised by a handler is treated as an internal
-        bug: counter increments, session stays alive on a single hit."""
+        bug: counter increments, session stays alive on a single hit.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -2330,7 +2366,8 @@ class TestDispatchErrorHandling:
 
     def test_internal_error_threshold_disconnects(self):
         """Once consecutive non-protocol errors hit the threshold, the
-        session tears down via _protocol_error."""
+        session tears down via _protocol_error.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -2354,7 +2391,8 @@ class TestDispatchErrorHandling:
 
     def test_internal_error_counter_resets_on_success(self):
         """A successful dispatch between errors prevents the threshold
-        from being reached."""
+        from being reached.
+        """
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -2397,7 +2435,8 @@ class TestInflightPerReqInvariant:
     def test_invariant_holds_through_lifecycle(self):
         """Run a full submit→complete sequence for two concurrent
         kv_request_ids and assert the counter matches `_inflight` at
-        every observable step, including the empty-after-finish case."""
+        every observable step, including the empty-after-finish case.
+        """
         session, conn, transport = _make_session()
         _activate(session, conn)
 
@@ -2462,7 +2501,8 @@ class TestInflightPerReqInvariant:
         """Populate many inflight xfers across many ids; lookup must
         match the actual presence in `_inflight` for both hits and
         misses. The whole point of the counter is that this lookup is
-        constant-time, but we assert correctness, not timing."""
+        constant-time, but we assert correctness, not timing.
+        """
         session, _, _ = _make_session()
         for kv_id_idx in range(100):
             kv_id = f"req-{kv_id_idx}"

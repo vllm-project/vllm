@@ -18,8 +18,7 @@ logger = init_logger(__name__)
 
 @config
 class IrOpPriorityConfig:
-    """
-    Configuration for vLLM IR op priority for dispatching/lowering during the
+    """Configuration for vLLM IR op priority for dispatching/lowering during the
     forward pass. Each member is a list of strings, which will be installed
     in worker init via vllm.ir.ops.<op_name>.set_default().
     A single comma-separated string is accepted as well,
@@ -35,8 +34,7 @@ class IrOpPriorityConfig:
     """Priority list for vllm.ir.ops.fused_add_rms_norm"""
 
     def compute_hash(self) -> str:
-        """
-        Produces a hash unique to the pass configuration.
+        """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
 
@@ -68,8 +66,7 @@ class IrOpPriorityConfig:
         return value
 
     def _iter_op_priorities(self):
-        """
-        Yield (IrOp, priority_list) for each field, after importing platform
+        """Yield (IrOp, priority_list) for each field, after importing platform
         kernels and validating each entry.
         """
         from vllm.ir.op import IrOp
@@ -86,16 +83,14 @@ class IrOpPriorityConfig:
             yield IrOp.registry[field.name], op_priority
 
     def set_default(self) -> None:
-        """
-        Permanently set the IR op priority for all op members.
+        """Permanently set the IR op priority for all op members.
         """
         for ir_op, op_priority in self._iter_op_priorities():
             ir_op.set_default(op_priority)
 
     @contextlib.contextmanager
     def set_priority(self):
-        """
-        Context manager to set the IR op priority for all op members.
+        """Context manager to set the IR op priority for all op members.
         It also imports IR kernel implementations for the current platform
         to ensure all implementations are made available.
         """
@@ -108,8 +103,7 @@ class IrOpPriorityConfig:
     def with_default(
         cls, default: list[str], /, **kwargs: list[str]
     ) -> "IrOpPriorityConfig":
-        """
-        A helper to create an IrOpPriorityConfig where fields not specified in kwargs
+        """A helper to create an IrOpPriorityConfig where fields not specified in kwargs
         use the given default list.
         """
         for field in fields(cls):  # type: ignore[arg-type]
@@ -252,8 +246,7 @@ class KernelConfig:
         return value
 
     def compute_hash(self) -> str:
-        """
-        Produces a hash unique to the pass configuration.
+        """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """

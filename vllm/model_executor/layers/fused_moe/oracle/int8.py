@@ -37,8 +37,7 @@ class Int8MoeBackend(Enum):
 def _get_priority_backends(
     moe_config: FusedMoEConfig,
 ) -> list[Int8MoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
+    """Get available backends in priority order based on platform and config.
     """
     return [
         Int8MoeBackend.TRITON,
@@ -99,11 +98,9 @@ def select_int8_moe_backend(
     weight_key: QuantKey | None = kInt8StaticChannelSym,
     activation_key: QuantKey | None = kInt8DynamicTokenSym,
 ) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts]]:
-    """
-    Select the primary Int8 MoE backend.
+    """Select the primary Int8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     activation_format = (
@@ -227,7 +224,8 @@ def _humming_int8_weight_schema(
     weight: torch.Tensor, weight_scale: torch.Tensor
 ) -> dict[str, Any]:
     """Build the humming compressed-tensors int8 schema from the canonical
-    on-device tensors; humming does the signed-int8 -> native conversion."""
+    on-device tensors; humming does the signed-int8 -> native conversion.
+    """
     config: dict[str, Any] = {
         "quant_method": "compressed-tensors",
         "format": "int-quantized",

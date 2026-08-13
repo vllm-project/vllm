@@ -56,14 +56,13 @@ logger = init_logger(__name__)
 
 
 class Gemma3ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - p: Number of patches total (over each image over each prompt in the
-          batch)
-        - c: Number of channels (3)
-        - h: Height of each patch
-        - w: Width of each patch
-        - bn: Batch size * number of images
+    """Dimensions:
+    - p: Number of patches total (over each image over each prompt in the
+      batch)
+    - c: Number of channels (3)
+    - h: Height of each patch
+    - w: Width of each patch
+    - bn: Batch size * number of images
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -641,8 +640,7 @@ class Gemma3ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
+        """Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
@@ -651,8 +649,7 @@ class Gemma3ForConditionalGeneration(
         )
 
     def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        """
-        Calculate the number of tokens output by the vision encoder.
+        """Calculate the number of tokens output by the vision encoder.
 
         The vision encoder processes images into patch embeddings. For Gemma3,
         the relationship between prompt placeholder tokens and actual vision
@@ -664,6 +661,7 @@ class Gemma3ForConditionalGeneration(
 
         Returns:
             Number of tokens output by the vision encoder
+
         """
         # For Gemma3, the vision encoder outputs tokens_per_side x tokens_per_side
         # tokens per image. Since num_image_tokens represents the number of
@@ -673,8 +671,7 @@ class Gemma3ForConditionalGeneration(
         return num_image_tokens * 16
 
     def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        """
-        Calculate the number of tokens output by the multimodal connector.
+        """Calculate the number of tokens output by the multimodal connector.
 
         The connector applies projection and normalization but maintains the
         token count for Gemma3.
@@ -684,6 +681,7 @@ class Gemma3ForConditionalGeneration(
 
         Returns:
             Number of tokens after connector processing
+
         """
         # The Gemma3 connector maintains a 1:1 token mapping
         return num_vision_tokens

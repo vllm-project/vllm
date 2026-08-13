@@ -123,7 +123,8 @@ class OpenAIServingModels:
 
     async def init_static_loras(self):
         """Loads all static LoRA modules.
-        Raises if any fail to load"""
+        Raises if any fail to load
+        """
         if self.static_lora_modules is None:
             return
         for lora in self.static_lora_modules:
@@ -148,7 +149,8 @@ class OpenAIServingModels:
 
     async def show_available_models(self) -> ModelList:
         """Show available models. This includes the base model and all
-        adapters."""
+        adapters.
+        """
         model_list = await self.registry.show_available_models()
         lora_cards = [
             ModelCard(
@@ -289,6 +291,7 @@ class OpenAIServingModels:
             LoRARequest if found and loaded successfully.
             ErrorResponse (404) if no resolver finds the adapter.
             ErrorResponse (400) if adapter(s) are found but none load.
+
         """
         async with self.lora_resolver_lock[lora_name]:
             # First check if this LoRA is already loaded

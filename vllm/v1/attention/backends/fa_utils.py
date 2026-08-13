@@ -295,6 +295,7 @@ def is_flash_attn_varlen_func_available() -> bool:
 
     Returns:
         bool: True if a working flash_attn_varlen_func implementation is available.
+
     """
     if current_platform.is_cuda() or current_platform.is_xpu():
         # CUDA and XPU always have flash_attn_varlen_func available

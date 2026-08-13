@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-NOTE: This API server is used only for demonstrating usage of AsyncEngine
+"""NOTE: This API server is used only for demonstrating usage of AsyncEngine
 and simple performance benchmarks. It is not intended for production use.
 For production use, we recommend using our OpenAI compatible server.
 We are also not going to accept PRs modifying this file, please

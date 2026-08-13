@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-ExampleSecondaryTierManager: A simple in-memory secondary tier.
+"""ExampleSecondaryTierManager: A simple in-memory secondary tier.
 
 This implementation provides a minimal secondary tier that stores blocks
 in memory (using a dictionary) with immediate completion. It serves as a
@@ -35,8 +34,7 @@ if TYPE_CHECKING:
 
 
 class ExampleSecondaryTierManager(SecondaryTierManager):
-    """
-    A simple in-memory secondary tier.
+    """A simple in-memory secondary tier.
 
     This implementation:
     - Stores blocks in a dictionary (key -> True)
@@ -52,11 +50,11 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         tier_type: str,
         custom_param: int = 0,
     ):
-        """
-        Initialize the example secondary tier.
+        """Initialize the example secondary tier.
 
         Args:
             custom_param: Dummy parameter demonstrating custom args.
+
         """
         super().__init__(
             offloading_spec=offloading_spec,
@@ -78,8 +76,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        """
-        Check whether a block exists in this secondary tier.
+        """Check whether a block exists in this secondary tier.
 
         Args:
             key: Offload key to look up.
@@ -87,17 +84,18 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
         Returns:
             HIT if the block is present, MISS if not found.
+
         """
         return LookupResult.HIT if key in self.blocks else LookupResult.MISS
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
-        """
-        Submit a job to store blocks from primary tier to this tier.
+        """Submit a job to store blocks from primary tier to this tier.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and
                           spec for reading blocks from the primary tier.
+
         """
         keys = job_metadata.keys
         block_ids = job_metadata.block_ids
@@ -118,12 +116,12 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
-        """
-        Submit a job to load blocks from this tier to primary tier.
+        """Submit a job to load blocks from this tier to primary tier.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and
                           spec for writing blocks into the primary tier.
+
         """
         keys = job_metadata.keys
         block_ids = job_metadata.block_ids
@@ -149,12 +147,12 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        """
-        Poll for finished jobs.
+        """Poll for finished jobs.
 
         Returns:
             Iterable of JobResult objects for all jobs that have
             finished since the last call.
+
         """
         result = self.completed_jobs
         self.completed_jobs = []
@@ -167,7 +165,8 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
     @override
     def drain_jobs(self) -> None:
         """Synchronous tier — submit_*() returns only after the operation
-        completes, so there is nothing to wait for."""
+        completes, so there is nothing to wait for.
+        """
         return
 
     def get_num_blocks(self) -> int:
