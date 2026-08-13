@@ -17,10 +17,16 @@ from vllm.v1.engine.exceptions import EngineDeadError
     ("intentional_shutdown", "engine_errored", "expect_engine_error"),
     [
         (False, True, True),
+        (True, False, False),
         (True, True, False),
         (False, False, False),
     ],
-    ids=["fatal-engine-death", "intentional-signal", "healthy-server-stop"],
+    ids=[
+        "fatal-engine-death",
+        "intentional-signal",
+        "signal-wins-engine-death-race",
+        "healthy-server-stop",
+    ],
 )
 async def test_serve_http_preserves_fatal_engine_exit_status(
     intentional_shutdown: bool,
