@@ -210,6 +210,7 @@ class GenerateResponseChoice(BaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
+    sampling_mask: list[list[int]] | None = None
 
     @field_validator("token_ids")
     @classmethod
@@ -225,6 +226,7 @@ class GenerateResponseStreamChoice(BaseModel):
     finish_reason: str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
+    sampling_mask: list[list[int]] | None = None
 
 
 class GenerateStreamResponse(BaseModel):
@@ -277,8 +279,8 @@ class DerenderChatRequest(BaseModel):
     # --8<-- [start:derender-chat-request]
     stream: Literal[False] = False
 
-    model: str
-    """Served model name."""
+    model: str | None = None
+    """Served model name. Defaults to the server's served model name."""
 
     generate_response: GenerateResponse
     """The complete token-in / token-out engine response to derender."""
@@ -311,8 +313,8 @@ class DerenderCompletionRequest(BaseModel):
     # --8<-- [start:derender-completion-request]
     stream: Literal[False] = False
 
-    model: str
-    """Served model name."""
+    model: str | None = None
+    """Served model name. Defaults to the server's served model name."""
 
     generate_responses: list[GenerateResponse]
     """One response per prompt, parallel to the list[GenerateRequest]
@@ -428,7 +430,7 @@ class DerenderChatStreamRequest(BaseModel):
 
     stream: Literal[True]
 
-    model: str
+    model: str | None = None
     generate_chunk: GenerateStreamResponse
     """One SSE chunk from ``/inference/v1/generate`` (``stream=True``)."""
 
@@ -452,7 +454,7 @@ class DerenderCompletionStreamRequest(BaseModel):
 
     stream: Literal[True]
 
-    model: str
+    model: str | None = None
     generate_chunk: GenerateStreamResponse
     """One SSE chunk from ``/inference/v1/generate``."""
 

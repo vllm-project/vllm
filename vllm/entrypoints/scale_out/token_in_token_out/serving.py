@@ -307,12 +307,17 @@ class ServingTokens(GenerateBaseServing):
                 else None
             )
 
+            sampling_mask = None
+            if output.sampling_mask is not None:
+                sampling_mask = output.sampling_mask.token_ids
+
             choice_data = GenerateResponseChoice(
                 index=output.index,
                 logprobs=logprobs,
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
+                sampling_mask=sampling_mask,
             )
 
             choices.append(choice_data)
