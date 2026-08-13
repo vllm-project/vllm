@@ -66,7 +66,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self.num_bits = weight_quant.num_bits
         self.packed_factor = 32 // weight_quant.num_bits
         self.strategy = weight_quant.strategy
-        self.group_size = weight_quant.group_size
+        # Per-channel strategies leave group_size unset; -1 is the in-tree
+        # encoding for that, as in CompressedTensorsWNA16 and siblings.
+        self.group_size = (
+            -1 if weight_quant.group_size is None else weight_quant.group_size
+        )
         self.actorder = weight_quant.actorder
 
         # Extract quant_type and create weight key for oracle selection
