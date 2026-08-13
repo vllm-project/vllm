@@ -1,29 +1,24 @@
 # JIT Kernel Warmup
 
-vLLM uses JIT-generated kernels from several backends, including Triton, CuTeDSL, TileLang, and backend-specific libraries. These kernels often specialize on static values such as tile sizes, head dimensions, dtypes, pointer alignment, or backend selector choices.
+vLLM uses JIT-generated kernels from Triton, CuTeDSL, TileLang, and other backends. This contract makes their required specializations available during startup, before the first request, by warming the kernel's **compile-key space** without dummy runtime launches or real tensor allocation.
 
-JIT warmup makes those specializations available during engine startup, before the first real request. The shared contract is designed around the kernel's **compile-key space**, not around representative non-key inputs. It also provides a compile-only warmup path, avoiding dummy runtime launches and real tensor allocation.
+Use it when adding a warmable JIT kernel or migrating an existing warmup path.
 
-Use this contract when adding a new warmable JIT kernel or migrating an existing warmup path.
+## In This Guide
 
-## Design Goals
+- [1. Quickstart](#1-quickstart): for contributors adding or migrating a warmable kernel.
+- [2. Search-Space Reference](#2-search-space-reference): for contributors defining non-trivial compile-key spaces.
+- [3. Maintainer Reference](#3-maintainer-reference): for backend integration, cache behavior, registry lifecycle, and tracer changes.
 
-A warmup implementation should:
+## 1. Quickstart
 
-- keep warmup logic close to the kernel that owns the specialization rules;
-- warm actual compile keys instead of hoping representative runtime inputs map to every needed specialization;
-- avoid dummy runtime launches and real tensor allocation;
-- run under the standard `kernel_warmup()` path, including logging, ordering, feature gates, and exception handling;
-- keep model construction cheap and side-effect free;
-- keep runtime execution and startup compilation easy to review separately.
+Each warmable kernel defines its compile-key mapping and compile-only entry point beside its normal runtime implementation. The startup registry then warms only the wrappers selected by the current engine configuration.
 
-## Kernel Contract
+### Define the Kernel Wrapper
 
 Here, a **kernel wrapper** (or just **wrapper**) is an instance of a concrete `VllmJitKernel` subclass.
 
-Each warmable kernel should expose a wrapper object near the kernel's normal runtime entry point. The backend-agnostic pieces are `CompileKey`, `dispatch(...)`, and `get_warmup_keys(...)`. Backend-specific details belong inside `kernel(...)`, `compile(...)`, and the runtime `__call__(...)` wrapper.
-
-Prefer this shape:
+Expose one wrapper near the kernel's normal runtime entry point. Prefer this shape:
 
 ```python
 class MyKernel(VllmJitKernel["MyKernel.CompileKey"]):
@@ -52,160 +47,67 @@ class MyKernel(VllmJitKernel["MyKernel.CompileKey"]):
 MY_KERNEL = MyKernel()
 ```
 
+`CompileKey`, `dispatch(...)`, and `get_warmup_keys(...)` are backend-agnostic. Backend-specific behavior belongs in `kernel(...)`, `compile(...)`, and `__call__(...)`.
+
 The module-level singleton should be used by warmup and by the runtime call path. This keeps dispatch behavior shared instead of duplicated.
 
-### Shared Methods
+### Choose Compile-Key Fields
 
-`VllmJitKernel` provides common mechanics for all warmable kernels:
+`CompileKey` must be frozen and hashable. Include only fields on which the backend specializes, such as tile sizes, head dimensions, dtypes, pointer alignment classes, or backend selectors; exclude runtime-only values. When unsure, inspect the backend cache key, specialization arguments, or verbose JIT-monitor output.
 
-- `warmup(*args, **kwargs)` calls `get_warmup_keys(...)` and then `compile(compile_key)` for each returned key.
-- `_trace_dispatch(dispatch)` expands a warmup input space, evaluates `dispatch(...)` through the AST tracer, and returns deduplicated `CompileKey` objects.
-- `compile_key(kwargs)` builds one `CompileKey` from one concrete dispatch input dictionary.
-- `_get_or_compile(compile_key)` returns an executor cached by the kernel wrapper. On a miss, it invokes the wrapper's monitored `compile(...)` path and then returns the executor populated by that method.
+### Generate Warmup Keys
 
-Runtime miss handling follows the backend's cache model:
-
-- Triton and TileLang call their native JIT entry points normally. Their native cache handles hits, and `jit_monitor` reports unexpected runtime compilation.
-- CuTeDSL compile-only warmup stores the returned JIT Executor in the kernel wrapper's cache. Runtime derives the same key and calls `_get_or_compile(...)`; monitor mode determines whether a miss is rejected, warned and compiled, or silently compiled.
-
-### Kernel Activation
-
-The kernel contract defines which compile keys a kernel wrapper needs. The per-runner `JitWarmupRegistry` separately records which wrappers were actually selected by the current engine configuration.
-
-Register a kernel wrapper from the component or backend construction path where its runtime implementation is selected:
+Use `_trace_dispatch(self.dispatch)` to describe representative inputs. The tracer maps them through the same specialization logic and deduplicates equal keys:
 
 ```python
-MY_KERNEL.register_warmup()
+def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
+    max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    return self._trace_dispatch(self.dispatch)(
+        num_tokens=WarmupIntRange(1, max_tokens + 1),
+    )
 ```
 
-`JitWarmupRegistry.activate()` scopes collection during model and supporting infrastructure setup. Registration outside that scope is a no-op. When `enable_jit_warmup` is enabled, `kernel_warmup()` expands collected registrations: calls without arguments receive `vllm_config`, explicit arguments are forwarded unchanged, and repeated wrapper/key pairs are compiled once. Registration itself only records metadata; it never compiles or launches.
+Use independent ranges or alternatives for cartesian products, `zip_inputs(...)` for coupled rows, and `_when` for validity constraints. The complete syntax is documented in [Search-Space Reference](#2-search-space-reference).
 
-Register at the narrowest stable selection point. Shared components should register their own wrappers rather than relying on a global model-name list. Repeated registration from equivalent layers is allowed and is deduplicated by the registry.
-
-If a kernel wrapper uses a nonstandard `get_warmup_keys(...)` signature, pass those arguments explicitly:
-
-```python
-MY_KERNEL.register_warmup(
-    shapes=((hidden_size, num_experts),),
-    m_values=range(1, 17),
-)
-```
-
-### Compile Key
-
-`CompileKey` is a frozen dataclass that identifies one compiled specialization. It must be hashable so warmup can deduplicate keys.
-
-Include fields that the backend actually specializes on. Avoid fields that are only runtime values. When unsure, inspect the backend JIT cache key, specialization arguments, or the JIT monitor in verbose mode (`--jit-monitor-verbose`) to find uncovered compile keys:
-
-```text
-Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel (
-constexprs={BLOCK_SIZE=1024, CP_KV_CACHE_INTERLEAVE_SIZE=1, PAD_ID=-1, TOTAL_CP_RANK=0, TOTAL_CP_WORLD_SIZE=1};
-...)
-```
-
-### Compile Method
+### Compile Without Launching
 
 `compile(compile_key)` means "make this specialization available". Depending on the backend, that may compile from source, call a compile-only API, load an already-built artifact, or compile on cache miss.
 
 `compile(...)` should not launch a real inference workload or allocate large real tensors. Each DSL should expose fake tensor/spec descriptors suitable for compilation only.
 
-## AST-Traced Dispatch
+### Register the Selected Wrapper
 
-The warmup system uses Python AST to trace `dispatch(...)`. One call to `dispatch(...)` returns one `CompileKey`, but many input points may map to the same key. It should express the same specialization logic used by the runtime path.
-
-### Dispatch Body
-
-The traced function body may contain:
-
-- local assignments, optionally annotated;
-- one `return self.CompileKey(...)` call.
-
-Local assignments let a kernel name intermediate specialization choices once and reuse them across fields:
+Register the wrapper where the runtime implementation is selected:
 
 ```python
-def dispatch(
-    self,
-    *,
-    num_tokens: int,
-    vectorized: bool,
-) -> CompileKey:
-    block_size = next_power_of_2(num_tokens)
-    return self.CompileKey(
-        BLOCK_SIZE=block_size,
-        VECTOR_WIDTH=4 if vectorized and block_size >= 4 else 1,
-    )
+MY_KERNEL.register_warmup()
 ```
 
-Conditional expressions (`x if condition else y`) are supported, but statement-level `if` blocks are not supported directly inside traced `dispatch(...)` or `_when` bodies. The tracer expects a straight-line sequence of local assignments followed by one return expression. Small, pure helpers called by traced expressions execute as normal Python with concrete values and may use ordinary control flow, including `if` blocks. Do not put loops, mutation, side effects, or backend imports directly inside traced functions. Put environment and model gating in `get_warmup_keys(...)` or the outer warmup entry point.
+Registration records metadata only. It does not compile or launch the kernel. Repeated registrations from equivalent layers are allowed and deduplicated later.
 
-### Expression Features
+### Review Checklist
 
-The AST evaluator supports the following expression features inside local assignments and `CompileKey(...)` fields:
+- Warm actual compile keys rather than representative non-key inputs.
+- Keep specialization mapping in `dispatch(...)` instead of duplicating it in warmup code.
+- Use fake tensors or backend compile-only descriptors; never perform a dummy runtime launch.
+- Keep registration metadata-only so model construction remains cheap and side-effect free.
+- Compile under `kernel_warmup()` so feature gates, logging, ordering, and exception handling remain centralized.
+- Keep runtime execution and startup compilation separate and easy to review.
+- Use the module-level wrapper singleton from both warmup and runtime paths.
 
-| Feature | What It Allows |
-| --- | --- |
-| Names | Read dispatch inputs, local assignments, defaults, and module globals. |
-| Constants | Use literals such as integers, strings, booleans, and `None`. |
-| Attributes | Read structured config values such as `cfg.block_size` or `mla_dims.v_head_dim`. |
-| Subscriptions | Read tuple/list positions or mapping values such as `config[0]` and `config["block_size"]`. |
-| Tuple/list literals | Build structured compile-key fields such as shapes, strides, and small descriptors. |
-| Conditional expressions | Select fields with `x if condition else y` without statement-level branching. |
-| Boolean expressions | Combine predicates with `and`, `or`, and `not`. |
-| Comparisons | Use `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in`, `is`, and `is not`. |
-| Arithmetic | Use `+`, `-`, `*`, `//`, `%`, and `**` for bucket and tile calculations. |
-| Unary minus | Build negative sentinel values or signed descriptors. |
-| Helper calls | Call small helper functions with positional arguments and explicit keyword arguments. |
+## 2. Search-Space Reference
 
-Helper calls are useful for small, pure specialization helpers:
+### How Tracing Works
 
-```python
-def dispatch(self, *, num_tokens: int, block_size: int) -> CompileKey:
-    return self.CompileKey(
-        PADDED_TOKENS=round_up(num_tokens, multiple=block_size),
-    )
-```
+`_trace_dispatch(...)` expands the inputs declared by `get_warmup_keys(...)`. Each concrete combination becomes a `dispatch_values` mapping from input names to selected values. `_when` may reject that mapping; otherwise the tracer evaluates `dispatch(...)` to construct one `CompileKey`. Equal keys are deduplicated after all combinations are evaluated.
 
-The tracer supports Python builtins such as `min(...)`, `max(...)`, and `len(...)`, unless that name is overridden locally or globally.
+One call to `dispatch(...)` returns one key, but many input points may map to the same key. Prefer this traced mapping over manually reconstructing keys in warmup code; `dispatch(...)` should express the same specialization logic used by the runtime path.
 
-For dispatch methods with many direct pass-through fields, the dispatch `**kwargs` parameter may be unpacked directly into `CompileKey(...)`:
+### Define Input Spaces
 
-```python
-def dispatch(
-    self,
-    *,
-    num_tokens: int,
-    **compile_key_fields: int,
-) -> CompileKey:
-    return self.CompileKey(
-        **compile_key_fields,
-        block_size=next_power_of_2(num_tokens),
-    )
-```
+Use ranges and alternatives for independent axes, `zip_inputs(...)` for coupled rows, and `_when` for validity constraints.
 
-All unmatched dispatch arguments are then compile-key fields and warmup inputs. Named parameters remain explicit when dispatch transforms them. The unpacking must use the dispatch method's `**kwargs` parameter directly and may appear only once. The fully explicit form remains supported and is clearer for dispatch methods with non-trivial field mappings. Unpacking another mapping or expression, or unpacking the parameter more than once, is rejected. Helper calls also cannot use `**kwargs`.
-
-Unsupported constructs directly inside traced function bodies currently include loops, statement-level `if`, comprehensions, lambda expressions, mutation, slices, dict/set literals, and star-argument calls. If a dispatch rule needs ordinary control flow, move that logic into a small, pure helper function and call it from a supported expression.
-
-### Input Discovery
-
-The tracer only expands inputs that affect the returned `CompileKey`.
-
-```python
-return self._trace_dispatch(self.dispatch)(
-    num_tokens=WarmupIntRange(1, max_tokens + 1),
-    unused_input=WarmupIntRange(0, 100),
-)
-```
-
-Here, `unused_input` is an arbitrary example; the name has no special meaning. Because it is not referenced by `dispatch(...)`, it is ignored. This lets dispatch accept runtime context that does not affect compilation without adding unnecessary axes to the warmup search space.
-
-Default dispatch arguments are honored. If a field depends on a parameter with a default and `get_warmup_keys(...)` does not pass that parameter, the default is used when building the key.
-
-## Warmup Input Expansion
-
-`get_warmup_keys(...)` returns the representative compile keys needed for a given vLLM configuration. Prefer deriving keys through `_trace_dispatch(...)` instead of manually reconstructing the compile key. `_trace_dispatch(...)` expands only arguments used by `dispatch(...)`; unused warmup inputs are ignored.
-
-### Integer Ranges
+#### Integer Ranges
 
 Use `WarmupIntRange` for integer ranges:
 
@@ -231,7 +133,7 @@ return self._trace_dispatch(self.dispatch)(
 
 This is useful for traversing specialization boundaries without enumerating every integer. `advance` cannot be combined with a non-default `step`, and it must return a value greater than its input so expansion always makes forward progress.
 
-### Independent Alternatives
+#### Independent Alternatives
 
 Use tuples or lists for independent alternatives. Multiple expanded inputs form a cartesian product:
 
@@ -243,7 +145,7 @@ return self._trace_dispatch(self.dispatch)(
 )
 ```
 
-### Coupled Inputs
+#### Coupled Inputs
 
 Use `zip_inputs(...)` when values must vary together row-by-row:
 
@@ -264,7 +166,7 @@ Multiple `zip_inputs(...)` groups may be passed as positional arguments. The tra
 
 Every row in a `zip_inputs(...)` group must use the same string keys. A `zip_inputs(...)` group cannot specify a field that is also specified as a keyword input to `_trace_dispatch(...)`.
 
-### Conditional Filtering
+#### Conditional Filtering
 
 Use `_when=...` to filter generated input points before they are passed to `dispatch(...)`. This is useful when independent ranges contain invalid combinations, but the validity rule belongs with the kernel warmup definition.
 
@@ -291,7 +193,98 @@ return self._trace_dispatch(self.dispatch)(
 
 The predicate is evaluated on the expanded warmup inputs. If it returns `False`, that input point is skipped and no `CompileKey` is produced for it.
 
-### Key Deduplication
+### Write Dispatch Rules
+
+#### Local Assignments
+
+The traced body may contain local assignments, optionally annotated, followed by one `return self.CompileKey(...)` call. Local assignments let a kernel name intermediate specialization choices once and reuse them across fields:
+
+```python
+def dispatch(
+    self,
+    *,
+    num_tokens: int,
+    vectorized: bool,
+) -> CompileKey:
+    block_size = next_power_of_2(num_tokens)
+    return self.CompileKey(
+        BLOCK_SIZE=block_size,
+        VECTOR_WIDTH=4 if vectorized and block_size >= 4 else 1,
+    )
+```
+
+#### Supported Expressions
+
+The evaluator supports these expressions inside local assignments and `CompileKey(...)` fields:
+
+| Feature | What It Allows |
+| --- | --- |
+| Names | Read dispatch inputs, local assignments, defaults, and module globals. |
+| Constants | Use literals such as integers, strings, booleans, and `None`. |
+| Attributes | Read structured values such as `cfg.block_size` or `mla_dims.v_head_dim`. |
+| Subscriptions | Read sequence positions or mapping values such as `config[0]` and `config["block_size"]`. |
+| Tuple/list literals | Build shapes, strides, and other small structured fields. |
+| Conditional expressions | Select a field with `x if condition else y`. |
+| Boolean expressions | Combine predicates with `and`, `or`, and `not`. |
+| Comparisons | Use `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in`, `is`, and `is not`. |
+| Arithmetic | Use `+`, `-`, `*`, `//`, `%`, and `**`. |
+| Unary minus | Build negative sentinel values or signed descriptors. |
+| Helper calls | Call helpers with positional and explicit keyword arguments. |
+
+Python builtins such as `min(...)`, `max(...)`, and `len(...)` are resolved unless the name is overridden locally or globally.
+
+#### Helper Calls
+
+Helpers are useful for small specialization rules:
+
+```python
+def dispatch(self, *, num_tokens: int, block_size: int) -> CompileKey:
+    return self.CompileKey(
+        PADDED_TOKENS=round_up(num_tokens, multiple=block_size),
+    )
+```
+
+`_trace_dispatch(...)` does not inspect helper bodies. It evaluates the call arguments and invokes the helper as ordinary Python, so control flow inside that helper is outside the AST interpreter's scope. Keep helpers deterministic and side-effect free.
+
+#### Direct Keyword Forwarding
+
+For many direct pass-through fields, the dispatch `**kwargs` parameter may be unpacked into `CompileKey(...)`:
+
+```python
+def dispatch(
+    self,
+    *,
+    num_tokens: int,
+    **compile_key_fields: int,
+) -> CompileKey:
+    return self.CompileKey(
+        **compile_key_fields,
+        block_size=next_power_of_2(num_tokens),
+    )
+```
+
+Unmatched dispatch arguments become compile-key fields and warmup inputs. Keep transformed inputs named and explicit. The unpacking must use the dispatch method's own `**kwargs` parameter directly and exactly once; arbitrary mappings, repeated unpacking, and helper-call `**kwargs` are rejected. The fully explicit form remains supported and is often clearer for non-trivial mappings.
+
+#### Unsupported Syntax
+
+Conditional expressions are supported, but statement-level `if` blocks directly inside `dispatch(...)` or `_when` are not. Loops, comprehensions, lambda expressions, mutation, slices, dict/set literals, tuple-unpacking assignments, multiple returns, star-argument calls, and backend imports are also unsupported in traced bodies. Put environment and model gating in `get_warmup_keys(...)` or the outer warmup entry point.
+
+### Result Handling
+
+#### Input Discovery
+
+The tracer expands only inputs that affect the returned `CompileKey`:
+
+```python
+return self._trace_dispatch(self.dispatch)(
+    num_tokens=WarmupIntRange(1, max_tokens + 1),
+    unused_input=WarmupIntRange(0, 100),
+)
+```
+
+Because `unused_input` is not referenced by `dispatch(...)`, it is ignored instead of adding an axis to the search space. Default dispatch arguments are honored when the corresponding warmup input is omitted.
+
+#### Compile-Key Deduplication
 
 `_trace_dispatch(...)` deduplicates the resulting keys while preserving order. This is important when many runtime-like inputs map to the same static bucket.
 
@@ -327,3 +320,43 @@ For `max_tokens == 8`, the expanded inputs are `1, 2, 3, 4, 5, 6, 7, 8`, but the
 ```
 
 Deduplication happens after `dispatch(...)` is evaluated, so the warmup system removes duplicate compile keys, not duplicate input values. `CompileKey` must be hashable for this to work; using `@dataclass(frozen=True)` is the standard pattern.
+
+## 3. Maintainer Reference
+
+### Shared Wrapper Methods
+
+`VllmJitKernel` provides the common lifecycle:
+
+- `warmup(*args, **kwargs)` calls `get_warmup_keys(...)` and then `compile(compile_key)` for each key.
+- `_trace_dispatch(dispatch)` expands warmup inputs, evaluates the traced dispatch logic, and returns deduplicated keys.
+- `_get_or_compile(compile_key)` returns an executor cached by the wrapper, compiling through the monitored path on a miss.
+
+### Backend Integration
+
+#### Triton
+
+Compile through Triton's compile-only warmup API with fake pointer descriptors and the static values from `CompileKey`. Runtime calls the native JIT entry point normally; Triton's cache handles hits, while `jit_monitor` reports unexpected runtime compilation.
+
+#### CuTeDSL
+
+Compile with fake tensors or symbolic shape descriptors and store the returned JIT Executor in the wrapper cache. Runtime derives the same key and calls `_get_or_compile(...)`; monitor mode determines whether a miss is rejected, warned and compiled, or silently compiled.
+
+#### TileLang and Prebuilt Backends
+
+TileLang uses its compile-only path and native runtime cache. A backend with prebuilt artifacts may implement `compile(compile_key)` as "load or otherwise ensure available" rather than compiling from source.
+
+### Registry Lifecycle
+
+The kernel contract defines which keys a wrapper needs. The per-runner `JitWarmupRegistry` records which wrappers were selected by the current engine configuration.
+
+`JitWarmupRegistry.activate()` scopes registration during model and supporting-infrastructure construction. Registration outside that scope is a no-op. When `enable_jit_warmup` is enabled, `kernel_warmup()` expands the collected registrations: calls without arguments receive `vllm_config`, explicit arguments are forwarded unchanged, and repeated wrapper/key pairs are compiled once.
+
+Register at the narrowest stable selection point. Shared components should register their wrappers directly rather than relying on a global model-name list. Registration must remain cheap: it records immutable metadata and must not compile, launch kernels, or retain large runtime tensors.
+
+Calls without explicit registration arguments receive `vllm_config` when warmup runs. If `get_warmup_keys(...)` instead depends on finalized runtime metadata, pass the smallest immutable values needed to `register_warmup(...)`.
+
+### Extending the Tracer
+
+Keep the accepted AST subset deliberate. Adding an expression form requires evaluator support, input-discovery coverage, focused success and rejection tests, and an actionable error message.
+
+Statement-level `if` is not another expression node: supporting it generally would require a restricted statement interpreter with defined behavior for branch-local assignments, nested branches, early returns, missing-return paths, and input discovery across every path. Prefer conditional expressions or ordinary helper calls until a concrete dispatch rule justifies that complexity.
