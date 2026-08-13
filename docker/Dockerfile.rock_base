@@ -107,7 +107,7 @@ RUN python3 -c "import torch; print(f'torch={torch.__version__}, hip={torch.vers
 # For each arch in PYTORCH_ROCM_ARCH, install the precompiled GPU code that
 # PyTorch needs to run on that specific chip.
 SHELL ["/bin/bash", "-c"]
-RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
+RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)" | sed 's/a[0-9]\{8\}$//') \
     && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
         echo "Installing device packages for ${arch}" \
         && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
