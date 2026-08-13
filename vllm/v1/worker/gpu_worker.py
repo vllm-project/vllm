@@ -1326,13 +1326,19 @@ class Worker(WorkerBase):
                 "finish_weight_update called without a matching start_weight_update."
             )
 
+        is_draft = self._weight_update_is_draft
         with set_current_vllm_config(self.vllm_config):
-            self.weight_transfer_engine.finish_weight_update()
-            self.weight_transfer_engine.reset_weight_update_target()
-            self._weight_update_active = False
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            finally:
+                try:
+                    self.weight_transfer_engine.reset_weight_update_target()
+                finally:
+                    self._weight_update_active = False
+                    self._weight_update_is_draft = False
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
-        if not self._weight_update_is_draft:
+        if not is_draft:
             self.model_runner.reset_lora_state()
 
     def shutdown(self) -> None:

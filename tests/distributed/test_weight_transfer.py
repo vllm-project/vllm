@@ -6,9 +6,11 @@ Unit tests for engine classes (parsing, validation, registry).
 Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
+import json
 import pickle
 import threading
 import time
+from dataclasses import asdict
 from unittest.mock import MagicMock
 
 import pybase64 as base64
@@ -17,6 +19,7 @@ import ray
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
+from vllm.config.load import LoadConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
@@ -34,6 +37,12 @@ from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
+)
+from vllm.distributed.weight_transfer.disk_engine import (
+    DiskWeightTransferEngine,
+    DiskWeightTransferInitInfo,
+    DiskWeightTransferUpdateInfo,
+    _PrimaryOnlyModelLoader,
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerInitInfo,
@@ -294,6 +303,21 @@ class TestEngineRegistry:
         )
         assert isinstance(engine, SparseNCCLWeightTransferEngine)
 
+    @pytest.mark.skip_global_cleanup
+    def test_create_engine_disk(self):
+        config = WeightTransferConfig(backend="disk")
+        engine = WeightTransferEngineFactory.create_engine(
+            config,
+            create_mock_vllm_config(),
+            torch.device("cpu"),
+            MagicMock(spec=torch.nn.Module),
+        )
+        assert isinstance(engine, DiskWeightTransferEngine)
+
+    @pytest.mark.skip_global_cleanup
+    def test_disk_backend_config_serializes(self):
+        assert asdict(WeightTransferConfig(backend="disk")) == {"backend": "disk"}
+
     def test_create_engine_invalid_backend(self):
         config = WeightTransferConfig(backend="invalid")
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):
@@ -309,6 +333,228 @@ class TestEngineRegistry:
             WeightTransferEngineFactory.register_engine(
                 "nccl", NCCLWeightTransferEngine
             )
+
+
+@pytest.mark.skip_global_cleanup
+class TestDiskWeightTransferEngine:
+    """CPU-only tests for shared-checkpoint weight update orchestration."""
+
+    def _checkpoint(self, tmp_path):
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+        (checkpoint / "model.safetensors").touch()
+        return checkpoint
+
+    def _make_engine(self):
+        model_config = MagicMock()
+        model_config.model = "original-model"
+        model_config.revision = "original-revision"
+        vllm_config = create_mock_vllm_config()
+        vllm_config.model_config = model_config
+        model = MagicMock(spec=torch.nn.Module)
+        return DiskWeightTransferEngine(
+            WeightTransferConfig(backend="disk"),
+            vllm_config,
+            torch.device("cpu"),
+            model,
+        )
+
+    def test_update_info_requires_local_safetensors_directory(self, tmp_path):
+        with pytest.raises(ValueError, match="local directory"):
+            DiskWeightTransferUpdateInfo(path="org/model")
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        with pytest.raises(ValueError, match="contains no safetensors"):
+            DiskWeightTransferUpdateInfo(path=str(empty))
+
+        checkpoint = self._checkpoint(tmp_path)
+        with pytest.raises(ValueError, match="absolute local directory"):
+            DiskWeightTransferUpdateInfo(path=checkpoint.name)
+
+    def test_primary_loader_reads_only_requested_safetensors(
+        self, tmp_path, monkeypatch
+    ):
+        checkpoint = self._checkpoint(tmp_path)
+        loader = _PrimaryOnlyModelLoader(LoadConfig(load_format="safetensors"))
+        seen_sources = []
+
+        def record_source(source):
+            seen_sources.append(source)
+            yield "weight", torch.ones(1)
+
+        monkeypatch.setattr(loader, "_get_weights_iterator", record_source)
+        model = MagicMock(spec=torch.nn.Module)
+        model.secondary_weights = [MagicMock()]
+        model_config = MagicMock()
+        model_config.model = str(checkpoint)
+        model_config.revision = None
+
+        assert [name for name, _ in loader.get_all_weights(model_config, model)] == [
+            "weight"
+        ]
+        assert len(seen_sources) == 1
+        assert seen_sources[0].model_or_path == str(checkpoint)
+        assert seen_sources[0].revision is None
+        assert seen_sources[0].fall_back_to_pt is False
+        assert seen_sources[0].allow_patterns_overrides == ["*.safetensors"]
+
+    def test_primary_loader_keeps_ep_mapping_and_strict_tracking(self, monkeypatch):
+        loader = _PrimaryOnlyModelLoader(
+            LoadConfig(
+                load_format="safetensors",
+                model_loader_extra_config={"enable_weights_track": True},
+            )
+        )
+        ep_filter = MagicMock()
+        monkeypatch.setattr(loader, "_init_ep_weight_filter", ep_filter)
+        monkeypatch.setattr(
+            loader,
+            "get_all_weights",
+            lambda model_config, model: iter([("checkpoint.weight", torch.ones(1))]),
+        )
+        model_config = MagicMock()
+        model_config.quantization = None
+
+        class MappingModel(torch.nn.Module):
+            def __init__(self, loaded_names):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.zeros(1))
+                self.loaded_names = loaded_names
+                self.seen_weights = []
+
+            def load_weights(self, weights):
+                self.seen_weights = list(weights)
+                return self.loaded_names
+
+        model = MappingModel({"weight"})
+        loader.load_weights(model, model_config)
+        ep_filter.assert_called_once_with(model_config)
+        assert model.seen_weights[0][0] == "checkpoint.weight"
+
+        with pytest.raises(ValueError, match="Following weights were not initialized"):
+            loader.load_weights(MappingModel(set()), model_config)
+
+    def test_primary_loader_rejects_incomplete_safetensors_index(self, tmp_path):
+        checkpoint = self._checkpoint(tmp_path)
+        index = checkpoint / "model.safetensors.index.json"
+        index.write_text(json.dumps({"weight_map": {"weight": "missing.safetensors"}}))
+        loader = _PrimaryOnlyModelLoader(LoadConfig(load_format="safetensors"))
+
+        with pytest.raises(FileNotFoundError, match="missing.safetensors"):
+            loader._prepare_weights(
+                str(checkpoint),
+                subfolder=None,
+                revision=None,
+                fall_back_to_pt=False,
+                allow_patterns_overrides=["*.safetensors"],
+            )
+
+    def test_parse_init_info(self):
+        engine = self._make_engine()
+        assert isinstance(engine.parse_init_info({}), DiskWeightTransferInitInfo)
+
+    def test_loads_checkpoint_without_mutating_target_config(
+        self, tmp_path, monkeypatch
+    ):
+        import vllm.distributed.weight_transfer.disk_engine as disk_mod
+
+        checkpoint = self._checkpoint(tmp_path)
+        engine = self._make_engine()
+        initialized = MagicMock()
+        finalized = MagicMock()
+        monkeypatch.setattr(disk_mod, "initialize_layerwise_reload", initialized)
+        monkeypatch.setattr(disk_mod, "finalize_layerwise_reload", finalized)
+
+        loaders = []
+
+        class RecordingLoader:
+            def __init__(self, load_config):
+                self.load_config = load_config
+                self.loaded = []
+                loaders.append(self)
+
+            def load_weights(self, model, model_config):
+                self.loaded.append((model, model_config))
+
+        monkeypatch.setattr(disk_mod, "_PrimaryOnlyModelLoader", RecordingLoader)
+
+        engine.start_weight_update()
+        monkeypatch.setattr(torch.accelerator, "synchronize", MagicMock())
+        engine.update_weights({"path": str(checkpoint)})
+        engine.finish_weight_update()
+
+        initialized.assert_called_once_with(engine.model)
+        finalized.assert_called_once_with(engine.model, engine.model_config)
+        assert len(loaders) == 1
+        assert loaders[0].load_config.load_format == "safetensors"
+        assert loaders[0].load_config.model_loader_extra_config == {
+            "enable_weights_track": True
+        }
+        loaded_model, loaded_config = loaders[0].loaded[0]
+        assert loaded_model is engine.model
+        assert loaded_config is not engine.model_config
+        assert loaded_config.model == str(checkpoint)
+        assert loaded_config.revision is None
+        assert engine.model_config.model == "original-model"
+        assert engine.model_config.revision == "original-revision"
+
+    def test_rejects_second_checkpoint_in_session(self, tmp_path, monkeypatch):
+        import vllm.distributed.weight_transfer.disk_engine as disk_mod
+
+        checkpoint = self._checkpoint(tmp_path)
+        engine = self._make_engine()
+        monkeypatch.setattr(disk_mod, "initialize_layerwise_reload", MagicMock())
+        monkeypatch.setattr(disk_mod, "finalize_layerwise_reload", MagicMock())
+        monkeypatch.setattr(
+            disk_mod._PrimaryOnlyModelLoader, "load_weights", MagicMock()
+        )
+
+        engine.start_weight_update()
+        update = DiskWeightTransferUpdateInfo(path=str(checkpoint))
+        engine.receive_weights(update)
+        with pytest.raises(RuntimeError, match="exactly one checkpoint"):
+            engine.receive_weights(update)
+
+    def test_load_error_cleans_session_and_propagates(self, tmp_path, monkeypatch):
+        import vllm.distributed.weight_transfer.disk_engine as disk_mod
+
+        checkpoint = self._checkpoint(tmp_path)
+        engine = self._make_engine()
+        initialized = MagicMock()
+        finalized = MagicMock()
+        monkeypatch.setattr(disk_mod, "initialize_layerwise_reload", initialized)
+        monkeypatch.setattr(disk_mod, "finalize_layerwise_reload", finalized)
+        monkeypatch.setattr(
+            disk_mod._PrimaryOnlyModelLoader,
+            "load_weights",
+            MagicMock(side_effect=ValueError("checkpoint shape mismatch")),
+        )
+
+        engine.start_weight_update()
+        with pytest.raises(ValueError, match="checkpoint shape mismatch"):
+            engine.receive_weights(DiskWeightTransferUpdateInfo(path=str(checkpoint)))
+
+        finalized.assert_called_once_with(engine.model, engine.model_config)
+        engine.start_weight_update()
+        assert initialized.call_count == 2
+
+    def test_direct_lifecycle_guards(self, monkeypatch):
+        import vllm.distributed.weight_transfer.disk_engine as disk_mod
+
+        engine = self._make_engine()
+        monkeypatch.setattr(disk_mod, "initialize_layerwise_reload", MagicMock())
+        monkeypatch.setattr(disk_mod, "finalize_layerwise_reload", MagicMock())
+
+        with pytest.raises(RuntimeError, match="No shared-disk"):
+            engine.finish_weight_update()
+        engine.start_weight_update()
+        with pytest.raises(RuntimeError, match="already active"):
+            engine.start_weight_update()
+        with pytest.raises(RuntimeError, match="No checkpoint was loaded"):
+            engine.finish_weight_update()
+        engine.start_weight_update()
+        engine.shutdown()
 
 
 # --- Unit Tests: Sparse patch application (CPU) ---
