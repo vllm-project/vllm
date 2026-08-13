@@ -135,7 +135,7 @@ class HYV4MoEFused(nn.Module):
                 intermediate_size=config.expert_hidden_dim * config.num_shared_experts,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                prefix=f"{prefix}",
+                prefix=f"{prefix}.shared_experts",
                 reduce_results=False,
             )
         else:
