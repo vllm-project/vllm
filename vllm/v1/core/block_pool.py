@@ -179,6 +179,8 @@ class BlockPool:
         # list of free blocks (including eviction candidates when caching is
         # enabled).
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+        # Free blocks with non-empty block_hash are tracked separately.
+        self.free_cached_block_queue = FreeKVCacheBlockQueue([])
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
@@ -658,7 +660,14 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        ret: list[KVCacheBlock] = []
+        num_from_free = min(num_blocks, self.free_block_queue.num_free_blocks)
+        if num_from_free > 0:
+            ret.extend(self.free_block_queue.popleft_n(num_from_free))
+
+        num_remaining = num_blocks - len(ret)
+        if num_remaining > 0:
+            ret.extend(self.free_cached_block_queue.popleft_n(num_remaining))
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
@@ -711,8 +720,10 @@ class BlockPool:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
             if block.ref_cnt == 0 and not block.is_null:
-                self.free_block_queue.remove(block)
+                assert block.block_hash is not None
+                self.free_cached_block_queue.remove(block)
             block.ref_cnt += 1
+            block.is_hit = True
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
@@ -726,6 +737,7 @@ class BlockPool:
         """
         # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_to_evict_last = []
+        blocks_to_evict_second = []
         blocks_to_evict_first = []
         for block in ordered_blocks:
             block.ref_cnt -= 1
@@ -733,14 +745,18 @@ class BlockPool:
                 if block.block_hash is None or not self.enable_caching:
                     # LIFO reuse of non-cached blocks for better GPU locality.
                     blocks_to_evict_first.append(block)
+                elif not block.is_hit:
+                    blocks_to_evict_second.append(block)
                 else:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
                     blocks_to_evict_last.append(block)
 
         # Blocks to reuse first are prepended to the front of the free queue.
         self.free_block_queue.prepend_n(blocks_to_evict_first)
-        # Blocks to reuse last are appended to the end of the free queue.
-        self.free_block_queue.append_n(blocks_to_evict_last)
+        # Blocks to reuse second are prepended to the front of the free cached queue.
+        self.free_cached_block_queue.prepend_n(blocks_to_evict_second)
+        # Blocks to reuse last are appended to the end of the free cached queue.
+        self.free_cached_block_queue.append_n(blocks_to_evict_last)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -803,7 +819,10 @@ class BlockPool:
         Returns:
             The number of free blocks.
         """
-        return self.free_block_queue.num_free_blocks
+        return (
+            self.free_block_queue.num_free_blocks
+            + self.free_cached_block_queue.num_free_blocks
+        )
 
     def get_usage(self) -> float:
         """Get the KV cache usage.
