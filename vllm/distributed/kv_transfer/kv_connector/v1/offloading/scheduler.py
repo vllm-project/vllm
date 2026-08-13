@@ -261,7 +261,7 @@ class SchedulerOffloadConfig(NamedTuple):
                 for config in kv_group_configs
             )
             if not has_swa_or_mamba:
-                raise ValueError(
+                logger.warning(
                     "VLLM_PREFIX_CACHE_RETENTION_INTERVAL is set but this "
                     "model has no sliding-window or Mamba KV cache group, "
                     "so retention has no effect. Unset it (it only applies "
@@ -1296,6 +1296,8 @@ class OffloadingConnectorScheduler:
 
                 # Use reachable_block_mask to filter unreachable chunks
                 # (SWA/Mamba sparsity + retention interval).
+                # reachable_block_mask operates in KV-block coordinates,
+                # so convert chunk indices to block indices.
                 reachable_boundaries = (
                     (req.num_prompt_tokens - 1,)
                     if self.config.retention_interval is not None
@@ -1306,8 +1308,8 @@ class OffloadingConnectorScheduler:
                 )
                 assert manager_cls is not None
                 block_mask = manager_cls.reachable_block_mask(
-                    start_block=start_chunk_idx,
-                    end_block=num_chunks,
+                    start_block=start_chunk_idx * blocks_per_chunk,
+                    end_block=num_chunks * blocks_per_chunk,
                     alignment_tokens=self.config.alignment_tokens,
                     kv_cache_spec=group_config.kv_cache_spec,
                     use_eagle=group_config.is_eagle_group,
@@ -1320,7 +1322,12 @@ class OffloadingConnectorScheduler:
                 ):
                     if block_id == 0:
                         continue
-                    if block_mask is not None and not block_mask[key_idx]:
+                    # A chunk is reachable if any of its constituent
+                    # blocks is reachable.
+                    if block_mask is not None and not any(
+                        block_mask[key_idx * blocks_per_chunk + b]
+                        for b in range(blocks_per_chunk)
+                    ):
                         continue
                     new_offload_keys.append(offload_key)
 
