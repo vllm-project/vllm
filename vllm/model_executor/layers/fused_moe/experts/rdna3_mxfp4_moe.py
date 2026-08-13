@@ -52,12 +52,6 @@ def _select_block_size_m(num_tokens: int, top_k: int, num_experts: int) -> int:
     return 4 if tokens_per_expert >= 1.5 else 1
 
 
-def _rocm_op_available() -> bool:
-    return hasattr(torch.ops, "_rocm_C") and hasattr(
-        torch.ops._rocm_C, "moe_mxfp4_gemm_rdna3"
-    )
-
-
 def repack_experts_rdna3(
     packed: torch.Tensor, scale: torch.Tensor, deinterleave: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -94,7 +88,7 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
     def _supports_current_device() -> bool:
         from vllm.platforms import current_platform
 
-        if not current_platform.is_rocm() or not _rocm_op_available():
+        if not current_platform.is_rocm():
             return False
         from vllm.platforms.rocm import on_gfx1100
 

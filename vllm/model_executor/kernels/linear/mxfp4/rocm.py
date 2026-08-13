@@ -42,8 +42,6 @@ class Rdna3MxFp4LinearKernel(MxFp4LinearKernel):
 
         if not on_gfx1100():
             return False, "RDNA3 gfx1100 WMMA required"
-        if not hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna3"):
-            return False, "_rocm_C.mxfp4_gemm_rdna3 op not built"
         return True, None
 
     @classmethod
