@@ -67,6 +67,15 @@ class EmbeddingCache:
         with self._lock:
             return self._entries.get(key)
 
+    def has_held_entries(self) -> bool:
+        """True if any entry is not-ready or pinned (an in-flight transfer).
+
+        Held entries are exactly those absent from the eviction free list, so
+        they represent saves awaiting mark_ready or loads awaiting unpin.
+        """
+        with self._lock:
+            return len(self._entries) != len(self._entries_free_list)
+
     def alloc(self, key: str, n_blocks: int) -> CacheEntry | None:
         """Allocate *n_blocks* for *key*, evicting as needed.
 
@@ -110,6 +119,23 @@ class EmbeddingCache:
                 self._evictable_block_count -= len(entry.block_ids)
             entry.pin()
 
+    def pin_if_ready(self, key: str) -> tuple[int, ...] | None:
+        """Atomically pin *key* if present and ready; return its block ids.
+
+        Returns None if the key is absent or not yet ready. Used by the
+        producer read-serving path to grant a remote read without racing a
+        concurrent eviction on the scheduler thread.
+        """
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or not entry.ready:
+                return None
+            if entry.evictable:
+                del self._entries_free_list[key]
+                self._evictable_block_count -= len(entry.block_ids)
+            entry.pin()
+            return entry.block_ids
+
     def unpin(self, key: str) -> None:
         """Unpin an entry. Asserts currently pinned."""
         with self._lock:
@@ -121,6 +147,21 @@ class EmbeddingCache:
             if entry._pin_count == 0:
                 self._entries_free_list[key] = None
                 self._evictable_block_count += len(entry.block_ids)
+
+    def discard(self, key: str) -> None:
+        """Remove a not-ready in-flight entry, returning its blocks to the pool.
+
+        Used when an in-flight fill (e.g. a NIXL READ) fails before the entry
+        is marked ready. Asserts the entry is present and not ready — ready or
+        pinned entries are reclaimed through eviction/unpin, not discard.
+        """
+        with self._lock:
+            entry = self._entries[key]
+            assert entry._pin_count == -1, (
+                f"EmbeddingCache: discard of ready/pinned entry {key!r}"
+            )
+            del self._entries[key]
+            self._free_blocks.extend(entry.block_ids)
 
     def _evict_until(self, n_blocks: int) -> None:
         """Evict ready+unpinned entries FIFO until enough space. Lock held."""

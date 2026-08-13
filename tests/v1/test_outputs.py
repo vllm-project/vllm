@@ -4,7 +4,13 @@ from unittest import TestCase
 
 import torch
 
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
+    ECConnectorOutput,
+    LogprobsLists,
+    LogprobsTensors,
+    ModelRunnerOutput,
+)
 
 
 def test_logprobs_tensors_cat():
@@ -122,3 +128,24 @@ class TestLogprobsLists(TestCase):
         assert len(sliced.logprob_token_ids) == 9  # All tokens
         assert sliced.logprob_token_ids == self.logprobsLists.logprob_token_ids
         assert sliced.cu_num_generated_tokens is None
+
+
+def test_with_ec_conn_output_sets_field_in_place():
+    output = ModelRunnerOutput(req_ids=["r0"], req_id_to_index={"r0": 0})
+    ec_output = ECConnectorOutput(finished_sending={"mm_hash"})
+
+    assert ModelRunnerOutput.with_ec_conn_output(output, ECConnectorOutput()) is output
+    assert output.ec_connector_output is None
+    assert ModelRunnerOutput.with_ec_conn_output(output, ec_output) is output
+    assert output.ec_connector_output is ec_output
+
+
+def test_with_ec_conn_output_copies_shared_empty_output():
+    """The shared empty output is copied, never written to."""
+    ec_output = ECConnectorOutput(finished_sending={"mm_hash"})
+
+    result = ModelRunnerOutput.with_ec_conn_output(EMPTY_MODEL_RUNNER_OUTPUT, ec_output)
+
+    assert result is not EMPTY_MODEL_RUNNER_OUTPUT
+    assert result.ec_connector_output is ec_output
+    assert EMPTY_MODEL_RUNNER_OUTPUT.ec_connector_output is None

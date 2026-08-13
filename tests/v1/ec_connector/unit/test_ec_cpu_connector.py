@@ -48,9 +48,10 @@ def _make_unique_image(base_image, iteration: int):
 def _wait_for_ec_ready(llm: LLM) -> None:
     """Send a dummy request to force a scheduler step.
 
-    After generate() returns, the EC entry's data is in the mmap but
-    readiness may not have fired yet (first-finish fires in the NEXT
-    scheduler step). This forces that step.
+    When generate() returns, the save copy has been issued to the GPU but its
+    completion event may fire on a later step, so the entry is not yet marked
+    ready. This extra step lets the scheduler poll the worker's completion
+    report and mark the entry ready.
     """
     llm.generate("hi", SamplingParams(max_tokens=1), use_tqdm=False)
 
@@ -134,7 +135,19 @@ def _accuracy_test(llm: LLM) -> None:
     )
 
 
+def _flash_attn_available() -> bool:
+    try:
+        import vllm.vllm_flash_attn  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not _flash_attn_available(),
+    reason="requires compiled CUDA flash-attention extensions",
+)
 def test_ec_cpu_offloading() -> None:
     """Tests ECCPUConnector accuracy and latency with a VLM model."""
     ec_transfer_config = ECTransferConfig(

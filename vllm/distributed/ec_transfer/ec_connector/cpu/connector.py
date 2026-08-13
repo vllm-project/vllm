@@ -8,13 +8,14 @@ GPU copy plumbing. An ec_both instance reuses encoder outputs it has already
 offloaded to CPU instead of recomputing them.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorRole,
+    ECConnectorWorkerMetadata,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
@@ -24,6 +25,7 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.outputs import ECConnectorOutput
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -106,12 +108,32 @@ class ECCPUConnector(ECConnectorBase):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    def request_finished(
+        self, request: "Request"
+    ) -> tuple[bool, "dict[str, Any] | None"]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request)
+
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
         if self.connector_worker is not None:
             self.connector_worker.flush_saves()
         return None, None
+
+    def build_connector_worker_meta(self) -> ECConnectorWorkerMetadata | None:
+        if self.connector_worker is not None:
+            return self.connector_worker.build_connector_worker_meta()
+        return None
+
+    def update_connector_output(self, connector_output: "ECConnectorOutput") -> None:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.update_connector_output(connector_output)
+
+    def has_pending_push_work(self) -> bool:
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.has_pending_push_work()
+        return False
 
     # Shared.
     def shutdown(self) -> None:
