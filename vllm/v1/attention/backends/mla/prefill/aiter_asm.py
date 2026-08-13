@@ -496,7 +496,12 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert out is None, (
+            "fused/in-place FP8 output not supported by the AITER ASM "
+            "MLA prefill backend"
+        )
         assert 0 <= chunk.index < len(self._context_ps), (
             f"context chunk {chunk.index} requested but prepare_metadata built "
             f"{len(self._context_ps)} chunk(s). Call prepare_metadata first."
