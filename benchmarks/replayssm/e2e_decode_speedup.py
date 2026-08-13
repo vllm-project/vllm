@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end autoregressive decode benchmark: ReplaySSM vs the standard SSM kernel.
 
-Loads a hybrid Mamba2 model, replicates one prompt across the batch, and times a
-long greedy decode (CUDA graphs on) once with the standard kernel and once with
-ReplaySSM, then reports the per-step / throughput speedup. The two modes run in
-separate subprocesses so each gets a clean CUDA context.
+Loads a hybrid SSM model (Mamba2 or GDN), replicates one prompt across the batch,
+and times a long greedy decode (CUDA graphs on) once with the standard kernel and
+once with ReplaySSM, then reports the per-step / throughput speedup. The two modes
+run in separate subprocesses so each gets a clean CUDA context.
+
+GDN models (Qwen3.5) default to the Triton prefill backend, which starts
+instantly; FlashInfer JIT-compiles on first use (slow startup) but never affects
+the decode speedup measured here.
 
 The FlashInfer FP4-MoE autotuner is disabled by default (it is unstable under
 CUDA-graph capture on the pre-release Blackwell FP4 path); pass
@@ -13,6 +17,7 @@ CUDA-graph capture on the pre-release Blackwell FP4 path); pass
 
 Examples:
     python e2e_decode_speedup.py --model-id nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
+    python e2e_decode_speedup.py --model-id Qwen/Qwen3.5-4B --buffer-len 16
     python e2e_decode_speedup.py --dtype auto --buffer-len 16 \
         --model-id nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4   # B300 NVFP4
 """
@@ -73,6 +78,14 @@ def parse_args():
         "engine so the override reaches the kernel). Empty = off.",
     )
     p.add_argument(
+        "--gdn-prefill-backend",
+        default="triton",
+        choices=["triton", "flashinfer", "auto"],
+        help="GDN prefill kernel (GDN models only; Mamba2 ignores it). "
+        "'triton' (default) starts instantly; 'flashinfer'/'auto' JIT-compile "
+        "on first use (slow startup). Decode speed is unaffected.",
+    )
+    p.add_argument(
         "--worker",
         choices=["standard", "replayssm"],
         default=None,
@@ -115,6 +128,11 @@ def run_worker(args):
         gpu_memory_utilization=args.gpu_memory_utilization,
         # SSM state dtype (applies to both standard and ReplaySSM).
         mamba_ssm_cache_dtype=args.mamba_ssm_cache_dtype,
+        # Skip the vision tower of multimodal hybrids (Qwen3.5 is a
+        # *ForConditionalGeneration model); ignored by text-only Mamba2 models.
+        language_model_only=True,
+        # GDN prefill kernel only; decode (and thus the speedup) is unaffected.
+        additional_config={"gdn_prefill_backend": args.gdn_prefill_backend},
     )
     if args.disable_flashinfer_autotune:
         # FP4-MoE autotuner is unstable under CUDA-graph capture on Blackwell;
@@ -207,6 +225,8 @@ def run_one_mode(args, mode) -> dict:
         str(args.gpu_memory_utilization),
         "--mamba-ssm-cache-dtype",
         args.mamba_ssm_cache_dtype,
+        "--gdn-prefill-backend",
+        args.gdn_prefill_backend,
         "--baseline-ssm-config",
         args.baseline_ssm_config,
     ]
