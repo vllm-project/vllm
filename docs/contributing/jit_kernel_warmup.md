@@ -7,7 +7,7 @@ Use it when adding a warmable JIT kernel or migrating an existing warmup path.
 ## In This Guide
 
 - [1. Quickstart](#1-quickstart): for contributors adding or migrating a warmable kernel.
-- [2. Search-Space Reference](#2-search-space-reference): for contributors defining non-trivial compile-key spaces.
+- [2. Search-Space Reference](#2-search-space-reference): reference for warmup input expansion and traced dispatch rules.
 
 ## 1. Quickstart
 
