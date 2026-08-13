@@ -7,6 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -37,6 +38,7 @@ class StructuredOutputManager:
 
     def __init__(self, vllm_config: VllmConfig):
         self.backend: StructuredOutputBackend | None = None
+        self.backend_name: str | None = None
         # We only store the class of the reasoner in the manager.
         # The parser instance is request-scoped because some reasoning parsers
         # depend on per-request chat-template kwargs.
@@ -115,10 +117,18 @@ class StructuredOutputManager:
         if request.structured_output_request is None:
             return
 
-        if TYPE_CHECKING:
-            assert (
-                request.sampling_params is not None
-                and request.sampling_params.structured_outputs is not None
+        assert request.sampling_params is not None
+        structured_outputs = request.sampling_params.structured_outputs
+        assert structured_outputs is not None
+        request_backend = structured_outputs._backend
+        assert request_backend is not None
+        if self.backend_name is not None and request_backend != self.backend_name:
+            raise VLLMValidationError(
+                "Structured output processing only supports one backend per engine. "
+                f"The engine is already using '{self.backend_name}', but this "
+                f"request resolved to '{request_backend}'. Configure "
+                "`structured_outputs_config.backend` explicitly or use schemas "
+                "supported by the initialized backend."
             )
 
         # Initialize the backend the first time it is needed.
@@ -127,22 +137,20 @@ class StructuredOutputManager:
         # backends on a per-request basis in V1 (for now, anyway...).
         # _backend is set in Processor._validate_structured_output
         if self.backend is None:
-            assert request.sampling_params is not None
-            backend = request.sampling_params.structured_outputs._backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
-            if backend == "xgrammar":
+            if request_backend == "xgrammar":
                 self.backend = XgrammarBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
-            elif backend == "guidance":
+            elif request_backend == "guidance":
                 self.backend = GuidanceBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
-            elif backend == "outlines":
+            elif request_backend == "outlines":
                 from vllm.v1.structured_output.backend_outlines import OutlinesBackend
 
                 self.backend = OutlinesBackend(
@@ -150,7 +158,7 @@ class StructuredOutputManager:
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
-            elif backend == "lm-format-enforcer":
+            elif request_backend == "lm-format-enforcer":
                 from vllm.v1.structured_output.backend_lm_format_enforcer import (  # noqa: E501
                     LMFormatEnforcerBackend,
                 )
@@ -161,7 +169,10 @@ class StructuredOutputManager:
                     vocab_size=vocab_size,
                 )
             else:
-                raise ValueError(f"Unsupported structured output backend: {backend}")
+                raise ValueError(
+                    f"Unsupported structured output backend: {request_backend}"
+                )
+            self.backend_name = request_backend
 
         grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar
         if self._use_async_grammar_compilation:
