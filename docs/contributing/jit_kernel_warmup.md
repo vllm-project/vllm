@@ -8,7 +8,6 @@ Use it when adding a warmable JIT kernel or migrating an existing warmup path.
 
 - [1. Quickstart](#1-quickstart): for contributors adding or migrating a warmable kernel.
 - [2. Search-Space Reference](#2-search-space-reference): for contributors defining non-trivial compile-key spaces.
-- [3. Maintainer Reference](#3-maintainer-reference): for backend integration, cache behavior, registry lifecycle, and tracer changes.
 
 ## 1. Quickstart
 
@@ -267,24 +266,9 @@ Unmatched dispatch arguments become compile-key fields and warmup inputs. Keep t
 
 #### Unsupported Syntax
 
-Conditional expressions are supported, but statement-level `if` blocks directly inside `dispatch(...)` or `_when` are not. Loops, comprehensions, lambda expressions, mutation, slices, dict/set literals, tuple-unpacking assignments, multiple returns, star-argument calls, and backend imports are also unsupported in traced bodies. Put environment and model gating in `get_warmup_keys(...)` or the outer warmup entry point.
+Conditional expressions (`x if condition else y`) are supported, but statement-level `if` blocks are not supported directly inside traced `dispatch(...)` or `_when` bodies. The tracer expects a straight-line sequence of local assignments followed by one return expression. Small, pure helpers called by traced expressions execute as normal Python with concrete values and may use ordinary control flow, including `if` blocks. Do not put loops, mutation, side effects, or backend imports directly inside traced functions. Put environment and model gating in `get_warmup_keys(...)` or the outer warmup entry point.
 
-### Result Handling
-
-#### Input Discovery
-
-The tracer expands only inputs that affect the returned `CompileKey`:
-
-```python
-return self._trace_dispatch(self.dispatch)(
-    num_tokens=WarmupIntRange(1, max_tokens + 1),
-    unused_input=WarmupIntRange(0, 100),
-)
-```
-
-Because `unused_input` is not referenced by `dispatch(...)`, it is ignored instead of adding an axis to the search space. Default dispatch arguments are honored when the corresponding warmup input is omitted.
-
-#### Compile-Key Deduplication
+### Compile-Key Deduplication
 
 `_trace_dispatch(...)` deduplicates the resulting keys while preserving order. This is important when many runtime-like inputs map to the same static bucket.
 
@@ -320,43 +304,3 @@ For `max_tokens == 8`, the expanded inputs are `1, 2, 3, 4, 5, 6, 7, 8`, but the
 ```
 
 Deduplication happens after `dispatch(...)` is evaluated, so the warmup system removes duplicate compile keys, not duplicate input values. `CompileKey` must be hashable for this to work; using `@dataclass(frozen=True)` is the standard pattern.
-
-## 3. Maintainer Reference
-
-### Shared Wrapper Methods
-
-`VllmJitKernel` provides the common lifecycle:
-
-- `warmup(*args, **kwargs)` calls `get_warmup_keys(...)` and then `compile(compile_key)` for each key.
-- `_trace_dispatch(dispatch)` expands warmup inputs, evaluates the traced dispatch logic, and returns deduplicated keys.
-- `_get_or_compile(compile_key)` returns an executor cached by the wrapper, compiling through the monitored path on a miss.
-
-### Backend Integration
-
-#### Triton
-
-Compile through Triton's compile-only warmup API with fake pointer descriptors and the static values from `CompileKey`. Runtime calls the native JIT entry point normally; Triton's cache handles hits, while `jit_monitor` reports unexpected runtime compilation.
-
-#### CuTeDSL
-
-Compile with fake tensors or symbolic shape descriptors and store the returned JIT Executor in the wrapper cache. Runtime derives the same key and calls `_get_or_compile(...)`; monitor mode determines whether a miss is rejected, warned and compiled, or silently compiled.
-
-#### TileLang and Prebuilt Backends
-
-TileLang uses its compile-only path and native runtime cache. A backend with prebuilt artifacts may implement `compile(compile_key)` as "load or otherwise ensure available" rather than compiling from source.
-
-### Registry Lifecycle
-
-The kernel contract defines which keys a wrapper needs. The per-runner `JitWarmupRegistry` records which wrappers were selected by the current engine configuration.
-
-`JitWarmupRegistry.activate()` scopes registration during model and supporting-infrastructure construction. Registration outside that scope is a no-op. When `enable_jit_warmup` is enabled, `kernel_warmup()` expands the collected registrations: calls without arguments receive `vllm_config`, explicit arguments are forwarded unchanged, and repeated wrapper/key pairs are compiled once.
-
-Register at the narrowest stable selection point. Shared components should register their wrappers directly rather than relying on a global model-name list. Registration must remain cheap: it records immutable metadata and must not compile, launch kernels, or retain large runtime tensors.
-
-Calls without explicit registration arguments receive `vllm_config` when warmup runs. If `get_warmup_keys(...)` instead depends on finalized runtime metadata, pass the smallest immutable values needed to `register_warmup(...)`.
-
-### Extending the Tracer
-
-Keep the accepted AST subset deliberate. Adding an expression form requires evaluator support, input-discovery coverage, focused success and rejection tests, and an actionable error message.
-
-Statement-level `if` is not another expression node: supporting it generally would require a restricted statement interpreter with defined behavior for branch-local assignments, nested branches, early returns, missing-return paths, and input discovery across every path. Prefer conditional expressions or ordinary helper calls until a concrete dispatch rule justifies that complexity.
