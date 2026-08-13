@@ -1905,9 +1905,10 @@ class _FakeProducerServer:
     """In-process stand-in for the _RDTProducerServer Ray actor. Records the
     engine->server call sequence and, by default, frees each group as soon as
     it is published (simulating the consumers' free_group barrier) so the
-    gather loop's backpressure never blocks. Mirrors the real server's
-    per-group barrier: publish/free are keyed by GROUP INDEX and signals count
-    to the ``begin_sync`` live total (see
+    gather loop's credit gate never parks. Mirrors the real server's
+    per-group barrier: publish/free are keyed by GROUP INDEX, signals count
+    to the ``begin_sync`` live total, publish_group returns nothing, and freed
+    groups flow back only through wait_freed / end_sync (see
     test_sharded_rdt_producer.TestFakeServerAgreesWithTheRealOne)."""
 
     def __init__(self, auto_free=True):
@@ -1932,12 +1933,9 @@ class _FakeProducerServer:
         self.order.append("publish")
         self.published.append(group_idx)
         self._inflight_groups.append(group_idx)
-        freed: list[int] = self._pending_freed
-        self._pending_freed = []
         if self.auto_free or self.free_counts.get(group_idx, 0) >= self.live_count:
             self._inflight_groups.remove(group_idx)
-            freed = freed + [group_idx]
-        return freed
+            self._pending_freed.append(group_idx)
 
     def free_group(self, group_idx):
         """Consumer back-edge; may arrive before the group's publish."""
@@ -1949,9 +1947,18 @@ class _FakeProducerServer:
             self._inflight_groups.remove(group_idx)
             self._pending_freed.append(group_idx)
 
-    def free_one(self):
-        """Manually free the oldest in-flight group (backpressure test)."""
-        self._pending_freed.append(self._inflight_groups.pop(0))
+    def wait_freed(self):
+        """The engine's credit gate. The real server blocks here; the fake
+        must already have a banked credit when the gate asks (auto_free, or a
+        test's own free_group) — anything else is the deadlock the real
+        watchdog would kill, so fail loudly. Not appended to ``order``: it is
+        pacing, not a lifecycle milestone."""
+        assert self._pending_freed, (
+            "wait_freed with nothing freed: the gather loop would deadlock"
+        )
+        freed = self._pending_freed
+        self._pending_freed = []
+        return freed
 
     def end_sync(self):
         self.order.append("end")

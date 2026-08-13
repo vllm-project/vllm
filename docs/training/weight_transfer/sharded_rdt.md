@@ -79,15 +79,15 @@ Each trainer rank owns a `_RDTProducerServer` Ray actor sharing its GPU. One gro
 ```
 engine                      server                          consumer
   begin_sync(live_count) ──►  reset counts, set the barrier target
+  wait_freed() while > lookahead groups are unfreed (the credit gate)
   gather group (collective)
-  publish_group(gi, ...) ──► wait while lookahead is full
-                             rebuild CUDA-IPC tensors, take a slot
+  publish_group(gi, ...) ──► rebuild CUDA-IPC tensors immediately
                                    ◄──── rdt_produce_weights_batched
                                          wait for names in cache
                                          replay chains, pack, serve
                                    ◄──── free_group(gi)   (from EVERY consumer)
                              count to live_count; on the last one:
-                             drop cache entries, release the slot
+                             drop cache entries, queue the freed credit
   end_sync() ─────────────►  wait until nothing is in flight
 ```
 
@@ -97,7 +97,7 @@ Details that matter:
 - **Signals can arrive before their publish.** A consumer with nothing to pull for a group signals it as its plan starts. So `publish_group` completes a group whose barrier is already satisfied, rather than waiting for a signal that will never come again.
 - **CUDA-IPC exports must outlive the import.** The engine holds strong refs to every gathered tensor it shared and drops them only when the server reports the group freed.
 - **One IPC export per storage, not per name.** Names are described as `as_strided` view specs against a whole-storage uint8 export. The per-name rebuild this replaced cost ~32 µs/name of pure Python plus an IPC open per new storage — and IPC opens are ~9× slower again when the exporting process uses the `expandable_segments` allocator, which is why `trainer_init` warns about it.
-- **`gather_lookahead` bounds trainer memory.** `publish_group` blocks while that many groups are resident; the consumers' `free_group` barrier drains it. So the gather loop self-paces to the consumers' pull rate. The default of 1 is the steady state "serve group N while gathering N+1"; raise it if the barrier ever paces the wall.
+- **`gather_lookahead` bounds trainer memory — by gating gathers, not publishes.** A gathered group is published (serveable) immediately; the engine's loop stops *gathering* while more than `gather_lookahead` groups are unfreed, blocking in the server's `wait_freed` until the consumers' `free_group` barrier banks a credit. So at most `lookahead + 1` groups are ever resident, and the loop self-paces to the consumers' pull rate. The default of 1 keeps group N+1 gathered *and pullable* while N is pulled — the boundary's free-barrier latency hides behind live pulls at the 2-group memory floor. (Parking `publish_group` on the credit instead — the old design — held N+1 gathered but unserveable across every boundary, draining the consumers' pipeline for ~2.5-3 s of 235B sync wall, while the parked publish plus its async window still kept ~3 groups alive.) Raise it only if one group's gather is slower than its pulls.
 - **`warmup_nixl` breaks a startup deadlock.** Creating the NIXL agent lazily deadlocks on EFA-class fabrics: libfabric's `fi_getinfo` probes CUDA HMEM with a `cudaMalloc`/`cudaFree`, and `cudaFree` blocks behind the co-resident trainer rank's persistent NCCL kernel — which cannot finish because the collective waits on the sender rank, which waits on the worker-init RPC, which waits on this server. Creating the agent up front, while the GPU is quiet, breaks the cycle.
 
 ## The slot generation handshake
@@ -119,7 +119,7 @@ The guard must precede `set_target_for_ref`, not just the `ray.get`: the transfe
 | ---- | ------- | ------ |
 | `num_rdt_buffers` | 2 | Ring depth on both sides. Must match, and the producer's ring must be no shallower than the consumer's — the producer-ring safety argument depends on it. |
 | `arena_presize_gb` | 0 | Pre-size each arena slot. Set it to cover the largest atomic chunk. |
-| `gather_lookahead` | 1 | Resident gathered groups on the trainer before the gather loop blocks; the per-group free barrier is the back-edge. |
+| `gather_lookahead` | 1 | Gathered-but-unfreed groups the gather loop runs ahead by (resident memory = lookahead + 1 groups); the per-group free barrier is the back-edge. |
 | `pack_check` | off | Checksum every blob on both sides for offline diffing. |
 
 Two results worth not rediscovering:

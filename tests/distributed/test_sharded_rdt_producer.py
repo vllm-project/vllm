@@ -18,6 +18,7 @@ the routing guard, which fires before any CUDA work.
 covered by the GPU tests in `test_weight_transfer.py`.
 """
 
+import contextlib
 import gc
 import threading
 import time
@@ -28,6 +29,8 @@ import torch
 import vllm.distributed.weight_transfer.sharded_rdt_trainer as trainer_mod
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     DEFAULT_GATHER_LOOKAHEAD,
+    ShardedRDTTrainerInitInfo,
+    ShardedRDTTrainerWeightTransferEngine,
     _RDTProducerServer,
 )
 
@@ -129,17 +132,18 @@ class TestPublishAndRebuild:
         _publish(server, GI_A, GROUP_A)
         assert server._group_names[GI_A] == list(GROUP_A)
 
-    def test_publish_takes_a_backpressure_slot(self, server_factory):
+    def test_publish_records_the_group_as_unfreed(self, server_factory):
         server = server_factory()
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
         assert server._inflight_groups == [GI_A]
 
-    def test_the_default_lookahead_is_two(self):
-        """Measured at 235B: lookahead=1 costs ~2.5-3s of sync wall — every
-        group boundary drains the consumers' pull pipeline while the fleet-wide
-        barrier closes. 2 restores one group of cross-boundary slack."""
-        assert DEFAULT_GATHER_LOOKAHEAD == 2
+    def test_the_default_lookahead_is_one(self):
+        """Under gather crediting, 1 is the sweet spot: group N+1 is gathered
+        AND published while N is being pulled (the overlap that lookahead=2 had
+        to buy under publish parking), with resident memory at its floor of 2
+        groups — the bound the larger-model runs size against."""
+        assert DEFAULT_GATHER_LOOKAHEAD == 1
 
 
 class TestFreeBarrier:
@@ -184,9 +188,9 @@ class TestFreeBarrier:
         server = server_factory()
         server.begin_sync(1)
         server.free_group(GI_A)
-        freed = _publish(server, GI_A, GROUP_A)
+        _publish(server, GI_A, GROUP_A)
         assert server._inflight_groups == []
-        assert freed == [GI_A]
+        assert server._freed_pending == [GI_A]
 
     def test_early_signals_from_every_consumer_complete_at_publish(
         self, server_factory
@@ -195,17 +199,21 @@ class TestFreeBarrier:
         server.begin_sync(3)
         for _ in range(3):
             server.free_group(GI_A)
-        freed = _publish(server, GI_A, GROUP_A)
-        assert freed == [GI_A]
+        _publish(server, GI_A, GROUP_A)
+        assert server._freed_pending == [GI_A]
 
     def test_freed_groups_are_reported_back_to_the_engine(self, server_factory):
         """The engine holds the CUDA-IPC export refs and may only drop them once
-        the server says the group is gone."""
+        the server says the group is gone — and it hears that ONLY through
+        ``wait_freed`` / ``end_sync``, never a publish return (a freed notice
+        riding an unharvested async publish while the engine blocks in
+        ``wait_freed`` would wedge the loop)."""
         server = server_factory()
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
         server.free_group(GI_A)
-        assert _publish(server, GI_B, GROUP_B) == [GI_A]
+        assert server.wait_freed() == [GI_A]
+        assert server._freed_pending == []
 
     def test_a_signal_for_an_unpublished_group_releases_nothing(self, server_factory):
         server = server_factory()
@@ -226,77 +234,192 @@ class TestFreeBarrier:
         assert server._group_names.get(GI_A) is None
 
 
-class TestBackpressure:
-    def test_publish_blocks_once_the_lookahead_is_full(self, server_factory):
-        """This is what bounds resident gathered groups on the trainer."""
+class _CountingSource:
+    """`iter_groups` yielding one CPU-tensor group per call, built lazily so a
+    group's tensors exist only once the engine's credit gate lets it gather."""
+
+    def __init__(self, groups):
+        self._groups = groups
+
+    def iter_groups(self):
+        for names in self._groups:
+            yield list(names), [torch.zeros(16, dtype=torch.float32) for _ in names]
+
+
+class _ResidencyDict(dict):
+    """The engine's `_inflight`, instrumented: `max_len` is the high-water mark
+    of groups whose CUDA-IPC export refs were alive at once — the trainer's
+    resident-memory bound in groups."""
+
+    def __init__(self):
+        super().__init__()
+        self.max_len = 0
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.max_len = max(self.max_len, len(self))
+
+
+def _loop_engine(server, n_groups, *, lookahead):
+    """A real engine wired straight to a real (non-Ray) server, with only the
+    state `_run_gather_loop` reads. The `_rpc` seam dispatches inline;
+    `_publish_async` sees no `.remote` and runs inline too."""
+    groups = [(f"model.layers.{gi}.w",) for gi in range(n_groups)]
+    e = ShardedRDTTrainerWeightTransferEngine.__new__(
+        ShardedRDTTrainerWeightTransferEngine
+    )
+    e._init_info = ShardedRDTTrainerInitInfo(
+        rank=0, num_consumers=1, gather_lookahead=lookahead
+    )
+    e.source = _CountingSource(groups)
+    e._server = server
+    e._rpc = lambda method, *a: getattr(server, method)(*a)
+    e._groups = [list(g) for g in groups]
+    e._owned_idx = list(range(n_groups))
+    e._held_names = None
+    e._inflight = _ResidencyDict()
+    e._sync_timing = {}
+    return e
+
+
+class TestGatherCredit:
+    """The memory bound moved from parking publishes to gating gathers: a
+    gathered group is published (serveable) immediately, and the ENGINE's loop
+    stops gathering while more than `gather_lookahead` groups are unfreed. So
+    at most `lookahead + 1` groups are resident — at the default of 1, AT MOST
+    TWO — while group N+1 is already pulled the instant N's pulls finish."""
+
+    @pytest.fixture
+    def gather_engine(self, monkeypatch):
+        """Neutralize the two CUDA touches in the export path so the REAL
+        gather loop runs on CPU: `.cuda()` becomes identity, and the storage
+        export ships the `(nbytes, ..., device, ...)` tuple the fixture's
+        stubbed `rebuild_cuda_tensor` expects."""
+        monkeypatch.setattr(torch.Tensor, "cuda", lambda self: self)
+        monkeypatch.setattr(
+            trainer_mod,
+            "reduce_tensor",
+            lambda base: (None, (base.numel(), None, None, None, None, None, -1, None)),
+        )
+        return _loop_engine
+
+    def test_publish_never_blocks(self, server_factory):
+        """Publishing must not park on a credit: the whole point is that a
+        gathered group becomes serveable immediately. Three publishes with no
+        frees, inline on this thread — a block here hangs the test."""
         server = server_factory(gather_lookahead=1)
         server.begin_sync(1)
-        _publish(server, GI_A, GROUP_A)
-
-        done = threading.Event()
-
-        def _second():
-            _publish(server, GI_B, GROUP_B)
-            done.set()
-
-        t = threading.Thread(target=_second, daemon=True)
-        t.start()
-        assert not done.wait(timeout=0.3), "second publish should be blocked"
-
-        server.free_group(GI_A)  # the consumer back-edge drains it
-        assert done.wait(timeout=5), "free_group must release the publish"
-        t.join(timeout=5)
-        assert server._inflight_groups == [GI_B]
-
-    def test_lookahead_one_serializes_the_pipeline_order(self, server_factory):
-        """The lookahead=1 steady state: publish(N+1) is admitted only after
-        group N's barrier completes, so the credit release ordering IS the
-        publish ordering."""
-        server = server_factory(gather_lookahead=1)
-        server.begin_sync(1)
-        order = []
-
-        def _publisher():
-            for gi, names in ((0, ("g0.w",)), (1, ("g1.w",)), (2, ("g2.w",))):
-                _publish(server, gi, names)
-                order.append(f"pub{gi}")
-
-        pub = threading.Thread(target=_publisher, daemon=True)
-        pub.start()
         for gi in range(3):
-            while True:
-                with server._cache_cond:
-                    published = gi in server._group_names
-                if published:
-                    break
-                time.sleep(0.01)
-            order.append(f"free{gi}")
-            server.free_group(gi)
-        pub.join(timeout=5)
-        assert not pub.is_alive()
-        assert order == ["pub0", "free0", "pub1", "free1", "pub2", "free2"]
+            _publish(server, gi, (f"model.layers.{gi}.w",))
+        assert server._inflight_groups == [0, 1, 2]
 
-    def test_lookahead_two_admits_two_groups_without_blocking(self, server_factory):
+    def test_lookahead_one_holds_at_most_two_groups_resident(
+        self, server_factory, gather_engine
+    ):
+        """THE memory invariant: at lookahead=1 the trainer never holds more
+        than 2 groups of gathered weights, no matter how the consumer paces —
+        and the pipeline still overlaps, because the consumer here refuses to
+        free group N until N+1 is already published (pullable). A gate an
+        off-by-one too tight deadlocks this test; too loose fails max_len."""
+        server = server_factory(gather_lookahead=1)
+        n_groups = 8
+        engine = gather_engine(server, n_groups, lookahead=1)
+
+        failures: list[str] = []
+
+        def _consumer():
+            for gi in range(n_groups):
+                # N+1 must be pullable before N frees
+                target = min(gi + 1, n_groups - 1)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    with server._cache_cond:
+                        if target in server._group_names:
+                            break
+                    time.sleep(0.002)
+                else:
+                    failures.append(
+                        f"group {target} never published while {gi} was unfreed"
+                    )
+                    return
+                server.free_group(gi)
+
+        consumer = threading.Thread(target=_consumer, daemon=True)
+        consumer.start()
+        engine._run_gather_loop(update_future=None, live_count=1)
+        consumer.join(timeout=10)
+
+        assert not consumer.is_alive() and not failures, failures
+        assert engine._inflight.max_len <= 2, (
+            f"{engine._inflight.max_len} groups were resident at lookahead=1"
+        )
+        assert engine._inflight == {} and server._cache == {}, (
+            "everything must be freed by end_sync"
+        )
+
+    def test_the_residency_bound_scales_with_the_lookahead(
+        self, server_factory, gather_engine
+    ):
+        """lookahead + 1, not a hardcoded 2: at lookahead=2 a free-nothing
+        consumer sees exactly 3 groups gathered before the loop parks."""
         server = server_factory(gather_lookahead=2)
+        engine = gather_engine(server, 8, lookahead=2)
+
+        def _run():
+            # unwound via set_gather_error below
+            with contextlib.suppress(Exception):
+                engine._run_gather_loop(update_future=None, live_count=1)
+
+        loop = threading.Thread(target=_run, daemon=True)
+        loop.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and len(server._inflight_groups) < 3:
+            time.sleep(0.005)
+        time.sleep(0.1)  # would-be 4th gather gets every chance to (wrongly) run
+        try:
+            assert engine._inflight.max_len == 3
+            assert server._inflight_groups == [0, 1, 2]
+        finally:
+            server.set_gather_error("test over")  # unblock the parked wait_freed
+            loop.join(timeout=10)
+        assert not loop.is_alive()
+
+    def test_wait_freed_returns_the_freed_backlog(self, server_factory):
+        server = server_factory()
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
         _publish(server, GI_B, GROUP_B)
-        assert server._inflight_groups == [GI_A, GI_B]
+        server.free_group(GI_A)
+        assert server.wait_freed() == [GI_A]
+        server.free_group(GI_B)
+        assert server.wait_freed() == [GI_B]
 
-    def test_a_gather_error_releases_a_blocked_publish(self, server_factory):
-        """Otherwise a trainer-side failure on another rank deadlocks this one."""
-        server = server_factory(gather_lookahead=1)
+    def test_a_gather_error_releases_a_blocked_wait_freed(self, server_factory):
+        """Otherwise a trainer-side failure on another rank deadlocks this one
+        inside its credit gate. It must RAISE, not return empty — an empty
+        return would spin the engine straight back into the wait."""
+        server = server_factory()
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
 
+        errors: list = []
         done = threading.Event()
-        threading.Thread(
-            target=lambda: (_publish(server, GI_B, GROUP_B), done.set()), daemon=True
-        ).start()
-        assert not done.wait(timeout=0.3)
+
+        def _wait():
+            try:
+                server.wait_freed()
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+            done.set()
+
+        threading.Thread(target=_wait, daemon=True).start()
+        assert not done.wait(timeout=0.3), (
+            "wait_freed must block while nothing is freed"
+        )
 
         server.set_gather_error("rank 3 export failed")
-        assert done.wait(timeout=5), "set_gather_error must unblock the publish"
+        assert done.wait(timeout=5), "set_gather_error must unblock wait_freed"
+        assert errors and "rank 3 export failed" in str(errors[0])
 
 
 class TestEndSync:
@@ -444,7 +567,7 @@ class TestStallWatchdog:
     Engine-death detection is generation-driven, and no generation is in flight
     during a weight sync, so a consumer that dies INSIDE the sync window has no
     detector. It never sends its `free_group` signals, the group's barrier never
-    completes, and `publish_group` / `end_sync` / the serve cache wait block
+    completes, and `wait_freed` / `end_sync` / the serve cache wait block
     forever — which stops this rank iterating its WeightSource, which is a
     collective, which wedges every other trainer rank in NCCL with no exception
     anywhere.
@@ -453,21 +576,30 @@ class TestStallWatchdog:
     the production default is 300s.
     """
 
-    def test_a_blocked_publish_fails_instead_of_hanging(self, server_factory):
+    def test_a_blocked_wait_freed_fails_instead_of_hanging(self, server_factory):
         server = server_factory(gather_lookahead=1, stall_timeout_s=0.3)
         server.begin_sync(1)
-        _publish(server, GI_A, GROUP_A)  # fills the only credit; nobody will signal
+        # the engine's credit gate now waits; nobody will signal
+        _publish(server, GI_A, GROUP_A)
 
+        errors: list = []
         done = threading.Event()
-        threading.Thread(
-            target=lambda: (_publish(server, GI_B, GROUP_B), done.set()), daemon=True
-        ).start()
+
+        def _wait():
+            try:
+                server.wait_freed()
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+            done.set()
+
+        threading.Thread(target=_wait, daemon=True).start()
 
         assert done.wait(timeout=10), (
-            "publish_group must give up rather than block forever"
+            "wait_freed must give up rather than block forever"
         )
         assert isinstance(server._gather_error, RuntimeError)
         assert "RDT stall" in str(server._gather_error)
+        assert errors, "the engine must get an exception, not an empty credit list"
 
     def test_end_sync_fails_when_a_consumer_never_signals(self, server_factory):
         """The exact mid-sync death signature: the group is published, one of
@@ -484,7 +616,8 @@ class TestStallWatchdog:
     def test_the_error_reaches_every_blocked_waiter(self, server_factory):
         """The watchdog fires on the existing `set_gather_error` channel, so one
         stall unwinds the whole rank through one path rather than each waiter
-        timing out separately."""
+        timing out separately — here both a consumer parked in the serve cache
+        wait and the engine parked in its credit gate."""
         server = server_factory(gather_lookahead=1, stall_timeout_s=0.3)
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
@@ -495,18 +628,23 @@ class TestStallWatchdog:
             try:
                 server.rdt_produce_weights_batched([(GROUP_B[0], ())], consumer_id=0)
             except BaseException as e:  # noqa: BLE001
-                errors.append(e)
+                errors.append(("pull", e))
+
+        def _wait():
+            try:
+                server.wait_freed()
+            except BaseException as e:  # noqa: BLE001
+                errors.append(("credit", e))
 
         puller = threading.Thread(target=_pull, daemon=True)
-        publisher = threading.Thread(
-            target=lambda: _publish(server, GI_B, GROUP_B), daemon=True
-        )
+        waiter = threading.Thread(target=_wait, daemon=True)
         puller.start()
-        publisher.start()
+        waiter.start()
         puller.join(timeout=10)
-        publisher.join(timeout=10)
-        assert not puller.is_alive() and not publisher.is_alive()
-        assert errors and "gather errored" in str(errors[0])
+        waiter.join(timeout=10)
+        assert not puller.is_alive() and not waiter.is_alive()
+        assert {who for who, _ in errors} == {"pull", "credit"}
+        assert all("gather errored" in str(e) for _, e in errors)
 
     def test_progress_anywhere_keeps_a_slow_sync_alive(self, server_factory):
         """A consumer that is slow but signaling must never trip it: the stamp
@@ -626,8 +764,9 @@ class TestFakeServerAgreesWithTheRealOne:
             server.begin_sync(2)
             # early signal, then publish, then the closing signal
             server.free_group(GI_A)
-            publish(GI_A, GROUP_A)
+            assert publish(GI_A, GROUP_A) is None, "publish returns nothing"
             assert server._inflight_groups == [GI_A]
             server.free_group(GI_A)
             assert server._inflight_groups == []
-            assert server.end_sync() == [GI_A]
+            assert server.wait_freed() == [GI_A]
+            assert server.end_sync() == []
