@@ -27,6 +27,7 @@ class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     is_static_input_scheme: bool
     is_channelwise: bool
     input_symmetric: bool
+    weight_shape: tuple[int, int]
 
 
 @dataclass
