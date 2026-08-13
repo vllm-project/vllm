@@ -52,6 +52,7 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_post_conv_prep,
     fused_recurrent_gated_delta_rule_packed_decode,
     fused_sigmoid_gating_delta_rule_update,
+    fused_split_qkv_post_conv_prep,
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
@@ -64,6 +65,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
@@ -73,6 +75,8 @@ GDN_AITER_TRITON_AVAILABLE = (
     rocm_aiter_ops.are_gdn_triton_kernels_available()
     or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
 )
+GDN_AITER_PREFILL_AVAILABLE = rocm_aiter_ops.is_gdn_prefill_split_qkv_available()
+_AITER_GDN_PREFILL_MIN_TOKENS = 8192
 
 if GDN_AITER_TRITON_AVAILABLE:
     from aiter.ops.triton.causal_conv1d_update_single_token import (
@@ -80,6 +84,11 @@ if GDN_AITER_TRITON_AVAILABLE:
     )
     from aiter.ops.triton.gated_delta_net.fused_rearrange_sigmoid_gdr import (
         fused_rearrange_sigmoid_gated_delta_rule as gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule,  # noqa: E501
+    )
+
+if GDN_AITER_PREFILL_AVAILABLE:
+    from aiter.ops.causal_conv1d_fwd_split_qkv import (
+        causal_conv1d_split_qkv_hip_fn as gdn_aiter_causal_conv1d_split_qkv,
     )
 
 logger = init_logger(__name__)
@@ -1283,23 +1292,51 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 validate_data=False,
             )
 
+        aiter_prefill_qkv: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
-            mixed_qkv_non_spec = causal_conv1d_fn(
-                mixed_qkv_non_spec_T,
-                conv_weights,
-                self.conv1d.bias,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata,
-            ).transpose(0, 1)
+            if (
+                GDN_AITER_PREFILL_AVAILABLE
+                and not self.gqa_interleaved_layout
+                and mixed_qkv_non_spec_T.size(1) >= _AITER_GDN_PREFILL_MIN_TOKENS
+                and mixed_qkv_non_spec_T.dtype == torch.bfloat16
+                and conv_state.dtype == torch.bfloat16
+                and conv_weights.size(1) == 4
+            ):
+                assert non_spec_state_indices_tensor is not None
+                assert non_spec_query_start_loc is not None
+                aiter_prefill_qkv = gdn_aiter_causal_conv1d_split_qkv(
+                    x=mixed_qkv_non_spec_T,
+                    weight=conv_weights,
+                    bias=self.conv1d.bias,
+                    conv_states=conv_state,
+                    query_start_loc=non_spec_query_start_loc,
+                    k_dim=self.key_dim // self.tp_size,
+                    v_dim=self.value_dim // self.tp_size,
+                    cache_indices=non_spec_state_indices_tensor,
+                    has_initial_state=has_initial_state,
+                    activation=self.activation,
+                    pad_slot_id=NULL_BLOCK_ID,
+                    block_m=64,
+                    metadata=attn_metadata,
+                )
+            else:
+                mixed_qkv_non_spec = causal_conv1d_fn(
+                    mixed_qkv_non_spec_T,
+                    conv_weights,
+                    self.conv1d.bias,
+                    activation=self.activation,
+                    conv_states=conv_state,
+                    has_initial_state=has_initial_state,
+                    cache_indices=non_spec_state_indices_tensor,
+                    query_start_loc=non_spec_query_start_loc,
+                    metadata=attn_metadata,
+                ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec = causal_conv1d_update(
@@ -1346,29 +1383,59 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 a_prefill = a_non_spec
                 b_prefill = b_non_spec
 
-            (
-                query_non_spec,
-                key_non_spec,
-                value_non_spec,
-                g_non_spec,
-                beta_non_spec,
-            ) = fused_post_conv_prep(
-                conv_output=conv_output_prefill,
-                a=a_prefill,
-                b=b_prefill,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_k_heads=self.num_k_heads // self.tp_size,
-                head_k_dim=self.head_k_dim,
-                head_v_dim=self.head_v_dim,
-                apply_l2norm=True,
-                output_g_exp=False,
-            )
-            query_non_spec = query_non_spec.unsqueeze(0)
-            key_non_spec = key_non_spec.unsqueeze(0)
-            value_non_spec = value_non_spec.unsqueeze(0)
-            g_non_spec = g_non_spec.unsqueeze(0)
-            beta_non_spec = beta_non_spec.unsqueeze(0)
+            if aiter_prefill_qkv is not None:
+                query_non_spec, key_non_spec, value_non_spec = aiter_prefill_qkv
+                if split_non_spec:
+                    query_non_spec = query_non_spec[num_decode_tokens:]
+                    key_non_spec = key_non_spec[num_decode_tokens:]
+                    value_non_spec = value_non_spec[num_decode_tokens:]
+                (
+                    query_non_spec,
+                    key_non_spec,
+                    value_non_spec,
+                    g_non_spec,
+                    beta_non_spec,
+                ) = fused_split_qkv_post_conv_prep(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    a=a_prefill,
+                    b=b_prefill,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    num_k_heads=self.num_k_heads // self.tp_size,
+                    head_k_dim=self.head_k_dim,
+                    head_v_dim=self.head_v_dim,
+                )
+                query_non_spec = query_non_spec.unsqueeze(0)
+                key_non_spec = key_non_spec.unsqueeze(0)
+                value_non_spec = value_non_spec.unsqueeze(0)
+                g_non_spec = g_non_spec.unsqueeze(0)
+                beta_non_spec = beta_non_spec.unsqueeze(0)
+            else:
+                (
+                    query_non_spec,
+                    key_non_spec,
+                    value_non_spec,
+                    g_non_spec,
+                    beta_non_spec,
+                ) = fused_post_conv_prep(
+                    conv_output=conv_output_prefill,
+                    a=a_prefill,
+                    b=b_prefill,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    num_k_heads=self.num_k_heads // self.tp_size,
+                    head_k_dim=self.head_k_dim,
+                    head_v_dim=self.head_v_dim,
+                    apply_l2norm=True,
+                    output_g_exp=False,
+                )
+                query_non_spec = query_non_spec.unsqueeze(0)
+                key_non_spec = key_non_spec.unsqueeze(0)
+                value_non_spec = value_non_spec.unsqueeze(0)
+                g_non_spec = g_non_spec.unsqueeze(0)
+                beta_non_spec = beta_non_spec.unsqueeze(0)
         else:
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
                 mixed_qkv_non_spec
@@ -1405,9 +1472,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.2: Process non-spec-decode part
         if split_non_spec:
-            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
-                mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
-            )
+            if aiter_prefill_qkv is not None:
+                query_decode, key_decode, value_decode = (
+                    x[:num_decode_tokens] for x in aiter_prefill_qkv
+                )
+                query_decode = query_decode.view(
+                    1, num_decode_tokens, -1, self.head_k_dim
+                )
+                key_decode = key_decode.view(1, num_decode_tokens, -1, self.head_k_dim)
+                value_decode = value_decode.view(
+                    1, num_decode_tokens, -1, self.head_v_dim
+                )
+            else:
+                query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+                    mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
+                )
             core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
                 A_log=self.A_log,
                 a=a[:num_decode_tokens],

@@ -1994,6 +1994,21 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_gdn_prefill_split_qkv_available(cls) -> bool:
+        """Check if AITER's fused GDN prefill conv/split op is importable."""
+        if not cls._AITER_ENABLED:
+            return False
+        try:
+            from aiter.ops.causal_conv1d_fwd_split_qkv import (  # noqa: F401
+                causal_conv1d_split_qkv_hip_fn,
+            )
+
+            return True
+        except (ImportError, ModuleNotFoundError):
+            return False
+
+    @classmethod
+    @if_aiter_supported
     def are_gdn_triton_kernels_available(cls) -> bool:
         """Check if AITER Triton kernels for GDN attention are importable.
 
