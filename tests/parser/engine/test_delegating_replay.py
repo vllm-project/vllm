@@ -40,6 +40,7 @@ from vllm.parser.engine.adapters import (
     ParserEngineReasoningAdapter,
     ParserEngineToolAdapter,
 )
+from vllm.parser.hermes import HermesParser
 from vllm.parser.mistral import MistralParser
 
 _TOOLS_VALIDATOR = TypeAdapter(list[ChatCompletionToolsParam])
@@ -89,6 +90,11 @@ def _discover_pairings() -> list[_PairingInfo]:
             # Mistral uses brace-balanced JSON tool args with no TOOL_END
             # token, so it does not fit this TOOL_END-based replay harness.
             # It is covered by tests/parser/mistral/ instead.
+            continue
+        if issubclass(engine_cls, HermesParser):
+            # Hermes and its delimiter variants opt out of token-id terminal
+            # matching, so they do not fit this TOOL_END-based harness. They
+            # are covered by tests/tool_parsers/test_{hermes,longcat}_tool_parser.py.
             continue
         cfg = engine_cls(bare_tok, None).parser_engine_config
         if cfg.name not in _BUILDERS:

@@ -140,11 +140,12 @@ def _hermes_arg_converter(raw_args: str, partial: bool) -> str:
 
 @functools.cache
 def hermes_config(
+    name: str = "hermes",
     tool_call_start: str = TOOL_CALL_START,
     tool_call_end: str = TOOL_CALL_END,
 ) -> ParserEngineConfig:
     return ParserEngineConfig(
-        name="hermes",
+        name=name,
         initial_state=ParserState.CONTENT,
         terminals={
             "TOOL_START": tool_call_start,
@@ -182,6 +183,7 @@ class HermesParser(ParserEngine):
     with different tags; see :class:`~vllm.parser.longcat.LongcatParser`.
     """
 
+    CONFIG_NAME: str = "hermes"
     TOOL_CALL_START: str = TOOL_CALL_START
     TOOL_CALL_END: str = TOOL_CALL_END
 
@@ -196,7 +198,7 @@ class HermesParser(ParserEngine):
             tokenizer = tokenizer.tokenizer
         kwargs.setdefault(
             "parser_engine_config",
-            hermes_config(self.TOOL_CALL_START, self.TOOL_CALL_END),
+            hermes_config(self.CONFIG_NAME, self.TOOL_CALL_START, self.TOOL_CALL_END),
         )
         super().__init__(tokenizer, tools, **kwargs)
 

@@ -8,5 +8,6 @@ from vllm.parser.hermes import HermesParser
 
 
 class LongcatParser(HermesParser):
+    CONFIG_NAME = "longcat"
     TOOL_CALL_START = "<longcat_tool_call>"
     TOOL_CALL_END = "</longcat_tool_call>"

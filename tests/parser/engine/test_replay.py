@@ -34,6 +34,7 @@ from tests.parser.engine.trace_builder import _BUILDERS, build_samples
 from vllm.parser.engine import registered_adapters as _adapters_mod
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import ParserState
+from vllm.parser.hermes import HermesParser
 from vllm.parser.mistral import MistralParser
 
 # ── Parser discovery ─────────────────────────────────────────────────
@@ -69,6 +70,11 @@ def _discover_parsers() -> list[_ParserInfo]:
             # Mistral uses brace-balanced JSON tool args with no TOOL_END
             # token, so it does not fit this TOOL_END-based replay harness.
             # It is covered by tests/parser/mistral/ instead.
+            continue
+        if issubclass(obj, HermesParser):
+            # Hermes and its delimiter variants opt out of token-id terminal
+            # matching, so they do not fit this TOOL_END-based harness. They
+            # are covered by tests/tool_parsers/test_{hermes,longcat}_tool_parser.py.
             continue
         cfg = obj(bare_tok, None).parser_engine_config
         if cfg.name not in _BUILDERS:
