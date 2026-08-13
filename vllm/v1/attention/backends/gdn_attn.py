@@ -68,6 +68,7 @@ class GDNAttentionMetadata:
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
     chunk_offsets: torch.Tensor | None = None
+    non_spec_chunk_indices: torch.Tensor | None = None
     # Chunk-kernel inputs for prefill
     prefill_query_start_loc: torch.Tensor | None = None
     prefill_state_indices: torch.Tensor | None = None
@@ -82,6 +83,9 @@ class GDNAttentionMetadata:
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
     kv_cache_spec: MambaSpec
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+
+    # Only the KDA chunk kernels consume `non_spec_chunk_indices`.
+    builds_non_spec_chunk_indices: bool = False
 
     reorder_batch_threshold: int = 1
 
@@ -329,7 +333,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         prefill_query_start_loc: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
+        non_spec_chunk_indices: torch.Tensor | None = None
         if num_prefills > 0:
+            from vllm.third_party.flash_linear_attention.ops.index import (
+                prepare_chunk_indices,
+                prepare_chunk_offsets,
+            )
             from vllm.third_party.flash_linear_attention.ops.utils import (
                 FLA_CHUNK_SIZE,
             )
@@ -372,11 +381,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 # Only prefill batches use FLA chunk ops.
                 # Pre-compute on CPU and async-copy to GPU to avoid
                 # GPU→CPU sync (.tolist()) in prepare_chunk_indices.
-                from vllm.third_party.flash_linear_attention.ops.index import (
-                    prepare_chunk_indices,
-                    prepare_chunk_offsets,
-                )
-
                 assert prefill_query_start_loc_cpu is not None
                 chunk_indices = async_tensor_h2d(
                     prepare_chunk_indices(prefill_query_start_loc_cpu, FLA_CHUNK_SIZE),
@@ -386,6 +390,24 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     prepare_chunk_offsets(prefill_query_start_loc_cpu, FLA_CHUNK_SIZE),
                     device=gpu_device,
                 )
+
+            # The KDA chunk kernels segment the whole non-spec batch rather
+            # than the peeled prefill slice, and never take the cutedsl path.
+            if self.builds_non_spec_chunk_indices:
+                assert non_spec_query_start_loc_cpu is not None
+                if (
+                    self.gdn_prefill_backend != "cutedsl"
+                    and prefill_query_start_loc_cpu is non_spec_query_start_loc_cpu
+                ):
+                    # Nothing was peeled off, so the segmentations coincide.
+                    non_spec_chunk_indices = chunk_indices
+                else:
+                    non_spec_chunk_indices = async_tensor_h2d(
+                        prepare_chunk_indices(
+                            non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE
+                        ),
+                        device=query_start_loc.device,
+                    )
 
         if num_prefills > 0:
             context_lens_tensor = m.compute_num_computed_tokens()
@@ -493,6 +515,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
             has_initial_state=has_initial_state,
+            non_spec_chunk_indices=non_spec_chunk_indices,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
             prefill_query_start_loc=prefill_query_start_loc,

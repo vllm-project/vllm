@@ -23,7 +23,12 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionBackend,
+    GDNAttentionMetadata,
+    GDNAttentionMetadataBuilder,
+)
 
 from ...linear import (
     ColumnParallelLinear,
@@ -151,8 +156,28 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = param_tp_rank
 
 
+class KimiGDNMetadataBuilder(GDNAttentionMetadataBuilder):
+    """GDN metadata for Kimi-Linear, whose prefill runs the KDA chunk kernels
+    over the whole non-spec batch."""
+
+    builds_non_spec_chunk_indices = True
+
+
+class KimiGDNAttentionBackend(GDNAttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "KIMI_GDN"
+
+    @staticmethod
+    def get_builder_cls() -> type[KimiGDNMetadataBuilder]:
+        return KimiGDNMetadataBuilder
+
+
 @PluggableLayer.register("kimi_gated_delta_net_attention")
 class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return KimiGDNAttentionBackend
+
     def get_state_dtype(
         self,
     ) -> tuple[torch.dtype, torch.dtype]:
@@ -577,6 +602,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
                     cu_seqlens=non_spec_query_start_loc,
+                    chunk_indices=m.non_spec_chunk_indices,
                 )
                 # Init cache
                 recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state

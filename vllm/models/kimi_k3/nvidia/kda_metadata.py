@@ -14,6 +14,8 @@ from functools import cache
 import torch
 
 from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops.index import prepare_chunk_indices
+from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -400,19 +402,24 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
 
                 num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
 
-        # Unlike the shared GDN layer, Kimi-K3's prefill KDA wrapper prepares
-        # its own chunk indices. Only causal-convolution metadata is needed here.
+        # The KDA chunk kernels segment the whole non-spec batch, so their
+        # chunk metadata is derived from `non_spec_query_start_loc`. Compute it
+        # on the host and copy it across to avoid D2H sync.
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
+        non_spec_chunk_indices = None
         if num_prefills > 0:
             has_initial_state = m.compute_num_computed_tokens() > 0
             if spec_sequence_masks_cpu is not None:
                 has_initial_state = has_initial_state[active_non_spec_mask_cpu]
-                assert non_spec_query_start_loc_cpu is not None
+            assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
-                    non_spec_query_start_loc_cpu,
-                    device=query_start_loc.device,
+                    non_spec_query_start_loc_cpu, device=query_start_loc.device
                 )
+            )
+            non_spec_chunk_indices = async_tensor_h2d(
+                prepare_chunk_indices(non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE),
+                device=query_start_loc.device,
             )
         else:
             has_initial_state = None
@@ -483,6 +490,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
+            non_spec_chunk_indices=non_spec_chunk_indices,
         )
 
 
