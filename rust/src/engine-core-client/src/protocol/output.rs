@@ -112,8 +112,6 @@ pub struct EngineCoreOutput {
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
-    #[serde(default)]
-    pub new_sampling_mask: Option<OpaqueValue>,
     /// Multi-modal hashes the engine could not find in its receiver cache,
     /// because the frontend sent `data: None` for an item the engine had
     /// already evicted. Non-empty makes the output retryable: a frontend that
@@ -125,6 +123,8 @@ pub struct EngineCoreOutput {
     /// frontend grows one.
     #[serde(default)]
     pub mm_cache_miss_hashes: Option<Vec<String>>,
+    #[serde(default)]
+    pub new_sampling_mask: Option<OpaqueValue>,
 }
 
 impl EngineCoreOutput {
@@ -441,8 +441,8 @@ mod tests {
                             prefill_stats: None,
                             routed_experts: None,
                             num_nans_in_logits: 0,
-                            new_sampling_mask: None,
                             mm_cache_miss_hashes: None,
+                            new_sampling_mask: None,
                         },
                     ],
                     scheduler_stats: None,
