@@ -20,6 +20,7 @@ from vllm.multimodal.utils import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
+    profile_mm_embed_input_ids,
     sanity_check_mm_encoder_outputs,
 )
 
@@ -108,6 +109,16 @@ class EncoderRunner:
         self.encoder_cache.encoder_outputs.update(
             (f"tmp_{i}", output) for i, output in enumerate(dummy_encoder_outputs)
         )
+
+        if not budget.model_config.is_encoder_decoder:
+            # Encoder-decoder models feed encoder outputs to cross-attention
+            # instead of merging them into `inputs_embeds`.
+            profile_mm_embed_input_ids(
+                self.model,
+                dummy_encoder_outputs,
+                self.max_num_tokens,
+                self.device,
+            )
 
     @torch.inference_mode()
     def execute_mm_encoder(

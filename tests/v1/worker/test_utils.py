@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
-from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.utils import bind_kv_cache, profile_mm_embed_input_ids
 
 
 def test_bind_kv_cache(default_vllm_config):
@@ -90,3 +91,38 @@ def test_bind_kv_cache_draft_model(default_vllm_config):
     assert runner_kv_caches[1] is kv_cache["draft_model.layers.0.attn"]
     assert runner_kv_caches[2] is kv_cache["model.layers.1.attn"]
     assert runner_kv_caches[3] is kv_cache["draft_model.layers.1.attn"]
+
+
+class _RecordingModel:
+    """Stands in for a multimodal model, recording the merge-path inputs."""
+
+    def __init__(self, hidden_size: int):
+        self.hidden_size = hidden_size
+        self.calls: list[tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]] = []
+
+    def embed_input_ids(self, input_ids, multimodal_embeddings=None, *, is_multimodal):
+        self.calls.append((input_ids, list(multimodal_embeddings), is_multimodal))
+        return torch.zeros(input_ids.size(0), self.hidden_size)
+
+
+@pytest.mark.parametrize("num_items", [1, 8])
+def test_profile_mm_embed_input_ids_profiles_a_full_batch(num_items: int):
+    """The merge path must be profiled at `max_num_batched_tokens`.
+
+    Its temporaries (e.g. deepstack embeddings) scale with the batch size, not
+    with the number of multimodal items, so profiling a partial batch would
+    under-reserve memory and let a real request OOM after startup succeeded.
+    """
+    num_tokens, item_len, hidden_size = 32, 8, 4
+    model = _RecordingModel(hidden_size)
+    encoder_outputs = [torch.zeros(item_len, hidden_size) for _ in range(num_items)]
+
+    profile_mm_embed_input_ids(model, encoder_outputs, num_tokens, torch.device("cpu"))
+
+    input_ids, mm_embeds, is_mm_embed = model.calls[0]
+    assert input_ids.size(0) == num_tokens
+    assert is_mm_embed.size(0) == num_tokens
+    # `_merge_multimodal_embeddings` requires one embedding row per masked
+    # position; the mask must never claim more rows than were passed in.
+    assert sum(e.size(0) for e in mm_embeds) == int(is_mm_embed.sum())
+    assert sum(e.size(0) for e in mm_embeds) == min(num_items * item_len, num_tokens)
