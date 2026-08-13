@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Run one Kimi-K3 XPU decoder layer with real checkpoint weights.
+"""Run any Kimi-K3 XPU decoder layer with real checkpoint weights.
 
 Layer indices are zero-based. The default ``--layer-index 3`` therefore runs
 the fourth transformer layer. Activations can be synthetic or loaded from a
-``torch.save`` file containing ``hidden_states``, ``prefix_sum``, and
-``residual`` tensors.
+``torch.save`` file containing ``hidden_states`` and, when attn-res is enabled,
+``prefix_sum`` and ``residual`` tensors.
 """
 
 import argparse
@@ -33,8 +33,11 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig, set_current_vllm_c
 from vllm.distributed import init_distributed_environment, initialize_model_parallel
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.models.kimi_k3.xpu.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.xpu.linear import KimiDecoderLayer
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import init_workspace_manager
 
 
@@ -103,25 +106,26 @@ def make_common_metadata(
     block_size: int,
     device: torch.device,
 ) -> CommonAttentionMetadata:
-    query_start_loc = torch.arange(
-        num_tokens + 1, dtype=torch.int32, device=device
+    query_start_loc = torch.tensor(
+        [0, num_tokens], dtype=torch.int32, device=device
     )
-    seq_lens = torch.ones(num_tokens, dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
     seq_lens_cpu = seq_lens.cpu()
+    num_blocks = cdiv(num_tokens, block_size)
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=seq_lens,
         seq_lens_cpu_upper_bound=seq_lens_cpu,
         _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=torch.zeros(num_tokens, dtype=torch.int32),
-        num_reqs=num_tokens,
+        _num_computed_tokens_cpu=torch.zeros(1, dtype=torch.int32),
+        num_reqs=1,
         num_actual_tokens=num_tokens,
-        max_query_len=1,
-        max_seq_len=1,
+        max_query_len=num_tokens,
+        max_seq_len=num_tokens,
         block_table_tensor=torch.arange(
-            num_tokens, dtype=torch.int32, device=device
-        ).view(num_tokens, 1),
+            num_blocks, dtype=torch.int32, device=device
+        ).view(1, num_blocks),
         slot_mapping=torch.arange(num_tokens, dtype=torch.int64, device=device),
         causal=True,
     )
@@ -152,14 +156,72 @@ def bind_mla_cache_and_metadata(
         common_prefix_len=0,
         common_attn_metadata=common,
     )
+    num_cache_blocks = cdiv(num_tokens, cache_spec.block_size)
     cache_shape = backend.get_kv_cache_shape(
-        num_tokens,
+        num_cache_blocks,
         cache_spec.block_size,
         cache_spec.num_kv_heads,
         cache_spec.head_size,
     )
     mla.kv_cache = torch.zeros(cache_shape, dtype=cache_spec.dtype, device=device)
     return {layer_name: metadata}, {layer_name: common.slot_mapping}
+
+
+def bind_kda_cache_and_metadata(
+    layer: KimiDecoderLayer,
+    vllm_config: VllmConfig,
+    num_tokens: int,
+    device: torch.device,
+) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+    kda = layer.self_attn
+    if not isinstance(kda, KimiK3DeltaAttention):
+        raise ProbeError("Selected layer does not use XPU KDA")
+    layer_name = kda.prefix
+    backend = kda.get_attn_backend()
+    cache_spec = kda.get_kv_cache_spec(vllm_config)
+    if not isinstance(cache_spec, MambaSpec):
+        raise ProbeError("KDA layer did not produce a Mamba cache spec")
+    builder = backend.get_builder_cls()(
+        kv_cache_spec=cache_spec,
+        layer_names=[layer_name],
+        vllm_config=vllm_config,
+        device=device,
+    )
+    common = make_common_metadata(num_tokens, cache_spec.block_size, device)
+    metadata = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+    )
+    num_cache_blocks = cache_spec.max_num_blocks_per_req(
+        vllm_config,
+        num_tokens,
+    )
+    raw_cache = torch.zeros(
+        num_cache_blocks,
+        1,
+        1,
+        cache_spec.page_size_bytes,
+        dtype=torch.uint8,
+        device=device,
+    )
+    kda.bind_kv_cache(raw_cache)
+    return {layer_name: metadata}, {layer_name: common.slot_mapping}
+
+
+def bind_attention_cache_and_metadata(
+    layer: KimiDecoderLayer,
+    vllm_config: VllmConfig,
+    num_tokens: int,
+    device: torch.device,
+) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+    if isinstance(layer.self_attn, KimiK3DeltaAttention):
+        return bind_kda_cache_and_metadata(
+            layer,
+            vllm_config,
+            num_tokens,
+            device,
+        )
+    return bind_mla_cache_and_metadata(layer, vllm_config, num_tokens, device)
 
 
 def load_direct_parameter(
@@ -186,12 +248,23 @@ def load_layer_weights(
     parameters = dict(layer.named_parameters())
     loaded: set[str] = set()
     stacked_mapping = (
+        ("self_attn.in_proj_qkvgfab.weight", "self_attn.q_proj.weight", 0),
+        ("self_attn.in_proj_qkvgfab.weight", "self_attn.k_proj.weight", 1),
+        ("self_attn.in_proj_qkvgfab.weight", "self_attn.v_proj.weight", 2),
+        ("self_attn.in_proj_qkvgfab.weight", "self_attn.g_proj.weight", 3),
+        ("self_attn.in_proj_qkvgfab.weight", "self_attn.f_a_proj.weight", 4),
+        ("self_attn.in_proj_qkvgfab.weight", "self_attn.b_proj.weight", 5),
+        ("self_attn.conv1d.weight", "self_attn.q_conv1d.weight", 0),
+        ("self_attn.conv1d.weight", "self_attn.k_conv1d.weight", 1),
+        ("self_attn.conv1d.weight", "self_attn.v_conv1d.weight", 2),
         ("self_attn.fused_qkv_a_proj.weight", "self_attn.q_a_proj.weight", 0),
         (
             "self_attn.fused_qkv_a_proj.weight",
             "self_attn.kv_a_proj_with_mqa.weight",
             1,
         ),
+        ("mlp.gate_up_proj.weight", "mlp.gate_proj.weight", 0),
+        ("mlp.gate_up_proj.weight", "mlp.up_proj.weight", 1),
     )
     moe_prefix = f"{checkpoint_prefix}.block_sparse_moe"
     for source_name in weight_map:
@@ -203,7 +276,7 @@ def load_layer_weights(
         if relative_name.startswith("block_sparse_moe."):
             continue
         for target_name, source_suffix, shard_id in stacked_mapping:
-            if relative_name == source_suffix:
+            if relative_name == source_suffix and target_name in parameters:
                 load_direct_parameter(
                     parameters,
                     target_name,
@@ -222,14 +295,18 @@ def load_layer_weights(
             )
             loaded.add(relative_name)
 
-    moe_records = load_moe_weights(
-        layer.block_sparse_moe,
-        weight_map,
-        moe_prefix,
-        source_config,
-        expert_ids,
-    )
-    loaded.update(f"block_sparse_moe.{record['target']}" for record in moe_records)
+    moe_records: list[dict[str, Any]] = []
+    if layer.is_moe_layer:
+        moe_records = load_moe_weights(
+            layer.block_sparse_moe,
+            weight_map,
+            moe_prefix,
+            source_config,
+            expert_ids,
+        )
+        loaded.update(
+            f"block_sparse_moe.{record['target']}" for record in moe_records
+        )
     return loaded, moe_records
 
 
@@ -237,31 +314,47 @@ def make_input_state(
     args: argparse.Namespace,
     layer: KimiDecoderLayer,
     device: torch.device,
-) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     if args.input_state is not None:
         state = torch.load(args.input_state, map_location=device, weights_only=True)
+        hidden_states = state["hidden_states"]
+        expected_shape = (args.num_tokens, layer.hidden_size)
+        if tuple(hidden_states.shape) != expected_shape:
+            raise ProbeError(
+                f"Input hidden_states shape {tuple(hidden_states.shape)} does not "
+                f"match {expected_shape}"
+            )
+        prefix_sum = state.get("prefix_sum")
+        residual = state.get("residual")
+        if layer.use_attn_res and (prefix_sum is None or residual is None):
+            raise ProbeError(
+                "Attn-res layer input requires prefix_sum and residual tensors"
+            )
         return (
-            state["hidden_states"],
-            state["prefix_sum"],
-            state["residual"],
+            hidden_states,
+            prefix_sum,
+            residual,
         )
     generator = torch.Generator(device=device).manual_seed(17)
     shape = (args.num_tokens, layer.hidden_size)
     hidden_states = torch.randn(
         shape, dtype=torch.bfloat16, device=device, generator=generator
     )
-    prefix_sum = torch.randn(
-        shape, dtype=torch.bfloat16, device=device, generator=generator
-    )
-    num_blocks = layer.prev_valid_blocks + int(layer.is_block_write_layer)
-    residual = torch.randn(
-        args.num_tokens,
-        num_blocks,
-        layer.hidden_size,
-        dtype=torch.bfloat16,
-        device=device,
-        generator=generator,
-    )
+    prefix_sum = None
+    residual = None
+    if layer.use_attn_res:
+        prefix_sum = torch.randn(
+            shape, dtype=torch.bfloat16, device=device, generator=generator
+        )
+        num_blocks = layer.prev_valid_blocks + int(layer.is_block_write_layer)
+        residual = torch.randn(
+            args.num_tokens,
+            num_blocks,
+            layer.hidden_size,
+            dtype=torch.bfloat16,
+            device=device,
+            generator=generator,
+        )
     return hidden_states, prefix_sum, residual
 
 
@@ -277,24 +370,38 @@ def main() -> int:
             raise ProbeError("Layer index must be non-negative and tokens positive")
         raw_config = load_checkpoint_config(args.checkpoint_dir)
         source_config = load_text_config(raw_config)
-        num_experts = args.num_experts or source_config.num_experts
-        if not 16 <= num_experts <= source_config.num_experts:
-            raise ProbeError("--num-experts must be between TopK 16 and source count")
-        expert_ids = list(range(num_experts))
+        source_num_experts = source_config.num_experts
+        if source_num_experts is None:
+            if args.num_experts is not None:
+                raise ProbeError("--num-experts requires a MoE checkpoint")
+            num_experts = 0
+            expert_ids: list[int] = []
+        else:
+            num_experts = args.num_experts or source_num_experts
+            if not 16 <= num_experts <= source_num_experts:
+                raise ProbeError(
+                    "--num-experts must be between TopK 16 and source count"
+                )
+            expert_ids = list(range(num_experts))
         config_dict = source_config.to_dict()
-        config_dict.update(
-            num_experts=num_experts,
-            num_expert_group=(
-                1
-                if num_experts < source_config.num_experts
-                else source_config.num_expert_group
-            ),
-            topk_group=(
-                1
-                if num_experts < source_config.num_experts
-                else source_config.topk_group
-            ),
-        )
+        if source_num_experts is not None:
+            config_dict.update(
+                num_experts=num_experts,
+                num_experts_per_token=min(
+                    source_config.num_experts_per_token or num_experts,
+                    num_experts,
+                ),
+                num_expert_group=(
+                    1
+                    if num_experts < source_num_experts
+                    else source_config.num_expert_group
+                ),
+                topk_group=(
+                    1
+                    if num_experts < source_num_experts
+                    else source_config.topk_group
+                ),
+            )
         config = type(source_config)(**config_dict)
         weight_map = load_weight_map(args.checkpoint_dir)
         checkpoint_prefix = f"language_model.model.layers.{args.layer_index}"
@@ -304,7 +411,15 @@ def main() -> int:
         device = torch.device("xpu:0")
         torch.xpu.set_device(device)
         model_config = make_model_config(source_config, args.checkpoint_dir)
-        cache_config = CacheConfig(block_size=16, cache_dtype="auto")
+        if args.num_tokens > model_config.max_model_len:
+            raise ProbeError(
+                f"--num-tokens exceeds max_model_len={model_config.max_model_len}"
+            )
+        cache_config = CacheConfig(
+            block_size=16,
+            cache_dtype="auto",
+            mamba_block_size=model_config.max_model_len,
+        )
         vllm_config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -319,8 +434,6 @@ def main() -> int:
                     vllm_config,
                     prefix=f"model.layers.{args.layer_index}",
                 ).to(device)
-            if not layer.is_moe_layer:
-                raise ProbeError("Selected layer is not an MLA + MoE layer")
             loaded, moe_records = load_layer_weights(
                 layer,
                 weight_map,
@@ -331,32 +444,38 @@ def main() -> int:
             missing = sorted(set(dict(layer.named_parameters())) - loaded)
             if missing:
                 raise ProbeError(f"Unloaded layer parameters: {missing}")
-            routed_experts = layer.block_sparse_moe.experts.routed_experts
-            routed_experts.quant_method.process_weights_after_loading(
-                routed_experts
-            )
-            moe_runner = layer.block_sparse_moe.experts
-            quant_method = moe_runner.routed_experts.quant_method
-            moe_kernel = quant_method.moe_kernel
-            situ_config = {
-                "source_beta": source_config.activation_situ_beta,
-                "source_linear_beta": source_config.activation_situ_linear_beta,
-                "runner_beta": moe_runner.moe_config.activation_situ_beta,
-                "runner_linear_beta": (
-                    moe_runner.moe_config.activation_situ_linear_beta
-                ),
-                "kernel_beta": moe_kernel.moe_config.activation_situ_beta,
-                "kernel_linear_beta": (
-                    moe_kernel.moe_config.activation_situ_linear_beta
-                ),
-            }
-            report["situ_config"] = situ_config
-            if config.hidden_act == "situ" and situ_config["kernel_beta"] is None:
-                raise ProbeError("SITU beta was lost before MXFP4 kernel creation")
-            layer.self_attn.mla_attn.mla_attn.process_weights_after_loading(
-                torch.bfloat16
-            )
-            metadata, slot_mapping = bind_mla_cache_and_metadata(
+            if layer.is_moe_layer:
+                routed_experts = layer.block_sparse_moe.experts.routed_experts
+                routed_experts.quant_method.process_weights_after_loading(
+                    routed_experts
+                )
+                moe_runner = layer.block_sparse_moe.experts
+                quant_method = moe_runner.routed_experts.quant_method
+                moe_kernel = quant_method.moe_kernel
+                situ_config = {
+                    "source_beta": source_config.activation_situ_beta,
+                    "source_linear_beta": source_config.activation_situ_linear_beta,
+                    "runner_beta": moe_runner.moe_config.activation_situ_beta,
+                    "runner_linear_beta": (
+                        moe_runner.moe_config.activation_situ_linear_beta
+                    ),
+                    "kernel_beta": moe_kernel.moe_config.activation_situ_beta,
+                    "kernel_linear_beta": (
+                        moe_kernel.moe_config.activation_situ_linear_beta
+                    ),
+                }
+                report["situ_config"] = situ_config
+                if (
+                    config.hidden_act == "situ"
+                    and situ_config["kernel_beta"] is None
+                ):
+                    raise ProbeError("SITU beta was lost before MXFP4 kernel creation")
+            is_kda = isinstance(layer.self_attn, KimiK3DeltaAttention)
+            if not is_kda:
+                layer.self_attn.mla_attn.mla_attn.process_weights_after_loading(
+                    torch.bfloat16
+                )
+            metadata, slot_mapping = bind_attention_cache_and_metadata(
                 layer,
                 vllm_config,
                 args.num_tokens,
@@ -381,9 +500,19 @@ def main() -> int:
                 raise ProbeError("Layer output contains non-finite values")
             output_state = {
                 "hidden_states": output.cpu(),
-                "prefix_sum": output_prefix_sum.cpu(),
-                "residual": output_residual.cpu(),
+                "prefix_sum": (
+                    None if output_prefix_sum is None else output_prefix_sum.cpu()
+                ),
+                "residual": (
+                    None if output_residual is None else output_residual.cpu()
+                ),
             }
+            if is_kda:
+                conv_state, recurrent_state = layer.self_attn.kv_cache
+                output_state.update(
+                    conv_state=conv_state.cpu(),
+                    recurrent_state=recurrent_state.cpu(),
+                )
             if args.save_output is not None:
                 args.save_output.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(output_state, args.save_output)
@@ -392,6 +521,8 @@ def main() -> int:
                 ordinal_layer=args.layer_index + 1,
                 checkpoint_prefix=checkpoint_prefix,
                 num_experts=num_experts,
+                attention_type="kda" if is_kda else "mla",
+                mlp_type="moe" if layer.is_moe_layer else "dense",
                 loaded_parameters=len(loaded),
                 loaded_moe_tensors=len(moe_records),
                 input_state="file" if args.input_state else "synthetic",
@@ -400,6 +531,15 @@ def main() -> int:
                 output_all_finite=True,
                 output_max_abs=float(output.abs().max()),
             )
+            if is_kda:
+                report.update(
+                    conv_state_shape=list(conv_state.shape),
+                    conv_state_dtype=str(conv_state.dtype),
+                    recurrent_state_shape=list(recurrent_state.shape),
+                    recurrent_state_dtype=str(recurrent_state.dtype),
+                    conv_state_max_abs=float(conv_state.abs().max()),
+                    recurrent_state_max_abs=float(recurrent_state.abs().max()),
+                )
     except Exception as error:
         report["error"] = f"{type(error).__name__}: {error}"
         report["traceback"] = traceback.format_exc()
