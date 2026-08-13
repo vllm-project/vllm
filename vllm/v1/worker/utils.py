@@ -17,7 +17,6 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -52,15 +51,12 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
     raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
 
 
-@triton.jit(do_not_specialize=["n_blocks"])
+@triton.jit
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
     seg_block_strides_ptr,
     seg_page_sizes_ptr,
     block_ids_ptr,
-    n_blocks,
-    N_SEGS: tl.constexpr,
-    MAX_CHUNKS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Zero KV cache blocks across all segments in a single launch.
@@ -78,29 +74,27 @@ def _zero_kv_blocks_kernel(
     seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
     allowing segments to live in different CUDA allocations.
 
-    Programs are mapped as (block_index, seg_index, chunk_index).
+    Programs are mapped directly onto a 3-D grid as
+    (block_index, seg_index, chunk_index).
     """
-    pid = tl.program_id(0)
-    work_per_block = N_SEGS * MAX_CHUNKS
-    block_index = pid // work_per_block
-    if block_index >= n_blocks:
-        return
-    remainder = pid % work_per_block
-    seg_index = remainder // MAX_CHUNKS
-    chunk_index = remainder % MAX_CHUNKS
+    block_index = tl.program_id(0)
+    seg_index = tl.program_id(1)
+    chunk_index = tl.program_id(2)
     block_stride_el = tl.load(seg_block_strides_ptr + seg_index)
     page_size_el = tl.load(seg_page_sizes_ptr + seg_index)
-    if chunk_index >= page_size_el // BLOCK_SIZE:
+    chunk_offset = chunk_index.to(tl.int64) * BLOCK_SIZE
+    if chunk_offset >= page_size_el:
         return
     block_id = tl.load(block_ids_ptr + block_index)
     seg_addr = tl.load(seg_addrs_ptr + seg_index)
     ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
-    offset = (
-        block_id.to(tl.int64) * block_stride_el.to(tl.int64)
-        + chunk_index.to(tl.int64) * BLOCK_SIZE
+    block_offset = block_id.to(tl.int64) * block_stride_el.to(tl.int64)
+    cols = chunk_offset + tl.arange(0, BLOCK_SIZE).to(tl.int64)
+    tl.store(
+        ptr + block_offset + cols,
+        tl.zeros([BLOCK_SIZE], dtype=tl.int32),
+        mask=cols < page_size_el,
     )
-    cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
-    tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
 
 
 class KVBlockZeroer:
@@ -204,15 +198,12 @@ class KVBlockZeroer:
             return
 
         max_page_size_el = max(seg_page_sizes)
-        blk_size = min(
-            min(largest_power_of_2_divisor(ps) for ps in seg_page_sizes),
-            1024,
-        )
+        blk_size = min(1 << (max_page_size_el - 1).bit_length(), 1024)
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
             torch.tensor(seg_block_strides, dtype=torch.int64, device=self.device),
             torch.tensor(seg_page_sizes, dtype=torch.int64, device=self.device),
-            max_page_size_el // blk_size,
+            (max_page_size_el + blk_size - 1) // blk_size,
             blk_size,
             len(seg_addrs),
         )
@@ -231,15 +222,12 @@ class KVBlockZeroer:
         ) = self._meta
         n_blocks = len(block_ids)
         idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
-        grid = (n_blocks * n_segs * max_chunks,)
+        grid = (n_blocks, n_segs, max_chunks)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
             seg_block_strides,
             seg_page_sizes,
             idx,
-            n_blocks,
-            N_SEGS=n_segs,
-            MAX_CHUNKS=max_chunks,
             BLOCK_SIZE=blk_size,
         )
 
@@ -550,17 +538,7 @@ def bind_kv_cache(
             # TODO - analyze where runner_kv_caches is used and the right
             # way to ensure it properly reflects multiple attention layers
             # in the same decoder block.
-            if (
-                current_platform.is_cuda_alike()
-                or current_platform.is_xpu()
-                or current_platform.is_cpu()
-            ):
-                # We know that the GPU / CPU runner is not impacted by this
-                # case. Some test code depends on runner_kv_caches, but
-                # not in a way that's impacted by ignoring this.
-                pass
-            else:
-                raise NotImplementedError
+            current_platform.check_runner_kv_caches_multi_layer()
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
 
@@ -609,6 +587,24 @@ def copy_kv_cache_blocks_inplace(
         assert blocks.numel() % num_blocks == 0
         blocks = blocks.view(num_blocks, -1)
         blocks[dst_indices] = blocks[src_indices]
+
+
+def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> bool:
+    """Whether every request in the batch has the same query length.
+
+    Shape test only; use ``get_uniform_decode_token_count`` to classify a
+    scheduled batch, since a prompt chunk can have a decode batch's shape.
+    """
+    return num_reqs > 0 and num_tokens == max_query_len * num_reqs
+
+
+def get_uniform_decode_token_count(
+    num_reqs: int, num_tokens: int, max_query_len: int, has_prefill: bool
+) -> int | None:
+    """Per-request token count of a uniform decode batch, or None."""
+    if not has_prefill and is_uniform_query_len(num_reqs, num_tokens, max_query_len):
+        return max_query_len
+    return None
 
 
 def is_residual_scattered_for_sp(

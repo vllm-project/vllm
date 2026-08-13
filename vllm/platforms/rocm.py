@@ -520,6 +520,7 @@ class RocmPlatform(Platform):
         "deepseek_v4_fp8",
         "compressed-tensors",
         "fbgemm_fp8",
+        "inc",
         "quark",
         "mxfp4",
         "mxfp8",
@@ -545,6 +546,10 @@ class RocmPlatform(Platform):
         # Import ROCm-specific extension
         with contextlib.suppress(ImportError):
             import vllm._rocm_C  # noqa: F401
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
