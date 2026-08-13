@@ -1004,25 +1004,19 @@ class SpeculativeConfig:
                     )
 
                 if self.method == "pard2":
-                    import vllm.envs as envs
-
-                    # Run target-independent (TI) — a plain parallel draft with no
-                    # target-hidden fusion — when the user selects it via the env
-                    # var, or when the target's hidden dim doesn't match what
-                    # target_proj was trained on (fusion not possible).
-                    if (
-                        envs.VLLM_PARD2_TARGET_INDEPENDENT
-                        or not self._pard2_target_dim_matches()
-                    ):
+                    # Use target-dependent fusion only when the target's hidden
+                    # dim matches what target_proj expects; otherwise fall back to
+                    # a plain parallel draft (target-independent, no fusion).
+                    if self._pard2_target_dim_matches():
+                        self._prepare_pard2_draft_config()
+                    else:
                         logger.info(
-                            "PARD-2: running target-independent (plain parallel "
-                            "draft, no target-hidden fusion) [forced=%s].",
-                            envs.VLLM_PARD2_TARGET_INDEPENDENT,
+                            "PARD-2: target hidden dim does not match the draft's "
+                            "pard2_target_dim; running target-independent "
+                            "(plain parallel draft, no target-hidden fusion)."
                         )
                         self.method = "draft_model"
                         self.parallel_drafting = True
-                    else:
-                        self._prepare_pard2_draft_config()
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"

@@ -576,6 +576,9 @@ class GPUModelRunner(
         self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
 
         self.use_aux_hidden_state_outputs = False
+        # PARD-2 fuses the target's final (-1) layer, whose aux capture is the
+        # PRE-final-norm residual; when True, swap it for the POST-norm output.
+        self._pard2_final_aux_post_norm = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
@@ -4459,6 +4462,10 @@ class GPUModelRunner(
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
                 hidden_states, aux_hidden_states = model_output
+                if self._pard2_final_aux_post_norm and aux_hidden_states:
+                    # Final layer's aux is the pre-final-norm residual; PARD-2
+                    # needs the post-norm value, which is the returned hidden_states.
+                    aux_hidden_states[-1] = hidden_states
             else:
                 # Common case.
                 hidden_states = model_output
@@ -5499,6 +5506,17 @@ class GPUModelRunner(
             aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
 
         self.model.set_aux_hidden_state_layers(aux_layers)
+
+        # PARD-2's target_proj is trained on HF's POST-final-norm hidden state for
+        # the final (-1) layer, but the in-loop aux capture records the PRE-norm
+        # residual. Flag it so the forward postprocess can swap in the post-norm
+        # value (the model's returned hidden_states). Only PARD-2 requests the
+        # final layer, so EAGLE3/DFlash (interior layers) are unaffected.
+        num_hidden_layers = self.model_config.hf_text_config.num_hidden_layers
+        self._pard2_final_aux_post_norm = (
+            self.speculative_config.method == "pard2"
+            and num_hidden_layers in aux_layers
+        )
 
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.

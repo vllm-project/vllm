@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_USE_FASTOKENS: bool = False
-    VLLM_PARD2_TARGET_INDEPENDENT: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
@@ -706,12 +705,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE": lambda: (
         os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true"
-    ),
-    # Option to switch PARD-2 drafts between target-dependent (TD, default) and
-    # target-independent (TI) mode. When set, the draft runs as a plain parallel
-    # draft with no target-hidden fusion.
-    "VLLM_PARD2_TARGET_INDEPENDENT": lambda: (
-        os.environ.get("VLLM_PARD2_TARGET_INDEPENDENT", "0") == "1"
     ),
     # If true, replace the Rust BPE backend that powers HF fast tokenizers
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
