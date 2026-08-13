@@ -41,6 +41,7 @@ from vllm.config import (
     DeviceConfig,
     DiffusionConfig,
     ECTransferConfig,
+    EncoderCacheManagerConfig,
     EPLBConfig,
     FaultToleranceConfig,
     KernelConfig,
@@ -686,6 +687,9 @@ class EngineArgs:
     kv_events_config: KVEventsConfig | None = None
 
     ec_transfer_config: ECTransferConfig | None = None
+    ec_manager_config: EncoderCacheManagerConfig = get_field(
+        VllmConfig, "ec_manager_config"
+    )
     reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
 
     generation_config: str = ModelConfig.generation_config
@@ -766,6 +770,8 @@ class EngineArgs:
             self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
+        if isinstance(self.ec_manager_config, dict):
+            self.ec_manager_config = EncoderCacheManagerConfig(**self.ec_manager_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
         if isinstance(self.weight_transfer_config, dict):
@@ -1624,6 +1630,9 @@ class EngineArgs:
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
         vllm_group.add_argument(
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
+        )
+        vllm_group.add_argument(
+            "--ec-manager-config", **vllm_kwargs["ec_manager_config"]
         )
         vllm_group.add_argument(
             "--compilation-config", "-cc", **vllm_kwargs["compilation_config"]
@@ -2506,6 +2515,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
+            ec_manager_config=self.ec_manager_config,
             reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
