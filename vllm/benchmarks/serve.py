@@ -405,6 +405,9 @@ async def get_request(
     Args:
         input_requests:
             A list of input requests, each represented as a SampleRequest.
+        self_timed:
+            If True, the requests carry their own arrival timing and no
+            request rate, burstiness or ramp-up is applied.
         request_rate:
             The rate at which requests are generated (requests/s).
         burstiness (optional):

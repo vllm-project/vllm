@@ -155,6 +155,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             x: Input tensor
             topk_weights: Expert weights from router
             topk_ids: Selected expert IDs from router
+            shared_experts: The shared experts module, if any
             shared_experts_input: Input for shared experts (if any)
 
         Returns:
@@ -176,6 +177,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             layer: RoutedExperts instance containing weight parameters
             x: Input tensor
             router_logits: Router logits (routing done internally)
+            input_ids: Token ids, for routers that condition on them
 
         Returns:
             Output tensor from routed experts

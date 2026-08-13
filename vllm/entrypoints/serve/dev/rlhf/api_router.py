@@ -36,6 +36,8 @@ async def pause_generation(
     """Pause generation requests to allow weight updates.
 
     Args:
+        raw_request: The incoming FastAPI request, used to reach the engine
+            client on the app state.
         mode: How to handle in-flight requests:
             - ``"abort"``: Abort all in-flight requests immediately (default).
             - ``"wait"``: Wait for in-flight requests to complete.
@@ -231,6 +233,8 @@ async def get_world_size(
     """Get the world size from the parallel config.
 
     Args:
+        raw_request: The incoming FastAPI request, used to reach the engine
+            client on the app state.
         include_dp: If True (default), returns the world size including
             data parallelism (TP * PP * DP). If False, returns the world
             size without data parallelism (TP * PP).

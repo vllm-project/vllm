@@ -256,6 +256,7 @@ def register_backend(
         backend: The AttentionBackendEnum member to register
         class_path: Optional class path. If not provided and used as
             decorator, will be auto-generated from the class.
+        is_mamba: Whether the backend is a Mamba attention backend.
 
     Returns:
         Decorator function if class_path is None, otherwise a no-op

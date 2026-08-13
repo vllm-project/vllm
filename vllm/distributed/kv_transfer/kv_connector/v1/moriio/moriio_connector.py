@@ -2490,6 +2490,9 @@ class MoRIIOConnectorWorker:
             local_block_ids: IDs of local blocks
             remote_block_ids: IDs of remote blocks
             remote_moriio_meta: Metadata of the remote MoRIIO agent
+            remote_tp_size: Tensor parallel size of the remote engine. Falls
+                back to the locally recorded value when None.
+
         Returns:
             Tuple of (local_offsets, remote_offsets, transfer_sizes)
 

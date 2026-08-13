@@ -238,7 +238,7 @@ def create_parser(add_cli_args, **kwargs) -> FlexibleArgumentParser:
     """Create a parser for the given class with markdown formatting.
 
     Args:
-        cls: The class to create a parser for
+        add_cli_args: The `add_cli_args` classmethod to build the parser from.
         **kwargs: Additional keyword arguments to pass to `cls.add_cli_args`.
 
     Returns:

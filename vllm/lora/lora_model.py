@@ -188,6 +188,12 @@ class LoRAModel:
                 a global counter.
             device: Device where the lora model is loaded.
             dtype: dtype of the lora model weights.
+            model_vocab_size: Vocab size of the base model, used to size the
+                embedding deltas.
+            weights_mapper: Optional mapper rewriting checkpoint weight names
+                to vLLM names.
+            tensorizer_config_dict: Optional tensorizer config used to load
+                the checkpoint via tensorizer instead of from disk.
             skip_prefixes: List of module name prefixes to skip during loading.
                 Models can define this to skip modules not used in inference
                 (e.g., MTP layers). Format: ["mtp."]

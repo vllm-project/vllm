@@ -226,6 +226,7 @@ def flashinfer_cutedsl_moe_masked(
         a2_global_scale (torch.Tensor): (l,)
         w2_blockscale (torch.Tensor): blockscale factors, e4m3,
         w2_alpha (torch.Tensor): (l,)
+        out (torch.Tensor): output tensor written in place, [l, m, k], bf16
         masked_m (torch.Tensor): Masked dimension indices
         workspace (torch.Tensor): For gateup_output
 

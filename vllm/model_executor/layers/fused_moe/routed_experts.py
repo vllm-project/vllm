@@ -1031,6 +1031,7 @@ class RoutedExperts(PluggableLayer):
             ckpt_up_proj_name: Name of up projection in checkpoint
             num_experts: Number of logical (non-redundant) experts
             num_redundant_experts: Number of redundant experts
+            routed_experts_prefix: Prefix of the routed experts submodule
             lora_base_layer_prefix: Prefix to add if this layer is a LoRA base layer
             include_fused: Prepend the fused pre-fused-checkpoint entries
 

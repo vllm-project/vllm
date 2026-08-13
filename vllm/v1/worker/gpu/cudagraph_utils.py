@@ -319,6 +319,7 @@ class CudaGraphManager:
                 it is invoked once with warmup=True and again with warmup=False
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
+            progress_bar_desc: Description shown on the capture progress bar.
 
         """
         with graph_capture(device=self.device):

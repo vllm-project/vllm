@@ -94,6 +94,7 @@ def apply_grammar_bitmask(
 
     Args:
         scheduler_output (SchedulerOutput): The result of engine scheduling.
+        grammar_output (GrammarOutput): The grammar bitmask to apply.
         input_batch (InputBatch): The input of model runner.
         logits (torch.Tensor): The output logits of model forward.
 

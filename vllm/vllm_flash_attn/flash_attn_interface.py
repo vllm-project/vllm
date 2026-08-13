@@ -261,6 +261,34 @@ def flash_attn_varlen_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+        seqused_k: (batch_size,), dtype torch.int32. Actual number of key tokens per
+           sequence. Mutually exclusive with cu_seqlens_k, and required when
+           block_table is given.
+        q_v: optional value tensor fused with q. FA3 only.
+        block_table: (batch_size, max_blocks_per_seq), dtype torch.int32. Paged KV
+           cache block table. Requires seqused_k.
+        return_softmax_lse: bool. Whether to also return softmax_lse.
+        out: optional tensor to write the output into.
+        scheduler_metadata: precomputed scheduling metadata. Not supported by FA2.
+        q_descale: descale factor for FP8 q. Not supported by FA2, and ignored by
+           FA4 when the inputs are not FP8.
+        k_descale: descale factor for FP8 k. Same constraints as q_descale.
+        v_descale: descale factor for FP8 v. Same constraints as q_descale.
+        num_splits: int. Number of splits for the split-KV kernel; 0 lets the kernel
+           choose. FA2 only supports 0 or 1.
+        output_scale: scale for fused FP8 output quantization. FA4 only.
+        fa_version: int. FlashAttention major version to dispatch to.
+        s_aux: learnable per-head attention sink logits. Not supported by FA2.
+        cp_world_size: int. Context parallel world size.
+        cp_rank: int. Rank of this shard within the context parallel group.
+        cp_tot_seqused_k: (batch_size,), dtype torch.int32. Key lengths across the
+           whole context parallel group.
+        mask_mod: optional callable applying a custom mask. Not supported by FA2.
+        block_sparse_tensors: block-sparse index tensors. FA4 only, and must
+           materialize full_block_cnt and full_block_idx.
+        aux_tensors: auxiliary tensors consumed by mask_mod. FA4 only.
+        aux_tensor_leading_dims: leading dimensions of each entry in aux_tensors.
+        dynamic_causal: optional per-sequence causal offsets. FA4 only.
 
     Return:
         out: (total, nheads, headdim).
@@ -545,6 +573,9 @@ def sparse_attn_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+        softcap: float. Anything > 0 activates softcapping attention.
+        return_softmax_lse: bool. Whether to also return softmax_lse.
+        out: optional tensor to write the output into.
 
     Return:
         out: (batch_size, seqlen, nheads, headdim).
@@ -633,6 +664,8 @@ def sparse_attn_varlen_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+        return_softmax_lse: bool. Whether to also return softmax_lse.
+        out: optional tensor to write the output into.
 
     Return:
         out: (total, nheads, headdim).

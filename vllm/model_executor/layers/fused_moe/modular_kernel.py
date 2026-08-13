@@ -892,37 +892,38 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         """This function computes the intermediate result of a Mixture of Experts
         (MoE) layer using two sets of weights, w1 and w2.
 
-        Parameters
-        ----------
-        - output: (torch.Tensor): The unweighted, unreduced output tensor.
-        - hidden_states: (torch.Tensor): The (quantized) input tensor to the MoE
-          layer.
-        - w1 (torch.Tensor): The first set of expert weights.
-        - w2 (torch.Tensor): The second set of expert weights.
-        - topk_weights: A map of row to expert weights. Some implementations
-          choose to do weight application.
-        - topk_ids (torch.Tensor): A map of row to expert id.
-        - activation (str): The activation function to apply after the first
-          MoE layer.
-        - global_num_experts (int): The total number of experts in the global
-          expert space.
-        - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-          from the global expert space to the local expert space of the expert
-          parallel shard.
-        - a1q_scale (Optional[torch.Tensor]): Optional quantized scale to be
-          used for a1.  Result of quantization from prepare/finalize and not
-          from the FusedMoEQuantConfig.
-        - workspace13 (torch.Tensor): A scratch tensor used for gemm outputs
-          must be large enough to hold output of either MoE gemm.
-        - workspace2 (torch.Tensor): A scratch tensor used for the activation
-          function.
-        - expert_tokens_meta (Optional[ExpertTokensMetadata]) - An optional
-          ExpertTokensMetadata object containing gpu/cpu tensors
-          as big as the number of local experts with the information about the
-          number of tokens assigned to each local expert.
-        - apply_router_weight_on_input: True if router weights are already
-          applied on the input. This is relevant if the implementation
-          chooses to do weight application.
+        Args:
+            output: (torch.Tensor): The unweighted, unreduced output tensor.
+            hidden_states: (torch.Tensor): The (quantized) input tensor to the MoE
+                layer.
+            w1 (torch.Tensor): The first set of expert weights.
+            w2 (torch.Tensor): The second set of expert weights.
+            topk_weights: A map of row to expert weights. Some implementations
+                choose to do weight application.
+            topk_ids (torch.Tensor): A map of row to expert id.
+            activation (str): The activation function to apply after the first
+                MoE layer.
+            global_num_experts (int): The total number of experts in the global
+                expert space.
+            expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+                from the global expert space to the local expert space of the expert
+                parallel shard.
+            a1q_scale (Optional[torch.Tensor]): Optional quantized scale to be
+                used for a1.  Result of quantization from prepare/finalize and not
+                from the FusedMoEQuantConfig.
+            a2_scale (Optional[torch.Tensor]): Optional scale for the second MoE
+                gemm, taken from the FusedMoEQuantConfig.
+            workspace13 (torch.Tensor): A scratch tensor used for gemm outputs
+                must be large enough to hold output of either MoE gemm.
+            workspace2 (torch.Tensor): A scratch tensor used for the activation
+                function.
+            expert_tokens_meta (Optional[ExpertTokensMetadata]): An optional
+                ExpertTokensMetadata object containing gpu/cpu tensors
+                as big as the number of local experts with the information about the
+                number of tokens assigned to each local expert.
+            apply_router_weight_on_input: True if router weights are already
+                applied on the input. This is relevant if the implementation
+                chooses to do weight application.
 
         """
         raise NotImplementedError
@@ -1327,6 +1328,13 @@ class FusedMoEKernelModularImpl:
         that handles DBO, async and shared expert overlap.
 
         Args:
+            output: Tensor the finalized result is written into.
+            fused_out: The unweighted, unreduced output of the fused experts.
+            hidden_states: The input tensor to the MoE layer.
+            topk_weights: A map of row to expert weights.
+            topk_ids: A map of row to expert id.
+            apply_router_weight_on_input: True if the router weights were
+                already applied to the input.
             shared_experts: SharedExperts | None. The shared experts if any.
             shared_experts_input: Optional separate input for shared experts.
                 When latent MoE is used, hidden_states is the latent-projected

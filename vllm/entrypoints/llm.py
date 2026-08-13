@@ -667,6 +667,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 template.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
             mm_processor_kwargs: Overrides for `processor.__call__`.
+            tools: Tools to make available to the model, if any.
 
         Returns:
             A list of `RequestOutput` objects containing the generated

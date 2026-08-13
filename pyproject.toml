@@ -58,6 +58,8 @@ include = ["vllm*"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
+# test args are mostly pytest fixtures, which don't benefit from descriptions
+"tests/**" = ["D417"]
 
 [tool.ruff.lint]
 select = [
@@ -96,6 +98,9 @@ ignore = [
     # f-string format
     "UP032",
 ]
+
+[tool.ruff.lint.pydocstyle]
+ignore-var-parameters = true
 
 [tool.ruff.format]
 docstring-code-format = true

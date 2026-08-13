@@ -901,13 +901,12 @@ def fused_kda_gate(
     threshold: float = 20.0,
     lower_bound: float | None = None,
 ) -> torch.Tensor:
-    """
-    Forward pass for KDA gate:
-      input g: [..., H*D]
-      param A: [H] or [1, 1, H, 1]
-      beta: softplus beta parameter
-      threshold: softplus threshold parameter
-      return  : [..., H, D]
+    """Forward pass for KDA gate:
+    input g: [..., H*D]
+    param A: [H] or [1, 1, H, 1]
+    beta: softplus beta parameter
+    threshold: softplus threshold parameter
+    return  : [..., H, D]
     """
     orig_shape = g.shape[:-1]
 

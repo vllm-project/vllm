@@ -2729,6 +2729,10 @@ class GPUModelRunner(
 
         Args:
             num_scheduled_tokens: Number of tokens scheduled per request.
+            num_computed_tokens: Number of tokens already computed per request.
+            kv_cache_spec: The KV cache spec of the group being considered.
+            attn_metadata_builder: Builder used to decide whether cascade
+                attention can be used.
             num_common_prefix_blocks: Number of shared KV cache blocks.
 
         Returns:
@@ -5942,6 +5946,11 @@ class GPUModelRunner(
                 - CUDAGraphMode.PIECEWISE: Piecewise cudagraph.
                 - CUDAGraphMode.FULL: Full cudagraph, attention metadata is
                     needed.
+            allow_microbatching: Whether the dummy batch may be split into
+                microbatches.
+            is_graph_capturing: Whether this run is a cudagraph capture.
+            randomize_inputs: Whether to fill the dummy inputs with random
+                values rather than zeros.
             force_attention: If True, always create attention metadata. Used to
                 warm up attention backend when mode is NONE.
             uniform_decode: If True, the batch is a uniform decode batch.
@@ -7736,6 +7745,7 @@ class GPUModelRunner(
         Args:
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
+            is_profiling: Whether this call is part of a profiling run.
 
         """
         kv_cache_config = deepcopy(kv_cache_config)

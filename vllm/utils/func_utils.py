@@ -137,6 +137,7 @@ def get_allowed_kwarg_only_overrides(
         callable: Callable which takes 0 or more keyword only arguments.
                   If None is provided, all overrides names are allowed.
         overrides: Potential overrides to be used when invoking the callable.
+        requires_kw_only: If True, only keyword-only params may be overridden.
         allow_var_kwargs: Allows overrides that are expandable for var kwargs.
 
     Returns:

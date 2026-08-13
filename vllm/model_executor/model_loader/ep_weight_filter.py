@@ -44,6 +44,9 @@ def compute_local_expert_ids(
     :func:`vllm.model_executor.layers.fused_moe.layer.determine_expert_map`.
 
     Args:
+        num_experts: Total number of experts in the layer.
+        ep_size: Expert parallel world size.
+        ep_rank: Rank whose local expert ids are computed.
         placement: ``"linear"`` for contiguous assignment,
             ``"round_robin"`` for interleaved assignment.
 

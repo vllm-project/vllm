@@ -117,6 +117,8 @@ class BenchmarkDataset(ABC):
                 indicates that a default or random dataset might be used.
             random_seed (int): Seed value for reproducible shuffling or
                 sampling. Defaults to DEFAULT_SEED.
+            disable_shuffle (bool): If True, keep the dataset in its original
+                order instead of shuffling it.
 
         """
         self.dataset_path = dataset_path
@@ -276,6 +278,8 @@ class BenchmarkDataset(ABC):
                 for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
             request_id_prefix (str): The prefix of request_id.
+            no_oversample (bool): If True, do not oversample the dataset to
+                reach num_requests.
 
         Returns:
             list[SampleRequest]: A list of sample requests generated from the
@@ -300,6 +304,8 @@ class BenchmarkDataset(ABC):
             num_requests (int): The target number of requests.
             request_id_prefix (str): The prefix applied to generated request
                 identifiers.
+            no_oversample (bool): If True, return the requests unchanged
+                instead of oversampling up to num_requests.
 
         """
         if no_oversample:

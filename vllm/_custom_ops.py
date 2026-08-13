@@ -1444,6 +1444,14 @@ def cutlass_w4a8_moe_mm(
     Args:
         out_tensors:
             Output buffer for all experts (updated in-place).
+        a_strides:
+            Row strides of the per-expert activation tensors.
+        b_strides:
+            Row strides of the per-expert weight tensors.
+        c_strides:
+            Row strides of the per-expert output tensors.
+        group_scale_strides:
+            Row strides of the per-expert group scale tensors.
         a_tensors:
             FP8 (E4M3FN) activations for all experts.
         b_tensors:
@@ -1605,6 +1613,7 @@ def scaled_fp4_experts_quant(
         input_global_scale: A scalar scaling factor for the entire tensor.
         expert_offsets: The expert offsets tensor
         blockscale_offsets: The blockscale offsets tensor
+        topk: The number of experts each token is routed to
     Outputs:
         output: The quantized tensor in NVFP4
         output_scales: The blockscale tensor in FP8-E4M3
@@ -1852,6 +1861,8 @@ def scaled_fp8_quant(
             of the output to at least this value.
         use_per_token_if_dynamic: Whether to do per_tensor or per_token
             in the dynamic quantization case.
+        output: Optional tensor to write the quantized result into. A new
+            tensor is allocated when omitted.
         group_shape: Optional tuple (group_m, group_n) specifying the group
             shape for static quantization. Use -1 for "full extent" (e.g.,
             (-1, -1) for per-tensor, (-1, 1) for per-channel, etc.)

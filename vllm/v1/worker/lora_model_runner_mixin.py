@@ -157,6 +157,7 @@ class LoRAModelRunnerMixin:
         Args:
             lora_config: LoRA configuration, or None if LoRA is disabled.
             num_scheduled_tokens: Array of scheduled token counts per request.
+            mapping_type: Which LoRA mapping to build (language or encoder).
             num_sampled_tokens: Array of sampled token counts per request.
             num_active_loras: Number of distinct active LoRAs to use.
                 - 0: No LoRA active (set up zero mappings).
@@ -266,6 +267,7 @@ class LoRAModelRunnerMixin:
             remove_lora: Whether to remove LoRAs after the context exits.
             num_active_loras: Number of distinct active LoRAs to use.
                 LoRA is activated when num_active_loras > 0.
+            mapping_type: Which LoRA mapping to build (language or encoder).
 
         """
         with (

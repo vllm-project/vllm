@@ -135,6 +135,8 @@ class ExampleConnector(KVConnectorBase_V1):
                 src_kv_cache (torch.Tensor): the source KV cache.
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
+                attn_metadata (AttentionMetadata): attention metadata for the
+                    current forward pass.
 
             """
             slot_mapping = slot_mapping.to(dst_kv_cache_layer.device, non_blocking=True)

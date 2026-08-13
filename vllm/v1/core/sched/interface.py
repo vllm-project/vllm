@@ -226,6 +226,7 @@ class SchedulerInterface(ABC):
                 preempted and moved to the waiting queue. Otherwise, this method
                 will only reset the KV prefix cache when there is no running request
                 taking KV cache.
+            reset_connector: If True, also reset any KV connector state.
 
         """
         raise NotImplementedError

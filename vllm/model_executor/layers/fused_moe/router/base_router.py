@@ -249,6 +249,7 @@ class BaseRouter(FusedMoERouter):
             hidden_states: Input hidden states
             router_logits: Router logits for expert selection
             indices_type: Desired dtype for expert indices (may be None)
+            input_ids: Token ids, for routers that condition on them
 
         Returns:
             tuple of (topk_weights, topk_ids)

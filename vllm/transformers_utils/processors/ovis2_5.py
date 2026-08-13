@@ -120,33 +120,28 @@ class Ovis2_5Processor(ProcessorMixin):
         if `vision_infos` is not `None`.
 
         Args:
-                images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`,
-                    `list[PIL.Image.Image]`, `list[np.ndarray]`,
-                    `list[torch.Tensor]`):
-                    The image or batch of images to be prepared.
-                    Each image can be a PIL image, NumPy array or PyTorch
-                    tensor. Both channels-first and channels-last formats
-                    are supported.
-                text (`str`, `list[str]`, `list[list[str]]`):
-                    The sequence or batch of sequences to be encoded.
-                    Each sequence can be a string or a list of strings
-                    (pretokenized string). If the sequences are provided as
-                    list of strings (pretokenized), you must set
-                    `is_split_into_words=True` (to lift the ambiguity with
-                    a batch of sequences).
-                videos (`np.ndarray`, `torch.Tensor`, `list[np.ndarray]`,
-                    `list[torch.Tensor]`):
-                    The image or batch of videos to be prepared. Each video
-                    can be a 4D NumPy array or PyTorch tensor, or a nested
-                    list of 3D frames. Both channels-first and channels-last
-                    formats are supported.
-                return_tensors (`str` or [`~utils.TensorType`], *optional*):
-                    If set, will return tensors of a particular framework.
-                    Acceptable values are:
-                    - `'tf'`: Return TensorFlow `tf.constant` objects.
-                    - `'pt'`: Return PyTorch `torch.Tensor` objects.
-                    - `'np'`: Return NumPy `np.ndarray` objects.
-                    - `'jax'`: Return JAX `jnp.ndarray` objects.
+            images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, or a list):
+                The image or batch of images to be prepared. Each image can
+                be a PIL image, NumPy array or PyTorch tensor. Both
+                channels-first and channels-last formats are supported.
+            videos (`np.ndarray`, `torch.Tensor`, or a list of either):
+                The video or batch of videos to be prepared. Each video can
+                be a 4D NumPy array or PyTorch tensor, or a nested list of
+                3D frames. Both channels-first and channels-last formats are
+                supported.
+            text (`str`, `list[str]`, `list[list[str]]`):
+                The sequence or batch of sequences to be encoded. Each
+                sequence can be a string or a list of strings (pretokenized
+                string). If the sequences are provided as list of strings
+                (pretokenized), you must set `is_split_into_words=True` (to
+                lift the ambiguity with a batch of sequences).
+            return_tensors (`str` or [`~utils.TensorType`], *optional*):
+                If set, will return tensors of a particular framework.
+                Acceptable values are:
+                - `'tf'`: Return TensorFlow `tf.constant` objects.
+                - `'pt'`: Return PyTorch `torch.Tensor` objects.
+                - `'np'`: Return NumPy `np.ndarray` objects.
+                - `'jax'`: Return JAX `jnp.ndarray` objects.
 
         Returns:
                 [`BatchFeature`]: A [`BatchFeature`] with the following fields:

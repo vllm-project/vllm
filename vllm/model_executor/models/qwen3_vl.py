@@ -1591,6 +1591,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             vision_start_token_id: Token ID for vision start marker
             vision_end_token_id: Token ID for vision end marker
             video_token_id: Token ID for video content
+            select_token_id: Whether to return token ids instead of text
 
         Returns:
             PromptUpdateDetails with full token sequence

@@ -35,6 +35,7 @@ def mm_k(
         b_ptr: Array of pointers, identifying columns of B
         ak_stride: K dimension stride of the A matrix
         bk_stride: K dimension stride of the B matrix
+        offset_k: Offsets within the current BLOCK_K tile along K
         K: Length of the K dimension
         BLOCK_M: M dimension of the output block m x n
         BLOCK_N: N dimension of the output block m x n

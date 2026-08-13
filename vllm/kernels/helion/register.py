@@ -409,6 +409,10 @@ def register_kernel(
     """Register a Helion kernel with pre-tuned config selection.
 
     Args:
+        op_name: Name to register the op under. Defaults to the function name.
+        fake_impl: Optional meta/fake implementation for tracing.
+        mutates_args: Names of arguments the kernel mutates in place.
+        helion_settings: Optional Helion settings override.
         config_picker: Required. Receives ``(args, config_keys)``
             where each config key is a ``dict[str, Any]`` mapping
             parameter names to values.  Return the best-matching

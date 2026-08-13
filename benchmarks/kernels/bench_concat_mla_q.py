@@ -24,9 +24,8 @@ def make_inputs(num_tokens, dtype):
     """Create inputs matching the real code path.
 
     Args:
-        contiguous_nope: If False, simulate the transposed BMM output
-                         (non-contiguous nope with stride pattern from
-                         [N,B,L].transpose(0,1)).
+        num_tokens: Number of tokens to generate inputs for.
+        dtype: dtype of the generated tensors.
 
     """
     # Simulate: bmm output [N, B, L].transpose(0, 1) -> [B, N, L]

@@ -442,6 +442,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
     If modifying the backend creation/wrapping logic, consider updating both.
 
     Args:
+        fake_mode: FakeTensorMode used to unpickle the cached graph.
         state: Deserialized state dict containing graph_module, example_inputs,
             prefix, sym_tensor_indices, is_encoder, etc.
         standalone_compile_artifacts: The StandaloneCompiledArtifacts containing

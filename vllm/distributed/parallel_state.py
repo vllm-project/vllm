@@ -1760,6 +1760,10 @@ def initialize_model_parallel(
             parallelism.
         pipeline_model_parallel_size: number of GPUs used for pipeline model
             parallelism.
+        prefill_context_model_parallel_size: number of GPUs used for context
+            parallelism during prefill.
+        decode_context_model_parallel_size: number of GPUs used for context
+            parallelism during decode.
         backend: name of torch distributed communication backend.
 
     Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we

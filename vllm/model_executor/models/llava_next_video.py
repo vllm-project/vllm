@@ -454,7 +454,11 @@ class LlavaNextVideoForConditionalGeneration(
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
+            positions: Flattened (concatenated) position ids corresponding to a
+                batch.
             pixel_values_videos: Pixels in each frames for each input videos.
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
         """
         if intermediate_tensors is not None:

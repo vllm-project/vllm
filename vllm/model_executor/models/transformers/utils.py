@@ -119,6 +119,7 @@ def replace_linear_class(
         linear: `nn.Linear` to be replaced.
         style: Tensor parallel style of the new linear, e.g. "colwise".
         quant_config: Quantization config for the new linear.
+        prefix: Module prefix of the new linear, used for quantization lookup.
 
     Returns:
         The new linear.

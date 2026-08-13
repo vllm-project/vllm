@@ -106,6 +106,7 @@ class ExtractHiddenStatesProposer:
         The main purpose is to cache hidden states, not to speculate.
 
         Args:
+            num_speculative_tokens: Number of draft tokens to return per request
             sampled_token_ids: Sampled token IDs from the target model
             target_hidden_states: List of hidden state tensors from target model
                                 (one per aux hidden state layer)

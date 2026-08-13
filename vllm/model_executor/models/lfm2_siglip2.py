@@ -496,6 +496,10 @@ class Siglip2Model(torch.nn.Module):
         """Forward pass through the vision model.
 
         Args:
+            pixel_values_packed: Packed pixel values for all images.
+            spatial_shapes: Per-image spatial dimensions.
+            cu_seqlens: Cumulative sequence lengths of the packed images.
+            max_seqlen: Longest image sequence in the batch.
             select_layers: Layer indices to select hidden states from.
                 Supports negative indices (e.g., [-2] for second-to-last).
                 If None, returns the last layer output with post_layernorm.

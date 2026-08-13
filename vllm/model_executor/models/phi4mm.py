@@ -1101,6 +1101,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
         Args:
             audio_input (Phi4MMAudioInputs): Audio input.
+            audio_projection_mode (str): Projection mode to use, selecting
+                which audio projector weights are applied.
 
         Returns:
             NestedTensors: Audio embeddings

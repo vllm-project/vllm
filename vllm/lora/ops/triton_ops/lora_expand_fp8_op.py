@@ -201,6 +201,8 @@ def _lora_expand_fp8(
         num_tokens_per_lora: Number of tokens per LoRA
         lora_token_start_loc: Start location for each LoRA's tokens
         lora_ids: LoRA IDs to process
+        num_active_loras: Number of active LoRAs. Accepted for API parity with
+            the non-FP8 kernel and unused here.
         no_lora_flag_cpu (torch.Tensor): A CPU tensor of size 1, that indicates
             if there are any requests that require LoRA.
         offset_start (int, optional): Offset start for output_tensor.

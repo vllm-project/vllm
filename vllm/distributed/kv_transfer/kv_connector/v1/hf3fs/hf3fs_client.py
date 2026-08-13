@@ -230,6 +230,7 @@ class Hf3fsClient:
         Args:
             offsets: List of byte offsets to write to
             tensors: List of tensors containing data to write
+            event: CUDA event to synchronize on before reading the tensors
 
         Returns:
             List of operation results (0 for success, non-zero for error)

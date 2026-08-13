@@ -76,6 +76,8 @@ def nvfp4_marlin_process_scales(
             given value is used directly. The caller is responsible for
             dividing ``global_scale`` by the returned ``scale_factor`` to
             preserve numerical correctness.
+        a_dtype: dtype of the activations the scales will be used with. None
+            keeps the dtype of ``marlin_scales``.
 
     Returns:
         A tuple of (processed_scales, scale_factor).

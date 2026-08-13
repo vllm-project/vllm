@@ -166,6 +166,7 @@ async def async_request_openai_completions(
 
     Args:
         request_func_input: The input for the request function.
+        session: The aiohttp session used to issue the request.
         pbar: The progress bar to display the progress.
 
     Returns:

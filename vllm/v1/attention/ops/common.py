@@ -64,6 +64,16 @@ def _correct_attn_cp_out_kernel(
             Pointer to output tensor of shape [ B, H, D ]
         vlse_ptr (triton.PointerType):
             Pointer to output tensor of shape [ B, H ]
+        outputs_stride_B: Batch stride of ``outputs_ptr``
+        outputs_stride_H: Head stride of ``outputs_ptr``
+        outputs_stride_D: Head-dim stride of ``outputs_ptr``
+        lses_stride_N: Rank stride of ``lses_ptr``
+        lses_stride_B: Batch stride of ``lses_ptr``
+        lses_stride_H: Head stride of ``lses_ptr``
+        lse_idx: Index of this rank's lse within the all-gathered tensor
+        HEAD_DIM: Head dimension, as a constexpr
+        N_ROUNDED: Rank count rounded to a power of two, as a constexpr
+        IS_BASE_E: Whether the lses are natural-log based, as a constexpr
 
     """
     batch_idx = tl.program_id(axis=0).to(tl.int64)
@@ -150,6 +160,7 @@ def correct_attn_out(
         lses: Tensor of shape [ N, B, H ]
         cp_rank: Current rank in the context-parallel group
         ctx: Triton context to avoid recompilation
+        is_lse_base_on_e: Whether the lses use base e rather than base 2
 
     Returns:
         Tuple of (out, lse) with corrected attention and final log-sum-exp.

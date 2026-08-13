@@ -185,6 +185,9 @@ class LoRAKernelMeta:
         Args:
             token_nums (int): Number of input tokens in the current forward
                 pass of the kernel.
+            specialize_active_lora (bool): If True, report the actual active
+                LoRA count; otherwise report the padded default, which keeps
+                the kernel launch shape stable.
 
         """
         if specialize_active_lora:

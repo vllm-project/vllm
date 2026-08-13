@@ -91,6 +91,8 @@ class LoRAModelManager:
                 in a single batch.
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
+            device: the device the LoRA tensors are placed on.
+            vllm_config: the vLLM config for this engine.
 
         """
         self.model: SupportsLoRAModel = model

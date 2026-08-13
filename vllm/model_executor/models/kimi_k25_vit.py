@@ -461,6 +461,9 @@ class MoonViTEncoderLayer(nn.Module):
         Args:
             x (torch.Tensor): (seqlen, hidden_dim)
             cu_seqlens (torch.Tensor): cumulative sequence lengths
+            rope_freqs_cis (torch.Tensor): optional rotary frequencies
+            max_seqlen (torch.Tensor): optional longest sequence in the batch
+            sequence_lengths (torch.Tensor): optional per-sequence lengths
 
         """
         seq_length = x.size(0)

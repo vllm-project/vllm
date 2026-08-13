@@ -2010,6 +2010,8 @@ class Qwen2_5_VLForConditionalGeneration(
                 batch. **NOTE**: If mrope is enabled (default setting for
                 Qwen2.5-VL opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
         """
         if intermediate_tensors is not None:

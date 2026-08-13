@@ -376,6 +376,7 @@ class MoRIIOWriter:
         Args:
             task: The write task
             request_info: Remote allocation information
+            remote_moriio_meta: Metadata of the remote MoRIIO agent
 
         Returns:
             The transfer plan

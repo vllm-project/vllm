@@ -195,12 +195,18 @@ class ExpertMapManager:
         """Initialize expert map manager.
 
         Args:
+            max_num_batched_tokens: Maximum number of batched tokens per step
+            top_k: Number of experts each token is routed to
             global_num_experts: Total number of experts across all ranks
+            num_redundant_experts: Number of redundant expert replicas (EPLB)
+            num_expert_group: Number of expert groups, when grouped routing is
+                used
             moe_parallel_config: MoE parallel configuration (contains ep_size,
                                  ep_rank, backend flags)
             placement_strategy: Strategy for placing experts ('linear' or 'round_robin')
             num_fused_shared_experts: Number of fused shared experts (for AITER)
             rocm_aiter_enabled: Whether ROCm AITER fusion is enabled
+            enable_eplb: Whether expert-parallel load balancing is enabled
 
         """
         self.global_num_experts = global_num_experts

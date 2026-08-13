@@ -552,6 +552,8 @@ def per_token_group_quant_fp8(
         column_major_scales: Outputs scales in column major.
         tma_aligned_scales: Outputs scales in TMA-aligned layout.
         out_q: Optional output tensor. If not provided, function will create.
+        use_ue8m0: If True, round each scale down to a power of two (UE8M0
+            format). None defers to the platform default.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
@@ -876,7 +878,7 @@ def w8a8_triton_block_scaled_mm(
         Bs: The per-block quantization scale for `B`.
         block_size: The block size for per-block quantization. It should
         be 2-dim, e.g., [128, 128].
-        output_dytpe: The dtype of the returned tensor.
+        output_dtype: The dtype of the returned tensor.
 
     Returns:
         torch.Tensor: The result of matmul.

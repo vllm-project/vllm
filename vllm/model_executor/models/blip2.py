@@ -672,6 +672,10 @@ class Blip2ForConditionalGeneration(
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
+            positions: Flattened (concatenated) position ids corresponding to a
+                batch.
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
         Info:
             [`Blip2ImageInputs`][vllm.model_executor.models.blip2.Blip2ImageInputs]

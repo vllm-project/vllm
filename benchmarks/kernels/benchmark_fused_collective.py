@@ -445,6 +445,11 @@ def run_benchmarks(
     """Run all benchmarks for given configuration.
 
     Args:
+        num_tokens: Number of tokens in the benchmark input.
+        hidden_dim: Hidden dimension of the benchmark input.
+        dtype: dtype of the benchmark input.
+        use_residual: Whether to include a residual add in the fused op.
+        no_oneshot: Skip the one-shot allreduce variants.
         allreduce_params: Shared parameters for FlashInfer fused allreduce.
         workspaces: Dict mapping backend name ("trtllm", "mnnvl") to workspace.
         quant_modes: Set of quantization modes: "none", "fp8", "fp4".

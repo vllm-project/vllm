@@ -294,6 +294,8 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         for an image of the given dimensions, after padding is stripped.
 
         Args:
+            image_width: Width of the image in pixels.
+            image_height: Height of the image in pixels.
             max_soft_tokens: Override for the vision config's
                 ``default_output_length``.  When *None*, the value from
                 the model config is used.
@@ -336,6 +338,9 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         produce after stripping padding.
 
         Args:
+            image_width: Width of the image in pixels.
+            image_height: Height of the image in pixels.
+            processor: The Gemma4 processor, when already constructed.
             max_soft_tokens: Override for the default token budget.
                 When *None*, falls back to the model config value.
 

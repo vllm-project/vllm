@@ -72,6 +72,8 @@ class NgramProposer:
         """Batch version of ngram proposer using numba for acceleration.
 
         Args:
+            num_requests:
+                Number of requests in the batch.
             valid_ngram_requests:
                 Set of indices of requests that need ngram proposals.
             num_tokens_no_spec:

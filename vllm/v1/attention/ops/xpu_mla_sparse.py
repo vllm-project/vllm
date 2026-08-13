@@ -190,6 +190,11 @@ def triton_bf16_mla_sparse_interface(
     lse : logsumexp, [num_tokens, num_heads_q]
 
     Args:
+        q: Query tensor, [num_tokens, num_heads_q, dim_qk].
+        kv: Latent KV cache tensor.
+        indices: Sparse KV indices selected for each query token.
+        sm_scale: Softmax scale applied to the QK product.
+        d_v: Size of the value dimension.
         block_dpe: Size of positional embedding portion of dim_qk.
             Set to 0 when q/kv contain only the nope latent (e.g. DSv4
             prefill where RoPE is not split out).

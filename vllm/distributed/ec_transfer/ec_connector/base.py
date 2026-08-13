@@ -233,6 +233,7 @@ class ECConnectorBase(ABC):
 
         Args:
             request (Request): the request object.
+            index (int): index of the encoder cache entry being allocated.
 
         """
         pass

@@ -27,6 +27,7 @@ async def wait_for_endpoint(
     Args:
         request_func: The async request function to call
         test_input: The RequestFuncInput to test with
+        session: The aiohttp session used to issue the probe requests
         timeout_seconds: Maximum time to wait in seconds (default: 10 minutes)
         retry_interval: Time between retries in seconds (default: 5 seconds)
 

@@ -478,6 +478,8 @@ def add_kv_sharing_layers_to_kv_cache_groups(
             means this layer will perform attention using the keys and values
             from the KV cache of `shared_kv_cache_layers[layer_name]`.
         kv_cache_groups: The KV cache groups of the model.
+        runner_only_attn_layers: Attention layers handled by the runner only,
+            which are excluded from the KV cache groups.
 
     """
     if not shared_kv_cache_layers:
@@ -513,6 +515,7 @@ def bind_kv_cache(
 
     Args:
         kv_caches: The allocated kv_caches with layer names as keys.
+        num_attn_module: Number of attention modules per layer entry.
         forward_context: The global forward context containing all Attention
             layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.

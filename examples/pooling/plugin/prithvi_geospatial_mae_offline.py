@@ -171,6 +171,8 @@ def load_example(
               images in *file_paths*.
         std: list containing std values for each band in the
              images in *file_paths*.
+        indices: optional band indices to select from each image. All bands
+             are kept when None.
 
     Returns:
         np.array containing created example

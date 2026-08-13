@@ -58,9 +58,12 @@ class SingleTypeKVCacheManager(ABC):
         Args:
             kv_cache_spec: The kv_cache_spec for this manager.
             block_pool: The block pool.
+            enable_caching: Whether prefix caching is enabled.
             kv_cache_group_id: The id of the kv cache group of this manager.
             scheduler_block_size: The scheduling granularity (LCM of all group
                 block sizes); a multiple of this manager's ``block_size``.
+            dcp_world_size: Decode context parallel world size.
+            pcp_world_size: Prefill context parallel world size.
             needs_kv_cache_zeroing: Whether worker-side KV cache zeroing needs
                 newly allocated block IDs from this manager.
             max_admission_blocks_per_request: Recycling-aware per-request

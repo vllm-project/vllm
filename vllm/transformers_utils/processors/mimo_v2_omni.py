@@ -1071,6 +1071,8 @@ class MiMoOmniProcessor(ProcessorMixin):
                     tuples (pre-decoded).
             audio: list of ``str`` (path/url/base64), ``bytes``,
                    ``(waveform_1D, sample_rate)`` tuples, or ``np.ndarray``.
+            video_audio: audio track extracted from ``videos``, in the same
+                   formats accepted by ``audio``.
             return_tensors: Passed to :class:`BatchFeature`.
 
         Returns:

@@ -266,6 +266,9 @@ class SingleWriterShmRingBuffer:
         still might not be a contiguous space of `nbytes` available.
 
         Args:
+            is_free_fn (Callable[[int, memoryview], bool]): Predicate called with
+                a monotonic id and the buffer, returning True when that buffer
+                can be reclaimed.
             nbytes (int, optional): The size of the buffer to free. If None,
                 frees the maximum size of the ring buffer.
 

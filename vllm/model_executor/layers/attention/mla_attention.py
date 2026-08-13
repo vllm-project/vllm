@@ -2356,6 +2356,8 @@ def reorg_kvcache(
                                   T1_0, T1_1, T1_2, ...]
 
     Args:
+        allgatered_kv_c_normed: all-gathered, padded latent KV cache.
+        allgatered_k_pe: all-gathered, padded RoPE key cache.
         padded_local_chunk_seq_lens_lst: local chunk context lengths
             under current CP rank.
         local_context_lens_allranks: local context lengths on each CP rank.
@@ -2467,6 +2469,11 @@ def accumulate_mla_context_chunk(
     remaining token range is initialized.
 
     Args:
+        chunk: The context chunk being folded in.
+        attn_output: The chunk's attention output.
+        attn_softmax_lse: The chunk's log-sum-exp values.
+        output: Running context partial, updated in place.
+        output_lse: Running log-sum-exp, updated in place.
         output_written: The chunk's attention output already landed in
             ``output[chunk.token_slice]`` because the backend was handed it as
             ``out``, leaving only the lse to fold. Invalid for a continuation

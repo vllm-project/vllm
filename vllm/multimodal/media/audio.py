@@ -62,6 +62,10 @@ def load_audio_pyav(
     Args:
         path: A :class:`~io.BytesIO` buffer, a filesystem
             :class:`~pathlib.Path`, or a string path.
+        sr: Target sample rate, or None to keep the native rate.
+        mono: Whether to average the channels down to mono.
+        max_decode_bytes: If set, abort decoding once this many bytes have
+            been read from the source.
         max_duration_s: If set, abort decoding once the accumulated
             sample count exceeds this many seconds of audio.  Prevents
             decompression-bomb attacks where a small compressed file

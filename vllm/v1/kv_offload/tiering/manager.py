@@ -348,6 +348,7 @@ class TieringOffloadingManager(OffloadingManager):
         Args:
             key: Block hash to look up.
             req_context: Per-request context.
+            exclude_tier_idx: Skip this tier index during the lookup.
 
         Returns:
             HIT       — block is ready in the primary tier.

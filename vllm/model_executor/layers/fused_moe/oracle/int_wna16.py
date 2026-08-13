@@ -211,6 +211,8 @@ def select_wna16_moe_backend(
         quant_config: Quantization structure and checkpoint format description.
         may_have_zp: Whether the integration can provide weight zero points.
         may_have_bias: Whether the integration can provide expert bias.
+        allow_tile_padding: Whether backends that require padding the weights
+            up to a tile boundary may be selected.
 
     Returns:
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
@@ -1451,6 +1453,16 @@ def convert_to_wna16_moe_kernel_format(
         layer: the ``MoERunner`` layer whose parameters are being prepared.
         quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
+        w13: fused gate/up expert weights.
+        w2: down-projection expert weights.
+        w13_scale: quantization scales for ``w13``.
+        w2_scale: quantization scales for ``w2``.
+        w13_g_idx: optional act_order indices for ``w13``.
+        w2_g_idx: optional act_order indices for ``w2``.
+        w13_qzeros: optional zero points for ``w13``.
+        w2_qzeros: optional zero points for ``w2``.
+        w13_bias: optional bias for ``w13``.
+        w2_bias: optional bias for ``w2``.
 
     """
     if backend == WNA16MoEBackend.HUMMING:

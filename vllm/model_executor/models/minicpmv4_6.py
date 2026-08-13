@@ -524,6 +524,8 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         """Compute grid, source_image_visual_tokens and patch_visual_tokens.
 
         Args:
+            image_size: Size of the source image.
+            max_slice_nums: Maximum number of slices, or None for the default.
             downsample_mode: ``"16x"`` (default, full merge) or ``"4x"``
                 (skip vit_merger, 4x more visual tokens).
 

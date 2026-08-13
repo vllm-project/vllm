@@ -71,6 +71,7 @@ class Zamba2LoRA(nn.Module):
             rank: LoRA rank
             output_dim: output dimension
             quant_config: Configuration for model quantization
+            prefix: Module prefix used for quantization config lookup
 
         """
         super().__init__()
@@ -314,6 +315,7 @@ class Zamba2MLP(nn.Module):
             bare_block_idx: Index of the bare block in the model
             num_hybrid_layers: Total number of hybrid layers
             quant_config: Configuration for model quantization
+            prefix: Module prefix used for quantization config lookup
 
         """
         super().__init__()
@@ -516,7 +518,10 @@ class Zamba2MambaDecoderLayer(nn.Module):
 
         Args:
             config: The Zamba2 model configuration
+            model_config: The model config, when available
+            cache_config: The KV cache config, when available
             quant_config: Configuration for model quantization
+            prefix: Module prefix used for quantization config lookup
 
         """
         super().__init__()
@@ -611,6 +616,12 @@ class Zamba2HybridLayer(nn.Module):
 
         Args:
             shared_transformer: Transformer decoder layer for attention pathway
+            config: The Zamba2 model configuration
+            block_idx: Index of this hybrid block in the model
+            model_config: The model config, when available
+            cache_config: The KV cache config, when available
+            quant_config: Configuration for model quantization
+            prefix: Module prefix used for quantization config lookup
 
         """
         super().__init__()

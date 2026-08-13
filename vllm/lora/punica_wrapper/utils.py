@@ -65,6 +65,7 @@ def convert_mapping(
         max_loras: Maximum number of LoRAs.
         vocab_size: Model vocab size.
         extra_vocab_size: Extra vocab size each LoRA can have.
+        device: Device the returned index tensors are created on.
 
     Returns:
         A tuple of tensors:

@@ -1084,6 +1084,7 @@ class CohereASRMultiHeadAttention(nn.Module):
             key (torch.Tensor): (batch, time2, size)
             value(torch.Tensor): (batch, time2, size)
             mask (torch.Tensor): (batch, time1, time2)
+            pos_emb (torch.Tensor): optional relative position embeddings
 
         Returns:
             output (torch.Tensor): transformed `value`

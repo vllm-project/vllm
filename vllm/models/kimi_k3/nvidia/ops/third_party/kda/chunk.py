@@ -539,9 +539,7 @@ def fused_kda_gate_chunk_cumsum(
         )
     B, T, H, D = raw_g.shape
     if raw_beta.shape != (B, T, H):
-        raise ValueError(
-            f"Expected raw_beta shape {(B, T, H)}, got {raw_beta.shape}"
-        )
+        raise ValueError(f"Expected raw_beta shape {(B, T, H)}, got {raw_beta.shape}")
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = cdiv(T, chunk_size) if cu_seqlens is None else len(chunk_indices)
@@ -896,13 +894,12 @@ def fused_kda_gate(
     threshold: float = 20.0,
     lower_bound: float | None = None,
 ) -> torch.Tensor:
-    """
-    Forward pass for KDA gate:
-      input g: [..., H*D]
-      param A: [H] or [1, 1, H, 1]
-      beta: softplus beta parameter
-      threshold: softplus threshold parameter
-      return  : [..., H, D]
+    """Forward pass for KDA gate:
+    input g: [..., H*D]
+    param A: [H] or [1, 1, H, 1]
+    beta: softplus beta parameter
+    threshold: softplus threshold parameter
+    return  : [..., H, D]
     """
     orig_shape = g.shape[:-1]
 

@@ -260,6 +260,7 @@ class SingleDirectionOffloadingHandler:
             cpu_tensors: list of CPU KV cache tensors.
                 Each of shape (num_cpu_blocks, cpu_page_size_bytes) with dtype int8.
                 Order should match gpu_tensors.
+            blocks_per_chunk: number of blocks transferred per chunk.
             layer_refs_per_group: list of CanonicalKVCacheRef per group.
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
             canonical_layout: if True, CPU pages use the canonical layout

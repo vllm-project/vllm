@@ -115,21 +115,22 @@ def moe_permute(
     """This function expands and permutes activation to gather uncontinuous tokens
       for each expert.
 
-    Parameters
-    ----------
-    - hidden_states (torch.Tensor): The input tensor to the MoE layer.
-    - a1q_scale (Optional[torch.Tensor]): quant scale for hidden_states
-    - topk_ids (torch.Tensor): topk expert route id for each token.
-    - n_expert (int): The number of expert.
-    - n_local_expert (int): The number of expert in current EP rank.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-        from the global expert space to the local expert space of the expert
-        parallel shard.
-    - permuted_hidden_states (Optional[torch.Tensor]): Optional output tensor.
-        If None, the output tensor will be created in this function.
+    Args:
+        hidden_states (torch.Tensor): The input tensor to the MoE layer.
+        a1q_scale (Optional[torch.Tensor]): quant scale for hidden_states
+        topk_ids (torch.Tensor): topk expert route id for each token.
+        n_expert (int): The number of expert.
+        n_local_expert (int): The number of expert in current EP rank.
+        expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+            from the global expert space to the local expert space of the expert
+            parallel shard.
+        permuted_hidden_states (Optional[torch.Tensor]): Optional output tensor.
+            If None, the output tensor will be created in this function.
+        scratch (Optional[MoEPermuteScratch]): Optional preallocated scratch
+            buffers. Validated against hidden_states and topk_ids when given,
+            otherwise the buffers are allocated in this function.
 
-    Returns
-    -------
+    Returns:
     - permuted_hidden_states (torch.Tensor): permuted activation.
     - a1q_scale (Optional[torch.Tensor]): permuted quant scale for hidden_states
         if original scale not per-tensor scaling

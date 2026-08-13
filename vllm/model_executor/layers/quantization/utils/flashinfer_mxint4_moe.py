@@ -208,6 +208,8 @@ def flashinfer_trtllm_mxint4_moe(
         ep_rank: Expert parallelism rank (default: 0)
         num_expert_group: Number of expert groups (default: None -> 0)
         topk_group: Top-k within groups (default: None -> 0)
+        routing_replay_out: Optional buffer receiving the routing decisions
+            so they can be replayed later
         e_score_correction_bias: Optional routing bias. dtype: bfloat16
         routing_method_type: FlashInfer RoutingMethodType enum value
 

@@ -130,6 +130,8 @@ def create_minimal_vllm_config(
                     provided
         block_size: KV cache block size
         max_num_seqs: Maximum number of sequences
+        max_num_batched_tokens: Maximum number of batched tokens
+        max_model_len: Maximum model context length
         mla_dims: Optional custom MLA dimensions dict. If not provided, uses
                   setup_mla_dims(model_name)
         index_topk: Optional topk value for sparse MLA backends. If provided,
@@ -137,6 +139,7 @@ def create_minimal_vllm_config(
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4", "flashinfer",
                         "trtllm"). Configures the attention config to force
                         the specified prefill backend.
+        kv_cache_dtype: KV cache dtype, e.g. "auto" or "fp8"
         sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
                     forward_mqa (even prefill tokens).
 
@@ -593,6 +596,7 @@ def _create_backend_impl(
         device: Target device
         max_num_tokens: Maximum number of tokens for sparse indexer buffer
         index_topk: Topk value for sparse MLA backends
+        kv_cache_dtype: KV cache dtype, e.g. "auto" or "fp8"
 
     Returns:
         Tuple of (impl, layer, builder_instance, indexer)
@@ -774,6 +778,7 @@ def _run_single_benchmark(
         mla_dims: MLA dimension configuration
         device: Target device
         indexer: Optional MockIndexer for sparse backends
+        kv_cache_dtype: KV cache dtype. None keeps the backend default.
         output_scale: Static per-tensor FP8 scale for prefill output. None
             keeps the plain bf16 output (no quantization).
         fuse_quant_op: With output_scale set, True lets the prefill kernel write
@@ -1061,6 +1066,10 @@ def _run_mla_benchmark_batched(
         index_topk: Topk value for sparse MLA backends (default 2048)
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
             When set, forces the specified FlashAttention version for prefill.
+        output_scale: Static per-tensor FP8 scale for prefill output. None
+            keeps the plain bf16 output (no quantization).
+        fuse_quant_op: With output_scale set, True lets the prefill kernel write
+            FP8 directly; False runs bf16 attention then a standalone quant.
         sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
             forward_mqa (even prefill tokens).
 

@@ -97,6 +97,12 @@ class AsyncLLM(EngineClient):
             mm_registry: Multi-modal registry.
             log_requests: Whether to log requests.
             start_engine_loop: Whether to start the engine loop.
+            client_addresses: ZMQ addresses of an externally launched engine,
+                when not launching one in-process.
+            client_count: Number of API-server clients sharing the engine.
+            client_index: Index of this client within ``client_count``.
+            aggregate_engine_logging: Whether to aggregate per-engine logs
+                into a single stat logger.
             stat_loggers: customized stat loggers for the engine.
                 If not provided, default stat loggers will be used.
                 PLEASE BE AWARE THAT STAT LOGGER IS NOT STABLE

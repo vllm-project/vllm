@@ -53,6 +53,9 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         """Initialize the example secondary tier.
 
         Args:
+            offloading_spec: The offloading spec this tier belongs to.
+            primary_kv_view: Memoryview over the primary tier's KV buffer.
+            tier_type: Name identifying this tier type.
             custom_param: Dummy parameter demonstrating custom args.
 
         """
