@@ -94,100 +94,97 @@ __global__ void fused_add_rms_norm_static_fp8_quant_kernel(
     const float* __restrict__ scale,      // [1]
     const float epsilon, const int num_tokens, const int hidden_size) {
   if constexpr (width > 0 && _typeConvert<scalar_t>::exists) {
-    // Sanity checks on our vector struct and type-punned pointer arithmetic
-    static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
-    static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
+  // Sanity checks on our vector struct and type-punned pointer arithmetic
+  static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
+  static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
 
-    const int vec_hidden_size = hidden_size / width;
-    const int vec_input_stride = input_stride / width;
-    __shared__ float s_variance;
-    float variance = 0.0f;
-    /* These and the argument pointers are all declared `restrict` as they are
-       not aliased in practice. Argument pointers should not be dereferenced
-       in this kernel as that would be undefined behavior */
-    auto* __restrict__ input_v =
-        reinterpret_cast<_f16Vec<scalar_t, width>*>(input);
-    auto* __restrict__ residual_v =
-        reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
-    auto* __restrict__ weight_v =
-        reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
+  const int vec_hidden_size = hidden_size / width;
+  const int vec_input_stride = input_stride / width;
+  __shared__ float s_variance;
+  float variance = 0.0f;
+  /* These and the argument pointers are all declared `restrict` as they are
+     not aliased in practice. Argument pointers should not be dereferenced
+     in this kernel as that would be undefined behavior */
+  auto* __restrict__ input_v =
+      reinterpret_cast<_f16Vec<scalar_t, width>*>(input);
+  auto* __restrict__ residual_v =
+      reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
+  auto* __restrict__ weight_v =
+      reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
 
-    for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-      int stride_id = blockIdx.x * vec_input_stride + idx;
-      int id = blockIdx.x * vec_hidden_size + idx;
-      _f16Vec<scalar_t, width> temp = input_v[stride_id];
-      temp += residual_v[id];
-      variance += temp.sum_squares();
-      residual_v[id] = temp;
-    }
+  for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
+    int stride_id = blockIdx.x * vec_input_stride + idx;
+    int id = blockIdx.x * vec_hidden_size + idx;
+    _f16Vec<scalar_t, width> temp = input_v[stride_id];
+    temp += residual_v[id];
+    variance += temp.sum_squares();
+    residual_v[id] = temp;
+  }
 
-    using BlockReduce = cub::BlockReduce<float, 1024>;
-    __shared__ typename BlockReduce::TempStorage reduceStore;
-    variance =
-        BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
-    if (threadIdx.x == 0) {
-      s_variance = rsqrtf(variance / hidden_size + epsilon);
-    }
-    __syncthreads();
+  if (threadIdx.x == 0) {
+    s_variance = rsqrtf(variance / hidden_size + epsilon);
+  }
+  __syncthreads();
 
-    // invert scale to avoid division
-    float const scale_inv = 1.0f / *scale;
+  // invert scale to avoid division
+  float const scale_inv = 1.0f / *scale;
 
-    for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-      int id = blockIdx.x * vec_hidden_size + idx;
-      _f16Vec<scalar_t, width> res = residual_v[id];
-      _f16Vec<scalar_t, width> w = weight_v[idx];
-      using Converter = _typeConvert<scalar_t>;
-      using HipT = typename Converter::hip_type;
+  for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
+    int id = blockIdx.x * vec_hidden_size + idx;
+    _f16Vec<scalar_t, width> res = residual_v[id];
+    _f16Vec<scalar_t, width> w = weight_v[idx];
+    using Converter = _typeConvert<scalar_t>;
+    using HipT = typename Converter::hip_type;
 #pragma unroll
-      for (int i = 0; i < width; ++i) {
-        float x = Converter::convert(res.data[i]);
-        float wf = Converter::convert(w.data[i]);
-        // See note in rms_norm_static_fp8_quant_kernel: round through scalar_t
-        // to match the unfused composite path at FP8 boundaries. We use the
-        // backend's hip_type for the intermediate since c10::Half/BFloat16 has
-        // ambiguous conversions on CUDA and no implicit conversion on ROCm.
-        HipT out_norm_h = Converter::convert(x * s_variance * wf);
-        out[id * width + i] = scaled_fp8_conversion<true, fp8_type>(
-            Converter::convert(out_norm_h), scale_inv);
-      }
-    }
-  } else {
-    __shared__ float s_variance;
-    float variance = 0.0f;
-
-    for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-      scalar_t z = input[blockIdx.x * input_stride + idx];
-      z += residual[blockIdx.x * hidden_size + idx];
-      float x = (float)z;
-      variance += x * x;
-      residual[blockIdx.x * hidden_size + idx] = z;
-    }
-
-    using BlockReduce = cub::BlockReduce<float, 1024>;
-    __shared__ typename BlockReduce::TempStorage reduceStore;
-    variance =
-        BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
-
-    if (threadIdx.x == 0) {
-      s_variance = rsqrtf(variance / hidden_size + epsilon);
-    }
-    __syncthreads();
-
-    // invert scale to avoid division
-    float const scale_inv = 1.0f / *scale;
-
-    for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-      float x = (float)residual[blockIdx.x * hidden_size + idx];
-      float w = (float)weight[idx];
+    for (int i = 0; i < width; ++i) {
+      float x = Converter::convert(res.data[i]);
+      float wf = Converter::convert(w.data[i]);
       // See note in rms_norm_static_fp8_quant_kernel: round through scalar_t
-      // to match the unfused composite path at FP8 boundaries.
-      scalar_t out_norm = static_cast<scalar_t>(x * s_variance * w);
-      out[blockIdx.x * hidden_size + idx] =
-          scaled_fp8_conversion<true, fp8_type>(static_cast<float>(out_norm),
-                                                scale_inv);
+      // to match the unfused composite path at FP8 boundaries. We use the
+      // backend's hip_type for the intermediate since c10::Half/BFloat16 has
+      // ambiguous conversions on CUDA and no implicit conversion on ROCm.
+      HipT out_norm_h = Converter::convert(x * s_variance * wf);
+      out[id * width + i] = scaled_fp8_conversion<true, fp8_type>(
+          Converter::convert(out_norm_h), scale_inv);
     }
+  }
+  } else {
+  __shared__ float s_variance;
+  float variance = 0.0f;
+
+  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    scalar_t z = input[blockIdx.x * input_stride + idx];
+    z += residual[blockIdx.x * hidden_size + idx];
+    float x = (float)z;
+    variance += x * x;
+    residual[blockIdx.x * hidden_size + idx] = z;
+  }
+
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
+
+  if (threadIdx.x == 0) {
+    s_variance = rsqrtf(variance / hidden_size + epsilon);
+  }
+  __syncthreads();
+
+  // invert scale to avoid division
+  float const scale_inv = 1.0f / *scale;
+
+  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    float x = (float)residual[blockIdx.x * hidden_size + idx];
+    float w = (float)weight[idx];
+    // See note in rms_norm_static_fp8_quant_kernel: round through scalar_t
+    // to match the unfused composite path at FP8 boundaries.
+    scalar_t out_norm = static_cast<scalar_t>(x * s_variance * w);
+    out[blockIdx.x * hidden_size + idx] = scaled_fp8_conversion<true, fp8_type>(
+        static_cast<float>(out_norm), scale_inv);
+  }
   }
 }
 
