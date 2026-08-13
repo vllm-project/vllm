@@ -18,7 +18,9 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 
 # Export Python path
+# Remove VLLM_DISABLE_COMPILE_CACHE=1 once intel/intel-xpu-backend-for-triton#7682 is fixed
 export PYTHONPATH=".."
+export VLLM_DISABLE_COMPILE_CACHE=1
 
 ###############################################################################
 # Helper Functions
@@ -243,8 +245,10 @@ container_name="xpu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head
 
 # ---- Command source selection ----
 commands=""
+commands_source=""
 if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
   commands="${VLLM_TEST_COMMANDS}"
+  commands_source="env"
   echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
 elif [[ $# -gt 0 ]]; then
   all_yaml=true
@@ -303,8 +307,12 @@ if [[ -z "$commands" ]]; then
 fi
 
 echo "Raw commands: $commands"
-commands=$(re_quote_pytest_markers "$commands")
-echo "After re-quoting: $commands"
+if [[ "$commands_source" != "env" ]]; then
+  commands=$(re_quote_pytest_markers "$commands")
+  echo "After re-quoting: $commands"
+else
+  echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
+fi
 commands=$(apply_intel_test_overrides "$commands")
 echo "Final commands: $commands"
 
@@ -336,7 +344,7 @@ if [[ -z "${ZE_AFFINITY_MASK:-}" ]]; then
 fi
 
 export CMDS="${commands}"
-export HF_TOKEN ZE_AFFINITY_MASK
+export HF_TOKEN ZE_AFFINITY_MASK VLLM_DISABLE_COMPILE_CACHE
 
 {
   flock 9
@@ -354,10 +362,11 @@ export HF_TOKEN ZE_AFFINITY_MASK
     --ipc=host \
     --privileged \
     -v /dev/dri/by-path:/dev/dri/by-path \
-    -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
+    -v "/data/huggingface:/root/.cache/huggingface" \
     --entrypoint='' \
     -e HF_TOKEN \
     -e ZE_AFFINITY_MASK \
+    -e VLLM_DISABLE_COMPILE_CACHE \
     -e BUILDKITE_PARALLEL_JOB \
     -e BUILDKITE_PARALLEL_JOB_COUNT \
     -e CMDS \

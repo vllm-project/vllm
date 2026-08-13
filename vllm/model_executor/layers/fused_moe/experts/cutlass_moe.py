@@ -8,8 +8,10 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
     MoEActivation,
     apply_moe_activation,
+    apply_moe_activation_supported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -76,6 +78,8 @@ def run_cutlass_moe_fp8(
     use_batched_format: bool,
     topk_weights: torch.Tensor | None,
     permute_scratch: MoEPermuteScratch | None,
+    *,
+    activation_config: ApplyMoEActivationConfig | None = None,
 ):
     a1q = hidden_states
 
@@ -231,7 +235,12 @@ def run_cutlass_moe_fp8(
         per_out_ch,
     )
 
-    apply_moe_activation(activation, act_out, mm1_out)
+    apply_moe_activation(
+        activation,
+        act_out,
+        mm1_out,
+        activation_config=activation_config,
+    )
 
     a2q, a2q_scale = ops.scaled_fp8_quant(
         act_out, a2_scale, use_per_token_if_dynamic=per_act_token, output=quant_out
@@ -319,12 +328,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SWIGLUOAI,
-        ]
+        return activation.is_gated and apply_moe_activation_supported(activation)
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
@@ -397,6 +401,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
             use_batched_format,
             topk_weights,
             self._get_permute_scratch(),
+            activation_config=self.activation_config,
         )
 
 
@@ -512,6 +517,8 @@ def run_cutlass_moe_fp4(
     e: int,
     device: torch.device,
     apply_router_weight_on_input: bool = False,
+    *,
+    activation_config: ApplyMoEActivationConfig | None = None,
 ) -> None:
     """
     MoE implementation for FP4 Inputs
@@ -633,7 +640,9 @@ def run_cutlass_moe_fp4(
         blockscale_offsets[:-1],
     )
     del rep_a_fp4, rep_a_blockscale
-    if activation == MoEActivation.SILU:
+    if activation == MoEActivation.SILU and (
+        activation_config is None or activation_config.clamp_limit is None
+    ):
         # Fused SiLU+Mul+NVFP4 quantization
         # Note: c2 workspace is no longer needed since SiLU is fused with quantization.
         # c3 reuses workspace13 after c1 is consumed.
@@ -641,7 +650,12 @@ def run_cutlass_moe_fp4(
             c1, a2_gscale, expert_offsets, blockscale_offsets, num_topk
         )
     else:
-        apply_moe_activation(activation, c2, c1)
+        apply_moe_activation(
+            activation,
+            c2,
+            c1,
+            activation_config=activation_config,
+        )
         int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
             c2, a2_gscale, expert_offsets, blockscale_offsets, num_topk
         )
@@ -716,23 +730,17 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         # fallback + separate fp4 quantization in run_cutlass_moe_fp4().
         # Non-gated activations (_NO_MUL) are also supported for models
         # like Nemotron-Nano that don't use gated MLP.
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUSTEP,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.GELU_TANH_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
+        return apply_moe_activation_supported(activation)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         # CutlassExpertsFp4 does not support expert map, which is
         # needed for STANDARD activation format kernels in EP mode.
         return moe_parallel_config.ep_size == 1
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        return True
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -803,6 +811,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
             e=e,
             device=hidden_states.device,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            activation_config=self.activation_config,
         )
 
 
@@ -824,6 +833,8 @@ def run_cutlass_moe_mxfp4(
     e: int,
     device: torch.device,
     apply_router_weight_on_input: bool = False,
+    *,
+    activation_config: ApplyMoEActivationConfig | None = None,
 ) -> None:
     """MXFP4 x MXFP4 MoE implementation using CUTLASS grouped GEMM."""
     is_gated = activation.is_gated
@@ -905,12 +916,19 @@ def run_cutlass_moe_mxfp4(
         blockscale_offsets[:-1],
     )
     del rep_a_fp4, rep_a_blockscale
-    if activation == MoEActivation.SILU:
+    if activation == MoEActivation.SILU and (
+        activation_config is None or activation_config.clamp_limit is None
+    ):
         int_fp4, int_blockscale = ops.silu_and_mul_mxfp4_experts_quant(
             c1, expert_offsets, blockscale_offsets, e, num_topk
         )
     else:
-        apply_moe_activation(activation, c2, c1)
+        apply_moe_activation(
+            activation,
+            c2,
+            c1,
+            activation_config=activation_config,
+        )
         int_fp4, int_blockscale = ops.mxfp4_experts_quant(
             c2, expert_offsets, blockscale_offsets, e, num_topk
         )
@@ -997,7 +1015,12 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
-        return p.is_cuda() and p.is_device_capability_family(100)
+        capability = p.get_device_capability()
+        return (
+            p.is_cuda()
+            and capability is not None
+            and ops.mxfp4_experts_quant_supported(capability.to_int())
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -1012,15 +1035,7 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUSTEP,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
+        return apply_moe_activation_supported(activation)
 
     @staticmethod
     def _supports_parallel_config(
@@ -1093,6 +1108,7 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
             e=e,
             device=hidden_states.device,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            activation_config=self.activation_config,
         )
 
 
@@ -1130,6 +1146,8 @@ def run_cutlass_moe_w4a8_fp8(
     topk_weights: torch.Tensor | None,
     group_size: int,
     permute_scratch: MoEPermuteScratch | None,
+    *,
+    activation_config: ApplyMoEActivationConfig | None = None,
 ):
     a1q = hidden_states
     M = a1q.size(0)
@@ -1209,7 +1227,12 @@ def run_cutlass_moe_w4a8_fp8(
         s_strides1,
     )
 
-    apply_moe_activation(activation, act_out, mm1_out)
+    apply_moe_activation(
+        activation,
+        act_out,
+        mm1_out,
+        activation_config=activation_config,
+    )
 
     a2q, a2q_scale = ops.scaled_fp8_quant(
         act_out, a2_scale, use_per_token_if_dynamic=per_act_token, output=quant_out
@@ -1321,11 +1344,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.SWIGLUOAI,
-        )
+        return activation.is_gated and apply_moe_activation_supported(activation)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -1429,4 +1448,5 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
             topk_weights,
             self.group_size,
             self._get_permute_scratch(),
+            activation_config=self.activation_config,
         )

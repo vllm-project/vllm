@@ -2,6 +2,8 @@
 
 The [CUDA Graphs](cuda_graphs.md) infrastructure in vLLM primarily targets the **decoder** (language model) forward pass. vLLM also supports capturing the **encoder** (vision transformer) forward pass as CUDA Graphs, independently from the decoder. This is based on <https://github.com/vllm-project/vllm/pull/35963>.
 
+For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tiling), a **dual-path graph** mode captures two independent sets of CUDA graphs — one for the global image path and one for the local patch path — enabling independent budget selection and partial eager fallback per path. This is based on <https://github.com/vllm-project/vllm/pull/43586>.
+
 !!! note
     Encoder CUDA Graphs are orthogonal to decoder CUDA Graphs — both can be enabled simultaneously. Encoder graphs capture the vision encoder execution (e.g., ViT in Qwen3-VL), while decoder graphs capture the language model execution as described in the [CUDA Graphs design document](cuda_graphs.md).
 
@@ -10,6 +12,8 @@ The [CUDA Graphs](cuda_graphs.md) infrastructure in vLLM primarily targets the *
 Vision encoder inference incurs CUDA kernel launch overhead on the host side. The overhead is more significant when the batch size is small or image size is small.
 
 Encoder CUDA Graphs eliminate this overhead by pre-capturing the full encoder forward pass at multiple token budget levels during model initialization, then replaying the appropriate graph at runtime.
+
+For two-tower vision encoders such as DeepSeek-OCR (SAM + CLIP with dynamic tiling), the global image path and local patch path have independent token profiles (272 tokens per global image vs. 100 tokens per local patch). Capturing a single monolithic graph for both paths would significantly reduce packing efficiency. The dual-path graph mode captures each path as a separate set of budgets, allowing the manager to pack and replay each path independently.
 
 ## Design
 
@@ -37,9 +41,13 @@ class BudgetGraphMetadata:
 
 Budgets are auto-generated as power-of-2 levels from a model-provided range via `get_encoder_cudagraph_budget_range()`, with the maximum budget always included even if it does not fall on a power-of-2 boundary. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`.
 
+Each entry in `EncoderCudaGraphConfig.paths` defines an independently captured encoder path. A path can provide its own minimum token budget and opt into zero-token batches; the manager generates and stores a separate budget graph set for every configured path.
+
 ### Greedy bin-packing at runtime
 
 When a batch of images arrives, the manager sorts images by output token count (smallest first) and greedily packs as many images as possible into each sub-batch while staying within the **largest** token budget and the maximum batch size. Once a sub-batch is finalized (the next image would overflow either constraint), the manager finds the **smallest** budget that fits the sub-batch's total tokens and replays the corresponding CUDA Graph. This repeats until the batch is exhausted. Images that exceed all budgets fall back to eager execution.
+
+For multi-path models, the same greedy packing loop constrains every configured path simultaneously (see [Multi-Path graph capture](#multi-path-graph-capture)).
 
 For each graph replay:
 
@@ -47,6 +55,33 @@ For each graph replay:
 2. Zero the pre-allocated `input_buffers`, then slice-copy the replay values into them.
 3. Replay the CUDA Graph.
 4. Clone outputs from `output_buffer` (cloning is necessary since the buffer is reused across replays).
+
+### Multi-Path graph capture
+
+`EncoderCudaGraphConfig.paths` maps path names to `EncoderCudaGraphPathConfig` capture policies. For example, DeepSeek-OCR configures a **global** image path and a **local** patch path, which are captured independently under `budget_graphs["global"]` and `budget_graphs["local"]`.
+
+**Budget generation.** Each path gets a separate budget list. For DeepSeek-OCR:
+
+* the `global` path — power-of-2 budgets starting at the global path minimum (e.g., `[272, 544, 1088, 2176, 4352, 8704, 13824]` for DeepSeek-OCR).
+* the `local` path — power-of-2 budgets starting at the local path minimum (e.g., `[0, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 13824]` for DeepSeek-OCR). A budget of `0` is included when `allow_zero_tokens=True` to handle images with no local patches (images ≤ 640×640 that produce only global features).
+
+Both lists are capped at the same `max_budget`.
+
+**Multi-path greedy packing.** Each `EncoderItemSpec` provides `path_output_tokens`, mapping each path to its contribution for that item. The packing algorithm constrains every path simultaneously:
+
+* Sort images by total output tokens (global + local), smallest first.
+* Greedily pack images: an image is added to the current sub-batch only if every accumulated path token count is within that path's maximum budget, with the image count ≤ `max_batch_size`.
+* Once any path constraint would overflow, finalize the sub-batch and find the smallest fitting budget **independently** for each path.
+* Repeat until all images are packed.
+
+**Partial graph fallback.** For each non-empty path, the manager replays the smallest fitting graph or runs only that path eagerly when no graph fits. Paths with zero tokens are skipped; a `0`-budget graph is never captured or replayed.
+
+**Buffer keys per path.** Global and local paths use different buffer keys. For DeepSeek-OCR, the global path uses `pixel_values` (full images, shape `[B, 3, 1280, 1280]`) while the local path uses `images_crop` (patches, shape `[P, 3, 1024, 1024]`). The manager iterates over each captured graph's own `input_buffers.keys()` rather than a shared `buffer_keys` list, so both paths can use different buffers.
+
+**Post-processing.** The `postprocess_encoder_output` method receives an `outputs` dictionary keyed by path name. The model is responsible for assembling global and local features into the final per-image embedding. For DeepSeek-OCR, it reshapes the global output into `[B, 272, n_embed]`, reshapes the local output into `[P, 100, n_embed]`, assembles patch grids with newline tokens, and concatenating `[patches_grid, global, view_separator]` for each image.
+
+!!! note
+    The dual-path design enables partial CUDA graph coverage — one path can hit while the other falls back to eager. This avoids wasted compute on zero-padded patch buffers for untiled images and avoids graph invalidation caused by variable `crop_shape` per image.
 
 ### Data-parallel support
 
@@ -57,7 +92,7 @@ When `mm_encoder_tp_mode="data"`, the manager distributes images across TP ranks
 Following <https://github.com/vllm-project/vllm/pull/35963> (ViT full CUDA graph support for image inference), <https://github.com/vllm-project/vllm/pull/38061> extends the encoder CUDA graph framework to support video inference for Qwen3-VL. Previously, the CUDA graph capture/replay path only handled image inputs (`pixel_values` + `image_grid_thw`). Video inputs use different keys (`pixel_values_videos` + `video_grid_thw`) and require larger `cu_seqlens` buffers because each video item contributes multiple frames (`T` attention sequences). This PR generalizes the protocol and manager to handle both modalities through a single shared graph manager.
 
 !!! note
-    Video CUDA graphs are automatically disabled when EVS (Efficient Video Sampling) pruning is enabled, since EVS makes the token count data-dependent and incompatible with CUDA graph capture.
+    Video CUDA graphs are automatically disabled when video token pruning (EVS or VidCom2) is enabled, since pruning makes the token count data-dependent and incompatible with CUDA graph capture.
 
     Mixed inputs (image+video) per prompt are also supported now.
 
@@ -67,29 +102,35 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 
 * `get_encoder_cudagraph_config()` — returns static configuration (supported modalities, buffer keys, output hidden size, padding logics, max frames per video).
 * `get_encoder_cudagraph_budget_range(vllm_config)` — returns `(min_budget, max_budget)` for auto-inference of token budgets.
-* `get_encoder_cudagraph_item_specs(mm_kwargs)` — returns `list[EncoderItemSpec]` describing each item with its input size and output token count. Replaces the former three separate methods (`get_num_items`, `get_per_item_output_tokens`, `get_per_item_input_sizes`).
+* `get_encoder_cudagraph_item_specs(mm_kwargs)` — returns `list[EncoderItemSpec]` describing each item with its input size, total output token count (`output_tokens`), and per-path token counts (`path_output_tokens`) for multi-path models.
 * `select_encoder_cudagraph_items(mm_kwargs, indices)` — extracts a sub-batch of items by index, used during greedy packing and DP sharding.
-* `prepare_encoder_cudagraph_capture_inputs(...)` — creates dummy inputs for graph capture. Returns `EncoderCudaGraphCaptureInputs` with a single `values: dict[str, torch.Tensor]` that contains all buffers to be recorded into the graph.
-* `prepare_encoder_cudagraph_replay_buffers(mm_kwargs, max_batch_size, max_frames_per_batch)` — computes buffer values from actual batch inputs. Returns `EncoderCudaGraphReplayBuffers` with a `values` dict whose keys match `buffer_keys` in the config.
-* `encoder_cudagraph_forward(inputs: dict[str, torch.Tensor])` — forward pass accepting only fixed-shaped input tensors (the captured `values` dict). Called during both capture and replay. The `pixel_values` tensor is included in `inputs` alongside metadata buffers.
-* `encoder_eager_forward(mm_kwargs)` — fallback eager forward when no graph fits.
-* `postprocess_encoder_output(...)` — post-process encoder output, delegates to `scatter_output_slices` by default.
+* `prepare_encoder_cudagraph_capture_inputs(..., path="default")` — creates dummy inputs for graph capture. The `path` parameter (`"global"` or `"local"`) tells the model which path to generate dummy inputs for. Returns `EncoderCudaGraphCaptureInputs` with a single `values: dict[str, torch.Tensor]` that contains all buffers to be recorded into the graph.
+* `prepare_encoder_cudagraph_replay_buffers(mm_kwargs, max_batch_size, max_frames_per_batch, path="default")` — computes buffer values from actual batch inputs. The `path` parameter selects which modality keys to extract from `mm_kwargs`. Returns `EncoderCudaGraphReplayBuffers` with a `values` dict whose keys match the captured graph's `input_buffers.keys()`.
+* `encoder_cudagraph_forward(inputs: dict[str, torch.Tensor], path="default")` — forward pass accepting only fixed-shaped input tensors (the captured `values` dict). Called during both capture and replay. The `path` parameter dispatches to the correct encoder sub-module (e.g., global vs. local path for DeepSeek-OCR).
+* `encoder_eager_forward(mm_kwargs, path="default")` — fallback eager forward when no graph fits. When `path` is `"global"` or `"local"`, runs only that encoder path without graph capture.
+* `postprocess_encoder_output(outputs, ...)` — post-process encoder outputs keyed by path name, enabling multi-path models to assemble their path-specific features into the final per-item embedding.
 
 !!! note
     The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
 
 **Supported models:**
 
-| Architecture | Models | CG for Image | CG for Video |
-| ------------ | ------ | ------------ | ------------ |
-| `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | - |
-| `InternVLChatModel` | `InternVL3.5`, `InternVL3`, `InternVL2.5`, `InternVL2` | ✅︎ | ✅︎ |
-| `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ |
-| `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ |
-| `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ |
-| `Qwen3_5ForConditionalGeneration` | `Qwen3.5` | ✅︎ | ✅︎ |
-| `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ |
-| `Glm4vForConditionalGeneration` | `GLM-4.1V, GLM-4.6V-Flash` | ✅︎ | ✅︎ |
+| Architecture | Models | CG for Image | CG for Video | Dual-Path Graph |
+| ------------ | ------ | ------------ | ------------ | --------------- |
+| `DeepseekOCRForCausalLM` | `DeepSeek-OCR` | ✅︎ | ❌︎ | ✅︎ |
+| `Ernie4_5_VLMoeForConditionalGeneration` | `ERNIE-4.5-VL` | ✅︎ | ❌︎ | ❌︎ |
+| `Gemma3ForConditionalGeneration` | `Gemma3` | ✅︎ | ❌︎ | ❌︎ |
+| `Glm4vForConditionalGeneration` | `GLM-4.1V, GLM-4.6V-Flash` | ✅︎ | ✅︎ | ❌︎ |
+| `Gemma4ForConditionalGeneration` | `Gemma-4` | ✅︎ | ✅︎ | ❌︎ |
+| `InternVLChatModel` | `InternVL3.5`, `InternVL3`, `InternVL2.5`, `InternVL2` | ✅︎ | ✅︎ | ❌︎ |
+| `KimiVLForConditionalGeneration` | `Kimi-VL` | ✅︎ | ❌︎ | ❌︎ |
+| `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
+| `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ | ❌︎ |
+| `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ | ❌︎ |
+| `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ | ❌︎ |
+| `Qwen3_5ForConditionalGeneration` | `Qwen3.5`, `Qwen3.6` | ✅︎ | ✅︎ | ❌︎ |
+| `Qwen3_5MoeForConditionalGeneration` | `Qwen3.5-MoE`, `Qwen3.6-MoE` | ✅︎ | ✅︎ | ❌︎ |
+| `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ | ✅︎ |
 
 !!! note
     Encoder CUDA Graphs have currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
@@ -97,12 +138,14 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 
 ## Configuration
 
-Three fields in `CompilationConfig` control encoder CUDA Graphs:
+Four fields in `CompilationConfig` control encoder CUDA Graphs:
 
 * `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
 * `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture as power-of-2 levels. User-provided values override auto-inference.
 * `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`.
 * `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value from `EncoderCudaGraphConfig`, computed by `get_max_frames_per_video()` on the model). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
+
+Multi-path mode is configured at the model level through `EncoderCudaGraphConfig.paths`. Each `EncoderCudaGraphPathConfig` can set a path-specific minimum budget and whether zero-token batches are allowed. The manager automatically generates separate budget lists and uses the same execution loop for single- and multi-path models.
 
 ## Usage guide
 

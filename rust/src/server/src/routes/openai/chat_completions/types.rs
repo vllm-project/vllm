@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 use std::fmt;
 
@@ -6,12 +9,13 @@ use serde_json::Value;
 use serde_with::SerializeDisplay;
 use validator::Validate;
 use vllm_chat::ReasoningEffort;
+use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, ChatMessage, Normalizable, StreamOptions, StringOrArray, Tool, ToolCall,
-    ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, UNKNOWN_MODEL_ID, Usage,
-    default_true, validate_messages, validate_stop, validate_top_p_value,
+    ToolCallDelta, ToolChoice, UNKNOWN_MODEL_ID, Usage, default_true, validate_messages,
+    validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -165,8 +169,10 @@ pub struct ChatCompletionRequest {
     pub bad_words: Option<Vec<String>>,
 
     // -------- Extra vLLM Parameters --------
-    /// Token budget for reasoning/thinking
-    pub thinking_token_budget: Option<u32>,
+    /// Token budget for reasoning/thinking. Accepts a non-negative integer, or
+    /// `-1` for unlimited (mirroring the Python frontend, which normalizes `-1`
+    /// to "no budget").
+    pub thinking_token_budget: Option<i64>,
 
     /// Whether to include reasoning content in the response
     #[serde(default = "default_true")]
@@ -216,6 +222,9 @@ pub struct ChatCompletionRequest {
     /// External request ID used for response correlation.
     pub request_id: Option<String>,
 
+    /// Stable session identity shared by related requests.
+    pub session_id: Option<String>,
+
     /// Tokens represented as strings of the form 'token_id:{token_id}' in
     /// logprobs
     pub return_tokens_as_token_ids: Option<bool>,
@@ -229,12 +238,15 @@ pub struct ChatCompletionRequest {
     /// KV transfer parameters for disaggregated serving
     pub kv_transfer_params: Option<HashMap<String, Value>>,
 
+    /// Encoder cache transfer parameters for disaggregated serving
+    pub ec_transfer_params: Option<HashMap<String, Value>>,
+
     /// Additional request parameters with string or numeric values for custom
     /// extensions
     pub vllm_xargs: Option<HashMap<String, Value>>,
 
     /// Parameters for detecting repetitive N-gram patterns in output tokens
-    pub repetition_detection: Option<Value>,
+    pub repetition_detection: Option<RepetitionDetectionParams>,
 }
 
 impl Default for ChatCompletionRequest {
@@ -292,10 +304,12 @@ impl Default for ChatCompletionRequest {
             structured_outputs: None,
             priority: None,
             request_id: None,
+            session_id: None,
             return_tokens_as_token_ids: None,
             return_token_ids: None,
             cache_salt: None,
             kv_transfer_params: None,
+            ec_transfer_params: None,
             vllm_xargs: None,
             repetition_detection: None,
         }
@@ -311,24 +325,13 @@ impl Normalizable for ChatCompletionRequest {
             self.max_completion_tokens = self.max_tokens;
             self.max_tokens = None;
         }
-
-        // Apply tool_choice defaults
-        // If tools is None, leave tool_choice as None (don't set it)
-        if self.tool_choice.is_none()
-            && let Some(tools) = &self.tools
-        {
-            let choice_value = if tools.is_empty() {
-                ToolChoiceValue::None
-            } else {
-                ToolChoiceValue::Auto
-            };
-            self.tool_choice = Some(ToolChoice::Value(choice_value));
-        }
     }
 }
 
 /// Mirrors the Python vLLM `ChatCompletionResponse` class.
-#[serde_with::skip_serializing_none]
+///
+/// Do not skip serializing `None` fields here: non-streaming response types
+/// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionResponse {
     pub id: String,
@@ -341,10 +344,10 @@ pub(super) struct ChatCompletionResponse {
     pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub kv_transfer_params: Option<Value>,
+    pub ec_transfer_params: Option<Value>,
 }
 
 /// Mirrors the Python vLLM `ChatCompletionResponseChoice` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionChoice {
     pub index: u32,
@@ -367,12 +370,12 @@ impl fmt::Display for AssistantRole {
 }
 
 /// Mirrors the Python vLLM response `ChatMessage` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionMessage {
     pub role: AssistantRole,
     pub content: Option<String>,
-    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
     pub reasoning: Option<String>,
 }
 
@@ -474,100 +477,6 @@ fn validate_chat_cross_parameters(
         let mut e = validator::ValidationError::new("json_schema_name_empty");
         e.message = Some("JSON schema name cannot be empty".into());
         return Err(e);
-    }
-
-    // 5. Validate tool_choice requires tools (except for "none")
-    if let Some(ref tool_choice) = req.tool_choice {
-        let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
-
-        // Check if tool_choice is anything other than "none"
-        let is_some_choice = !matches!(tool_choice, ToolChoice::Value(ToolChoiceValue::None));
-
-        if is_some_choice && !has_tools {
-            let mut e = validator::ValidationError::new("tool_choice_requires_tools");
-            e.message = Some("Invalid value for 'tool_choice': 'tool_choice' is only allowed when 'tools' are specified.".into());
-            return Err(e);
-        }
-
-        // Additional validation when tools are present
-        if let Some(tools) = req.tools.as_ref().filter(|t| !t.is_empty()) {
-            match tool_choice {
-                ToolChoice::Function { function, .. } => {
-                    // Validate that the specified function name exists in tools
-                    let function_exists = tools.iter().any(|tool| {
-                        tool.tool_type == "function" && tool.function.name == function.name
-                    });
-
-                    if !function_exists {
-                        let mut e =
-                            validator::ValidationError::new("tool_choice_function_not_found");
-                        e.message = Some(
-                            format!(
-                            "Invalid value for 'tool_choice': function '{}' not found in 'tools'.",
-                            function.name
-                        )
-                            .into(),
-                        );
-                        return Err(e);
-                    }
-                }
-                ToolChoice::AllowedTools {
-                    mode,
-                    tools: allowed_tools,
-                    ..
-                } => {
-                    // Validate mode is "auto" or "required"
-                    if mode != "auto" && mode != "required" {
-                        let mut e = validator::ValidationError::new("tool_choice_invalid_mode");
-                        e.message = Some(format!(
-                            "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{mode}'."
-                        ).into());
-                        return Err(e);
-                    }
-
-                    // Validate that all ToolReferences are Function type (Chat API only supports
-                    // function tools)
-                    for tool_ref in allowed_tools {
-                        match tool_ref {
-                            ToolReference::Function { name } => {
-                                // Validate that the function exists in tools array
-                                let tool_exists = tools.iter().any(|tool| {
-                                    tool.tool_type == "function" && tool.function.name == *name
-                                });
-
-                                if !tool_exists {
-                                    let mut e = validator::ValidationError::new(
-                                        "tool_choice_tool_not_found",
-                                    );
-                                    e.message = Some(
-                                        format!(
-                                            "Invalid value for 'tool_choice.tools': tool '{name}' not found in 'tools'."
-                                        )
-                                        .into(),
-                                    );
-                                    return Err(e);
-                                }
-                            }
-                            _ => {
-                                // Chat Completion API only supports function tools in tool_choice
-                                let mut e = validator::ValidationError::new(
-                                    "tool_choice_invalid_tool_type",
-                                );
-                                e.message = Some(
-                                    format!(
-                                        "Invalid value for 'tool_choice.tools': Chat Completion API only supports function tools, got '{}'.",
-                                        tool_ref.identifier()
-                                    )
-                                    .into(),
-                                );
-                                return Err(e);
-                            }
-                        }
-                    }
-                }
-                ToolChoice::Value(_) => {}
-            }
-        }
     }
 
     Ok(())

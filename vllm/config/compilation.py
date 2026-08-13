@@ -146,10 +146,16 @@ class PassConfig:
     """Fuse paired q/kv RMS norms in MLA attention."""
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the QK rope + KV cache ops."""
+    fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
+    """Fuse QK RMSNorm + RoPE + KV cache update into a single AITER HIP
+    kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
+    for layers that support it. Auto-enabled at O1+ on ROCm for models
+    with QK-norm (e.g. Qwen3-MoE)."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
+    Also applies to the fused QK-Norm+RoPE+KVCache pass.
     """
 
     fi_allreduce_fusion_max_size_mb: float | None = None
@@ -186,7 +192,7 @@ class PassConfig:
         """
 
         MiB = 1024 * 1024
-        FI_SUPPORTED_WORLD_SIZES = [2, 4, 8]
+        FI_SUPPORTED_WORLD_SIZES = [2, 4, 8, 16]
         if world_size not in FI_SUPPORTED_WORLD_SIZES:
             return None
         max_size_mb = self.fi_allreduce_fusion_max_size_mb
@@ -228,6 +234,8 @@ class PassConfig:
         "fuse_act_padding",
         "fuse_mla_dual_rms_norm",
         "fuse_rope_kvcache",
+        "fuse_qk_norm_rope_kvcache",
+        "enable_qk_norm_rope_fusion",
         "fuse_rope_kvcache_cat_mla",
         mode="wrap",
     )
@@ -262,10 +270,12 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + padding fusion might not work"
                 )
-        if self.enable_qk_norm_rope_fusion and not current_platform.is_cuda_alike():
+        if self.enable_qk_norm_rope_fusion and not (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
             logger.warning_once(
                 "QK Norm + RoPE fusion enabled but the current platform is not "
-                "CUDA or ROCm. The fusion will be disabled."
+                "CUDA, ROCm or XPU. The fusion will be disabled."
             )
             self.enable_qk_norm_rope_fusion = False
         if self.fuse_act_padding and not current_platform.is_rocm():
@@ -286,6 +296,12 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
+        if self.fuse_qk_norm_rope_kvcache and not current_platform.is_rocm():
+            logger.warning_once(
+                "QK-Norm+RoPE+KVCache fusion requires ROCm with AITER. "
+                "The fusion will be disabled."
+            )
+            self.fuse_qk_norm_rope_kvcache = False
         if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "
@@ -300,10 +316,13 @@ class PassConfig:
         after all defaults are finalized.
         TODO also log the compile ranges for which this is enabled.
         """
+        fusion_prefixes = ("fuse_", "enable_")
         enabled_fusions = [
-            f.name[len("fuse_") :]
+            f.name[len(prefix) :]
             for f in fields(self)  # type: ignore[arg-type]
-            if getattr(self, f.name) and f.name.startswith("fuse_")
+            if getattr(self, f.name)
+            for prefix in fusion_prefixes
+            if f.name.startswith(prefix)
         ]
 
         if enabled_fusions:
@@ -681,10 +700,10 @@ class CompilationConfig:
         [1, 2, 4] + list(range(8, 256, 8)) + list(
         range(256, max_cudagraph_capture_size + 1, 16))
 
-    If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
-    512) by default. This voids OOM in tight memory scenarios with small
-    max_num_seqs, and prevents capture of many large graphs (>512) that would
-    greatly increase startup time with limited performance benefit.
+    If not specified, max_cudagraph_capture_size is capped at 512 by default,
+    or 1024 on data center Blackwell GPUs. This avoids OOM in tight memory
+    scenarios with small max_num_seqs, and limits capture of large graphs that
+    increase startup time and memory usage.
     """
 
     dynamic_shapes_config: DynamicShapesConfig = field(
@@ -749,14 +768,13 @@ class CompilationConfig:
         "vllm::mamba_mixer",
         "vllm::short_conv",
         "vllm::linear_attention",
-        "vllm::plamo2_mamba_mixer",
         "vllm::qwen_gdn_attention_core",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
-        "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",
+        "vllm::hpc_rope_norm_forward",
     ]
 
     def compute_hash(self) -> str:
@@ -885,10 +903,6 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
-        count_none = self.custom_ops.count("none")
-        count_all = self.custom_ops.count("all")
-        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
-
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
         #    https://github.com/pytorch/pytorch/issues/147924
@@ -944,12 +958,19 @@ class CompilationConfig:
             # TODO(zhuhaoran): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
+
         if (
             self.pass_config.fuse_rope_kvcache
             and "+rotary_embedding" not in self.custom_ops
         ):
             # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
+
+        if (
+            self.pass_config.fuse_qk_norm_rope_kvcache
+            and "+rotary_embedding" not in self.custom_ops
+        ):
             self.custom_ops.append("+rotary_embedding")
 
         if (
@@ -974,12 +995,27 @@ class CompilationConfig:
             )
 
         for op in self.custom_ops:
-            if op[0] not in {"+", "-"} and op not in {"all", "none"}:
+            if op not in {"all", "none"} and (len(op) < 2 or op[0] not in {"+", "-"}):
                 raise ValueError(
                     f"Invalid syntax '{op}' for custom op, "
                     "must be 'all', 'none', '+op' or '-op' "
                     "(where 'op' is the registered op name)"
                 )
+
+        base_modes = [op for op in self.custom_ops if op in {"all", "none"}]
+        if len(base_modes) > 1:
+            raise ValueError(
+                "custom_ops can contain only one base mode: 'all' or 'none'"
+            )
+
+        enabled_ops = {op[1:] for op in self.custom_ops if op.startswith("+")}
+        disabled_ops = {op[1:] for op in self.custom_ops if op.startswith("-")}
+        conflicting_ops = sorted(enabled_ops & disabled_ops)
+        if conflicting_ops:
+            raise ValueError(
+                "custom_ops cannot both enable and disable the same operation(s): "
+                f"{', '.join(conflicting_ops)}. Remove either the '+' or '-' directive"
+            )
 
         # Currently only eager and inductor backend are supported.
         # for piecewise compilation. Custom backends are not supported for
@@ -1134,6 +1170,16 @@ class CompilationConfig:
                             "to enable RoPE+KV cache fusion."
                         )
                         self.pass_config.fuse_rope_kvcache = False
+                    if self.pass_config.fuse_qk_norm_rope_kvcache:
+                        logger.warning_once(
+                            "fuse_qk_norm_rope_kvcache is enabled, but "
+                            "splitting_ops is None and Inductor graph partition "
+                            "is not enabled. Disabling fuse_qk_norm_rope_kvcache. "
+                            "Please either set splitting_ops to an empty list [] "
+                            "or set use_inductor_graph_partition to True "
+                            "to enable QK-Norm+RoPE+KV cache fusion."
+                        )
+                        self.pass_config.fuse_qk_norm_rope_kvcache = False
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
@@ -1197,7 +1243,7 @@ class CompilationConfig:
                 "are optimized for prefill and are incompatible with CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
                 "use --all2all-backend with another option, such as "
-                "deepep_low_latency or allgather_reducescatter."
+                "deepep_low_latency, nixl_ep, or allgather_reducescatter."
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -1307,10 +1353,16 @@ class CompilationConfig:
                 )
 
     def is_custom_op_enabled(self, op: str) -> bool:
-        if "all" in self.custom_ops:
+        count_all = self.custom_ops.count("all")
+        count_none = self.custom_ops.count("none")
+        if count_all + count_none != 1:
+            raise ValueError(
+                "custom_ops must contain exactly one base mode: 'all' or 'none'"
+            )
+
+        if count_all:
             return f"-{op}" not in self.custom_ops
 
-        assert "none" in self.custom_ops
         return f"+{op}" in self.custom_ops
 
     def resolve_cudagraph_mode_and_sizes(
@@ -1318,6 +1370,7 @@ class CompilationConfig:
         min_cg_support: "AttentionCGSupport",
         min_cg_attn_backend: str | None,
         uniform_decode_query_len: int = 1,
+        use_v2_model_runner: bool = False,
         tensor_parallel_size: int = 1,
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
@@ -1418,13 +1471,16 @@ class CompilationConfig:
                 "and make sure compilation mode is VLLM_COMPILE"
             )
 
-        # Adjust cudagraph sizes to be a multiple of uniform_decode_query_len
+        # MRV1 adjusts cudagraph sizes to be a multiple of uniform_decode_query_len
         # to avoid: https://github.com/vllm-project/vllm/issues/28207 and temp-fix:
         # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
         # Will be removed in the near future when we have separate cudagraph capture
         # sizes for decode and mixed prefill-decode.
+        # MRV2 handles cudagraph capture sizing in cudagraph_utils.py
+        # and doesn't need below: https://github.com/vllm-project/vllm/pull/45953
         if (
-            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            not use_v2_model_runner
+            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and uniform_decode_query_len > 1
         ):
             self.adjust_cudagraph_sizes_for_spec_decode(

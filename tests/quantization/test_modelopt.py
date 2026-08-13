@@ -13,18 +13,27 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.model import ModelConfig
+from vllm.model_executor.kernels.linear import (
+    HummingNvFp4LinearKernel,
+    MarlinNvFp4LinearKernel,
+)
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
+    ModelOptFp8LinearMethod,
     ModelOptMixedPrecisionConfig,
+    ModelOptMxFp8Config,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
+    ModelOptNvFp4W4A16LinearMethod,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.platforms import current_platform
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -40,12 +49,12 @@ def _skip(msg: str) -> NoReturn:
 
 def _snapshot_download_or_skip(model_id: str) -> str:
     try:
-        from huggingface_hub import snapshot_download
+        from vllm.transformers_utils.repo_utils import hf_api
     except Exception as e:  # pragma: no cover
         _skip(f"huggingface_hub is required to download {model_id}: {e}")
 
     try:
-        return snapshot_download(
+        return hf_api().snapshot_download(
             repo_id=model_id,
             repo_type="model",
             # These checkpoints are already small; download full repo for simplicity.
@@ -83,6 +92,11 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
             kv_cache_quant_algo=None,
             exclude_modules=[],
         ),
+        mxfp8_config=ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
     )
 
 
@@ -99,6 +113,28 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
         method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
     assert isinstance(method, ModelOptNvFp4LinearMethod)
+
+
+def test_modelopt_fp8_updates_weight_dims_after_transpose():
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight", torch.nn.Parameter(torch.empty(3, 2), requires_grad=False)
+    )
+    layer.register_parameter(
+        "weight_scale", torch.nn.Parameter(torch.ones(1), requires_grad=False)
+    )
+    layer.register_parameter(
+        "input_scale", torch.nn.Parameter(torch.ones(1), requires_grad=False)
+    )
+
+    method = ModelOptFp8LinearMethod.__new__(ModelOptFp8LinearMethod)
+    method.fp8_linear = Mock()
+    method.process_weights_after_loading(layer)
+
+    assert layer.weight.shape == (2, 3)
+    assert layer.weight.input_dim == 0
+    assert layer.weight.output_dim == 1
+    method.fp8_linear.process_weights_after_loading.assert_called_once_with(layer)
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
@@ -124,6 +160,113 @@ def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
         method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
     assert isinstance(method, ModelOptNvFp4LinearMethod)
+
+
+def test_modelopt_mixed_precision_resolves_declared_packed_projection():
+    config = _mixed_precision_config(
+        {
+            "model.layers.0.self_attn.q_proj": {"quant_algo": "MXFP8"},
+            "model.layers.0.self_attn.k_proj": {"quant_algo": "MXFP8"},
+            "model.layers.0.self_attn.v_proj": {"quant_algo": "MXFP8"},
+        }
+    )
+    config.packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    assert config._resolve_quant_algo("model.layers.0.self_attn.qkv_proj") == "MXFP8"
+
+
+def test_modelopt_mixed_precision_does_not_quantize_unlisted_fused_sibling():
+    config = _mixed_precision_config(
+        {
+            "model.layers.0.linear_attn.in_proj_qkv": {"quant_algo": "FP8"},
+            "model.layers.0.linear_attn.in_proj_z": {"quant_algo": "FP8"},
+            "model.layers.0.linear_attn.out_proj": {"quant_algo": "FP8"},
+        }
+    )
+    config.packed_modules_mapping = {
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+    }
+
+    assert (
+        config._resolve_quant_algo("model.layers.0.linear_attn.in_proj_qkvz") == "FP8"
+    )
+    assert config._resolve_quant_algo("model.layers.0.linear_attn.in_proj_ba") is None
+
+
+def test_modelopt_mixed_precision_composes_gemma4_mappers():
+    from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
+    from vllm.model_executor.models.gemma4_mm import (
+        Gemma4ForConditionalGeneration,
+    )
+
+    config = _mixed_precision_config(
+        {
+            "model.language_model.layers.0.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16,
+            },
+            "model.language_model.layers.1.moe.experts.gate_up_proj": {
+                "quant_algo": "NVFP4",
+                "group_size": 16,
+            },
+        }
+    )
+
+    config.apply_vllm_mapper(
+        Gemma4ForConditionalGeneration.hf_to_vllm_mapper.get_unstacked_mapper()
+    )
+    config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_unstacked_mapper())
+
+    expected_prefix = "language_model.model.layers.0.moe.experts"
+    assert set(config.quantized_layers) == {
+        expected_prefix,
+        "language_model.model.layers.1.moe.gate_up_proj",
+    }
+    assert config._resolve_quant_algo(expected_prefix) == "NVFP4"
+
+
+def test_modelopt_mixed_precision_infers_fused_gate_up_projection():
+    from vllm.model_executor.layers.linear import LinearBase
+
+    config = _mixed_precision_config(
+        {
+            "model.layers.0.mlp.gate_proj": {"quant_algo": "NVFP4"},
+            "model.layers.0.mlp.up_proj": {"quant_algo": "NVFP4"},
+        }
+    )
+
+    fake_layer = MagicMock(spec=LinearBase)
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.init_nvfp4_linear_kernel"
+    ):
+        method = config.get_quant_method(fake_layer, "model.layers.0.mlp.gate_up_proj")
+
+    assert isinstance(method, ModelOptNvFp4LinearMethod)
+
+
+@pytest.mark.parametrize(
+    ("quantized_prefix", "missing_prefix"),
+    [
+        ("model.layers.0.mlp.gate_proj", "model.layers.0.mlp.down_proj"),
+        ("model.layers.0.self_attn.o_proj", "model.layers.0.self_attn.qkv_proj"),
+    ],
+)
+def test_modelopt_mixed_precision_does_not_infer_missing_sibling_linear(
+    quantized_prefix, missing_prefix
+):
+    from vllm.model_executor.layers.linear import LinearBase
+
+    config = _mixed_precision_config(
+        {
+            quantized_prefix: {"quant_algo": "NVFP4"},
+        }
+    )
+
+    fake_layer = MagicMock(spec=LinearBase)
+    method = config.get_quant_method(fake_layer, missing_prefix)
+
+    assert isinstance(method, UnquantizedLinearMethod)
 
 
 def test_vocab_parallel_embedding_weight_loader_accepts_scalar_scale():
@@ -242,10 +385,11 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(default_vllm_config, vllm_runner):
             assert isinstance(gate_up_proj.quant_method, ModelOptFp8PcPtLinearMethod)
             assert isinstance(down_proj.quant_method, ModelOptFp8PcPtLinearMethod)
 
-            assert qkv_proj.weight.dtype == torch.float8_e4m3fn
-            assert o_proj.weight.dtype == torch.float8_e4m3fn
-            assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
-            assert down_proj.weight.dtype == torch.float8_e4m3fn
+            fp8_dtype = current_platform.fp8_dtype()
+            assert qkv_proj.weight.dtype == fp8_dtype
+            assert o_proj.weight.dtype == fp8_dtype
+            assert gate_up_proj.weight.dtype == fp8_dtype
+            assert down_proj.weight.dtype == fp8_dtype
 
             # Per-channel scales; activations are dynamically scaled per token.
             assert hasattr(qkv_proj, "weight_scale")
@@ -353,15 +497,13 @@ def test_modelopt_nvfp4_config_dispatches_w4a4_method():
 
 
 def test_modelopt_nvfp4_config_dispatches_w4a16_method():
-    """``quant_method="W4A16_NVFP4"`` routes to the new
+    """``quant_method="W4A16_NVFP4"`` routes to
     ``ModelOptNvFp4W4A16LinearMethod`` instead of the W4A4 sibling.
 
     Mirrors the FP8 dispatch precedent (``ModelOptFp8Config`` selects
     one of three FP8 LinearMethods on ``quant_method``); a regression
     here would mean a W4A16 NVFP4 checkpoint silently loaded under the
-    W4A4 method, which would try to register an ``input_scale`` runtime
-    parameter and (more importantly) call the cutlass W4A4 NVFP4 GEMM
-    instead of FP4 Marlin.
+    W4A4 activation-quantization path.
     """
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptNvFp4Config,
@@ -378,6 +520,21 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
     assert config.LinearMethodCls is ModelOptNvFp4W4A16LinearMethod
     assert config.LinearMethodCls is not ModelOptNvFp4LinearMethod
     assert config.quant_method == "W4A16_NVFP4"
+
+
+@pytest.mark.parametrize(
+    ("linear_backend", "kernel_cls"),
+    [("auto", MarlinNvFp4LinearKernel), ("humming", HummingNvFp4LinearKernel)],
+)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
+    vllm_config = VllmConfig()
+    vllm_config.kernel_config.linear_backend = linear_backend
+    with set_current_vllm_config(vllm_config):
+        method = ModelOptNvFp4W4A16LinearMethod(
+            ModelOptNvFp4Config(quant_method="W4A16_NVFP4")
+        )
+    assert isinstance(method.kernel, kernel_cls)
 
 
 @pytest.mark.parametrize(
@@ -466,6 +623,12 @@ def test_modelopt_mixed_precision_dispatches_w4a16_layer(
     """
     from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.quantization import modelopt as m
+
+    if (
+        expected_linear_cls_name == "ModelOptNvFp4W4A16LinearMethod"
+        and current_platform.is_rocm()
+    ):
+        pytest.skip("ModelOptNvFp4W4A16LinearMethod is not supported with rocm")
 
     hf_quant_config: dict[str, Any] = {
         "quantization": {

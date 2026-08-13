@@ -154,6 +154,16 @@ class UBatchWrapper:
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
         comm_sms: int = envs.VLLM_DBO_COMM_SMS
+        rocm_deepep_ht_dbo = (
+            current_platform.is_rocm()
+            and vllm_config.parallel_config.enable_dbo
+            and vllm_config.parallel_config.all2all_backend == "deepep_high_throughput"
+        )
+        if rocm_deepep_ht_dbo:
+            # On ROCm, reserving CUs for DeepEP HT communication under DBO
+            # corrupts DP+EP generation accuracy. Keep the backend active, but
+            # leave all CUs visible to the compute and communication kernels.
+            comm_sms = 0
 
         set_comm_sms = lambda sms: None
         if vllm_config.parallel_config.enable_expert_parallel:
@@ -242,7 +252,7 @@ class UBatchWrapper:
 
         results: list[tuple[int, torch.Tensor]] = []
         compute_stream = ubatch_metadata[0].context.compute_stream
-        num_tokens = ubatch_metadata[0].num_tokens + ubatch_metadata[1].num_tokens
+        num_tokens = sum(m.num_tokens for m in ubatch_metadata)
 
         # Ubatches will manually manage the forward context, so we override
         # it to None here so we can have it restored correctly later
@@ -258,7 +268,7 @@ class UBatchWrapper:
                 )
                 ubatch_threads.append(thread)
                 thread.start()
-            self.ready_barrier.wait()  # Wait for both threads to be ready
+            self.ready_barrier.wait()  # Wait for all ubatch threads to be ready
 
             # Capture the cudagraph
             cudagraph_metadata = CUDAGraphMetaData(
@@ -322,7 +332,7 @@ class UBatchWrapper:
                 )
                 ubatch_threads.append(thread)
                 thread.start()
-            self.ready_barrier.wait()  # Wait for both threads to be ready
+            self.ready_barrier.wait()  # Wait for all ubatch threads to be ready
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()

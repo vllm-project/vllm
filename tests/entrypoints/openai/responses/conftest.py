@@ -251,7 +251,13 @@ def _validate_field_consistency(events: list) -> None:
             "response.reasoning_part.added",
         ):
             _assert_item_fields(event, etype, active_item_id, active_output_index)
-            active_content_index = getattr(event, "content_index", None)
+            content_index = getattr(event, "content_index", None)
+            if active_content_index is None:
+                assert content_index == 0, (
+                    f"{etype} for a new item must start at content_index 0, "
+                    f"got {content_index}"
+                )
+            active_content_index = content_index
             continue
 
         # --- all other item-level events --------------------------
@@ -390,7 +396,6 @@ def server_with_store(default_server_args):
         env_dict={
             "VLLM_ENABLE_RESPONSES_API_STORE": "1",
             "VLLM_SERVER_DEV_MODE": "1",
-            "VLLM_ENFORCE_STRICT_TOOL_CALLING": "0",
         },
     ) as remote_server:
         yield remote_server

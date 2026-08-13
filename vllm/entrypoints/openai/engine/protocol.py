@@ -3,9 +3,10 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import json
 import time
 from http import HTTPStatus
-from typing import Any, ClassVar, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 import regex as re
 from pydantic import (
@@ -16,13 +17,20 @@ from pydantic import (
     model_validator,
 )
 
+import vllm.envs as envs
+from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMServerError, VLLMValidationError
 from vllm.logger import init_logger
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
+
+StopParam: TypeAlias = (
+    str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
+)
 
 
 class OpenAIBaseModel(BaseModel):
@@ -101,6 +109,12 @@ class ModelList(OpenAIBaseModel):
 
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: int | None = None
+    created_cache_tokens: int | None = None
+    multimodal_tokens: dict[str, int] | None = None
+    """Prompt tokens contributed by each input modality, keyed by modality name
+    (e.g. `image`, `audio`, `video`). A breakdown of the multimodal
+    placeholder tokens already counted in `prompt_tokens`; `None` when the
+    request has no multimodal input."""
 
 
 class UsageInfo(OpenAIBaseModel):
@@ -108,6 +122,14 @@ class UsageInfo(OpenAIBaseModel):
     total_tokens: int = 0
     completion_tokens: int | None = 0
     prompt_tokens_details: PromptTokenUsageInfo | None = None
+
+
+class PerRequestTimingMetrics(OpenAIBaseModel):
+    time_to_first_token_ms: float | None = None
+    generation_time_ms: float | None = None
+    queue_time_ms: float | None = None
+    mean_itl_ms: float | None = None
+    tokens_per_second: float | None = None
 
 
 class RequestResponseMetadata(BaseModel):
@@ -159,6 +181,39 @@ AnyResponseFormat: TypeAlias = (
 )
 
 
+def structured_outputs_from_response_format(
+    structured_outputs: StructuredOutputsParams | None,
+    response_format: AnyResponseFormat | None,
+) -> StructuredOutputsParams | None:
+    """Apply ``response_format`` overrides to ``structured_outputs``."""
+    if response_format is None or response_format.type == "text":
+        return structured_outputs
+
+    overrides: dict[str, Any]
+    if response_format.type == "json_object":
+        overrides = {"json_object": True}
+    elif response_format.type == "json_schema":
+        json_schema = response_format.json_schema
+        assert json_schema is not None
+        overrides = {"json": json_schema.json_schema}
+    else:
+        assert isinstance(
+            response_format,
+            (
+                LegacyStructuralTagResponseFormat,
+                StructuralTagResponseFormat,
+            ),
+        )
+        overrides = {
+            "structural_tag": json.dumps(response_format.model_dump(by_alias=True))
+        }
+
+    if structured_outputs is None:
+        return StructuredOutputsParams(**overrides)
+
+    return replace(structured_outputs, **overrides)
+
+
 def validate_structural_tag_response_format(
     response_format: AnyStructuralTagResponseFormat | dict[str, Any],
 ) -> None:
@@ -167,8 +222,6 @@ def validate_structural_tag_response_format(
     Engine-side validation reports malformed structural tags as generation
     failures. OpenAI request parsing should classify them as bad requests.
     """
-    import json
-
     from pydantic import TypeAdapter, ValidationError
 
     if isinstance(response_format, dict):
@@ -242,11 +295,15 @@ class FunctionDefinition(OpenAIBaseModel):
     name: str
     description: str | None = None
     parameters: dict[str, Any] | None = None
+    strict: bool | None = None
     defer_loading: bool | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
+        data = {k: v for k, v in data.items() if k in type(self).model_fields}
+        if self.strict is None:
+            data.pop("strict", None)
         if self.defer_loading is None:
             data.pop("defer_loading", None)
         return data
@@ -345,8 +402,15 @@ class DeltaMessage(OpenAIBaseModel):
     reasoning: str | None = None
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
 
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if len(data.get("tool_calls", [])) == 0:
+            data.pop("tool_calls", None)
+        return data
 
-class GenerationError(Exception):
+
+class GenerationError(VLLMServerError):
     """raised when finish_reason indicates internal server error (500)"""
 
     def __init__(self, message: str = "Internal server error"):

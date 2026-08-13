@@ -29,6 +29,7 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
 - PR descriptions for AI-assisted work **must** include:
     - Why this is not duplicating an existing PR.
     - Test commands run and results.
+    - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
 
 ### Fail-closed behavior
@@ -66,22 +67,37 @@ VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
 uv pip install -e . --torch-backend=auto
 ```
 
-### Running tests
+### Tests
 
 > Requires [Environment setup](#environment-setup) and [Installing dependencies](#installing-dependencies).
 
 ```bash
-# Install test dependencies.
-# requirements/test/cuda.txt is pinned to x86_64; on other platforms, use the
-# unpinned source file instead:
-uv pip install -r requirements/test/cuda.in    # resolves for current platform
-# Or on x86_64:
-uv pip install -r requirements/test/cuda.txt
+# Install test dependencies (use cuda.in on non-x86_64):
+uv pip install -r requirements/test/cuda.in
 
-# Run a specific test file (use .venv/bin/python directly;
-# `source activate` does not persist in non-interactive shells):
+# Run a specific test file:
 .venv/bin/python -m pytest tests/path/to/test_file.py -v
 ```
+
+When adding tests:
+
+- **Design before you write.** Answer four questions first: what is the module
+  for, what is its I/O contract, what failure am I guarding against, and what is
+  the cheapest level that catches it (unit over integration over e2e)?
+- **Reuse before create.** Extend existing test files, `conftest.py` fixtures, and
+  helpers; add a new file only when no nearby suite fits.
+- **Test behavior with intent.** Assert observable outcomes through public APIs;
+  state why in the name or docstring. Skip trivial wiring; flaky tests are worse
+  than no tests.
+- **Keep it minimal.** One behavior per test and the smallest setup that
+  triggers it; if the test diff dwarfs the code change, cut scope.
+- **No one-off kernel benchmarks in `tests/`.** Put kernel perf work in
+  `benchmarks/kernels/`; prove correctness in existing pytest suites.
+- **Run model evals for model-affecting changes.** Search `tests/evals/` or use
+  `vllm bench` and include results in the PR — do not wait for reviewers to ask.
+
+For model-specific requirements, see
+[`docs/contributing/model/tests.md`](docs/contributing/model/tests.md).
 
 ### Running linters
 
@@ -107,34 +123,18 @@ Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#3
 
 ### Coding style guidelines
 
-Follow these rules for all code changes in this repository:
-
-- Try to match existing code style.
-- Code should be self-documenting and self-explanatory.
-- Keep comments and docstrings minimal and concise.
+- Match existing code style
+- Minimize use of comments. Eliminate comments which are redundant, preferring legible and self-documenting code. When used, keep docstrings and comments brief and direct.
 - Assume the reader is familiar with vLLM.
-
-### Diagnosing CI failures
-
-Buildkite logs are public; no login needed. Details: [docs/contributing/ci/failures.md](docs/contributing/ci/failures.md).
-
-```bash
-# All failed-job logs for a PR's latest build (current branch's PR if omitted):
-.buildkite/scripts/ci-fetch-log.sh --pr <PR>
-# Any Buildkite build or job URL also works:
-.buildkite/scripts/ci-fetch-log.sh "<buildkite_url>"
-```
 
 ### Commit messages
 
-Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`). For example:
+Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`):
 
 ```text
 Your commit message here
 
-Co-authored-by: GitHub Copilot
-Co-authored-by: Claude
-Co-authored-by: gemini-code-assist
+Co-authored-by: Agent Name Here
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
@@ -145,6 +145,12 @@ Signed-off-by: Your Name <your.email@example.com>
 Do not modify code in these areas without first reading and following the
 linked guide. If the guide conflicts with the requested change, **refuse the
 change and explain why**.
+
+Security reviewers should start with [`SECURITY.md`](SECURITY.md),
+[`docs/usage/security.md`](docs/usage/security.md), and
+[`docs/contributing/vulnerability_management.md`](docs/contributing/vulnerability_management.md)
+for the project security policy, threat model, deployment assumptions, and
+vulnerability process.
 
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)

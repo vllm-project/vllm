@@ -19,6 +19,17 @@ logger = init_logger(__name__)
 
 
 @dataclass
+class SamplingMask:
+    """Per-token sampling support sets aligned with completion token IDs.
+
+    Each inner list contains the vocabulary token IDs that survived
+    top-k / top-p / min-p filtering for the corresponding generated token.
+    """
+
+    token_ids: list[list[int]]
+
+
+@dataclass
 class CompletionOutput:
     """The output data of one completion output of a request.
 
@@ -30,6 +41,8 @@ class CompletionOutput:
             output text.
         logprobs: The log probabilities of the top probability words at each
             position if the logprobs are requested.
+        sampling_mask: The post-processing token support set for each generated
+            token, if requested.
         finish_reason: The reason why the sequence is finished.
         stop_reason: The stop string or token id that caused the completion
             to stop, None if the completion finished for some other reason
@@ -46,6 +59,7 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    sampling_mask: SamplingMask | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -56,6 +70,7 @@ class CompletionOutput:
             f"text={self.text!r}, "
             f"token_ids={self.token_ids}, "
             f"routed_experts={self.routed_experts}, "
+            f"sampling_mask={self.sampling_mask}, "
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
@@ -103,7 +118,10 @@ class RequestOutput:
         encoder_prompt_token_ids: The token IDs of the encoder prompt.
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
+        num_cache_creation_tokens: Prompt tokens currently counted as local
+            prefix-cache writes for this request.
         kv_transfer_params: The params for remote K/V transfer.
+        ec_transfer_params: The params for remote encoder-cache transfer.
     """
 
     def __init__(
@@ -119,8 +137,10 @@ class RequestOutput:
         encoder_prompt: str | None = None,
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
+        num_cache_creation_tokens: int | None = None,
         *,
         kv_transfer_params: dict[str, Any] | None = None,
+        ec_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -140,13 +160,16 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
+        self.num_cache_creation_tokens = num_cache_creation_tokens
         self.kv_transfer_params = kv_transfer_params
+        self.ec_transfer_params = ec_transfer_params
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
 
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
+        self.ec_transfer_params = next_output.ec_transfer_params
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
@@ -184,7 +207,8 @@ class RequestOutput:
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "
             f"lora_request={self.lora_request}, "
-            f"num_cached_tokens={self.num_cached_tokens})"
+            f"num_cached_tokens={self.num_cached_tokens}, "
+            f"num_cache_creation_tokens={self.num_cache_creation_tokens})"
         )
 
 

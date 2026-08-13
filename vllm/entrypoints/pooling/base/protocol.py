@@ -14,8 +14,21 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.tasks import check_removed_pooling_task
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
+
+
+def reject_removed_pooling_parameters(data):
+    if not isinstance(data, dict):
+        return data
+    if "normalize" in data:
+        raise VLLMValidationError(
+            "Parameter `normalize` was removed; use `use_activation` instead.",
+            parameter="normalize",
+        )
+    check_removed_pooling_task(data.get("task"))
+    return data
 
 
 class PoolingBasicRequestMixin(OpenAIBaseModel):
@@ -168,11 +181,7 @@ class CompletionRequestMixin(OpenAIBaseModel):
     # --8<-- [end:completion-extra-params]
 
 
-class ChatRequestMixin(OpenAIBaseModel):
-    # --8<-- [start:chat-params]
-    messages: list[ChatCompletionMessageParam]
-    # --8<-- [end:chat-params]
-
+class ChatRequestOptionsMixin(OpenAIBaseModel):
     # --8<-- [start:chat-extra-params]
     add_generation_prompt: bool = Field(
         default=False,
@@ -254,6 +263,12 @@ class ChatRequestMixin(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
         )
+
+
+class ChatRequestMixin(ChatRequestOptionsMixin):
+    # --8<-- [start:chat-params]
+    messages: list[ChatCompletionMessageParam]
+    # --8<-- [end:chat-params]
 
 
 class EncodingRequestMixin(OpenAIBaseModel):

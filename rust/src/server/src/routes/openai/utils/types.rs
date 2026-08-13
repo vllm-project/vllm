@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 use std::slice;
 
@@ -51,14 +54,59 @@ impl StringOrArray {
     }
 }
 
-/// Validates stop sequences (non-empty strings)
+fn max_stop_strings() -> usize {
+    std::env::var("VLLM_MAX_STOP_STRINGS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4)
+}
+
+/// Validates stop sequences (at most the configured number of non-empty strings).
 pub fn validate_stop(stop: &StringOrArray) -> Result<(), validator::ValidationError> {
-    if stop.as_slice().iter().any(|s| s.is_empty()) {
+    let stop = stop.as_slice();
+    let max_stop_strings = max_stop_strings();
+    if stop.len() > max_stop_strings {
+        let mut error = validator::ValidationError::new("too_many_stop_strings");
+        error.code = format!("stop strings must contain at most {max_stop_strings} items").into();
+        return Err(error);
+    }
+    if stop.iter().any(|s| s.is_empty()) {
         return Err(validator::ValidationError::new(
             "stop strings cannot be empty",
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StringOrArray, validate_stop};
+
+    #[test]
+    fn validate_stop_accepts_four_stop_strings() {
+        let stop = StringOrArray::Array(
+            ["one", "two", "three", "four"].into_iter().map(str::to_string).collect(),
+        );
+
+        validate_stop(&stop).expect("four stop strings should be accepted");
+    }
+
+    #[test]
+    fn validate_stop_rejects_more_than_four_stop_strings() {
+        let stop = StringOrArray::Array(
+            ["one", "two", "three", "four", "five"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+
+        let error = validate_stop(&stop).expect_err("five stop strings should be rejected");
+
+        assert_eq!(
+            error.code.as_ref(),
+            "stop strings must contain at most 4 items"
+        );
+    }
 }
 
 // ============================================================================
@@ -91,7 +139,23 @@ pub enum ContentPart {
         uuid: Option<String>,
     },
     #[serde(rename = "video_url")]
-    VideoUrl { video_url: VideoUrl },
+    VideoUrl {
+        video_url: VideoUrl,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    #[serde(rename = "audio_url")]
+    AudioUrl {
+        audio_url: AudioUrl,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    #[serde(rename = "input_audio")]
+    InputAudio {
+        input_audio: InputAudio,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
 }
 
 #[serde_with::skip_serializing_none]
@@ -104,6 +168,19 @@ pub struct ImageUrl {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct VideoUrl {
     pub url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AudioUrl {
+    pub url: String,
+}
+
+/// Base64-encoded audio bytes in OpenAI `input_audio` form.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct InputAudio {
+    pub data: String,
+    pub format: Option<String>,
 }
 
 // ============================================================================
@@ -311,7 +388,9 @@ pub enum MessageContent {
 // ============================================================================
 
 /// Mirrors the Python vLLM `UsageInfo` class.
-#[serde_with::skip_serializing_none]
+///
+/// Do not skip serializing `None` fields here: non-streaming response types
+/// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     pub prompt_tokens: usize,
@@ -402,14 +481,12 @@ pub struct LogProbs {
 }
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbs` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatLogProbs {
     pub content: Option<Vec<ChatLogProbsContent>>,
 }
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbsContent` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatLogProbsContent {
     pub token: String,
@@ -419,7 +496,6 @@ pub struct ChatLogProbsContent {
 }
 
 /// Mirrors the Python vLLM `ChatCompletionLogProb` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub struct TopLogProb {
     pub token: String,
@@ -436,7 +512,6 @@ pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorDetail {
     pub message: String,
@@ -457,6 +532,12 @@ pub struct ModelObject {
     pub object: String,
     pub created: i64,
     pub owned_by: String,
+    /// Backend model path (base cards) or adapter path (LoRA cards).
+    pub root: Option<String>,
+    /// Base model a LoRA adapter derives from; `null` for base models.
+    pub parent: Option<String>,
+    /// Maximum context length; `null` for LoRA adapter cards.
+    pub max_model_len: Option<u32>,
 }
 
 /// Response body for `GET /v1/models`.

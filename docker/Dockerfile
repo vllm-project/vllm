@@ -22,31 +22,25 @@
 #   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
 # =============================================================================
 
-ARG CUDA_VERSION=13.0.2
+ARG CUDA_VERSION=13.0.3
 ARG PYTHON_VERSION=3.12
-ARG UBUNTU_VERSION=22.04
+ARG UBUNTU_VERSION=24.04
+# DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
+# This version is used for CUDA 12+ builds to keep the DeepEP build and
+# runtime NCCL versions compatible.
+ARG NCCL_VERSION=2.30.7
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
 # private registries that use a different repository naming conventions.
 #
 # Example:
-# docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+# docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/pytorch/manylinux2_28-builder:cuda13.0
 
-# Important: We build with an old version of Ubuntu to maintain broad
-# compatibility with other Linux OSes. The main reason for this is that the
-# glibc version is baked into the distro, and binaries built with one glibc
-# version are not backwards compatible with OSes that use an earlier version.
-ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
+# Build wheels against the same glibc floor as PyTorch's published wheels.
+ARG BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
-
-# OS family of BUILD_BASE_IMAGE. Controls package manager (apt vs dnf) and
-# Python bootstrap. Set to "manylinux" alongside a manylinux build base such
-# as pytorch/manylinux2_28-builder:cuda13.0 to produce wheels with a glibc
-# 2.28 floor (matches PyTorch's own published wheels). Default stays on
-# Ubuntu for backwards compatibility.
-ARG BUILD_OS=ubuntu
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
@@ -99,11 +93,15 @@ ARG INSTALL_KV_CONNECTORS=false
 # prepare basic build environment
 FROM ${BUILD_BASE_IMAGE} AS base
 
+ARG TARGETPLATFORM
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
-ARG BUILD_OS
-
-ENV DEBIAN_FRONTEND=noninteractive
+ARG USE_SCCACHE
+ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
+ARG SCCACHE_REGION_NAME=us-west-2
+ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 # Environment for uv
 # Declared BEFORE the installer + `uv venv` invocations below so the uv
@@ -122,48 +120,40 @@ ENV UV_INSTALL_DIR=/opt/uv/bin
 ENV PATH="/opt/venv/bin:/opt/uv/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
 
-# Install system dependencies including build tools.
-# The Ubuntu path uses apt + deadsnakes-via-uv for Python; the manylinux path
-# (AlmaLinux 8, e.g. pytorch/manylinux2_28-builder) uses dnf and the Python
-# interpreters pre-installed at /opt/python/cpXY-cpXY/.
-RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
-        # rdma-core-devel provides libibverbs headers; ccache lives in EPEL,
-        # which the pytorch manylinux image already enables. git/curl/sudo
-        # are typically pre-installed but listed defensively.
-        dnf install -y --setopt=install_weak_deps=False \
-            ccache \
-            git \
-            curl \
-            sudo \
-            rdma-core-devel \
-        && dnf clean all \
-        && rm -rf /var/cache/dnf; \
-    else \
-        apt-get update -y \
-        && apt-get install -y --no-install-recommends \
-            ccache \
-            software-properties-common \
-            git \
-            curl \
-            sudo \
-            python3-pip \
-            libibverbs-dev \
-            # GCC 10 was previously pinned to suppress spurious -Wredundant-move warnings
-            # from CUTLASS (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519). That bug
-            # was fixed in GCC 11. GCC >= 11.3 is now required because PyTorch's C++20 headers
-            # (pytorch/pytorch#167929) are not compatible with GCC < 11.3.
-            gcc-11 \
-            g++-11 \
-        && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 --slave /usr/bin/g++ g++ /usr/bin/g++-11 \
-        # Install python dev headers if available (needed for cmake FindPython on Ubuntu 24.04
-        # which ships cmake 3.28 and requires Development.SABIModule; silently skipped on
-        # Ubuntu 20.04/22.04 where python3.x-dev is not available without a PPA)
-        && (apt-get install -y --no-install-recommends python${PYTHON_VERSION}-dev 2>/dev/null || true) \
-        && rm -rf /var/lib/apt/lists/*; \
+# Install system dependencies including build tools. The PyTorch manylinux
+# image enables EPEL, which provides ccache.
+RUN dnf install -y --setopt=install_weak_deps=False \
+        ccache \
+        git \
+        curl \
+        sudo \
+        rdma-core-devel \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+# Install sccache once in base so Rust and CMake/CUDA build stages share the
+# same binary and remote cache configuration.
+RUN if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "Installing sccache..." \
+        && case "${TARGETPLATFORM}" in \
+          linux/arm64) SCCACHE_ARCH="aarch64" ;; \
+          linux/amd64) SCCACHE_ARCH="x86_64" ;; \
+          *) echo "Unsupported TARGETPLATFORM for sccache: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+        esac \
+        && export SCCACHE_DOWNLOAD_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+        && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
+        && tar -xzf sccache.tar.gz \
+        && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl; \
     fi
 
-# Install uv and bootstrap /opt/venv. Both paths converge on /opt/venv so all
-# downstream stages stay distro-agnostic.
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
+ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
+ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
+ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
+
+# Install uv and bootstrap /opt/venv from the Python interpreter included in
+# the manylinux image.
 RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" "${UV_INSTALL_DIR}" \
     && chmod -R a+rX /opt/uv \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
@@ -171,15 +161,9 @@ RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" "${UV_INSTALL_DIR}" \
     # pip` works regardless of how uv happens to link the venv back to the
     # managed Python install (which, at a non-default UV_PYTHON_INSTALL_DIR,
     # doesn't always expose ensurepip via the default venv layout).
-    && if [ "${BUILD_OS}" = "manylinux" ]; then \
-           # manylinux images ship Python at /opt/python/cpXY-cpXY/; point uv
-           # at the matching interpreter rather than letting it fetch one.
-           PYV_NODOT=$(echo ${PYTHON_VERSION} | tr -d '.') \
-           && MANYLINUX_PY=/opt/python/cp${PYV_NODOT}-cp${PYV_NODOT}/bin/python${PYTHON_VERSION} \
-           && uv venv --seed /opt/venv --python "$MANYLINUX_PY"; \
-       else \
-           uv venv --seed /opt/venv --python ${PYTHON_VERSION}; \
-       fi \
+    && PYV_NODOT=$(echo ${PYTHON_VERSION} | tr -d '.') \
+    && MANYLINUX_PY=/opt/python/cp${PYV_NODOT}-cp${PYV_NODOT}/bin/python${PYTHON_VERSION} \
+    && uv venv --seed /opt/venv --python "$MANYLINUX_PY" \
     && rm -f /usr/bin/python3 /usr/bin/python3-config /usr/bin/pip \
     && ln -sf /opt/venv/bin/python3 /usr/bin/python3 \
     && ln -sf /opt/venv/bin/python3-config /usr/bin/python3-config \
@@ -220,10 +204,6 @@ COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY pyproject.toml pyproject.toml
-# nvidia-cutlass-dsl[cu13] installs -libs-base and -libs-cu13 wheels that
-# share paths with different content. uv can extract them in either order,
-# leaving base files that break CUDA 13 CuTe DSL JIT.
-# TODO(mmangkad): Remove this after NVIDIA/cutlass#3259 is fixed.
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' requirements/cuda.txt; \
@@ -240,13 +220,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     else \
         uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
-    fi \
-    && if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "13" ]; then \
-        CUTLASS_DSL_VERSION=$(uv pip show --python /opt/venv/bin/python3 nvidia-cutlass-dsl 2>/dev/null | awk '/^Version:/{print $2}') && \
-        if [ -n "$CUTLASS_DSL_VERSION" ]; then \
-            uv pip install --python /opt/venv/bin/python3 --force-reinstall --no-deps \
-                "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}"; \
-        fi; \
     fi
 
 # Track PyTorch lib versions used during build and match in downstream instances.
@@ -261,7 +234,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Explicitly set the list to avoid issues with torch 2.2
 # See https://github.com/pytorch/pytorch/pull/123243
 # From versions.json: .torch.cuda_arch_list
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
+# Do not add +PTX here: vLLM filters torch's top-level PTX flag when it
+# converts global gencode flags into per-kernel arch lists. If a specific
+# kernel needs PTX, add +PTX to that kernel's CMake arch list instead.
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
 
@@ -271,19 +247,13 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # This stage reuses the Python environment from base and runs in parallel with
 # csrc-build/extensions-build.
 FROM base AS rust-build
-ARG BUILD_OS
+ARG USE_SCCACHE
+ARG SCCACHE_ENDPOINT
 
 # Install native tools needed only for Rust/protoc builds.
-RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
-        dnf install -y --setopt=install_weak_deps=False \
-            make unzip \
-        && dnf clean all && rm -rf /var/cache/dnf; \
-    else \
-        apt-get update -y \
-        && apt-get install -y --no-install-recommends \
-            make unzip \
-        && rm -rf /var/lib/apt/lists/*; \
-    fi
+RUN dnf install -y --setopt=install_weak_deps=False make unzip \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
 
 COPY tools/install_protoc.sh /tmp/install_protoc.sh
 RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
@@ -305,17 +275,29 @@ COPY build_rust.sh build_rust.sh
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
+# BuildKit can run this stage in parallel with csrc-build. Keep Rust on a
+# separate local sccache daemon while sharing the same remote cache backend.
+ENV SCCACHE_SERVER_PORT=4227
+
 # Build the release artifacts. Cache cargo registry/git, but not target/,
 # because stale target metadata can outlive source updates across BuildKit
 # cache reuse.
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    bash build_rust.sh
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
+    if [ "$USE_SCCACHE" = "1" ]; then \
+        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
+        export RUSTC_WRAPPER=sccache; \
+        sccache --show-stats; \
+    fi \
+    && bash build_rust.sh \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+        sccache --show-stats; \
+    fi
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
 FROM base AS csrc-build
-ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -367,11 +349,7 @@ ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG USE_SCCACHE
-ARG SCCACHE_DOWNLOAD_URL
 ARG SCCACHE_ENDPOINT
-ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
-ARG SCCACHE_REGION_NAME=us-west-2
-ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 # Flag to control whether to use pre-built vLLM wheels
 ARG VLLM_USE_PRECOMPILED=""
@@ -401,22 +379,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Installing sccache..." \
-        && case "${TARGETPLATFORM}" in \
-          linux/arm64) SCCACHE_ARCH="aarch64" ;; \
-          linux/amd64) SCCACHE_ARCH="x86_64" ;; \
-          *) echo "Unsupported TARGETPLATFORM for sccache: ${TARGETPLATFORM}" >&2; exit 1 ;; \
-        esac \
-        && export SCCACHE_DOWNLOAD_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
-        && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
-        && tar -xzf sccache.tar.gz \
-        && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
-        && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl \
-        && if [ ! -z ${SCCACHE_ENDPOINT} ] ; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} ; fi \
-        && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
-        && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
-        && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
-        && export SCCACHE_IDLE_TIMEOUT=0 \
+        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi \
         && export CMAKE_BUILD_TYPE=Release \
         && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
         && export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" \
@@ -462,10 +425,17 @@ WORKDIR /workspace
 # Build DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
 # Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
-ARG DEEPEP_COMMIT_HASH=73b6ea4
+ARG DEEPEP_COMMIT_HASH=d4f41e4e93
 ARG NVSHMEM_VER
+ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
+    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
+    if [ -n "$NCCL_VERSION" ]; then \
+        echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
+            > /tmp/nccl-override.txt && \
+        export UV_OVERRIDE=/tmp/nccl-override.txt; \
+    fi && \
     export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
     /tmp/install_python_libraries.sh \
         --workspace /tmp/ep_kernels_workspace \
@@ -548,16 +518,25 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
+# Record the wheel checksum so downstream stages can bust their layer cache
+# when the wheel changes, without copying the wheel itself into the image.
+RUN sha256sum dist/*.whl > dist/wheel.sha256
+
 # Copy extension wheels from extensions-build stage for later use
 COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_workspace/dist
 
-# Check the size of the wheel if RUN_WHEEL_CHECK is true
+# Record the EP kernels wheel checksum for the same cache-busting purpose.
+RUN sha256sum /tmp/ep_kernels_workspace/dist/*.whl \
+    > /tmp/ep_kernels_workspace/dist/wheels.sha256
+
+# Check the size of the CUDA 13 wheel uploaded to PyPI
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 # sync the default value with .buildkite/check-wheel-size.py
 ARG VLLM_MAX_SIZE_MB=500
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
-RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
+RUN if [ "$RUN_WHEEL_CHECK" = "true" ] && \
+        [ "${CUDA_VERSION%%.*}" = "13" ]; then \
         python3 check-wheel-size.py dist; \
     else \
         echo "Skipping wheel size check."; \
@@ -571,7 +550,6 @@ FROM base AS dev
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
-ARG BUILD_OS
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -581,17 +559,16 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 # Install libnuma-dev, required by fastsafetensors (fixes #20384)
-RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
-        dnf install -y numactl-devel && dnf clean all && rm -rf /var/cache/dnf; \
-    else \
-        apt-get update && apt-get install -y --no-install-recommends libnuma-dev && rm -rf /var/lib/apt/lists/*; \
-    fi
+RUN dnf install -y numactl-devel \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
 
 
 # We can specify the standard or nightly build of PyTorch
 ARG PYTORCH_NIGHTLY
 
 # Install development dependencies
+COPY requirements/common.txt requirements/common.txt
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
@@ -617,10 +594,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 #################### DEV IMAGE ####################
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM ${FINAL_BASE_IMAGE} AS vllm-base
+FROM ${FINAL_BASE_IMAGE} AS vllm-runtime-base
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
+ARG NCCL_VERSION
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
@@ -673,7 +651,6 @@ RUN apt-get update -y \
 # Install CUDA development tools for runtime JIT compilation
 # (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
 RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
-    CUDA_VERSION_SHORT=$(echo $CUDA_VERSION | cut -d. -f1,2) && \
     apt-get update -y && \
     apt-get install -y --no-install-recommends --allow-change-held-packages \
         cuda-nvcc-${CUDA_VERSION_DASH} \
@@ -686,12 +663,6 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         libnuma-dev \
         # numactl CLI for NUMA binding at runtime
         numactl && \
-    # Fixes nccl_allocator requiring nccl.h at runtime
-    # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
-    # NCCL packages don't use the cuda-MAJOR-MINOR naming convention,
-    # so we pin the version to match our CUDA version
-    NCCL_VER=$(apt-cache madison libnccl-dev | grep "+cuda${CUDA_VERSION_SHORT}" | head -1 | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}') && \
-    apt-get install -y --no-install-recommends --allow-change-held-packages libnccl-dev=${NCCL_VER} libnccl2=${NCCL_VER} && \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv for faster pip installs
@@ -710,6 +681,18 @@ ENV UV_CACHE_DIR=/opt/uv/cache
 RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" \
     && chgrp -R 0 /opt/uv \
     && chmod -R g+rwX,a+rX /opt/uv
+
+# DeepEPv2 GIN requires NCCL >= 2.30.4 at both compile and runtime. torch pins
+# an older version as a transitive dep; this override forces uv to use our
+# pinned version whenever nvidia-nccl-cu* is resolved.
+RUN CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
+    if [ -n "$NCCL_VERSION" ]; then \
+        echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
+            > /etc/uv-overrides.txt; \
+    else \
+        touch /etc/uv-overrides.txt; \
+    fi
+ENV UV_OVERRIDE=/etc/uv-overrides.txt
 
 # ----------------------------------------------------------------------
 # Non-root support (opt-in)
@@ -758,10 +741,6 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
-# nvidia-cutlass-dsl[cu13] installs -libs-base and -libs-cu13 wheels that
-# share paths with different content. uv can extract them in either order,
-# leaving base files that break CUDA 13 CuTe DSL JIT.
-# TODO(mmangkad): Remove this after NVIDIA/cutlass#3259 is fixed.
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' /tmp/requirements-cuda.txt; \
@@ -769,19 +748,12 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     uv pip install --system -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
-    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "13" ]; then \
-        CUTLASS_DSL_VERSION=$(uv pip show --system nvidia-cutlass-dsl 2>/dev/null | awk '/^Version:/{print $2}') && \
-        if [ -n "$CUTLASS_DSL_VERSION" ]; then \
-            uv pip install --system --force-reinstall --no-deps \
-                "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}"; \
-        fi; \
-    fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.12
+ARG FLASHINFER_VERSION=0.6.16.post3
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
@@ -794,7 +766,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install gdrcopy (saves ~6s per build)
 # TODO (huydhn): There is no prebuilt gdrcopy package on 12.9 at the moment
 ARG GDRCOPY_CUDA_VERSION=12.8
-ARG GDRCOPY_OS_VERSION=Ubuntu22_04
+ARG GDRCOPY_OS_VERSION=Ubuntu24_04
 ARG TARGETPLATFORM
 COPY tools/install_gdrcopy.sh /tmp/install_gdrcopy.sh
 RUN set -eux; \
@@ -808,24 +780,18 @@ RUN set -eux; \
 
 # Install vllm-openai dependencies (saves ~2.6s per build)
 # These are stable packages that don't depend on vLLM itself
-# From versions.json: .bitsandbytes.x86_64, .bitsandbytes.arm64
 # From versions.json: .openai_server_extras.timm, .openai_server_extras.runai_model_streamer
-ARG BITSANDBYTES_VERSION_X86=0.46.1
-ARG BITSANDBYTES_VERSION_ARM64=0.42.0
 ARG TIMM_VERSION=">=1.0.17"
 ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.7"
 RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_ARM64}"; \
-    else \
-        BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_X86}"; \
-    fi; \
-    uv pip install --system accelerate modelscope \
-        "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
+    uv pip install --system accelerate 'modelscope<1.38' \
+        "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
 
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)
 # ============================================================
+
+FROM vllm-runtime-base AS vllm-base
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -838,6 +804,11 @@ ARG PYTORCH_NIGHTLY
 # Install vLLM wheel first, so that torch etc will be installed.
 # Check whether to install torch nightly instead of release for this build.
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+# Copy only the wheel checksum (a few bytes) so a wheel change invalidates this
+# install layer. The wheel itself is bind-mounted below and never enters the
+# image. Without this the bind mount is not part of the layer cache key, so a
+# warm BuildKit agent can skip the install and ship a stale wheel.
+COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
@@ -860,31 +831,14 @@ uv pip list
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-# Install EP kernels wheels (DeepEP) that have been built in the `build` stage
+# Install EP kernels wheels (DeepEP) that have been built in the `build` stage.
+# As with the vLLM wheel above, copy only the checksum to bust the layer cache
+# and bind-mount the wheel for the actual install to keep it out of the image.
+COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-
-# nvidia-cutlass-dsl[cu13] installs -libs-base and -libs-cu13 wheels that
-# share paths with different content. Force -libs-cu13 last after runtime
-# dependency installs so uv cannot leave base files behind.
-# TODO(mmangkad): Remove this after NVIDIA/cutlass#3259 is fixed.
-RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "13" ]; then \
-        CUTLASS_DSL_VERSION=$(uv pip show --system nvidia-cutlass-dsl 2>/dev/null | awk '/^Version:/{print $2}') && \
-        if [ -n "$CUTLASS_DSL_VERSION" ]; then \
-            uv pip install --system --force-reinstall --no-deps \
-                "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}"; \
-        fi; \
-    fi
-
-# Download FlashInfer precompiled cubins AFTER all pip installs are done.
-# This must run after the vLLM wheel and EP kernels installs above, because
-# those can reinstall/touch flashinfer packages. Downloading cubins earlier
-# (in the flashinfer-jit-cache layer) causes ~2.5 GB of layer duplication
-# when a later pip install overwrites flashinfer package files.
-RUN flashinfer show-config && flashinfer download-cubin
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
@@ -898,11 +852,8 @@ COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
 #################### vLLM installation IMAGE ####################
 #################### TEST IMAGE ####################
-# image to run unit testing suite
-# note that this uses vllm installed by `pip`
-FROM vllm-base AS test
-
-ADD . /vllm-workspace/
+# Stable dependencies for the unit testing image
+FROM vllm-runtime-base AS test-deps
 
 ARG PYTHON_VERSION
 ARG TARGETPLATFORM
@@ -910,6 +861,7 @@ ARG TARGETPLATFORM
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -925,6 +877,7 @@ RUN apt-get update -y \
 ARG PYTORCH_NIGHTLY
 
 # Install development dependencies (for testing)
+COPY requirements/common.txt requirements/common.txt
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
@@ -954,6 +907,53 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
         fi \
     fi
+
+# image to run unit testing suite
+# note that this uses vllm installed by `pip`
+FROM test-deps AS test
+
+ARG PYTHON_VERSION
+
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
+
+# We can specify the standard or nightly build of PyTorch
+ARG PYTORCH_NIGHTLY
+
+# Install vLLM and EP kernel wheels after the stable test dependencies so
+# source-only changes do not invalidate the dependency layers above.
+COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=cache,target=/opt/uv/cache \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        echo "Installing torch nightly..." \
+        && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        && echo "Installing vLLM..." \
+        && uv pip install --system dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    else \
+        echo "Installing vLLM..." \
+        && uv pip install --system dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi
+
+# Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
+RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
+    --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --system ep_kernels/dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# See the matching comment in the vllm-base stage.
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
+
+ADD . /vllm-workspace/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -994,7 +994,8 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ENV UV_HTTP_TIMEOUT=500
 
 # install kv_connectors if requested
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
+# Do not add +PTX here; see the main TORCH_CUDA_ARCH_LIST comment above.
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
@@ -1015,31 +1016,20 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
-        # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is installed.
-        uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR}; \
-    fi
-
-# Optional override: install mooncake-transfer-engine from a URL instead of the
-# PyPI release pulled in above. Use this for wheels built with non-default CMake
-# flags (e.g. `STORE_USE_ETCD=ON` for master HA). The URL's manylinux glibc
-# floor must be <= the FINAL_BASE_IMAGE's glibc.
-ARG MOONCAKE_WHEEL_AARCH64
-ARG MOONCAKE_WHEEL_X86_64
-RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-            WHEEL="${MOONCAKE_WHEEL_AARCH64}"; \
-        else \
-            WHEEL="${MOONCAKE_WHEEL_X86_64}"; \
-        fi && \
-        if [ -n "${WHEEL}" ]; then \
-            uv pip install --system "${WHEEL}" && \
-            CUDA_MAJOR="${CUDA_VERSION%%.*}" && \
-            if [ ! -f /usr/local/cuda/lib64/libcudart.so ] && \
-               [ -f "/usr/local/cuda/lib64/libcudart.so.${CUDA_MAJOR}" ]; then \
-                ln -s "libcudart.so.${CUDA_MAJOR}" /usr/local/cuda/lib64/libcudart.so; \
-            fi; \
+        # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
+        # cuda13 variant. Uninstall first; both ship the `mooncake` package.
+        # Mirrors .buildkite/scripts/install-kv-connectors.sh.
+        MOONCAKE_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('mooncake-transfer-engine'))" 2>/dev/null || true) && \
+        if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then \
+            uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \
+            uv pip install --system "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"; \
         fi; \
     fi
+
+# Mooncake registers GPU memory for RDMA via nvidia-peermem by default. Hosts
+# without that module loaded (e.g. GB200) must pass WITH_NVIDIA_PEERMEM=0 at run
+# time; see docs/features/mooncake_connector_usage.md. Deliberately not an ENV
+# here so the image does not override mooncake's own default.
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \
