@@ -206,15 +206,22 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         scale = getattr(layer, scale_attr)
 
         # Ragged N (N % block_n != 0): oneDNN needs n_blocks to divide N.
-        # Weight untouched; only repeat scale rows to a finer N-group so that
-        # n_blocks divides N (g = gcd(N, block_n)):
-        #   scale [ceil(N/block_n), K/block_k] --> [N/g, K/block_k]
-        # No-op when N % block_n == 0.
+        # Weight untouched; only repeat scale rows to a finer N-group gn that
+        # divides both N and block_n (gn = gcd(N, block_n)):
+        #   scale [ceil(N/block_n), K/block_k] --> [N/gn, K/block_k]
+        # oneDNN only accepts gn that is a multiple of 16, and gcd(N, block_n)
+        # is a power of two (block_n=128), so gn must be >= 16. No-op when
+        # N % block_n == 0.
         block_n, block_k = self.weight_group_shape
         N, K = layer.weight.shape
         if N % block_n != 0:
-            g = math.gcd(N, block_n)
-            col_start = torch.arange(N // g, device=scale.device) * g
+            gn = math.gcd(N, block_n)
+            assert gn % 16 == 0, (
+                f"XPU block-scaled FP8: N ({N}) yields group width {gn}, but "
+                f"oneDNN only supports multiples of 16; this weight shape is "
+                f"unsupported."
+            )
+            col_start = torch.arange(N // gn, device=scale.device) * gn
             src_idx = torch.div(col_start, block_n, rounding_mode="floor")
             scale = scale.index_select(0, src_idx).contiguous()
 
