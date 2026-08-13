@@ -133,7 +133,6 @@ class FSDPTrainWorker:
                 trainer_actor_namespace=RAY_NAMESPACE,
                 num_rdt_buffers=int(os.environ.get("NUM_RDT_BUFFERS", "2")),
                 arena_presize_gb=float(os.environ.get("RDT_ARENA_PRESIZE_GB", "0")),
-                pack_check=os.environ.get("RDT_PACK_CHECK", "0") == "1",
             ),
             client=HTTPVLLMWeightSyncClient(vllm_endpoint),
             source=ModuleSource(self.model),

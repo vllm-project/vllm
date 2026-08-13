@@ -299,14 +299,6 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     matters beyond perf -- see the doc's "Sizing arenas once matters beyond
     throughput"."""
 
-    pack_check: bool = False
-    """[RDT-PACK-CHECK diagnostic] After every pull, checksum the received
-    packed blob and append {pid, bytes, sum} to
-    /tmp/rdt_profile/packcheck_cons.jsonl; the producer logs the matching sum
-    when ``ShardedRDTTrainerInitInfo.pack_check`` is set. Diffing the streams
-    localizes any producer/consumer packed-layout divergence (the core invariant
-    of the packed contract)."""
-
     replica_rank: int = 0
     """This inference engine's ordinal in the fleet (0..``num_replicas``-1).
 
@@ -448,7 +440,6 @@ class ShardedRDTWeightTransferEngine(
         # Lives on the engine, not on the _Chunk: the plan is static and shared
         # across syncs, so a per-slot runtime cache has no business inside it.
         self._targets_cache: dict[tuple[int, int], tuple[int, list[torch.Tensor]]] = {}
-        self._pack_check = False  # [RDT-PACK-CHECK diagnostic] set from init_info
         self._arena_presize = 0  # [RDT-RING] bytes; set from init_info
         self._pending_frees: list[Any] = []  # free_group signal refs, drained per sync
         # The STATIC plan (see _CallPlan): built once — at init from
@@ -525,7 +516,6 @@ class ShardedRDTWeightTransferEngine(
         counters, and before any arena is grown (both happen on the first pull).
         """
         self._num_consumers_override = int(init_info.num_consumers or 0)
-        self._pack_check = bool(init_info.pack_check)
         k = max(1, int(init_info.num_rdt_buffers))
         self._ring_depth = k
         self._dest_arenas = [{} for _ in range(k)]
@@ -939,27 +929,6 @@ class ShardedRDTWeightTransferEngine(
         import ray
 
         ray.get(pending.ref)
-        if self._pack_check:
-            # [RDT-PACK-CHECK] checksum each received sub-blob; the producer logs
-            # one matching sum PER produce call (i.e. per sub-blob), so we log one
-            # record per sub-pull too and the two streams line up under the M:N
-            # split (one sub-blob == the pre-M:N whole-arena case). Chunked sums:
-            # .sum(dtype=int64) upcasts its INPUT to int64, so a whole-blob sum
-            # materializes 8x the blob (OOM on the consumer).
-            import json as _json
-            import os as _os
-
-            _os.makedirs("/tmp/rdt_profile", exist_ok=True)
-            _w = 32 << 20
-            with open("/tmp/rdt_profile/packcheck_cons.jsonl", "a") as f:
-                for sub in pending.blob:
-                    n = sub.numel()
-                    s = 0
-                    for _i in range(0, n, _w):
-                        s += int(sub[_i : min(_i + _w, n)].sum(dtype=torch.int64))
-                    f.write(
-                        _json.dumps({"pid": _os.getpid(), "bytes": n, "sum": s}) + "\n"
-                    )
         return dict(zip(pending.keys, pending.targets))
 
     # ---------------- Bake (dry run, at init) / replay ----------------

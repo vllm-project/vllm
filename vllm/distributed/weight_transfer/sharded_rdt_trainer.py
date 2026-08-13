@@ -122,8 +122,6 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     """Serve/receive ring depth K (must match the worker)."""
     arena_presize_gb: float = 0.0
     """Serve-arena pre-size floor in GiB (avoids NIXL desc-cache churn)."""
-    pack_check: bool = False
-    """Emit per-blob checksums to /tmp/rdt_profile for offline diffing."""
     gather_lookahead: int = DEFAULT_GATHER_LOOKAHEAD
     """Gathered-but-unfreed groups the gather loop may run ahead by. Bounds
     trainer-resident memory at ``gather_lookahead + 1`` groups."""
@@ -151,7 +149,6 @@ class _RDTProducerServer:
         *,
         num_rdt_buffers: int,
         arena_presize_gb: float,
-        pack_check: bool,
         gather_lookahead: int,
         served_names: list[str] | None = None,
         stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S,
@@ -210,7 +207,6 @@ class _RDTProducerServer:
         self._reg_lock = threading.Lock()
         self._arena_presize = int(arena_presize_gb * (1 << 30))
 
-        self._pack_check = pack_check
         # [RDT-PACK-DSTS] (consumer_id, ring idx, packed layout) ->
         # (arena data_ptr, destination views). Keyed on the arena pointer too, so
         # a ring regrow invalidates rather than writing into a freed buffer. See
@@ -547,28 +543,12 @@ class _RDTProducerServer:
         torch._foreach_copy_(dsts, [t for _off, t in sliced])
 
         blob = arena[:pack_cur]
-        if self._pack_check:
-            self._log_pack_check(blob, pack_cur)
         # A served pull is the third of the four progress signals the stall
         # watchdog reads (publish / produce / free / begin_sync): a long sync whose
         # consumers pull steadily but slowly must never trip it.
         with self._cache_cond:
             self._note_progress_locked()
         return [blob]
-
-    def _log_pack_check(self, blob: torch.Tensor, pack_cur: int) -> None:
-        import json
-        import os
-
-        s = 0
-        w = 32 << 20
-        for i in range(0, pack_cur, w):
-            s += int(blob[i : min(i + w, pack_cur)].sum(dtype=torch.int64))
-        os.makedirs("/tmp/rdt_profile", exist_ok=True)
-        with open("/tmp/rdt_profile/packcheck_prod.jsonl", "a") as f:
-            f.write(
-                json.dumps({"pid": os.getpid(), "bytes": pack_cur, "sum": s}) + "\n"
-            )
 
     def shutdown(self) -> None:
         with self._cache_cond:
@@ -1000,7 +980,6 @@ class ShardedRDTTrainerWeightTransferEngine(
             served_names=served_names,
             num_rdt_buffers=ii.num_rdt_buffers,
             arena_presize_gb=ii.arena_presize_gb,
-            pack_check=ii.pack_check,
             gather_lookahead=ii.gather_lookahead,
             stall_timeout_s=ii.stall_timeout_s,
         )
@@ -1032,7 +1011,6 @@ class ShardedRDTTrainerWeightTransferEngine(
             num_consumers=self._init_info.num_consumers,
             num_rdt_buffers=self._init_info.num_rdt_buffers,
             arena_presize_gb=self._init_info.arena_presize_gb,
-            pack_check=self._init_info.pack_check,
         )
 
     # ---------------- per-round ----------------

@@ -67,7 +67,6 @@ def server_factory(monkeypatch):
     def _make(**kwargs):
         kwargs.setdefault("num_rdt_buffers", 2)
         kwargs.setdefault("arena_presize_gb", 0.0)
-        kwargs.setdefault("pack_check", False)
         kwargs.setdefault("gather_lookahead", 2)
         server = _RDTProducerServer(**kwargs)
         built.append(server)

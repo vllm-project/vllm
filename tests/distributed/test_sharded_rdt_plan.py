@@ -323,9 +323,10 @@ def _producer_pack_offsets(slices):
     """The producer's rule, transcribed from ``rdt_produce_weights_batched``
     (sharded_rdt_trainer.py): 16B-aligned offsets in specs order.
 
-    Kept as an independent implementation on purpose — the consumer computing
-    the same offsets is the invariant that makes the packed blob readable, and
-    the ``pack_check`` diagnostic exists only to detect drift between the two.
+    Kept as an independent implementation on purpose: the consumer computing the
+    same offsets is the invariant that makes the packed blob readable, and this
+    is the only thing that catches the two rules drifting apart. A divergence is
+    silent at runtime — the bytes still arrive, they are just carved up wrong.
     """
     pack_cur = 0
     offsets = []

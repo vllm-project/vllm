@@ -57,7 +57,7 @@ Chunks stream over a ring of receive slots (`num_rdt_buffers` deep). While chunk
 
 Both sides compute the same byte-exact layout independently: slices packed at 16-byte-aligned offsets in key order. The producer packs into its serve arena and returns one blob; the consumer carves dtype views back out of its receive arena to scatter from. This is the core invariant of the transport — if the two ever disagree, weights are silently wrong.
 
-`pack_check` on both init infos exists to localize exactly that: it checksums each blob on both sides into `/tmp/rdt_profile/packcheck_{prod,cons}.jsonl` so the two streams can be diffed offline.
+A divergence cannot be caught on the wire: the bytes arrive exactly as sent either way, and only the carving differs. The guard is instead `TestPackedLayout` in `tests/distributed/test_sharded_rdt_plan.py`, which transcribes the producer's rule independently and asserts the consumer's `pack_layout` matches it, on a mixed-dtype group whose sizes do not land on 16B.
 
 ## Ownership and M:N routing
 
@@ -120,7 +120,6 @@ The guard must precede `set_target_for_ref`, not just the `ray.get`: the transfe
 | `num_rdt_buffers` | 2 | Ring depth on both sides. Must match, and the producer's ring must be no shallower than the consumer's — the producer-ring safety argument depends on it. |
 | `arena_presize_gb` | 0 | Pre-size each arena slot. Set it to cover the largest atomic chunk. |
 | `gather_lookahead` | 1 | Gathered-but-unfreed groups the gather loop runs ahead by (resident memory = lookahead + 1 groups); the per-group free barrier is the back-edge. |
-| `pack_check` | off | Checksum every blob on both sides for offline diffing. |
 
 **Consumer memory budget — the arenas live OUTSIDE the engine's budget.** The
 receive arenas are `num_rdt_buffers` ring slots, each sized to the largest
