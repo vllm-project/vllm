@@ -374,7 +374,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if current_platform.is_xpu():
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
-            import vllm.envs as envs
             from vllm.triton_utils import HAS_TRITON
 
             # Use the FLA Triton kernels only when triton-cpu is installed and
