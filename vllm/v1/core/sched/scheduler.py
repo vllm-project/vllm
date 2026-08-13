@@ -37,7 +37,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, mamba_state_cache_position
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -404,6 +404,15 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit
             else 0
         )
+        # Where a replay of this prompt needs the state; a chunk must end there
+        # or it is never written (see ``mamba_state_cache_position``).
+        state_position = (
+            mamba_state_cache_position(
+                request.num_prompt_tokens, block_size, self.hash_block_size
+            )
+            if self.mamba_partial_cache_hit and self.use_eagle
+            else 0
+        )
         stops = (
             # Same invariant: a chunk starting mid-block stops at the boundary
             # rather than running past it.
@@ -415,6 +424,8 @@ class Scheduler(SchedulerInterface):
             tail_boundary
             if last_cache_position < tail_boundary < request.num_prompt_tokens
             else 0,
+            # Replay landing position (see ``state_position`` above).
+            state_position,
             # Marconi shared-prefix junction, block-floored (a sub-block
             # junction's state is not separately cacheable): cache its state
             # so sibling requests sharing the prefix can reuse it.

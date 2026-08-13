@@ -13,6 +13,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    mamba_state_cache_position,
     resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -793,28 +794,39 @@ class FullAttentionManager(SingleTypeKVCacheManager):
     ) -> None:
         """Cache the prompt tail when it ends inside a cache block.
 
-        Only the final prompt hash boundary is registered as a partial
-        prefix-cache entry; intermediate hash boundaries inside the same cache
-        block are intentionally skipped.
+        Only the final prompt hash boundary (plus, under EAGLE, the boundary a
+        replay can reach) is registered; intermediate hash boundaries inside the
+        same cache block are intentionally skipped.
         """
         hash_block_size = self.block_pool.hash_block_size
-        boundary_tokens = request.num_prompt_tokens // hash_block_size * hash_block_size
-        if boundary_tokens == 0 or boundary_tokens > num_tokens:
-            return
-        if boundary_tokens % self.block_size == 0:
-            return
+        prompt_tokens = request.num_prompt_tokens
+        boundaries = (prompt_tokens // hash_block_size * hash_block_size,)
+        if self.use_eagle:
+            # A replay caps its lookup at ``prompt_tokens - 1``, so a prompt
+            # ending on a boundary can only match one unit lower; the unshifted
+            # tail still serves requests extending this prompt. Deepest first:
+            # a deeper entry evicts shallower hashes on the same block, not the
+            # other way round.
+            replay_tail = (prompt_tokens - 1) // hash_block_size * hash_block_size
+            if replay_tail != boundaries[0]:
+                boundaries += (replay_tail,)
 
         blocks = self.req_to_blocks[request.request_id]
-        block_idx = boundary_tokens // self.block_size
-        if block_idx >= len(blocks):
-            return
-        self.block_pool.cache_partial_block(
-            request=request,
-            block=blocks[block_idx],
-            num_tokens=boundary_tokens,
-            kv_cache_group_id=self.kv_cache_group_id,
-            block_size=self.block_size,
-        )
+        for boundary_tokens in boundaries:
+            if boundary_tokens == 0 or boundary_tokens > num_tokens:
+                continue
+            if boundary_tokens % self.block_size == 0:
+                continue
+            block_idx = boundary_tokens // self.block_size
+            if block_idx >= len(blocks):
+                continue
+            self.block_pool.cache_partial_block(
+                request=request,
+                block=blocks[block_idx],
+                num_tokens=boundary_tokens,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_size=self.block_size,
+            )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         blocks = self.req_to_blocks[running_request_id]
@@ -1711,10 +1723,17 @@ class MambaManager(SingleTypeKVCacheManager):
             return None
         if num_tokens % hash_block_size != 0:
             return None
-        latest_prompt_hash_boundary = (
-            request.num_prompt_tokens // hash_block_size
-        ) * hash_block_size
-        if num_tokens != latest_prompt_hash_boundary:
+        if self.use_eagle:
+            # Spec decode replays from one unit below the consumer's match, so
+            # the snapshot belongs there rather than at the prompt's tail.
+            boundary = mamba_state_cache_position(
+                request.num_prompt_tokens, self.block_size, hash_block_size
+            )
+        else:
+            boundary = (
+                request.num_prompt_tokens // hash_block_size
+            ) * hash_block_size
+        if num_tokens != boundary:
             return None
 
         block_idx = num_tokens // self.block_size

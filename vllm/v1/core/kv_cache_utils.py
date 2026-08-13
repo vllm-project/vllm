@@ -668,6 +668,19 @@ def resolve_kv_cache_block_sizes(
     return scheduler_block_size, hash_block_size
 
 
+def mamba_state_cache_position(
+    num_tokens: int, block_size: int, hash_block_size: int
+) -> int:
+    """Position at which a producer must snapshot Mamba state under spec decode.
+
+    A replay of this prefix caps its lookup at ``num_tokens - 1`` and then drops
+    one unit for EAGLE (see `FullAttentionManager.find_longest_cache_hit`), so it
+    lands one unit below the deepest boundary under that cap.
+    """
+    unit = min(hash_block_size, block_size)
+    return max((num_tokens - 1 - unit) // unit * unit, 0)
+
+
 def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
