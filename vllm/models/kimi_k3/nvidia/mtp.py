@@ -47,6 +47,12 @@ from .model import (
 logger = init_logger(__name__)
 
 
+def _get_draft_text_config(vllm_config: VllmConfig) -> KimiLinearConfig:
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    return speculative_config.draft_model_config.hf_text_config
+
+
 class SharedHead(nn.Module):
     def __init__(
         self,
@@ -147,7 +153,7 @@ class KimiK3MultiTokenPredictorLayer(nn.Module):
 class KimiK3MultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config: KimiLinearConfig = vllm_config.model_config.hf_text_config
+        config = _get_draft_text_config(vllm_config)
         self.config = config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
@@ -206,7 +212,7 @@ class KimiK3MultiTokenPredictor(nn.Module):
 class KimiK3MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.config = vllm_config.model_config.hf_text_config
+        self.config = _get_draft_text_config(vllm_config)
         self.quant_config = vllm_config.quant_config
         self.model = KimiK3MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
