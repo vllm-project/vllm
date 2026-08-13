@@ -97,7 +97,12 @@ def _cap_tuning_config_k_block(tuning_config: list, max_k_block: int = 128) -> N
 
     A K-block of 256 produces a TMA descriptor the driver rejects at launch
     (CUDA_ERROR_MISALIGNED_ADDRESS); 128 is what Humming uses for larger M.
+
+    Gated by VLLM_HUMMING_CAP_MOE_TUNING_K_BLOCK (default on) so the cap can be
+    disabled to test whether a newer Humming/driver no longer needs it.
     """
+    if not envs.VLLM_HUMMING_CAP_MOE_TUNING_K_BLOCK:
+        return
     for entry in tuning_config:
         config = entry[2]
         block_shape = config.get("block_shape")
