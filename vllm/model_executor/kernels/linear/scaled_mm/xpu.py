@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-
 from collections.abc import Sequence
 
 import torch
@@ -206,16 +205,11 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         )
         scale = getattr(layer, scale_attr)
 
-        # oneDNN derives the weight block-group width as N // n_blocks (n_blocks
-        # = scale columns) and requires it to evenly divide N. Checkpoints use a
-        # block_n-wide N group so n_blocks = ceil(N / block_n); when N is not a
-        # multiple of block_n the width is fractional and oneDNN cannot build
-        # the matmul primitive (e.g. DeepSeek/GLM MLA fused_qkv_a_proj N=2624,
-        # kv_a_proj_with_mqa N=576 with block_n=128). Instead of padding the
-        # weight on every forward, shrink the group width once here to
-        # gcd(N, block_n) and expand the scale along N so each finer block
-        # reuses the coarse block's scale. When N % block_n == 0 this is a
-        # no-op.
+        # Ragged N (N % block_n != 0): oneDNN needs n_blocks to divide N.
+        # Weight untouched; only repeat scale rows to a finer N-group so that
+        # n_blocks divides N (g = gcd(N, block_n)):
+        #   scale [ceil(N/block_n), K/block_k] --> [N/g, K/block_k]
+        # No-op when N % block_n == 0.
         block_n, block_k = self.weight_group_shape
         N, K = layer.weight.shape
         if N % block_n != 0:
@@ -224,12 +218,8 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             src_idx = torch.div(col_start, block_n, rounding_mode="floor")
             scale = scale.index_select(0, src_idx).contiguous()
 
-        # A ragged K would hit the same oneDNN limitation, but K is the
-        # reduction axis so it also needs the runtime activation-group scale
-        # expanded to match; that is not handled here. DeepSeek/GLM block-FP8
-        # checkpoints always keep K (hidden / LoRA / intermediate dims) aligned
-        # to block_k, so fail loudly instead of letting oneDNN crash with an
-        # opaque "could not create a primitive descriptor" error.
+        # Ragged K needs the runtime activation scale expanded too, which we
+        # don't handle; DeepSeek/GLM keep K block-aligned, so fail loudly.
         assert K % block_k == 0, (
             f"XPU block-scaled FP8 requires K ({K}) to be a multiple of the "
             f"weight block size ({block_k}); ragged-K weights are unsupported."
