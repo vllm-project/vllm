@@ -2056,8 +2056,12 @@ def test_speculators_format_declares_method_and_tokens(model_type, expected):
     assert SpeculatorsConfig.build_vllm_speculative_config(config) == expected
 
 
-def test_speculators_format_preserves_explicit_method():
+def test_speculators_format_preserves_explicit_shorthand_method():
+    from vllm.engine.arg_utils import EngineArgs
     from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    engine_args = EngineArgs(spec_method="draft_model")
+    engine_args._merge_speculative_shorthand_args()
 
     config = {
         "speculators_model_type": "dflash",
@@ -2076,7 +2080,7 @@ def test_speculators_format_preserves_explicit_method():
             model="draft/model",
             tokenizer=None,
             trust_remote_code=False,
-            vllm_speculative_config={"method": "draft_model"},
+            vllm_speculative_config=engine_args.speculative_config,
         )
 
     assert (model, tokenizer) == ("target/model", "target/model")

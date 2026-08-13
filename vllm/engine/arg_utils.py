@@ -1847,20 +1847,7 @@ class EngineArgs:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
         """
-        for flag, key, value in (
-            ("--spec-method", "method", self.spec_method),
-            ("--spec-model", "model", self.spec_model),
-            ("--spec-tokens", "num_speculative_tokens", self.spec_tokens),
-        ):
-            if value is None:
-                continue
-            if self.speculative_config is None:
-                self.speculative_config = {}
-            if key in self.speculative_config:
-                raise ValueError(
-                    f"{flag} and --speculative-config['{key}'] are mutually exclusive"
-                )
-            self.speculative_config[key] = value
+        self._merge_speculative_shorthand_args()
 
         if self.speculative_config is None:
             return None
@@ -1879,6 +1866,27 @@ class EngineArgs:
             }
         )
         return SpeculativeConfig(**self.speculative_config)
+
+    def _merge_speculative_shorthand_args(self) -> None:
+        """Merge --spec-* shorthand flags into ``speculative_config``."""
+        for flag, key, value in (
+            ("--spec-method", "method", self.spec_method),
+            ("--spec-model", "model", self.spec_model),
+            ("--spec-tokens", "num_speculative_tokens", self.spec_tokens),
+        ):
+            if value is None:
+                continue
+            if self.speculative_config is None:
+                self.speculative_config = {}
+            if key in self.speculative_config:
+                raise ValueError(
+                    f"{flag} and --speculative-config['{key}'] are mutually exclusive"
+                )
+            self.speculative_config[key] = value
+
+        self.spec_method = None
+        self.spec_model = None
+        self.spec_tokens = None
 
     def _resolve_device_ids(self) -> list[int] | None:
         if not self.device_ids:
@@ -1960,6 +1968,8 @@ class EngineArgs:
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
         envs.validate_environ(self.fail_on_environ_validation)
+
+        self._merge_speculative_shorthand_args()
 
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model
