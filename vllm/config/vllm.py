@@ -1679,17 +1679,12 @@ class VllmConfig:
                 "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
             )
 
-        if envs.VLLM_BATCH_INVARIANT:
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
             pcp_size = self.parallel_config.prefill_context_parallel_size
-            # Decode context parallelism is admitted: "a2a" combines locally
-            # and never reaches a collective reduction, and "ag_rs" goes
-            # through CudaCommunicator.reduce_scatter, which is size
-            # independent under the mode.
             if pcp_size > 1:
                 # Unmeasured rather than known-bad: the V2 runner rejects PCP
                 # before this point, so the branch only bites once that
-                # changes. Raise rather than override to 1, unlike the guards
-                # below: those cost throughput, this changes the deployment.
+                # changes. Revisit once that changes.
                 raise ValueError(
                     "Prefill context parallelism is not supported with "
                     "VLLM_BATCH_INVARIANT (prefill_context_parallel_size="
@@ -1703,9 +1698,7 @@ class VllmConfig:
 
             # These passes rewrite the collective the communicator would have
             # run -- sequence parallelism and AsyncTP into reduce-scatter +
-            # all-gather, the fusions into a fused all-reduce+RMSNorm kernel --
-            # which bypasses the batch-invariant all-reduce. Disabled on every
-            # platform, so the mode costs this throughput everywhere.
+            # all-gather, the fusions into a fused all-reduce+RMSNorm kernel
             pass_config = self.compilation_config.pass_config
             for name in ("enable_sp", "fuse_gemm_comms", "fuse_allreduce_rms"):
                 if getattr(pass_config, name):

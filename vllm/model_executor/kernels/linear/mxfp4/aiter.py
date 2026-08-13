@@ -103,9 +103,7 @@ if is_aiter_found_and_supported():
             config = None
             if envs.VLLM_BATCH_INVARIANT:
                 # The tuned config asks for a four-way split-K at M <= 8 and
-                # none above it, which changes the order an output element's K
-                # contributions are summed in. Keep the tuned tile, drop the
-                # split. _get_config takes the packed K, as gemm_afp4wfp4 does.
+                # none above it. Keep the tuned tile, drop the- split.
                 from aiter.ops.triton.gemm_afp4wfp4 import _get_config
 
                 config, _ = _get_config(M, N, K)

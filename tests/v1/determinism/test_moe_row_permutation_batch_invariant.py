@@ -9,10 +9,6 @@ row order inside an expert's buffer is nondeterministic run to run. The routing
 is still correct -- a map records each token's slot -- so the whole scheme rests
 on the expert GEMM being invariant to a permutation of the rows it is handed.
 
-That is a load-bearing assumption, not a proof: MoRI's ``activation_format`` is
-``Standard``, so it pairs with ``TritonExperts`` and is reachable under
-``VLLM_BATCH_INVARIANT`` today. This test measures the assumption bitwise.
-
 The permutation applied here is a global derangement of the token buffer, which
 is exactly a permutation of the rows within every expert's group: per-expert
 membership and counts are untouched, only the arrival order changes.
@@ -36,6 +32,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
@@ -84,12 +83,15 @@ def _slot_movement(topk_ids, permuted_topk_ids, pi, block_size) -> float:
 
 
 def _quantize_blockwise(w: torch.Tensor, block: int = 128):
-    fp8 = current_platform.fp8_dtype()
-    finfo = torch.finfo(fp8)
+    fp8_min, fp8_max = get_fp8_min_max()
     e, x, y = w.shape
     view = w.float().view(e, x // block, block, y // block, block)
-    scale = view.abs().amax(dim=(2, 4)).clamp(1e-4) / finfo.max
-    q = (view / scale[:, :, None, :, None]).clamp(finfo.min, finfo.max).to(fp8)
+    scale = view.abs().amax(dim=(2, 4)).clamp(1e-4) / fp8_max
+    q = (
+        (view / scale[:, :, None, :, None])
+        .clamp(fp8_min, fp8_max)
+        .to(current_platform.fp8_dtype())
+    )
     return q.view(e, x, y), scale.contiguous()
 
 

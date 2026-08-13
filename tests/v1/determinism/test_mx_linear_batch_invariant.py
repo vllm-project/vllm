@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The native MX linear kernels must not depend on the number of rows.
+"""The ROCm native MX linear kernels must not depend on the number of rows.
 
 Batch-invariant mode keeps both GEMMs rather than substituting a Triton kernel,
 so the tile selectors -- which are keyed on M -- decide the property, and each

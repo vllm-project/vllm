@@ -424,26 +424,7 @@ steps:
     - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
     - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
     - pytest -v -s v1/determinism/test_online_batch_invariance.py
-
-# Keep the per-module pytest invocations separate: the determinism conftest
-# asserts that VRAM has settled between modules, so a leak in one module fails
-# the next module's teardown and blames the wrong file.
-- label: Batch Invariance (4 GPUs)
-  key: batch-invariance-4-gpus
-  timeout_in_minutes: 90
-  optional: true
-  device: h100
-  num_devices: 4
-  source_file_dependencies:
-    - vllm/v1/attention
-    - vllm/model_executor/layers
-    - vllm/distributed
-    - tests/v1/determinism/
-  commands:
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pip install pytest-timeout pytest-forked
-    - pytest -v -s v1/determinism/test_tp_all_reduce_batch_invariant.py -m 'distributed(num_gpus=4)'
-    - pytest -v -s v1/determinism/test_tp_reduce_scatter_batch_invariant.py -m 'distributed(num_gpus=4)'
+    - pytest -v -s v1/determinism/test_moe_row_permutation_batch_invariant.py
 
 - label: Acceptance Length Test (Large Models) # optional
   device: h200_35gb

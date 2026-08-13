@@ -44,10 +44,8 @@ __global__ void __launch_bounds__(512, 1)
 #pragma unroll
   for (int i = 0; i < ngpus; i++) {
     int target = (rank + i) % ngpus;
-    // Reduce in plain rank order, not starting at our own rank: the rotation
-    // makes an element's accumulation order depend on which size/ngpus slice
-    // owns it, i.e. on the message size. tmps keeps the rotation -- the gather
-    // stage below indexes it by the same (rank + i) % ngpus.
+    // Reduce in plain rank order, matching the 1stage algo: this preserves
+    // batch invariance.
     ptrs[i] = (const P*)_dp->ptrs[i];
     tmps[i] = get_tmp_buf<P>(sg.signals[target]);
   }

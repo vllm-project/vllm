@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Reduce-scatter must not depend on the number of tokens either.
+"""Reduce-scatter must not depend on the number of tokens.
 
-Same failure as the all-reduce next door, and for the same reason: the library
-picks its chunk boundaries from the message size, so a given output element's
-contributions are summed in an order that changes with the batch. Measured on
-4x gfx950, ``ncclReduceScatter`` of ``[N, 4096]`` bf16 over ``N in 32..4096``
-gives up to ten distinct values for a single row.
+Library collectives pick their algorithm, channel count and chunk boundaries
+from the message size, so the order in which a given element's contributions are
+summed changes with the batch size. Under ``VLLM_BATCH_INVARIANT`` the
+communicator is expected to route around that, whichever backend it lands on.
 
-Requires at least 4 GPUs: a 2-rank sum is order independent, so every row comes
-out invariant at TP=2 even from the library collective.
+Requires at least 4 GPUs: a 2-rank sum is order independent, so TP=2 passes even
+with a batch-variant collective. Runs again at 8 where they are available, which
+is the more sensitive probe.
 """
 
 import os
@@ -27,17 +27,17 @@ from tests.utils import (
 )
 from vllm.distributed.parallel_state import get_tp_group, set_custom_all_reduce
 
-from .utils import order_sensitive_elements, skip_if_not_cuda_alike
+from .utils import order_sensitive_elements, skip_if_not_rocm
 
-pytestmark = [skip_if_not_cuda_alike, *multi_gpu_marks(num_gpus=4)]
+# Can be enabled off ROCm if batch-invariant custom all reduce + fallback
+# are enabled there
+pytestmark = [skip_if_not_rocm, *multi_gpu_marks(num_gpus=4)]
 
 # Divisible by 8 so the same counts work at both world sizes, and spread across
 # the small-message thresholds where the collective changes protocol. They also
 # straddle the custom kernel's default 16MiB bound -- bf16/fp16 above 2048
 # tokens and fp32 above 1024 take the all-to-all fallback instead -- so the
-# sweep below spans both implementations rather than one. That is deliberate
-# extra coverage; `implementations_agree` is what settles the switch itself,
-# wherever a given engine config places it.
+# sweep below spans both implementations rather than one.
 TOKEN_COUNTS = [32, 40, 64, 128, 256, 512, 1024, 3000, 4096]
 HIDDEN_SIZE = 4096
 
@@ -45,9 +45,7 @@ HIDDEN_SIZE = 4096
 # and stays invariant even when the rest of the tensor does not. The rest of the
 # probe is checked in full rather than sampled: summing four 16-bit values in an
 # fp32 accumulator is exact for all but a handful of elements, so a sampled set
-# of rows is regularly insensitive to reordering by chance (measured over 31
-# rows at world size 4: bf16 34-56 elements notice a reversed rank order, fp16
-# 3-11, fp32 55535; over 6 rows, fp16 hits zero for 2 seeds in 5).
+# of rows is regularly insensitive to reordering by chance.
 CHECK_ROWS = list(range(1, 32))
 
 # (dtype, exponent_spread), as in the all-reduce test: the spread widens the

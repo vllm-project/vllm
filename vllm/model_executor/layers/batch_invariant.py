@@ -473,10 +473,7 @@ def _softmax_kernel(
     """Softmax over the last dimension, one row per program.
 
     Mirrors ``_log_softmax_kernel``: each row is reduced by a single program in
-    a fixed block order, so the result never depends on the row count. Both
-    input strides are runtime arguments so that a non-contiguous view is read
-    in place; Triton specializes a stride of 1 into a constant, so the
-    contiguous case compiles to the same code as an unstrided kernel.
+    a fixed block order, so the result never depends on the row count.
     """
     row_idx = tl.program_id(0).to(tl.int64)
     row_start_ptr = input_ptr + row_idx * input_row_stride
@@ -860,6 +857,7 @@ def softmax_batch_invariant(input, dim, dtype=None):
     # Reducing over an interior dimension: torch.sum picks its split count from
     # the tensor shape, so this path is only incidentally batch invariant.
     input_max = torch.amax(input, dim=dim, keepdim=True)
+    # First subtract max for numerical stability (standard practice)
     input = input - input_max
     exp_x = torch.exp(input)
     sum_exp_x = torch.sum(exp_x, dim=dim, keepdim=True)
@@ -1228,7 +1226,6 @@ def all_reduce_batch_invariant(
     Library all-reduces (NCCL/RCCL) pick their algorithm, channel count and chunk
     boundaries from the message size, so the order in which a given element's
     contributions are summed changes with the number of tokens in the batch.
-    Pinning the algorithm, channel count and protocol does not fix it.
 
     Instead, all-gather the contributions -- pure data movement, so bitwise
     reproducible at any size -- and reduce them with ``_fixed_order_sum_kernel``.
@@ -1367,9 +1364,6 @@ def enable_batch_invariant_mode():
 
         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
     elif current_platform.is_rocm():
-        # hipBLASLt is not batch invariant on gfx942/gfx950 and exposes no
-        # equivalent of the cuBLAS workspace knob that serializes split-k, so
-        # take the same route as SM80 and route the GEMMs through Triton.
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::mm.out", mm_out_batch_invariant, key)
@@ -1377,7 +1371,6 @@ def enable_batch_invariant_mode():
         _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
 
-        # gfx950 has 160KB of LDS, gfx942 64KB.
         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
     elif current_platform.is_xpu():
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
@@ -1439,17 +1432,6 @@ def override_envs_for_invariance():
         os.environ["NCCL_NTHREADS"] = "1"
         os.environ["NCCL_SOCKET_NTHREADS"] = "1"
     else:
-        # The pins above do not fix RCCL's reduction order -- ring chunk
-        # boundaries are recomputed from the message size, and Tree has zero
-        # AllReduce bandwidth in RCCL's tuning tables, so allreduce:tree falls
-        # back to Ring. They are also expensive, and unnecessary: under the mode
-        # every reduction is served by the custom all-reduce or by all-gather
-        # plus a fixed-order local sum, neither of which is size dependent.
-
-        # The ROCm skinny GEMMs pick a kernel from the token count. Nothing
-        # reaches one under the current kernel selection, but a forced kernel
-        # that cannot implement a layer falls back to the platform list, so keep
-        # them off.
         os.environ["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
 
     # torch.compile settings

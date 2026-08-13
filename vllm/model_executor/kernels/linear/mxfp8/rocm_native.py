@@ -93,8 +93,7 @@ def _mxfp8_dot_scaled_linear(
     BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages = _select_cfg(M, N, K)
     if envs.VLLM_BATCH_INVARIANT:
         # BLOCK_K alone decides the order an output element's K contributions
-        # accumulate in; BLOCK_M, BLOCK_N, num_warps and num_stages are all
-        # bitwise neutral. _select_cfg varies BLOCK_K with M, so pin it to a
+        # accumulate in. _select_cfg varies BLOCK_K with M, so pin it to a
         # K-divisible constant and leave the rest of the tile M-tuned. The
         # kernel selector already requires K % 128 == 0.
         BLOCK_K = 256 if K % 256 == 0 else 128

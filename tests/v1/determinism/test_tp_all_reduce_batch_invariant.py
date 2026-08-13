@@ -27,13 +27,11 @@ from tests.utils import (
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group, set_custom_all_reduce
 
-from .utils import order_sensitive_elements, skip_if_not_cuda_alike
+from .utils import order_sensitive_elements, skip_if_not_rocm
 
-# multi_gpu_test would also wrap the test in create_new_process_for_each_test,
-# whose re-import breaks the ray workers below, so take its marks alone: the
-# registered `distributed` selector keeps `-m distributed` picking this test up,
-# and its skipif enforces the 4 GPUs the module docstring explains are needed.
-pytestmark = [skip_if_not_cuda_alike, *multi_gpu_marks(num_gpus=4)]
+# Can be enabled off ROCm if batch-invariant custom all reduce + fallback
+# are enabled there
+pytestmark = [skip_if_not_rocm, *multi_gpu_marks(num_gpus=4)]
 
 # Token counts spanning the small-message thresholds where the collectives
 # switch protocol, chunking, or algorithm. At world size 4 the custom all-reduce
@@ -84,20 +82,9 @@ def _check_all_reduce(
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)
 
-    # Both of the paths batch invariance can take have to hold. With the custom
-    # all-reduce enabled it serves everything under its size limit; with it
-    # disabled -- and above its limit either way -- every message falls through
-    # to all-gather plus a fixed rank-order sum. The library collective is never
-    # reached under the mode.
     set_custom_all_reduce(use_custom_all_reduce)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
-    # Without this the two parametrizations can silently become the same test:
-    # the custom all-reduce disables itself when P2P is unavailable, and on ROCm
-    # an enabled AITER custom all-reduce leaves `ca_comm` unset as well. Batch
-    # invariance dispatches through `ca_comm` alone, so in either case every
-    # message would take the all-gather fallback and both workers would pass
-    # having covered one path.
     ca_comm = get_tp_group().device_communicator.ca_comm
     if use_custom_all_reduce:
         assert ca_comm is not None and not ca_comm.disabled, (
@@ -180,8 +167,6 @@ def _check_all_reduce(
     )
 
 
-# multi_process_parallel does not forward extra arguments to the remote, so bind
-# the two paths as separate workers.
 @ray.remote(num_gpus=1, max_calls=1)
 def custom_ar_worker(monkeypatch, tp_size, pp_size, rank, port):
     _check_all_reduce(monkeypatch, tp_size, pp_size, rank, port, True)
@@ -288,9 +273,7 @@ def fallback_ar_worker(monkeypatch, tp_size, pp_size, rank, port):
 
 # Eight ranks where the hardware allows: an fp32 accumulator often sums four
 # contributions exactly, so world size 4 is the weaker probe. Doubling the ranks
-# roughly doubles how many checked rows can observe a reordering at all --
-# measured on gfx950, 148 order-sensitive comparisons at 4 and 256 at 8, fp32
-# rising from 68 to 136 because fp32 operands leave the accumulator no headroom.
+# roughly doubles how many checked rows can observe a reordering at all.
 @pytest.mark.parametrize(
     "tp_size", [4, pytest.param(8, marks=multi_gpu_marks(num_gpus=8))]
 )

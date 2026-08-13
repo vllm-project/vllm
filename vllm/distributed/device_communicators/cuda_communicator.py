@@ -28,8 +28,8 @@ logger = init_logger(__name__)
 
 # Ceiling on the IPC buffer the custom all-reduce registers per rank, so a
 # pathological max_num_batched_tokens cannot reserve an unbounded amount. This
-# bounds memory, not speed: the custom kernel beat the all-gather fallback at
-# every size measured. Raise it if a model needs more.
+# bounds memory, not speed: the custom kernel beats the all-gather fallback at
+# every size measured.
 _MAX_BATCH_INVARIANT_CA_BYTES = 1024 * 1024 * 1024
 
 
@@ -44,8 +44,6 @@ def _max_allreduce_bytes() -> int | None:
     if not max_tokens:
         return None
     hidden = config.model_config.get_hidden_size()
-    # Declared as a str literal union too, though it is resolved to a dtype by
-    # the time any communicator exists.
     dtype = config.model_config.dtype
     if not isinstance(dtype, torch.dtype):
         return None
@@ -107,11 +105,9 @@ def _dcp_custom_allreduce_bytes(unique_name: str) -> int | None:
     exception under batch invariance: its attention combine ends in a
     reduce-scatter once per layer per decode step, and without IPC buffers of
     its own that falls back to an all-to-all plus a local sum, which pays an
-    extra Triton launch the custom kernel does not. Nothing else is turned on
-    for the group -- no quick reduce, no AITER, no symmetric memory -- because
-    none of those promises a size-independent reduction order.
+    extra Triton launch the custom kernel does not.
 
-    Confined to ROCm in practice: ParallelConfig forces
+    Currently confined to ROCm in practice: ParallelConfig forces
     `disable_custom_all_reduce` under the mode elsewhere. `_ENABLE_CUSTOM_ALL_REDUCE`
     still gates construction on top of this.
     """
@@ -229,17 +225,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         ) and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             ca_kwargs = {}
-            # Size the buffer for the largest all-reduce the scheduler can
-            # produce: the mode cannot use NCCL's ring, and its all-gather
-            # fallback moves the same volume as the custom kernel while also
-            # materialising the gathered buffer, so the custom kernel stays
-            # ahead past the 8MB default. The reduce-scatter kernel takes the
-            # same [tokens, hidden] operand, so the same bound sizes it, and the
-            # shared buffer is already max() over the three limits, so raising
-            # them off their defaults costs no memory. The DCP group gets its
-            # own, much smaller bound -- its reduce-scatter carries only decode
-            # tokens -- and sets all three limits from it rather than picking up
-            # the all-gather default it never uses.
             if dcp_ca_bytes is not None:
                 ca_kwargs["max_size"] = dcp_ca_bytes
                 ca_kwargs["max_all_gather_size"] = dcp_ca_bytes
@@ -408,11 +393,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
-        if envs.VLLM_BATCH_INVARIANT:
-            # Library all-reduces pick their reduction order from the message
-            # size. Both custom kernels and the all-gather fallback sum in a
-            # fixed rank order instead; prefer the custom kernel where it
-            # applies, since it is the faster of the two at every size.
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
+            # This path should be batch-invariant on all platforms but is
+            # not enabled there because speed has not been measured
             ca_comm = self.ca_comm
             if (
                 ca_comm is not None
@@ -422,16 +405,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 out = ca_comm.custom_all_reduce(input_)
                 assert out is not None
                 return out
-
-            # Above the custom all-reduce size limit, fall back to all-gather
-            # plus a fixed rank-order local sum. The quick / AITER / FlashInfer
-            # and symmetric-memory paths are skipped entirely: none of them
-            # promises a size-independent reduction order.
+            # Above the custom kernel's size bound, fall back to an
+            # all-to-all plus a fixed rank-order local sum. This is only benign
+            # while the two agree bitwise -- see
+            # tests/v1/determinism/test_tp_all_reduce_batch_invariant.py.
             from vllm.model_executor.layers.batch_invariant import (
                 all_reduce_batch_invariant,
             )
 
             return all_reduce_batch_invariant(input_, self.device_group)
+
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
         if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
@@ -563,19 +546,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        if envs.VLLM_BATCH_INVARIANT:
-            # Same as all_reduce above: the custom kernel's reduction order is
-            # size independent, the library's is not. It slices the flat buffer
-            # by size/world_size, which is this rank's shard because the input
-            # has already been canonicalised to dim 0 and made contiguous.
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
             ca_comm = self.ca_comm
             output = (
                 None if ca_comm is None else ca_comm.custom_reduce_scatter(input_tensor)
             )
             if output is None:
                 # Above the custom kernel's size bound, fall back to an
-                # all-to-all plus a fixed rank-order local sum. That is a
-                # size-dependent choice of implementation, so it is only benign
+                # all-to-all plus a fixed rank-order local sum. This is only benign
                 # while the two agree bitwise -- see
                 # tests/v1/determinism/test_tp_reduce_scatter_batch_invariant.py.
                 from vllm.model_executor.layers.batch_invariant import (
@@ -621,9 +599,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # ncclCommWindowRegister is collective: asymmetric pool allocations
         # from variable per-rank sizes cause deadlocks.
         use_symm_mem = sizes is None and should_nccl_symm_mem_ag_rs()
-        if envs.VLLM_BATCH_INVARIANT:
-            # See reduce_scatter above. Variable shard sizes change which rows a
-            # rank receives, not the ascending-rank order they are summed in.
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
             from vllm.model_executor.layers.batch_invariant import (
                 reduce_scatter_batch_invariant,
             )

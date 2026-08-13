@@ -30,9 +30,6 @@ DEVICE_BACKENDS: dict[str, DeviceConfig] = {
         available=current_platform.is_xpu() and HAS_TRITON,
         backends=["TRITON_ATTN"],
     ),
-    # ROCm reports device_type "cuda" but is_cuda() is False, so it needs its
-    # own entry. The AITER and ROCm custom attention backends do not declare
-    # supports_batch_invariance(), leaving the Triton backends.
     "rocm": DeviceConfig(
         available=current_platform.is_rocm() and HAS_TRITON,
         backends=["TRITON_ATTN"],
@@ -44,11 +41,6 @@ TEST_MODEL = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
 
 # Override backends for MLA models (MLA only supported on CUDA).
 if os.getenv("VLLM_TEST_MODEL"):
-    # Imported here, not at module scope. `model_arch_config_convertor` and
-    # `vllm.config` import each other, so the convertor has to be reached
-    # through `vllm.config`; importing it at the top of this file makes it the
-    # first vllm import in an interpreter that imports a test module before
-    # vllm itself, which dies with a partially-initialized-module ImportError.
     from vllm.transformers_utils.config import get_config
     from vllm.transformers_utils.model_arch_config_convertor import (
         ModelArchConfigConvertorBase,
@@ -85,14 +77,16 @@ skip_if_not_cuda = pytest.mark.skipif(
     reason="Requires CUDA >= Ampere (SM80)",
 )
 
-# For tests that only need a CUDA-alike GPU, i.e. anything whose kernels are
-# Triton or HIP-portable rather than NVIDIA-specific.
 skip_if_not_cuda_alike = pytest.mark.skipif(
     not (DEVICE_BACKENDS["cuda"].available or DEVICE_BACKENDS["rocm"].available),
     reason="Requires CUDA >= Ampere (SM80) or ROCm",
 )
 
-# For the native MX kernels, which need CDNA4 microscaling instructions.
+skip_if_not_rocm = pytest.mark.skipif(
+    not DEVICE_BACKENDS["rocm"].available,
+    reason="Requires ROCm",
+)
+
 requires_mx = pytest.mark.skipif(
     not (current_platform.is_rocm() and current_platform.supports_mx()),
     reason="requires a ROCm device with native MX support (gfx95x)",
@@ -167,15 +161,7 @@ def is_device_capability_below_90() -> bool:
 
 def shutdown_llm(llm) -> None:
     """Tear an ``LLM`` down so the next model load has its VRAM back.
-
-    ``LLM`` has no ``shutdown()`` method -- the engine-core child owns the
-    memory and has to be asked directly. Deliberately not wrapped in
-    ``contextlib.suppress``: a suppressed teardown that never ran is
-    indistinguishable from one that worked.
-
-    The VRAM comes back with the child a second or two after the caller drops
-    its last reference to ``llm``, which is what the inter-module settle in
-    ``conftest.py`` absorbs. Under ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` the
+    Note: Under ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` the
     engine still shuts down, but its VRAM is not recoverable in-process; run
     those tests in a spawned interpreter.
     """
