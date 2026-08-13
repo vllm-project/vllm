@@ -32,17 +32,44 @@ else:
 logger = init_logger(__name__)
 
 
+def _coerce_eos_token_ids(eos_token_id: Any) -> list[int]:
+    if type(eos_token_id) is int:
+        return [eos_token_id]
+
+    if isinstance(eos_token_id, (list, tuple, set)):
+        return [token_id for token_id in eos_token_id if type(token_id) is int]
+
+    return []
+
+
+def _model_stop_token_ids(vllm_config: Any, tokenizer: Any) -> list[int] | None:
+    stop_token_ids: list[int] = []
+
+    tokenizer_eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    stop_token_ids.extend(_coerce_eos_token_ids(tokenizer_eos_token_id))
+
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is not None:
+        generation_config = model_config.try_get_generation_config() or {}
+        stop_token_ids.extend(
+            _coerce_eos_token_ids(generation_config.get("eos_token_id"))
+        )
+
+    stop_token_ids = list(dict.fromkeys(stop_token_ids))
+    return stop_token_ids or None
+
+
 @dataclass
 class XgrammarBackend(StructuredOutputBackend):
     def __post_init__(self):
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
         )
+        stop_token_ids = _model_stop_token_ids(self.vllm_config, self.tokenizer)
 
         if is_mistral_tokenizer(self.tokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
-            stop_token_ids = [self.tokenizer.eos_token_id]
 
             # not self.tokenizer.vocab_size as self.tokenizer.vocab
             # collapses all decoded errors into a single token.
@@ -54,13 +81,14 @@ class XgrammarBackend(StructuredOutputBackend):
                 if self.tokenizer.is_tekken
                 else xgr.VocabType.BYTE_FALLBACK,
                 vocab_size=self.vocab_size,
-                stop_token_ids=stop_token_ids,
+                stop_token_ids=stop_token_ids or [],
                 add_prefix_space=True,
             )
         else:
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
                 self.tokenizer,
                 vocab_size=self.vocab_size,
+                stop_token_ids=stop_token_ids,
             )
         self.compiler = xgr.GrammarCompiler(
             tokenizer_info,
