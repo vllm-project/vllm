@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LookupResult,
@@ -3313,3 +3314,63 @@ def test_chunked_local_attention_reports_its_chunk_window():
     assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=1024) == 8
     # Partial chunks round up, so the reachable tail is never understated.
     assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=3000) == 3
+
+
+@pytest.mark.parametrize("blocks_per_chunk", [1, 2, 3])
+def test_reachable_block_mask_chunk_to_block_index_conversion(
+    blocks_per_chunk: int,
+):
+    """reachable_block_mask operates in KV-block coordinates, but the
+    offloading scheduler works in chunk coordinates. Verify that the
+    index conversion (chunk -> block -> chunk) produces the same
+    filtering result regardless of blocks_per_chunk.
+
+    Uses a SWA spec with alignment_tokens large enough to create
+    unreachable blocks (alignment_tokens > sliding_window).
+    """
+    block_size = 4
+    sliding_window = 8
+    alignment_tokens = 16 * blocks_per_chunk
+
+    swa_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+
+    num_chunks = 8
+    start_chunk_idx = 0
+
+    manager_cls = KVCacheSpecRegistry.get_manager_class(swa_spec)
+    assert manager_cls is not None
+
+    block_mask = manager_cls.reachable_block_mask(
+        start_block=start_chunk_idx * blocks_per_chunk,
+        end_block=num_chunks * blocks_per_chunk,
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=swa_spec,
+        use_eagle=False,
+    )
+
+    if block_mask is None:
+        return
+
+    assert len(block_mask) == num_chunks * blocks_per_chunk
+
+    reachable_chunks = []
+    for chunk_idx in range(num_chunks):
+        if any(
+            block_mask[chunk_idx * blocks_per_chunk + b]
+            for b in range(blocks_per_chunk)
+        ):
+            reachable_chunks.append(chunk_idx)
+
+    # The tail of each alignment segment should be reachable.
+    # sliding_window=8 with block_size=4 -> need=2 blocks.
+    # With blocks_per_chunk=1: alignment has 16 blocks, tail 2 reachable.
+    # With blocks_per_chunk=2: alignment has 16 blocks, tail 2 -> 1 chunk.
+    # With blocks_per_chunk=3: alignment has 16 blocks, tail 2 -> 1 chunk.
+    assert len(reachable_chunks) > 0
+    assert len(reachable_chunks) < num_chunks
