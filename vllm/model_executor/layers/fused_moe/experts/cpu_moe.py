@@ -500,6 +500,39 @@ class ArmCPUUnquantizedExperts(CPUUnquantizedExperts):
         return cpu_cls._supports_grouped_gemm(moe_config)
 
 
+class PowerCPUUnquantizedExperts(CPUUnquantizedExperts):
+    """PowerPC VSX grouped-gemm unquantized MoE experts."""
+
+    isa = "vsx"
+    output_alignment = 16
+    reduction_alignment = 2
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+        )
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        supported, reason = mk.FusedMoEExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not supported:
+            return supported, reason
+        if moe_config.in_dtype != torch.bfloat16:
+            return False, "kernel requires bfloat16 activations"
+        cpu_cls = cast(type[CPUUnquantizedExperts], cls)
+        return cpu_cls._supports_grouped_gemm(moe_config)
+
+
 # ===========================================================================
 # FP8 W8A16 MoE
 # ===========================================================================

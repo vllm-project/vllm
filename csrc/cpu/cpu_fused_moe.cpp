@@ -27,10 +27,22 @@
   #define NEON_DISPATCH(...) case cpu_utils::ISA::NEON:
 #endif
 
+#ifdef __powerpc64__
+  #include "cpu/micro_gemm/cpu_micro_gemm_vsx.hpp"
+  #define VSX_DISPATCH(...)                                                    \
+    case cpu_utils::ISA::VSX: {                                                \
+      using gemm_t = cpu_micro_gemm::MicroGemm<cpu_utils::ISA::VSX, scalar_t>; \
+      return __VA_ARGS__();                                                    \
+    }
+#else
+  #define VSX_DISPATCH(...) case cpu_utils::ISA::VSX:
+#endif
+
 #define CPU_ISA_DISPATCH_IMPL(ISA_TYPE, ...)                          \
   [&] {                                                               \
     switch (ISA_TYPE) {                                               \
       AMX_DISPATCH(__VA_ARGS__)                                       \
+      VSX_DISPATCH(__VA_ARGS__)                                       \
       case cpu_utils::ISA::VEC: {                                     \
         using gemm_t =                                                \
             cpu_micro_gemm::MicroGemm<cpu_utils::ISA::VEC, scalar_t>; \
