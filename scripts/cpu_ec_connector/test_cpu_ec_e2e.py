@@ -12,7 +12,14 @@ Run from the repo root::
 
     python scripts/cpu_ec_connector/test_cpu_ec_e2e.py
 
-Requires two CUDA devices visible to the host (defaults to GPUs 0/1).
+Requires two CUDA devices visible to the host (defaults to GPUs 0/1). Each
+instance can be widened with tensor parallelism by listing more devices::
+
+    python scripts/cpu_ec_connector/test_cpu_ec_e2e.py \
+        --producer-gpus 0,1,2,3 --consumer-gpus 4,5,6,7
+
+The device count per instance is its --tensor-parallel-size, so that example
+needs eight GPUs.
 """
 
 from __future__ import annotations
@@ -53,8 +60,8 @@ from shared import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PATCHES_DIR = Path(__file__).resolve().parent  # contains sitecustomize.py
 
-DEFAULT_PRODUCER_GPU = 0
-DEFAULT_CONSUMER_GPU = 1
+DEFAULT_PRODUCER_GPUS = "0"
+DEFAULT_CONSUMER_GPUS = "1"
 DEFAULT_PRODUCER_PORT = 8001
 DEFAULT_CONSUMER_PORT = 8002
 DEFAULT_PRODUCER_SIDE_PORT = 5601
@@ -98,6 +105,8 @@ def build_vllm_argv(spec: ServerSpec, model: str) -> list[str]:
         "--enforce-eager",
         "--gpu-memory-utilization",
         str(spec.gpu_memory_utilization),
+        "--tensor-parallel-size",
+        str(spec.tp_size),
         "--ec-transfer-config",
         json.dumps(ec_cfg),
     ]
@@ -121,7 +130,7 @@ def spawn_server(spec: ServerSpec, model: str) -> subprocess.Popen:
     env = {
         **os.environ,
         "EC_TEST_EVENT_FILE": str(event_path),
-        "CUDA_VISIBLE_DEVICES": str(spec.gpu),
+        "CUDA_VISIBLE_DEVICES": ",".join(str(d) for d in spec.device_list),
         "VLLM_EC_SIDE_CHANNEL_HOST": "127.0.0.1",
         "VLLM_EC_SIDE_CHANNEL_PORT": str(spec.side_channel_port),
         "EC_TEST_ROLE": spec.role,
@@ -175,6 +184,23 @@ def shutdown_server(proc: subprocess.Popen, name: str, grace_s: float = 10.0) ->
 # -----------------------------------------------------------------------------
 
 
+def _parse_devices(raw: str, flag: str) -> tuple[int, ...]:
+    """Parse a comma-separated device list; its length is the TP size."""
+    try:
+        devices = tuple(int(part) for part in raw.split(",") if part.strip())
+    except ValueError:
+        # `from None`: the int() ValueError adds nothing over the message here,
+        # and a traceback would bury a plain CLI usage error.
+        raise SystemExit(
+            f"{flag}: expected comma-separated integers, got {raw!r}"
+        ) from None
+    if not devices:
+        raise SystemExit(f"{flag}: at least one device index is required")
+    if len(set(devices)) != len(devices):
+        raise SystemExit(f"{flag}: duplicate device indices in {raw!r}")
+    return devices
+
+
 def cleanup_dev_shm() -> None:
     """Wipe any stale `/dev/shm/vllm_ec_*.mmap` files."""
     stale = list(Path("/dev/shm").glob("vllm_ec_*.mmap"))
@@ -197,7 +223,8 @@ def make_specs(
     """Default ServerSpec pair: GPU 0 producer, GPU 1 consumer, distinct ports."""
     producer = ServerSpec(
         role="producer",
-        gpu=args.producer_gpu,
+        gpu=args.producer_devices[0],
+        devices=args.producer_devices,
         http_port=args.producer_port,
         side_channel_port=DEFAULT_PRODUCER_SIDE_PORT,
         engine_id="ec-producer-0",
@@ -207,7 +234,8 @@ def make_specs(
     )
     consumer = ServerSpec(
         role="consumer",
-        gpu=args.consumer_gpu,
+        gpu=args.consumer_devices[0],
+        devices=args.consumer_devices,
         http_port=args.consumer_port,
         side_channel_port=DEFAULT_CONSUMER_SIDE_PORT,
         engine_id="ec-consumer-0",
@@ -244,14 +272,14 @@ class LocalHarness:
 
     def __enter__(self) -> LocalHarness:
         print(
-            f"[setup] spawning producer (gpu={self.producer.gpu}, "
-            f"port={self.producer.http_port}, "
+            f"[setup] spawning producer (gpus={self.producer.device_list}, "
+            f"tp={self.producer.tp_size}, port={self.producer.http_port}, "
             f"ec_cpu_bytes={self.producer.ec_cpu_bytes})"
         )
         self.producer_proc = spawn_server(self.producer, self.model)
         print(
-            f"[setup] spawning consumer (gpu={self.consumer.gpu}, "
-            f"port={self.consumer.http_port}, "
+            f"[setup] spawning consumer (gpus={self.consumer.device_list}, "
+            f"tp={self.consumer.tp_size}, port={self.consumer.http_port}, "
             f"ec_cpu_bytes={self.consumer.ec_cpu_bytes})"
         )
         self.consumer_proc = spawn_server(self.consumer, self.model)
@@ -324,8 +352,18 @@ def main() -> int:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--image", type=Path, default=DEFAULT_IMAGE)
     parser.add_argument("--prompt", default="Describe this image in one sentence.")
-    parser.add_argument("--producer-gpu", type=int, default=DEFAULT_PRODUCER_GPU)
-    parser.add_argument("--consumer-gpu", type=int, default=DEFAULT_CONSUMER_GPU)
+    parser.add_argument(
+        "--producer-gpus",
+        default=DEFAULT_PRODUCER_GPUS,
+        help="comma-separated device indices for the producer; the count is "
+        "its tensor-parallel size (e.g. '0,1,2,3' for TP=4)",
+    )
+    parser.add_argument(
+        "--consumer-gpus",
+        default=DEFAULT_CONSUMER_GPUS,
+        help="comma-separated device indices for the consumer; the count is "
+        "its tensor-parallel size (e.g. '4,5,6,7' for TP=4)",
+    )
     parser.add_argument("--producer-port", type=int, default=DEFAULT_PRODUCER_PORT)
     parser.add_argument("--consumer-port", type=int, default=DEFAULT_CONSUMER_PORT)
     parser.add_argument(
@@ -349,6 +387,19 @@ def main() -> int:
 
     global _DEBUG_LOGGING
     _DEBUG_LOGGING = args.debug
+
+    args.producer_devices = _parse_devices(args.producer_gpus, "--producer-gpus")
+    args.consumer_devices = _parse_devices(args.consumer_gpus, "--consumer-gpus")
+    shared_devices = set(args.producer_devices) & set(args.consumer_devices)
+    if shared_devices:
+        # Both instances reserve gpu_memory_utilization of every device they
+        # see, so an overlap silently starves one of them rather than failing.
+        print(
+            f"producer and consumer must not share devices; both list "
+            f"{sorted(shared_devices)}",
+            file=sys.stderr,
+        )
+        return 2
 
     if not args.image.exists():
         print(f"image not found: {args.image}", file=sys.stderr)

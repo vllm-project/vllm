@@ -64,6 +64,18 @@ class ServerSpec:
     # num_blocks = ec_cpu_bytes // block_size_bytes at startup, so this is a
     # generous default sized to never evict during the default-harness tests.
     ec_cpu_bytes: int = 4 * 1024**3
+    # Devices this instance owns, single-pod harness only; empty means just
+    # `gpu`. Its length is the tensor-parallel size, one rank per device. In
+    # K8s mode this stays empty because device assignment lives in the pod spec.
+    devices: tuple[int, ...] = ()
+
+    @property
+    def device_list(self) -> tuple[int, ...]:
+        return self.devices or (self.gpu,)
+
+    @property
+    def tp_size(self) -> int:
+        return len(self.device_list)
 
 
 # ---------------------------------------------------------------------------
