@@ -1468,6 +1468,9 @@ def _promote_local_kv_cache_specs(
             promoted_specs[layer_name] = replace_as(
                 spec,
                 target_cls,
+                # Promoted specs allocate blocks for all tokens and never free
+                # below the window, so the trailing-edge extension is moot.
+                drop=("extra_retained_tokens",),
                 block_size=block_size,
                 page_size_padded=promoted_page_size_padded(spec, block_size),
             )

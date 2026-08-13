@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
+from collections.abc import Collection
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
@@ -88,14 +89,24 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
 
 
-def replace_as(spec: KVCacheSpec, target_cls: type[_SpecT], **changes) -> _SpecT:
+def replace_as(
+    spec: KVCacheSpec,
+    target_cls: type[_SpecT],
+    *,
+    drop: Collection[str] = (),
+    **changes,
+) -> _SpecT:
     """``dataclasses.replace``, but rebuilding *spec* as *target_cls*
       e.g. ``SlidingWindowSpec`` -> ``FullAttentionSpec``
 
-    Every field of *spec* must exist on *target_cls*; fields only *target_cls* has keep
-    their default values.
+    Every field of *spec* must exist on *target_cls* unless named in *drop*;
+    fields only *target_cls* has keep their default values.
     """
-    kwargs = {f.name: getattr(spec, f.name) for f in fields(spec) if f.init}
+    kwargs = {
+        f.name: getattr(spec, f.name)
+        for f in fields(spec)
+        if f.init and f.name not in drop
+    }
     kwargs.update(changes)
     return target_cls(**kwargs)
 
@@ -697,16 +708,18 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
         block_stride_set = set(spec.indexes_kv_by_block_stride for spec in specs)
+        extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
             and len(block_stride_set) == 1
+            and len(extra_retained_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, compress ratio, model version, sliding "
-            "window size, and KV block stride indexing."
+            "window size, KV block stride indexing, and retained token count."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -716,6 +729,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             page_size_padded=specs[0].page_size_padded,
             indexes_kv_by_block_stride=block_stride_set.pop(),
             sliding_window=sliding_window_set.pop(),
+            extra_retained_tokens=extra_retained_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
