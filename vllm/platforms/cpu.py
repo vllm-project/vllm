@@ -341,6 +341,27 @@ class CpuPlatform(Platform):
         )
 
         if model_config is not None and model_config.use_mla:
+            # The CPU MLA decode kernel only supports the DeepSeek-V2/V3
+            # cache layout (see csrc/cpu/mla_decode.cpp), so fail fast with
+            # a clear error when the model's MLA head dimensions do not
+            # match, instead of crashing deep in kernel dispatch.
+            hf_text_config = model_config.hf_text_config
+            kv_lora_rank = getattr(hf_text_config, "kv_lora_rank", None)
+            qk_rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", None)
+            head_dim = (
+                kv_lora_rank + qk_rope_head_dim
+                if kv_lora_rank is not None and qk_rope_head_dim is not None
+                else None
+            )
+            v_head_dim = getattr(hf_text_config, "v_head_dim", None)
+            if (head_dim, v_head_dim) != (576, 512):
+                raise ValueError(
+                    "The CPU MLA decode kernel only supports "
+                    "head_dim=576, v_head_dim=512 (block_size=16); got "
+                    f"head_dim={head_dim}, v_head_dim={v_head_dim}. "
+                    f"Model {model_config.model} cannot run on the CPU "
+                    "backend."
+                )
             logger.info_once(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled."
