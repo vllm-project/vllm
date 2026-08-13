@@ -1182,6 +1182,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MuseGlimmerForConditionalGeneration": _HfExamplesInfo(
         "meta-models/Muse-Glimmer-30B",
     ),
+    "MuseGlimmerForCausalLM": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
+    ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
         "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
@@ -1482,7 +1485,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "MuseGlimmerAssistantModel": _HfExamplesInfo(
         "meta-models/Muse-Glimmer-30B",
         speculative_model="meta-models/Muse-Glimmer-30B-assistant",
-        use_original_num_layers=True,  # Draft head reads 5 target residual layers
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
+    "DFlashMuseGlimmerAssistantModel": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
+        speculative_model="meta-models/Muse-Glimmer-30B-assistant",
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),

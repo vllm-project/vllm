@@ -25,12 +25,22 @@ a real tokenizer live in ``test_muse_glimmer_parse_delta.py``.
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningParser
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 
-# __init__ needs a tokenizer; every method under test is reachable without one.
-R = MuseGlimmerReasoningParser.__new__(MuseGlimmerReasoningParser)
-T = MuseGlimmerToolParser.__new__(MuseGlimmerToolParser)
+R: MuseGlimmerReasoningParser
+T: MuseGlimmerToolParser
+
+
+@pytest.fixture(autouse=True)
+def _fresh_parsers():
+    """Give each test request-scoped parser state through the real constructors."""
+    global R, T
+    R = MuseGlimmerReasoningParser(object())
+    T = MuseGlimmerToolParser(object())
+
 
 # Any framing token that must NEVER appear in surfaced reasoning/content.
 _FRAMING = [
@@ -223,8 +233,11 @@ def _stream(raw: str, chunk: int):
         if dm is not None:
             if getattr(dm, "reasoning", None):
                 reasoning.append(dm.reasoning)
-            if getattr(dm, "content", None):
-                content.append(dm.content)
+            content_delta = getattr(dm, "content", None)
+            # Tool-channel content is an internal handoff to the tool parser,
+            # not client-visible content from the unified parser.
+            if content_delta and "<atem:function_calls>" not in content_delta:
+                content.append(content_delta)
         dt = MuseGlimmerToolParser.extract_tool_calls_streaming(
             T, prev, cur, delta, [], [], [], _FakeReq()
         )
@@ -343,12 +356,12 @@ def test_namespaced_name_preserved():
     assert out.tool_calls[0].function.name == "weather.get"
 
 
-def test_trailing_segment_unambiguous():
-    # emitted foo.get_weather; registered get_weather (bare) -> bind to get_weather
+def test_unregistered_namespace_is_preserved():
+    # Suffix-only matching can silently dispatch a tool from the wrong namespace.
     out = MuseGlimmerToolParser.extract_tool_calls(
         T, _call("foo.get_weather"), _req("get_weather")
     )
-    assert out.tool_calls[0].function.name == "get_weather"
+    assert out.tool_calls[0].function.name == "foo.get_weather"
 
 
 def test_trailing_segment_ambiguous_left_alone():

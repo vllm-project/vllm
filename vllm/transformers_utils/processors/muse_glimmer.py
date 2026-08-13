@@ -324,11 +324,12 @@ class MuseGlimmerVideoProcessor(BaseVideoProcessor):
         Returns (group_tensors, n_groups, tokens_per_group).
         """
         pt = self.patch_temporal
-        if len(frames) < pt or len(frames) % pt != 0:
-            raise ValueError(
-                f"video frame count {len(frames)} must be a positive multiple of "
-                f"patch_temporal={pt}"
-            )
+        if pt <= 0:
+            raise ValueError(f"patch_temporal must be positive, got {pt}")
+        if not frames:
+            raise ValueError("video must contain at least one frame")
+        if padding := (-len(frames)) % pt:
+            frames = [*frames, *([frames[-1]] * padding)]
         first = frames[0].convert("RGB")
         target_h, target_w, n_tokens = self.compute_video_frame_size(
             first.width, first.height

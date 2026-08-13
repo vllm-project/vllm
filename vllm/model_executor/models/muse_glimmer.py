@@ -262,6 +262,17 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
 class MuseGlimmerMultiModalProcessor(
     BaseMultiModalProcessor[MuseGlimmerProcessingInfo]
 ):
+    def _apply_hf_processor_text_only(
+        self,
+        prompt_text: str,
+        tokenization_kwargs: Mapping[str, object],
+    ) -> list[int]:
+        tokenizer = self.info.get_tokenizer()
+        return tokenizer.encode(
+            prompt_text,
+            **{"add_special_tokens": False, **tokenization_kwargs},
+        )
+
     def _call_hf_processor(
         self,
         prompt: str,
