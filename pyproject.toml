@@ -61,6 +61,8 @@ include = ["vllm*"]
 
 [tool.ruff.lint]
 select = [
+    # pydocstyle
+    "D",
     # pycodestyle
     "E",
     # Pyflakes
@@ -79,6 +81,8 @@ select = [
     "G",
 ]
 ignore = [
+    # undocumented
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107",
     # star imports
     "F405", "F403",
     # lambda expression assignment
