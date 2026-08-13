@@ -1433,6 +1433,8 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
                 otherwise it will be `(seq_len,)`.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
 
         """
         if intermediate_tensors is not None:

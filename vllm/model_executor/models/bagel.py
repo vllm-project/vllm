@@ -519,6 +519,8 @@ class BagelForConditionalGeneration(
             positions: Flattened (concatenated) position ids corresponding to a batch.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
 
         """
         if intermediate_tensors is not None:

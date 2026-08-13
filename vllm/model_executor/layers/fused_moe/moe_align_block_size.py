@@ -25,27 +25,25 @@ def moe_align_block_size(
     the current GPU rank as -1 so the MoE matmuls could skip those blocks.
     This requires the num_experts input arg to be the num global experts.
 
-    Parameters
-    ----------
-    - topk_ids: A tensor of shape [total_tokens, top_k] representing the
-        top-k expert indices for each token.
-    - block_size: The block size used in block matrix multiplication.
-    - num_experts: The total number of experts.
-    - expert_map: A tensor of shape [num_experts] that maps the expert index
-        from the global space to the local index space of the current
-        expert parallel shard. If the expert is not in the current expert
-        parallel shard, the mapping is set to -1.
-    - pad_sorted_ids: A flag indicating whether the sorted_token_ids length
-        should be padded to a multiple of block_size,
-    - ignore_invalid_experts: A flag indicating whether to ignore invalid
-        experts. When False, all expert_ids in topk_ids will participate in
-        counting and ranking, but invalid experts in expert_ids will be marked
-        as -1. When True, all invalid expert_ids in topk_ids will be ignored
-        and will not participate in counting or ranking, and there will be no
-        -1 in expert_ids.
+    Args:
+        topk_ids: A tensor of shape [total_tokens, top_k] representing the
+            top-k expert indices for each token.
+        block_size: The block size used in block matrix multiplication.
+        num_experts: The total number of experts.
+        expert_map: A tensor of shape [num_experts] that maps the expert index
+            from the global space to the local index space of the current
+            expert parallel shard. If the expert is not in the current expert
+            parallel shard, the mapping is set to -1.
+        pad_sorted_ids: A flag indicating whether the sorted_token_ids length
+            should be padded to a multiple of block_size,
+        ignore_invalid_experts: A flag indicating whether to ignore invalid
+            experts. When False, all expert_ids in topk_ids will participate in
+            counting and ranking, but invalid experts in expert_ids will be marked
+            as -1. When True, all invalid expert_ids in topk_ids will be ignored
+            and will not participate in counting or ranking, and there will be no
+            -1 in expert_ids.
 
-    Returns
-    -------
+    Returns:
     - sorted_token_ids: A tensor containing the sorted token indices according
         to their allocated expert.
     - expert_ids: A tensor indicating the assigned expert index for each block.
@@ -116,16 +114,14 @@ def batched_moe_align_block_size(
     This function is intended to be a drop in replacement for
     moe_align_batch_size for the batched case.
 
-    Parameters
-    ----------
-    - max_tokens_per_batch (int): Number of tokens in each batch (both
-        valid and invalid).
-    - block_size (int): block_size to align the data to.
-    - expert_num_tokens (torch.Tensor): expert_num_tokens[i], indicates
-        the number of valid tokens in batch i.
+    Args:
+        max_tokens_per_batch (int): Number of tokens in each batch (both
+            valid and invalid).
+        block_size (int): block_size to align the data to.
+        expert_num_tokens (torch.Tensor): expert_num_tokens[i], indicates
+            the number of valid tokens in batch i.
 
-    Returns
-    -------
+    Returns:
     - sorted_token_ids (torch.Tensor): Torch tensor of size
         (num_batches * max_tokens_per_batch) indicating the token indices for
         that block.
@@ -135,6 +131,7 @@ def batched_moe_align_block_size(
     - num_tokens_post_pad (torch.Tensor): Torch tensor of size 1
         indicating the number of valid blocks with actual data to
         process. This is represented in terms of num tokens.
+
     Example:
     Let num_batches=5, max_tokens_per_batch=8, block_size=4, and
     expert_num_tokens=[2, 3, 0, 6, 8]. This expert_num_tokens tensor

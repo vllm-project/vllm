@@ -1032,12 +1032,18 @@ class AiterFlashAttentionImpl(AttentionImpl):
         """Forward pass with AiterFlashAttention.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
                 [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization; not supported
+                by this backend.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
 
         Returns:
             shape = [num_tokens, num_heads * head_size]

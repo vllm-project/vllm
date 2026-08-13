@@ -907,15 +907,11 @@ def get_sentence_transformer_tokenizer_config(
     """Returns the tokenization configuration dictionary for a
     given Sentence Transformer BERT model.
 
-    Parameters
-    ----------
-    - model (str|Path): The name of the Sentence Transformer
-    BERT model.
-    - revision (str, optional): The revision of the m
-    odel to use. Defaults to 'main'.
+    Args:
+        model (str|Path): The name of the Sentence Transformer BERT model.
+        revision (str, optional): The revision of the model to use. Defaults to 'main'.
 
-    Returns
-    -------
+    Returns:
     - dict: A dictionary containing the configuration parameters
     for the Sentence Transformer BERT model.
 

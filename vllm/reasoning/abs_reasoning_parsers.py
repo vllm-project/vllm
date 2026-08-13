@@ -161,13 +161,11 @@ class ReasoningParser:
         Used for non-streaming responses where we have the entire model response
         available before sending to the client.
 
-        Parameters
-        ----------
+        Args:
             model_output: The model-generated string to extract reasoning content from.
             request: The request object that was used to generate the model_output.
 
-        Returns
-        -------
+        Returns:
             A tuple containing the reasoning content and the content.
 
         """

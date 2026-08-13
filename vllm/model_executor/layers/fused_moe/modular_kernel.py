@@ -1397,30 +1397,29 @@ class FusedMoEKernelModularImpl:
         """This function computes a Mixture of Experts (MoE) layer using two sets
         of weights, w1 and w2, and top-k gating mechanism.
 
-        Parameters
-        ----------
-        - hidden_states: (torch.Tensor): The input tensor to the MoE layer.
-        - w1 (torch.Tensor): The first set of expert weights.
-        - w2 (torch.Tensor): The second set of expert weights.
-        - topk_weights (torch.Tensor): The topk weights applied at the end of the layer.
-        - topk_ids (torch.Tensor): A map of row to expert id.
-        - activation (MoEActivation): The activation function to apply after the first
-          MoE layer.
-        - global_num_experts (int): The total number of experts in the global
-          expert space.
-        - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-          from the global expert space to the local expert space of the expert
-          parallel shard.
-        - apply_router_weight_on_input (bool): When true, the topk weights are
-          applied directly on the inputs. This is only applicable when topk is
-          1.
-        - shared_experts: SharedExperts | None. The shared experts if any.
-        - shared_experts_input (Optional[torch.Tensor]): Optional separate
-          input for shared experts. For latent MoE, this is the original
-          hidden_states before latent projection.
+        Args:
+            hidden_states: (torch.Tensor): The input tensor to the MoE layer.
+            w1 (torch.Tensor): The first set of expert weights.
+            w2 (torch.Tensor): The second set of expert weights.
+            topk_weights (torch.Tensor): The topk weights applied at the end
+                of the layer.
+            topk_ids (torch.Tensor): A map of row to expert id.
+            activation (MoEActivation): The activation function to apply after the first
+                MoE layer.
+            global_num_experts (int): The total number of experts in the global
+                expert space.
+            expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+                from the global expert space to the local expert space of the expert
+                parallel shard.
+            apply_router_weight_on_input (bool): When true, the topk weights are
+                applied directly on the inputs. This is only applicable when topk is
+                1.
+            shared_experts: SharedExperts | None. The shared experts if any.
+            shared_experts_input (Optional[torch.Tensor]): Optional separate
+                input for shared experts. For latent MoE, this is the original
+                hidden_states before latent projection.
 
-        Returns
-        -------
+        Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
 
         """

@@ -559,6 +559,8 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
             positions: Position indices for the input tokens.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
 
         Info:
             [`LlavaNextImageInputs`][vllm.model_executor.models.llava_next.LlavaNextImageInputs]

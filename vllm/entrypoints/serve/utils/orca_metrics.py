@@ -19,14 +19,12 @@ def create_orca_header(
     ORCA headers format description: https://docs.google.com/document/d/1C1ybMmDKJIVlrbOLbywhu9iRYo4rilR-cT50OTtOFTs/edit?tab=t.0
     ORCA proto https://github.com/cncf/xds/blob/main/xds/data/orca/v3/orca_load_report.proto
 
-    Parameters
-    ----------
-    - metrics_format (str): The format of the header ('TEXT', 'JSON').
-    - named_metrics (List[Tuple[str, float]]): List of tuples with metric names
-    and their corresponding double values.
+    Args:
+        metrics_format (str): The format of the header ('TEXT', 'JSON').
+        named_metrics (List[Tuple[str, float]]): List of tuples with metric names
+            and their corresponding double values.
 
-    Returns
-    -------
+    Returns:
     - Optional[Mapping[str,str]]: A dictionary with header key as
     'endpoint-load-metrics' and values as the ORCA header strings with
     format prefix and data in  with named_metrics in.
@@ -105,12 +103,10 @@ def metrics_header(metrics_format: str) -> Mapping[str, str] | None:
     ORCA headers format description: https://docs.google.com/document/d/1C1ybMmDKJIVlrbOLbywhu9iRYo4rilR-cT50OTtOFTs/edit?tab=t.0
     ORCA proto https://github.com/cncf/xds/blob/main/xds/data/orca/v3/orca_load_report.proto
 
-    Parameters
-    ----------
-    - metrics_format (str): The format of the header ('TEXT', 'JSON').
+    Args:
+        metrics_format (str): The format of the header ('TEXT', 'JSON').
 
-    Returns
-    -------
+    Returns:
     - Optional[Mapping[str,str]]: A dictionary with header key as
     'endpoint-load-metrics' and values as the ORCA header strings with
     format prefix and data in  with named_metrics in.

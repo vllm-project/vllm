@@ -702,6 +702,8 @@ class LlavaForConditionalGeneration(
             positions: Position indices for the input tokens.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
 
         Info:
             [`LlavaImageInputs`][vllm.model_executor.models.llava.LlavaImageInputs]

@@ -377,6 +377,7 @@ class Cohere2VisionForConditionalGeneration(
         Args:
             image_input: Validated image input containing pixel values and
                          patch counts
+            **kwargs: Unused; accepted for interface compatibility.
 
         Returns:
             List of flattened image embeddings, one per image

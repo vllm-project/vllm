@@ -317,14 +317,12 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     Otherwise, it treats the lora_path as a local file path and
     converts it to an absolute path.
 
-    Parameters
-    ----------
-    lora_path (str): The path to the lora model, which can be an absolute path,
-                     a relative path, or a Hugging Face model identifier.
+    Args:
+        lora_path (str): The path to the lora model, which can be an absolute
+            path, a relative path, or a Hugging Face model identifier.
 
-    Returns
-    -------
-    str: The resolved absolute local path to the lora model.
+    Returns:
+        str: The resolved absolute local path to the lora model.
 
     """
     # Check if the path is an absolute path. Return it no matter exists or not.

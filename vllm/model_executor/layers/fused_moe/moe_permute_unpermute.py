@@ -256,17 +256,15 @@ def moe_unpermute(
     """This function expands and permutes activation to gathering uncontinuous
       tokens for each expert.
 
-    Parameters
-    ----------
-    - out (torch.Tensor): output tensor
-    - permuted_hidden_states (torch.Tensor): permuted activation.
-    - topk_weights (torch.Tensor): topk expert route weight for each token.
-    - inv_permuted_idx (torch.Tensor): row idx map for moe_unpermute.
-    - expert_first_token_offset (Optional[torch.Tensor]): offset of the first
-      token of each expert for grouped gemm.
+    Args:
+        out (torch.Tensor): output tensor
+        permuted_hidden_states (torch.Tensor): permuted activation.
+        topk_weights (torch.Tensor): topk expert route weight for each token.
+        inv_permuted_idx (torch.Tensor): row idx map for moe_unpermute.
+        expert_first_token_offset (Optional[torch.Tensor]): offset of the first
+            token of each expert for grouped gemm.
 
-    Returns
-    -------
+    Returns:
     - hidden_states (torch.Tensor): The reduced and unpermuted activation
       tensor.
 

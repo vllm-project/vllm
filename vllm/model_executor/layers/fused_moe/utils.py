@@ -81,17 +81,14 @@ def count_expert_num_tokens(
 ) -> torch.Tensor:
     """Count the number to tokens assigned to each expert.
 
-    Parameters
-    ----------
-    - topk_ids (torch.Tensor): Tensor mapping each token to its
-    list of experts.
-    - num_local_experts (int): Number of experts in this rank.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-    from the global expert space to the local expert space of the expert
-    parallel shard.
+    Args:
+        topk_ids (torch.Tensor): Tensor mapping each token to its list of experts.
+        num_local_experts (int): Number of experts in this rank.
+        expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+            from the global expert space to the local expert space of the expert
+            parallel shard.
 
-    Returns
-    -------
+    Returns:
     A tensor of size num_local_experts, where tensor[i] holds the number
     of tokens assigned to the ith expert.
 

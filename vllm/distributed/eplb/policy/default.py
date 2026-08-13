@@ -25,13 +25,11 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         """Pack n weighted objects to m packs, such that each bin contains exactly
         n/m objects and the weights of all packs are as balanced as possible.
 
-        Parameters
-        ----------
+        Args:
             weight: [X, n], the weight of each item
             num_packs: number of packs
 
-        Returns
-        -------
+        Returns:
             pack_index: [X, n], the pack index of each item
             rank_in_pack: [X, n], the rank of the item in the pack
 
@@ -80,13 +78,11 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         """Replicate `num_log` experts to `num_phy` replicas, such that the maximum
         load of all replicas is minimized.
 
-        Parameters
-        ----------
+        Args:
             weight: [X, num_log]
             num_phy: total number of experts after replication
 
-        Returns
-        -------
+        Returns:
             phy2log: [X, num_phy], logical expert id of each physical expert
             logcnt: [X, num_log], number of replicas for each logical expert
 
@@ -120,8 +116,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
                 (e.g, NVLink) is faster
             num_gpus: number of GPUs, must be a multiple of `num_nodes`
 
-        Returns
-        -------
+        Returns:
             phy2log: [layers, num_replicas], the expert
                 index of each replica
 
@@ -286,8 +281,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
     ) -> torch.Tensor:
         """Entry point for expert-parallelism load balancer.
 
-        Parameters
-        ----------
+        Args:
             weight: [layers, num_logical_experts], the load statistics for all
                 logical experts
             num_replicas: number of physical experts, must be a multiple of
@@ -300,7 +294,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
                 expert indices. Used to avoid unnecessary weight copying
                 for experts moving within one rank.
 
-        Returns
+        Returns:
         -------
             phy2log: [layers, num_replicas], the expert
                 index of each replica

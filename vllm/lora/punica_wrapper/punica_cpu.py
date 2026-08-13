@@ -182,6 +182,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         x = x.view(-1, x.shape[-1])
@@ -212,7 +213,9 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             x (Union[tuple[torch.Tensor, ...], torch.Tensor]): Input tensors
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
             output_slices (tuple[int, ...]): Every slice's size
+            offset_start (int): The starting position of y, defaults to 0.
             add_inputs (bool):  Defaults to True.
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         y_org = y
@@ -248,6 +251,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         # Embedding layer only need expand op
@@ -287,6 +291,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[tuple[torch.Tensor, ...]]): Defaults to None.
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
@@ -328,6 +333,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor):lora_b's weights.
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
+            **kwargs: Forwarded to `add_shrink` and `add_expand`.
 
         """
         y_org = y

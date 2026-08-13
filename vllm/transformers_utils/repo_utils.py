@@ -375,14 +375,12 @@ def get_hf_file_to_dict(
     """Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
 
-    Parameters
-    ----------
-    - file_name (str): The name of the file to download.
-    - model (str): The name of the model on the Hugging Face Hub.
-    - revision (str): The specific version of the model.
+    Args:
+        file_name (str): The name of the file to download.
+        model (str): The name of the model on the Hugging Face Hub.
+        revision (str): The specific version of the model.
 
-    Returns
-    -------
+    Returns:
     - config_dict (dict): A dictionary containing
     the contents of the downloaded file.
 

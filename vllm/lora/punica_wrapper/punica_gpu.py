@@ -104,6 +104,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         x = x.view(-1, x.shape[-1])
@@ -140,9 +141,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensors
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
             output_slices (tuple[int, ...]): Every slice's size
+            offset_start (int): The starting position of y, defaults to 0.
             add_inputs (bool): If True, add LoRA output to y; if False, write
                 LoRA-only output to y (used for dual-stream when base and LoRA
                 run on different CUDA streams). Defaults to True.
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         y_org = y
@@ -183,6 +186,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         lora_expand(
@@ -227,6 +231,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[torch.Tensor]): Defaults to None.
+            **kwargs: Accepts `add_inputs` (bool, defaults to True); any other
+                keys are ignored.
 
         """
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
@@ -283,6 +289,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]): Default to None.
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         y_org = y

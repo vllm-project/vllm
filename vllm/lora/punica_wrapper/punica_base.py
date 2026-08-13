@@ -295,6 +295,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         # TODO: implement it based on torch ops
@@ -327,6 +328,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             output_slices (tuple[int, ...]): Every slice's size
             offset_start (int): The starting position of y, defaults to 0
             add_inputs (bool):  Defaults to True.
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         # TODO: implement it based on torch ops
@@ -351,6 +353,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         # TODO: implement it based on torch ops
@@ -388,6 +391,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[tuple[torch.Tensor, ...]]): Defaults to None.
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         # TODO: implement it based on torch ops
@@ -418,6 +422,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             lora_b_stacked (torch.Tensor):lora_b's weights.
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
+            **kwargs: Unused; accepted for compatibility with the base class signature.
 
         """
         # TODO: implement it based on torch ops

@@ -205,8 +205,7 @@ def maybe_make_int_tensor(
     """Convert Python int list to a 1D int torch.Tensor on `device`.
 
     Returns:
-    * If _list is not None: 1D int torch.Tensor on `device`
-    * None otherwise
+        If _list is not None: 1D int torch.Tensor on `device`, `None` otherwise.
 
     """
     return (
@@ -221,8 +220,7 @@ def maybe_make_long_tensor(
     """Convert Python int list to a 1D long torch.Tensor on `device`.
 
     Returns:
-    * If _list is not None: 1D long torch.Tensor on `device`
-    * None otherwise
+        If _list is not None: 1D long torch.Tensor on `device`, `None` otherwise.
 
     """
     return (
@@ -231,9 +229,10 @@ def maybe_make_long_tensor(
 
 
 def maybe_max(_list: list | None) -> Number | None:
-    """Returns:
-    * If _list is not None: max(_list)
-    * None otherwise
+    """Compute the maximum of a list, if it exists.
+
+    Returns:
+        If _list is not None: max(_list), `None` otherwise.
 
     """
     return None if _list is None else max(_list)
@@ -246,11 +245,11 @@ def make_causal_mask(
     """Create a q_max_seq_len x kv_max_seq_len causal mask.
 
     Arguments:
-    * q_max_seq_len: query max seq len
-    * kv_max_seq_len: key/value max seq len
+        q_max_seq_len: query max seq len
+        kv_max_seq_len: key/value max seq len
 
     Returns:
-    * 2D tensor, q_max_seq_len x kv_max_seq_len
+        2D tensor, q_max_seq_len x kv_max_seq_len
 
     """
     # Create a matrix where entry (i, j) is True if i >= j
@@ -277,17 +276,16 @@ def ref_masked_attention(
       causal
 
     Arguments:
-    * query: batch_size x q_padded_seq_len x num_heads x head_size
-    * key: batch_size x kv_padded_seq_len x num_heads x head_size
-    * value: batch_size x kv_padded_seq_len x num_heads x head_size
-    * scale: Attention scale factor
-    * custom_mask: custom attention mask; good place to inject a causal
-      attention mask
-    * q_seq_lens: list of unpadded query seq_lens for each batch index
-    * kv_seq_lens: list of unpadded key/value seq_lens for each batch index
+        query: batch_size x q_padded_seq_len x num_heads x head_size
+        key: batch_size x kv_padded_seq_len x num_heads x head_size
+        value: batch_size x kv_padded_seq_len x num_heads x head_size
+        scale: Attention scale factor
+        custom_mask: custom attention mask; good place to inject a causal attention mask
+        q_seq_lens: list of unpadded query seq_lens for each batch index
+        kv_seq_lens: list of unpadded key/value seq_lens for each batch index
 
     Returns:
-    * Attention result, batch_size x q_padded_seq_len x num_heads x head_size
+        Attention result, batch_size x q_padded_seq_len x num_heads x head_size
 
     """
     assert q_seq_lens is not None
@@ -345,26 +343,26 @@ def make_qkv(
     seqlens
 
     Arguments:
-    * batch_size
-    * max_q_seq_len: max query seq len
-    * max_kv_seq_len: max key/value seq len
-    * num_heads
-    * head_size
-    * is_encoder_decoder_attn: if True, query seqlen may differ from
-      key/value seqlen (as is often the case for cross-attention);
-      o/w, query/key/value seqlens match at each batch index
-      (max_kv_seq_len is unused)
-    * force_kv_seq_lens: if not None, overrides kv sequence lengths
-    * attn_type: encoder, decoder self, or enc/dec cross attention
-    * force_max_len: if True, all query seqlens are max_q_seq_len; o/w query
-      seqlens are random in [2,max_q_seq_lens]. Same for key/value seqlens
-      and max_kv_seq_len, unless forced by is_encoder_decoder_attn=False
-    * device: CPU or CUDA device
+        batch_size: number of sequences in the batch
+        max_q_seq_len: max query seq len
+        max_kv_seq_len: max key/value seq len
+        num_heads: number of attention heads
+        head_size: head dimension
+        is_encoder_decoder_attn: if True, query seqlen may differ from
+          key/value seqlen (as is often the case for cross-attention);
+          o/w, query/key/value seqlens match at each batch index
+          (max_kv_seq_len is unused)
+        force_kv_seq_lens: if not None, overrides kv sequence lengths
+        attn_type: encoder, decoder self, or enc/dec cross attention
+        force_max_len: if True, all query seqlens are max_q_seq_len; o/w query
+          seqlens are random in [2,max_q_seq_lens]. Same for key/value seqlens
+          and max_kv_seq_len, unless forced by is_encoder_decoder_attn=False
+        device: CPU or CUDA device
 
     Returns:
-    * Overall QKVInputs structure (containing full unpacked Q/K/V tensors)
-    * Prefill QKVInputs structure (containing all but the last sequence offset)
-    * Decode QKVInputs structure (containing all only the last sequence offset)
+        Overall QKVInputs structure (containing full unpacked Q/K/V tensors)
+        Prefill QKVInputs structure (containing all but the last sequence offset)
+        Decode QKVInputs structure (containing all only the last sequence offset)
 
     """
     if force_max_len:
@@ -461,14 +459,14 @@ def pack_tensor(
     number_of_tokens = sum(seq_lens)
 
     Arguments:
-    * unpacked_tensor: batch_size x padded_seq_len x num_heads x head_size
-    * seq_lens: list of token counts for each seq
-    * device: CPU or CUDA device
+        unpacked_tensor: batch_size x padded_seq_len x num_heads x head_size
+        seq_lens: list of token counts for each seq
+        device: CPU or CUDA device
 
     Returns:
-    * packed_tensor: number_of_tokens x num_heads x head_size
-    * start_loc_list: start idx of each batch elt in packed_tensor; [0] +
-      list(itertools.accumulate(seq_lens))
+        packed_tensor: number_of_tokens x num_heads x head_size
+        start_loc_list: start idx of each batch elt in packed_tensor; [0] +
+          list(itertools.accumulate(seq_lens))
 
     """
     num_tok = sum(seq_lens)
@@ -495,13 +493,13 @@ def pack_qkv(qkv: QKVInputs, device: torch.device | str) -> PackedQKVInputs:
     For K and V, number_of_tokens = sum(kv_seq_lens)
 
     Arguments:
-    * qkv: Unpacked (batch_size x padded_seq_len x num_heads x head_size)
-           attention inputs
-    * device: CPU or CUDA device
+        qkv: Unpacked (batch_size x padded_seq_len x num_heads x head_size)
+               attention inputs
+        device: CPU or CUDA device
 
     Returns:
-    * Packed (number_of_tokens x num_heads x head_size) QKV inputs
-      derived from unpacked inputs
+        Packed (number_of_tokens x num_heads x head_size) QKV inputs
+          derived from unpacked inputs
 
     """
     if qkv.query is None:
@@ -542,20 +540,20 @@ def _make_metadata_tensors(
     """Build scalar & tensor values required to build attention metadata structure.
 
     Arguments:
-    * seq_lens: list of token-counts for each decoder input seq
-    * context_lens: list of context length values for each seq
-    * encoder_seq_lens: list of token-counts for each encoder input seq
-    * device: CPU or CUDA device
+        seq_lens: list of token-counts for each decoder input seq
+        context_lens: list of context length values for each seq
+        encoder_seq_lens: list of token-counts for each encoder input seq
+        device: CPU or CUDA device
 
     Returns:
-    * seq_lens_tensor: decoder seq_lens list, as tensor
-    * context_lens_tensor: context_lens list, as tensor
-    * max_context_len: max(context_lens)
-    * max_seq_len: max(seq_lens)
-    * seq_start_loc: start idx of each sequence
-    * encoder_seq_lens_tensor: encoder seq_lens list, as tensor
-    * encoder_seq_start_loc: start idx of each encoder sequence
-    * max_encoder_seq_len: encoder seq_lens list, as tensor
+        seq_lens_tensor: decoder seq_lens list, as tensor
+        context_lens_tensor: context_lens list, as tensor
+        max_context_len: max(context_lens)
+        max_seq_len: max(seq_lens)
+        seq_start_loc: start idx of each sequence
+        encoder_seq_lens_tensor: encoder seq_lens list, as tensor
+        encoder_seq_start_loc: start idx of each encoder sequence
+        max_encoder_seq_len: encoder seq_lens list, as tensor
 
     """
     seq_lens_tensor = maybe_make_int_tensor(seq_lens, device)
@@ -614,16 +612,17 @@ def make_kv_cache(
     """Create a fake KV cache.
 
     Arguments:
-    * num_blocks: number of blocks in the KV cache
-    * num_heads: number of attention heads
-    * head_size: head dimension
-    * block_size: number of offsets within a block
-    * device: CPU or CUDA device
-    * default_val: initialization value for KV cache elements
+        num_blocks: number of blocks in the KV cache
+        num_heads: number of attention heads
+        head_size: head dimension
+        block_size: number of offsets within a block
+        device: CPU or CUDA device
+        backend: attention backend name; only 'FLASH_ATTN' is supported
+        default_val: initialization value for KV cache elements
 
     Returns:
-    * kv_cache: 2 x num_blocks x block_size x num_heads x head_size
-    *     for backend 'FLASH_ATTN'
+        kv_cache: 2 x num_blocks x block_size x num_heads x head_size
+            for backend 'FLASH_ATTN'
 
     """
     if backend != "FLASH_ATTN":
@@ -678,17 +677,17 @@ def split_slot_mapping(
     The N excised entries are appended to obtain the decode-phase slot mapping
 
     Arguments:
-    * slot_mapping_list: Length-P 1D slot mapping (as list) reflecting all N
-      post-decode sequences
-    * seq_lens: list of N post-decode sequence lengths (K_i + 1 in the
-      description above)
-    * device: cuda, cpu, etc.
+        slot_mapping_list: Length-P 1D slot mapping (as list) reflecting all N
+          post-decode sequences
+        seq_lens: list of N post-decode sequence lengths (K_i + 1 in the
+          description above)
+        device: cuda, cpu, etc.
 
     Returns:
-    * prefill_slot_mapping: Length-M 1D slot mapping (as Tensor)
-      reflecting all N prefill prompts
-    * decode_slot_mapping: Length-N 1D slot mapping (as Tensor) reflecting
-      all N decoded tokens
+        prefill_slot_mapping: Length-M 1D slot mapping (as Tensor)
+          reflecting all N prefill prompts
+        decode_slot_mapping: Length-N 1D slot mapping (as Tensor) reflecting
+          all N decoded tokens
 
     """
     prefill_slot_mapping = []
@@ -739,10 +738,10 @@ def make_block_tables_slot_mapping(
     i.e. the total of prefill prompt tokens + decoded tokens.
 
     Arguments:
-    * block_size: number of offsets per block
-    * seq_lens: list of token-counts for each sequence
-    * block_base_addr: the block table base address
-    * device: CPU or CUDA device
+        block_size: number of offsets per block
+        seq_lens: list of token-counts for each sequence
+        block_base_addr: the block table base address
+        device: CPU or CUDA device
 
     Return:
     * block_tables_tensor: block table for sequence
@@ -793,8 +792,9 @@ def assert_actual_matches_ideal(
     contained in the test parameters data structure.
 
     Arguments:
-    * test_params: Test parameters including packed ideal output
-    * output_under_test: actually observed output value
+        test_params: Test parameters including packed ideal output
+        output_under_test: actually observed output value
+        backend: attention backend name; only 'FLASH_ATTN' is supported
 
     """
     ideal_output = test_params.packed_qkvo.ideal_output
