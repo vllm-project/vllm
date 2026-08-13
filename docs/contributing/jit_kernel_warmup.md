@@ -136,7 +136,7 @@ def dispatch(
     )
 ```
 
-Conditional expressions (`x if condition else y`) are supported, but statement-level `if` blocks are currently not. The tracer expects a straight-line sequence of local assignments followed by one `return self.CompileKey(...)`; supporting `if` blocks would require tracing and merging multiple control-flow paths. Keep branching in conditional expressions or small, pure helper functions. Do not put loops, mutation, side effects, or backend imports inside `dispatch(...)`. Put environment and model gating in `get_warmup_keys(...)` or the outer warmup entry point.
+Conditional expressions (`x if condition else y`) are supported, but statement-level `if` blocks are not supported directly inside traced `dispatch(...)` or `_when` bodies. The tracer expects a straight-line sequence of local assignments followed by one return expression. Small, pure helpers called by traced expressions execute as normal Python with concrete values and may use ordinary control flow, including `if` blocks. Do not put loops, mutation, side effects, or backend imports directly inside traced functions. Put environment and model gating in `get_warmup_keys(...)` or the outer warmup entry point.
 
 ### Expression Features
 
@@ -184,7 +184,7 @@ def dispatch(
 
 All unmatched dispatch arguments are then compile-key fields and warmup inputs. Named parameters remain explicit when dispatch transforms them. The unpacking must use the dispatch method's `**kwargs` parameter directly and may appear only once. The fully explicit form remains supported and is clearer for dispatch methods with non-trivial field mappings. Unpacking another mapping or expression, or unpacking the parameter more than once, is rejected. Helper calls also cannot use `**kwargs`.
 
-Unsupported constructs currently include loops, statement-level `if`, comprehensions, lambda expressions, mutation, slices, dict/set literals, and star-argument calls. If a dispatch rule needs those features, move that logic into a small helper function and call it from a supported expression.
+Unsupported constructs directly inside traced function bodies currently include loops, statement-level `if`, comprehensions, lambda expressions, mutation, slices, dict/set literals, and star-argument calls. If a dispatch rule needs ordinary control flow, move that logic into a small, pure helper function and call it from a supported expression.
 
 ### Input Discovery
 
