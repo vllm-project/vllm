@@ -451,6 +451,14 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit
             else 0
         )
+        if tail_boundary and self.use_eagle_block_drop:
+            # Eagle matches one hash unit past the candidate and drops it, so
+            # nothing proves the prompt's own last hash boundary. Materialize
+            # the state one unit lower, where the hit can actually land. Keyed on
+            # the block-drop bit, not plain use_eagle: this shift exists only to
+            # compensate for the drop, and the Mamba manager's matching gate
+            # reads the same bit (the coordinator is handed use_eagle_block_drop).
+            tail_boundary = max(tail_boundary - self.hash_block_size, 0)
         stops = (
             # Same invariant: a chunk starting mid-block stops at the boundary
             # rather than running past it.
