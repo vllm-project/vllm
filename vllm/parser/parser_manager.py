@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.parser.abstract_parser import Parser
+    from vllm.parser.engine.parser_engine import ParserEngine
     from vllm.reasoning import ReasoningParser
     from vllm.tool_parsers import ToolParser
 
@@ -22,6 +23,24 @@ class ParserManager:
     Parser engine adapters backed by the same engine are collapsed back into
     that engine. Other parser pairs are composed through ``DelegatingParser``.
     """
+
+    @staticmethod
+    def _get_parser_engine_cls(
+        parser_cls: type[object] | None,
+    ) -> type[ParserEngine] | None:
+        if parser_cls is None:
+            return None
+        parser_engine_cls = getattr(parser_cls, "_parser_engine_cls", None)
+        if parser_engine_cls is None:
+            return None
+
+        from vllm.parser.engine.parser_engine import ParserEngine
+
+        if not isinstance(parser_engine_cls, type) or not issubclass(
+            parser_engine_cls, ParserEngine
+        ):
+            return None
+        return parser_engine_cls
 
     @classmethod
     def get_tool_parser(
@@ -118,18 +137,14 @@ class ParserManager:
             HarmonyParser.tool_parser_cls = tool_parser_cls
             return HarmonyParser
 
-        reasoning_engine_cls = getattr(reasoning_parser_cls, "_parser_engine_cls", None)
-        tool_engine_cls = getattr(tool_parser_cls, "_parser_engine_cls", None)
+        reasoning_engine_cls = cls._get_parser_engine_cls(reasoning_parser_cls)
+        tool_engine_cls = cls._get_parser_engine_cls(tool_parser_cls)
+        if reasoning_engine_cls is not None and tool_parser_cls is None:
+            return reasoning_engine_cls
+        if tool_engine_cls is not None and reasoning_parser_cls is None:
+            return tool_engine_cls
         if reasoning_engine_cls is not None and reasoning_engine_cls is tool_engine_cls:
-            unified_parser_cls = type(
-                f"Unified{reasoning_engine_cls.__name__}",
-                (reasoning_engine_cls,),
-                {
-                    "reasoning_parser_cls": reasoning_parser_cls,
-                    "tool_parser_cls": tool_parser_cls,
-                },
-            )
-            return cast("type[Parser]", unified_parser_cls)
+            return reasoning_engine_cls
 
         if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
             from vllm.parser.kimi_k3 import KimiK3Parser

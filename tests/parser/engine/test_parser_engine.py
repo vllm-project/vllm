@@ -912,7 +912,7 @@ def test_parser_manager_uses_shared_engine_directly(monkeypatch):
     )
 
     assert parser_cls is not None
-    assert issubclass(parser_cls, _CombinedTestEngine)
+    assert parser_cls is _CombinedTestEngine
     parser = parser_cls(make_mock_tokenizer(_VOCAB))
     request = _make_delegating_request()
     reasoning, content, _ = parser.parse(
@@ -923,6 +923,48 @@ def test_parser_manager_uses_shared_engine_directly(monkeypatch):
     assert reasoning == "ab"
     assert content == "c"
     assert parser.count_reasoning_tokens([]) == 2
+
+
+def test_parser_manager_uses_reasoning_only_engine_directly(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: _CombinedReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: None),
+    )
+
+    parser_cls = ParserManager.get_parser(reasoning_parser_name="combined")
+
+    assert parser_cls is not None
+    assert parser_cls is _CombinedTestEngine
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    reasoning, content, _ = parser.parse(
+        "ab</think>c",
+        _make_delegating_request(),
+        model_output_token_ids=[ord("a"), ord("b"), 201, ord("c")],
+    )
+    assert reasoning == "ab"
+    assert content == "c"
+    assert parser.count_reasoning_tokens([]) == 2
+
+
+def test_parser_manager_rejects_non_engine_adapter_metadata():
+    class TraditionalParser:
+        pass
+
+    class InvalidEngineAdapter:
+        _parser_engine_cls = TraditionalParser
+
+    assert ParserManager._get_parser_engine_cls(TraditionalParser) is None
+    assert ParserManager._get_parser_engine_cls(InvalidEngineAdapter) is None
+    assert (
+        ParserManager._get_parser_engine_cls(_CombinedReasoningAdapter)
+        is _CombinedTestEngine
+    )
 
 
 def _make_delegating_request():
