@@ -192,19 +192,15 @@ def test_encoder_cache_reset_clears_late_interaction_state() -> None:
 
 def test_pooling_runner_rejects_unsupported_selected_task() -> None:
     model = MagicMock()
-    model.pooler.get_supported_tasks.return_value = {
-        "embed",
-        "embed&token_classify",
-        "token_classify",
-    }
+    model.pooler.get_supported_tasks.return_value = {"embed", "plugin"}
     vllm_config = MagicMock()
     vllm_config.scheduler_config.max_num_seqs = 2
     vllm_config.model_config.attn_type = "encoder_only"
-    vllm_config.model_config.get_pooling_task.return_value = "embed&token_classify"
+    vllm_config.model_config.get_pooling_task.return_value = "plugin"
 
     with (
         patch.object(PoolingRunner, "get_supported_tasks", return_value=["embed"]),
-        pytest.raises(ValueError, match="selects 'embed&token_classify'"),
+        pytest.raises(ValueError, match="selects 'plugin'"),
     ):
         PoolingRunner(model, vllm_config)
 
@@ -235,7 +231,7 @@ def test_pooling_runner_supports_encoder_token_embedding() -> None:
     assert runner.supported_tasks == {"token_embed"}
 
 
-def test_pooling_runner_rejects_decoder_token_classification() -> None:
+def test_pooling_runner_supports_decoder_token_classification() -> None:
     model = MagicMock()
     model.pooler.get_supported_tasks.return_value = {"token_classify"}
     vllm_config = MagicMock()
@@ -243,13 +239,12 @@ def test_pooling_runner_rejects_decoder_token_classification() -> None:
     vllm_config.model_config.attn_type = "decoder"
     vllm_config.model_config.get_pooling_task.return_value = "token_classify"
 
-    with pytest.raises(ValueError, match="selects 'token_classify'") as exc_info:
-        PoolingRunner(model, vllm_config)
+    runner = PoolingRunner(model, vllm_config)
 
-    assert "Set an explicitly supported task" not in str(exc_info.value)
+    assert runner.supported_tasks == {"token_classify"}
 
 
-def test_pooling_runner_filters_decoder_token_classification() -> None:
+def test_pooling_runner_keeps_decoder_token_classification() -> None:
     model = MagicMock()
     model.pooler.get_supported_tasks.return_value = {"embed", "token_classify"}
     vllm_config = MagicMock()
@@ -259,10 +254,10 @@ def test_pooling_runner_filters_decoder_token_classification() -> None:
 
     runner = PoolingRunner(model, vllm_config)
 
-    assert runner.supported_tasks == {"embed"}
+    assert runner.supported_tasks == {"embed", "token_classify"}
 
 
-def test_pooling_runner_filters_decoder_token_embedding() -> None:
+def test_pooling_runner_keeps_decoder_token_embedding() -> None:
     model = MagicMock()
     model.pooler.get_supported_tasks.return_value = {"embed", "token_embed"}
     vllm_config = MagicMock()
@@ -272,4 +267,18 @@ def test_pooling_runner_filters_decoder_token_embedding() -> None:
 
     runner = PoolingRunner(model, vllm_config)
 
-    assert runner.supported_tasks == {"embed"}
+    assert runner.supported_tasks == {"embed", "token_embed"}
+
+
+def test_pooling_runner_supports_embed_token_classification() -> None:
+    model = MagicMock()
+    model.pooler.get_supported_tasks.return_value = {"embed", "embed&token_classify"}
+    vllm_config = MagicMock()
+    vllm_config.scheduler_config.max_num_seqs = 2
+
+    vllm_config.model_config.attn_type = "encoder_only"
+    vllm_config.model_config.get_pooling_task.return_value = "embed&token_classify"
+    assert PoolingRunner(model, vllm_config).supported_tasks == {
+        "embed",
+        "embed&token_classify",
+    }

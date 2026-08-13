@@ -622,6 +622,31 @@ The following arguments can be used to control the ramp-up:
 - `--ramp-up-start-rps`: The request rate at the beginning of the benchmark.
 - `--ramp-up-end-rps`: The request rate at the end of the benchmark.
 
+#### Probe Requests
+
+The benchmark tool also supports sending probe requests alongside the main
+workload. This can be useful for measuring how the main workload affects
+unrelated traffic sharing the server, e.g. a few requests with large images
+stalling a concurrent lightweight request while their multimodal preprocessing
+occupies the frontend.
+
+Setting `--probe-request-rate` to a positive value sends single-token text-only
+probe requests at that rate (requests per second) alongside the main workload.
+Probes bypass `--max-concurrency` and their latency is reported separately, so
+the probe percentiles directly measure the interference that the main workload
+inflicts on unrelated requests.
+
+```bash
+vllm bench serve \
+    --model Qwen/Qwen2.5-VL-3B-Instruct \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --dataset-name random-mm \
+    --random-mm-bucket-config '{(2048, 2048, 1): 1.0}' \
+    --request-rate 4 \
+    --probe-request-rate 20
+```
+
 #### Load Pattern Configuration
 
 vLLM's benchmark serving script provides sophisticated load pattern simulation capabilities through three key parameters that control request generation and concurrency behavior:

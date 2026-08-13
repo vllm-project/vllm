@@ -17,6 +17,7 @@
 /vllm/kernels/ @ProExpertProg @tjtanaa
 /vllm/kernels/helion @ProExpertProg @zou3519
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa @shen-shanshan
+/vllm/multimodal/media @Isotr0py
 /vllm/vllm_flash_attn @LucasWilkinson @MatthewBonanni
 /CMakeLists.txt @tlrmchlsmth @LucasWilkinson @Harry-Chen
 /cmake @tlrmchlsmth @LucasWilkinson @Harry-Chen
@@ -104,6 +105,7 @@
 /tests/kernels/ir @ProExpertProg @tjtanaa
 /tests/models @DarkLight1337 @ywang96 @AndreasKaratzas
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche @shen-shanshan
+/tests/multimodal/media @Isotr0py
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
@@ -185,15 +187,19 @@ mkdocs.yaml @hmellor
 /vllm/v1/attention/backends/mla/rocm*.py @tjtanaa @dllehr-amd
 /vllm/v1/attention/ops/rocm*.py @tjtanaa @dllehr-amd
 /vllm/model_executor/layers/fused_moe/rocm*.py @tjtanaa @dllehr-amd
-/csrc/rocm @tjtanaa @dllehr-amd
+/csrc/rocm @tjtanaa @dllehr-amd @hongxiayang
 /requirements/*rocm* @tjtanaa @AndreasKaratzas
 /tests/**/*rocm* @tjtanaa @AndreasKaratzas
-/docs/**/*rocm* @tjtanaa
+/docs/**/*rocm* @tjtanaa @hongxiayang
 /vllm/**/*quark* @tjtanaa
 /tests/**/*quark* @tjtanaa @AndreasKaratzas
-/docs/**/*quark* @tjtanaa
+/docs/**/*quark* @tjtanaa @hongxiayang
 /vllm/**/*aiter* @tjtanaa @AndreasKaratzas
 /tests/**/*aiter* @tjtanaa @AndreasKaratzas
+
+# AMD per-model amd/ subtrees
+/vllm/models/*/amd @tjtanaa @dllehr-amd @hongxiayang
+/vllm/models/deepseek_v4/amd @tjtanaa @dllehr-amd @hongxiayang @zyongye
 
 # TPU
 /vllm/v1/worker/tpu* @NickLucche
