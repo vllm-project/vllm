@@ -1219,6 +1219,13 @@ def _sparse_attn_prefill_ragged_kernel(
 
 
 @triton.jit
+def _decode_e8m0_scales_triton(encoded_scales):
+    scale_bits = encoded_scales.to(tl.int32) << 23
+    scale_bits = tl.where(encoded_scales == 0, 1 << 22, scale_bits)
+    return scale_bits.to(tl.float32, bitcast=True)
+
+
+@triton.jit
 def _sparse_attn_decode_ragged_kernel(
     q_ptr,
     main_cache_ptr,
@@ -1237,8 +1244,8 @@ def _sparse_attn_decode_ragged_kernel(
     extra_cache_stride0,
     main_num_rows,
     extra_num_rows,
-    main_block_size,
-    extra_block_size,
+    MAIN_BLOCK_SIZE: tl.constexpr,
+    EXTRA_BLOCK_SIZE: tl.constexpr,
     scale,
     num_heads,
     HAS_ATTN_SINK: tl.constexpr,
@@ -1295,11 +1302,11 @@ def _sparse_attn_decode_ragged_kernel(
         valid = in_range & (slot >= 0) & (slot < main_num_rows)
         safe_slot = tl.where(valid, slot, 0)
 
-        block_idx = safe_slot // main_block_size
-        pos_in_block = safe_slot % main_block_size
+        block_idx = safe_slot // MAIN_BLOCK_SIZE
+        pos_in_block = safe_slot % MAIN_BLOCK_SIZE
         cache_block_ptr = main_cache_ptr + block_idx.to(tl.int64) * main_cache_stride0
         token_data_ptr = cache_block_ptr + pos_in_block * 576
-        token_scale_ptr = cache_block_ptr + main_block_size * 576 + pos_in_block * 8
+        token_scale_ptr = cache_block_ptr + MAIN_BLOCK_SIZE * 576 + pos_in_block * 8
 
         x_uint8 = tl.load(
             token_data_ptr[:, None] + nope_offsets[None, :],
@@ -1315,7 +1322,7 @@ def _sparse_attn_decode_ragged_kernel(
             mask=valid[:, None] & nope_mask[None, :],
             other=127,
         )
-        scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
+        scales = _decode_e8m0_scales_triton(encoded_scales)
         k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
         k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
         k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
@@ -1359,14 +1366,14 @@ def _sparse_attn_decode_ragged_kernel(
             valid = in_range & (slot >= 0) & (slot < extra_num_rows)
             safe_slot = tl.where(valid, slot, 0)
 
-            block_idx = safe_slot // extra_block_size
-            pos_in_block = safe_slot % extra_block_size
+            block_idx = safe_slot // EXTRA_BLOCK_SIZE
+            pos_in_block = safe_slot % EXTRA_BLOCK_SIZE
             cache_block_ptr = (
                 extra_cache_ptr + block_idx.to(tl.int64) * extra_cache_stride0
             )
             token_data_ptr = cache_block_ptr + pos_in_block * 576
             token_scale_ptr = (
-                cache_block_ptr + extra_block_size * 576 + pos_in_block * 8
+                cache_block_ptr + EXTRA_BLOCK_SIZE * 576 + pos_in_block * 8
             )
 
             x_uint8 = tl.load(
@@ -1383,7 +1390,7 @@ def _sparse_attn_decode_ragged_kernel(
                 mask=valid[:, None] & nope_mask[None, :],
                 other=127,
             )
-            scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
+            scales = _decode_e8m0_scales_triton(encoded_scales)
             k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
             k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
             k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
@@ -1477,8 +1484,8 @@ def _sparse_attn_decode_partial_kernel(
     pa_stride_h,
     main_num_rows,
     extra_num_rows,
-    main_block_size,
-    extra_block_size,
+    MAIN_BLOCK_SIZE: tl.constexpr,
+    EXTRA_BLOCK_SIZE: tl.constexpr,
     scale,
     num_heads,
     HAS_EXTRA: tl.constexpr,
@@ -1545,11 +1552,11 @@ def _sparse_attn_decode_partial_kernel(
         valid = in_range & (slot >= 0) & (slot < main_num_rows)
         safe_slot = tl.where(valid, slot, 0)
 
-        block_idx = safe_slot // main_block_size
-        pos_in_block = safe_slot % main_block_size
+        block_idx = safe_slot // MAIN_BLOCK_SIZE
+        pos_in_block = safe_slot % MAIN_BLOCK_SIZE
         cache_block_ptr = main_cache_ptr + block_idx.to(tl.int64) * main_cache_stride0
         token_data_ptr = cache_block_ptr + pos_in_block * 576
-        token_scale_ptr = cache_block_ptr + main_block_size * 576 + pos_in_block * 8
+        token_scale_ptr = cache_block_ptr + MAIN_BLOCK_SIZE * 576 + pos_in_block * 8
 
         x_uint8 = tl.load(
             token_data_ptr[:, None] + nope_offsets[None, :],
@@ -1565,7 +1572,7 @@ def _sparse_attn_decode_partial_kernel(
             mask=valid[:, None] & nope_mask[None, :],
             other=127,
         )
-        scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
+        scales = _decode_e8m0_scales_triton(encoded_scales)
         k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
         k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
         k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
@@ -1612,14 +1619,14 @@ def _sparse_attn_decode_partial_kernel(
             valid = in_range & (slot >= 0) & (slot < extra_num_rows)
             safe_slot = tl.where(valid, slot, 0)
 
-            block_idx = safe_slot // extra_block_size
-            pos_in_block = safe_slot % extra_block_size
+            block_idx = safe_slot // EXTRA_BLOCK_SIZE
+            pos_in_block = safe_slot % EXTRA_BLOCK_SIZE
             cache_block_ptr = (
                 extra_cache_ptr + block_idx.to(tl.int64) * extra_cache_stride0
             )
             token_data_ptr = cache_block_ptr + pos_in_block * 576
             token_scale_ptr = (
-                cache_block_ptr + extra_block_size * 576 + pos_in_block * 8
+                cache_block_ptr + EXTRA_BLOCK_SIZE * 576 + pos_in_block * 8
             )
 
             x_uint8 = tl.load(
@@ -1636,7 +1643,7 @@ def _sparse_attn_decode_partial_kernel(
                 mask=valid[:, None] & nope_mask[None, :],
                 other=127,
             )
-            scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
+            scales = _decode_e8m0_scales_triton(encoded_scales)
             k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
             k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
             k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
@@ -1971,8 +1978,9 @@ def _decode_num_splits(
     mu = 0.04
     best_splits = 1
     best_cost = None
-    # Search up to 16 splits; beyond that the reduce/HBM overhead dominates.
-    for splits in range(1, 17):
+    # A full C128A row can contain 8K KV tokens. At low batch sizes, 32 splits
+    # keep those long rows to one device wave and halve the partial iterations.
+    for splits in range(1, 33):
         waves = (base * splits + cu - 1) // cu
         cost = waves * (1.0 / splits + mu)
         if best_cost is None or cost < best_cost - 1e-9:
@@ -2005,6 +2013,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
     extra_cache: torch.Tensor | None = None,
     extra_indices: torch.Tensor | None = None,
     extra_indptr: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[b,h,d], got {q.shape}"
     assert main_cache.ndim == 3, (
@@ -2066,7 +2075,16 @@ def _rocm_sparse_attn_decode_ragged_triton(
         extra_indptr = torch.zeros(num_queries + 1, device=q.device, dtype=torch.int32)
 
     block_h = 16
-    out = torch.empty_like(q, dtype=torch.bfloat16)
+    if out is None:
+        out = torch.empty_like(q, dtype=torch.bfloat16)
+    else:
+        assert out.shape == q.shape, f"expected out shape {q.shape}, got {out.shape}"
+        assert out.device == q.device, (
+            f"expected out on device {q.device}, got {out.device}"
+        )
+        assert out.dtype == torch.bfloat16, (
+            f"expected out dtype {torch.bfloat16}, got {out.dtype}"
+        )
     heads_blocks = triton.cdiv(num_heads, block_h)
     nope_block = triton.next_power_of_2(nope_head_dim)
     comb_dim = nope_head_dim + rope_head_dim
@@ -2213,6 +2231,7 @@ def _rocm_sparse_attn_decode_triton(
     main_ragged_indptr: torch.Tensor | None = None,
     extra_ragged_indices: torch.Tensor | None = None,
     extra_ragged_indptr: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if main_ragged_indices is None or main_ragged_indptr is None:
         main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
@@ -2248,6 +2267,7 @@ def _rocm_sparse_attn_decode_triton(
         extra_cache=extra_cache,
         extra_indices=extra_ragged_indices,
         extra_indptr=extra_ragged_indptr,
+        out=out,
     )
 
 
@@ -2348,6 +2368,7 @@ def rocm_sparse_attn_decode(
         if topk_indices is not None:
             extra_indices = topk_indices.reshape(topk_indices.shape[0], -1)
 
+    direct_out = output if output.dtype == torch.bfloat16 else None
     attn_out = _rocm_sparse_attn_decode_triton(
         q=q,
         main_cache=swa_k_cache,
@@ -2364,5 +2385,7 @@ def rocm_sparse_attn_decode(
         main_ragged_indptr=swa_ragged_indptr,
         extra_ragged_indices=topk_ragged_indices,
         extra_ragged_indptr=topk_ragged_indptr,
+        out=direct_out,
     )
-    output.copy_(attn_out.to(output.dtype))
+    if direct_out is None:
+        output.copy_(attn_out.to(output.dtype))

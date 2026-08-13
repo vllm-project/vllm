@@ -142,6 +142,34 @@ def _read_fp8_ds_mla_cache(
     return torch.cat([nope, rope])
 
 
+def _read_fp8_ds_mla_cache_rows(
+    cache: torch.Tensor,
+    slots: torch.Tensor,
+    block_size: int,
+    use_fnuz: bool,
+) -> torch.Tensor:
+    cache_flat = cache.view(torch.uint8).flatten()
+    block_idx = slots // block_size
+    pos = slots % block_size
+    block_base = block_idx * cache.stride(0)
+    token_base = block_base + pos * 576
+    scale_base = block_base + block_size * 576 + pos * 8
+
+    fp8_dtype = torch.float8_e4m3fnuz if use_fnuz else torch.float8_e4m3fn
+    nope_offsets = torch.arange(NOPE_HEAD_DIM, device=cache.device)
+    nope_u8 = cache_flat[token_base[:, None] + nope_offsets]
+    nope = nope_u8.view(fp8_dtype).to(torch.float32)
+    scale_offsets = torch.arange(7, device=cache.device)
+    scales = torch.exp2(
+        cache_flat[scale_base[:, None] + scale_offsets].to(torch.float32) - 127.0
+    )
+    nope = nope * scales.repeat_interleave(64, dim=1)
+    rope_offsets = torch.arange(ROPE_HEAD_DIM * 2, device=cache.device)
+    rope_u8 = cache_flat[token_base[:, None] + NOPE_HEAD_DIM + rope_offsets]
+    rope = rope_u8.contiguous().view(torch.bfloat16).to(torch.float32)
+    return torch.cat([nope, rope], dim=1)
+
+
 def _ref_sparse_decode_ragged(
     q: torch.Tensor,
     main_cache: torch.Tensor,
@@ -366,6 +394,7 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
     attn_sink = torch.tensor([-0.1, 0.0, 0.1], dtype=torch.float32, device=device)
     scale = HEAD_DIM**-0.5
 
+    out = torch.empty_like(q)
     actual = _rocm_sparse_attn_decode_ragged_triton(
         q=q,
         main_cache=main_cache,
@@ -378,6 +407,7 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
         extra_cache=extra_cache,
         extra_indices=extra_indices,
         extra_indptr=extra_indptr,
+        out=out,
     )
     expected = _ref_sparse_decode_ragged(
         q=q,
@@ -391,6 +421,7 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
         main_use_fnuz=main_use_fnuz,
     )
 
+    assert actual.data_ptr() == out.data_ptr()
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
@@ -408,18 +439,23 @@ def test_decode_num_splits_heuristic(monkeypatch) -> None:
     # A tiny batch on a large device should split to add parallelism.
     assert mod._decode_num_splits(2, 1, avg_main_len=256.0, avg_extra_len=0.0) > 1
 
-    # The chosen count always stays within the searched [1, 16] range, and a
+    # Long C128A rows need 32 splits to fill a 256-CU device at low batch.
+    assert mod._decode_num_splits(1, 1, 128.0, 8192.0) == 32
+    assert mod._decode_num_splits(8, 1, 128.0, 8192.0) == 32
+    assert mod._decode_num_splits(64, 1, 128.0, 8192.0) == 4
+
+    # The chosen count always stays within the searched [1, 32] range, and a
     # zero-length workload never splits (no work to parallelize).
     for num_queries in (1, 4, 24, 224, 1024):
         splits = mod._decode_num_splits(
             num_queries, 1, avg_main_len=512.0, avg_extra_len=128.0
         )
-        assert 1 <= splits <= 16
+        assert 1 <= splits <= 32
     assert mod._decode_num_splits(2, 1, avg_main_len=0.0, avg_extra_len=0.0) >= 1
 
 
 @requires_split_decode_arch
-@pytest.mark.parametrize("num_splits", [1, 2, 3, 4, 8])
+@pytest.mark.parametrize("num_splits", [1, 2, 3, 4, 8, 32])
 @pytest.mark.parametrize("with_extra", [True, False])
 @pytest.mark.parametrize("with_sink", [True, False])
 @torch.inference_mode()
@@ -501,6 +537,59 @@ def test_sparse_attn_decode_split_k_kernel(
     )
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_split_decode_arch
+@torch.inference_mode()
+def test_sparse_attn_decode_long_context(monkeypatch) -> None:
+    """Validate the production C128A maximum of 8192 selected KV rows."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    device = torch.device("cuda")
+    torch.manual_seed(11)
+    block_size = 64
+    num_kv = 8192
+    num_heads = 16
+    q = torch.randn(1, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    main_cache = _pack_fp8_ds_mla_cache(
+        torch.zeros(1, HEAD_DIM, dtype=torch.bfloat16, device=device),
+        block_size,
+        use_fnuz=current_platform.is_fp8_fnuz(),
+    )
+    extra_cache = _pack_fp8_ds_mla_cache(
+        torch.randn(num_kv, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125,
+        block_size,
+        use_fnuz=False,
+    )
+    empty_indices = torch.empty(0, dtype=torch.int32, device=device)
+    empty_indptr = torch.zeros(2, dtype=torch.int32, device=device)
+    extra_indices = torch.arange(num_kv, dtype=torch.int32, device=device)
+    extra_indptr = torch.tensor([0, num_kv], dtype=torch.int32, device=device)
+    scale = HEAD_DIM**-0.5
+
+    monkeypatch.setattr(mod, "_decode_num_splits", lambda *args, **kwargs: 32)
+    actual = mod._rocm_sparse_attn_decode_ragged_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=empty_indices,
+        main_indptr=empty_indptr,
+        scale=scale,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=extra_indices,
+        extra_indptr=extra_indptr,
+    )
+
+    kv = _read_fp8_ds_mla_cache_rows(
+        extra_cache, extra_indices.to(torch.int64), block_size, use_fnuz=False
+    )
+    scores = torch.matmul(q[0].float(), kv.T) * scale
+    expected = torch.matmul(torch.softmax(scores, dim=-1), kv)
+    torch.testing.assert_close(
+        actual[0], expected.to(torch.bfloat16), atol=2e-2, rtol=2e-2
+    )
 
 
 # ---------------------------------------------------------------------------
