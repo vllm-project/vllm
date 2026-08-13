@@ -21,6 +21,14 @@ instance can be widened with tensor parallelism by listing more devices::
 The device count per instance is its --tensor-parallel-size, so that example
 needs eight GPUs. At TP>1, ``--load-format fastsafetensors`` splits the
 checkpoint read across ranks rather than having each rank read all of it.
+
+For an FP8 model on an image without the NVRTC dev header::
+
+    python scripts/cpu_ec_connector/test_cpu_ec_e2e.py \
+        --model Qwen/Qwen3-VL-235B-A22B-Instruct-FP8 \
+        --producer-gpus 0,1,2,3 --consumer-gpus 4,5,6,7 \
+        --kernel-config \'{"linear_backend": "deep_gemm"}\'
+
 """
 
 from __future__ import annotations
@@ -114,6 +122,8 @@ def build_vllm_argv(spec: ServerSpec, model: str) -> list[str]:
     ]
     if spec.load_format is not None:
         argv += ["--load-format", spec.load_format]
+    if spec.kernel_config is not None:
+        argv += ["--kernel-config", json.dumps(spec.kernel_config)]
     if spec.role == "producer":
         argv.append("--no-enable-prefix-caching")
     return argv
@@ -236,6 +246,7 @@ def make_specs(
         log_path=log_dir / "producer.log",
         ec_cpu_bytes=producer_ec_cpu_bytes,
         load_format=args.load_format,
+        kernel_config=args.kernel_config,
     )
     consumer = ServerSpec(
         role="consumer",
@@ -248,6 +259,7 @@ def make_specs(
         log_path=log_dir / "consumer.log",
         ec_cpu_bytes=consumer_ec_cpu_bytes,
         load_format=args.load_format,
+        kernel_config=args.kernel_config,
     )
     return producer, consumer
 
@@ -381,6 +393,15 @@ def main() -> int:
         "re-reading the whole checkpoint. Default leaves vLLM on 'auto'",
     )
     parser.add_argument(
+        "--kernel-config",
+        default=None,
+        help="JSON passed through to both instances as --kernel-config. FP8 "
+        "models on images without the NVRTC dev header need "
+        '\'{"linear_backend": "deep_gemm"}\' -- the default flashinfer_* '
+        "backends JIT-build their block-scaled GEMM on the first forward and "
+        "abort on a missing nvrtc.h. Default leaves vLLM on 'auto'",
+    )
+    parser.add_argument(
         "--keep-servers",
         action="store_true",
         help="leave the shared-harness servers running on success",
@@ -404,6 +425,20 @@ def main() -> int:
 
     args.producer_devices = _parse_devices(args.producer_gpus, "--producer-gpus")
     args.consumer_devices = _parse_devices(args.consumer_gpus, "--consumer-gpus")
+    if args.kernel_config is not None:
+        try:
+            args.kernel_config = json.loads(args.kernel_config)
+        except json.JSONDecodeError as e:
+            print(f"--kernel-config: not valid JSON ({e})", file=sys.stderr)
+            return 2
+        if not isinstance(args.kernel_config, dict):
+            print(
+                "--kernel-config: expected a JSON object, e.g. "
+                '\'{"linear_backend": "deep_gemm"}\'',
+                file=sys.stderr,
+            )
+            return 2
+
     if args.load_format == "fastsafetensors" and (
         importlib.util.find_spec("fastsafetensors") is None
     ):

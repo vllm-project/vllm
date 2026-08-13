@@ -16,6 +16,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pybase64
 import regex as re
@@ -74,6 +75,13 @@ class ServerSpec:
     # and scatters TP-sharded ones over NCCL, so a TP>1 instance loads weights
     # without every rank re-reading the whole checkpoint.
     load_format: str | None = None
+    # Passed through as --kernel-config; None leaves vLLM on "auto". Needed for
+    # FP8 models on images without the NVRTC dev header: the default
+    # flashinfer_* linear backends JIT-compile their block-scaled GEMM on the
+    # first forward and abort on a missing nvrtc.h, while
+    # {"linear_backend": "deep_gemm"} (or "cutlass"/"triton") uses a prebuilt
+    # kernel instead.
+    kernel_config: dict[str, Any] | None = None
 
     @property
     def device_list(self) -> tuple[int, ...]:
