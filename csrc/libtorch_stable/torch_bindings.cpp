@@ -433,6 +433,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor q_in, Tensor kv, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
       "int q_head_padded, float eps, int cache_block_size) -> Tensor");
+  ops.def(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out("
+      "Tensor q_in, Tensor kv, Tensor! q_out, Tensor! k_cache, "
+      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
+      "int q_head_padded, float eps, int cache_block_size) -> ()");
 
   // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
   // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
@@ -461,6 +466,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! k_out, Tensor! k_cache, Tensor slot_mapping, "
       "int cache_block_size, Tensor? position_ids=None, "
       "Tensor? cos_sin_cache=None) -> ()");
+  ops.def(
+      "fused_kimi_k3_mla_kv_concat(Tensor k_nope, Tensor k_pe, Tensor! k_out) "
+      "-> ()");
+  ops.def(
+      "fused_kimi_k3_mla_kv_concat_quant_fp8("
+      "Tensor k_nope, Tensor k_pe, Tensor v, Tensor! k_fp8, Tensor! v_fp8) "
+      "-> ()");
   ops.def(
       "fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert("
       "Tensor q, Tensor k_nope, Tensor k_pe, Tensor kv_c_normed, Tensor v, "
@@ -509,7 +521,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? slot_mapping, Tensor? index_slot_mapping, "
       "Tensor!? kv_cache, Tensor!? index_cache, "
       "int block_size, Tensor!? q_out, Tensor!? index_q_out, "
-      "str kv_cache_dtype, bool skip_index_branch=False) -> ()");
+      "str kv_cache_dtype, bool skip_index_branch=False, "
+      "Tensor!? q_fp8_out=None, float q_fp8_scale=1.0) -> ()");
 
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
   ops.def(
@@ -751,6 +764,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
            TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert));
+  ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out",
+           TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out));
   ops.impl(
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert",
       TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert));
@@ -761,6 +776,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&fused_kimi_k3_mla_key_concat_kv_cache_insert));
   ops.impl("fused_kimi_k3_mla_key_concat_ds_mla_insert",
            TORCH_BOX(&fused_kimi_k3_mla_key_concat_ds_mla_insert));
+  ops.impl("fused_kimi_k3_mla_kv_concat",
+           TORCH_BOX(&fused_kimi_k3_mla_kv_concat));
+  ops.impl("fused_kimi_k3_mla_kv_concat_quant_fp8",
+           TORCH_BOX(&fused_kimi_k3_mla_kv_concat_quant_fp8));
   ops.impl("fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert",
            TORCH_BOX(&fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert));
   ops.impl("fused_kimi_k3_mla_decode_q_concat_kv_cache_insert",

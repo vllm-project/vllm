@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -134,11 +135,10 @@ class DFlashSpeculator(DraftModelSpeculator):
 
     def capture(self) -> None:
         logger.info("Capturing model for %s speculator...", self._speculator_name)
-        # Reset sampling indices to zero to prevent stale values from prior
-        # dummy runs from being baked into the captured graph.
+        # Padded sample rows must not scatter into a live request during capture.
         self.sample_indices.zero_()
         self.sample_pos.zero_()
-        self.sample_idx_mapping.zero_()
+        self.sample_idx_mapping.fill_(-1)
         assert self.query_cudagraph_manager is not None
         self.query_cudagraph_manager.capture(
             self._generate_draft,
@@ -282,6 +282,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         step: int,
         num_query_per_req: int | None = None,
         causal: bool | Mapping[int, bool] = False,
+        query_start_loc_np: np.ndarray | None = None,
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
@@ -294,6 +295,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             step=step,
             num_query_per_req=self.num_query_per_req,
             causal=causal,
+            query_start_loc_np=query_start_loc_np,
         )
 
     @torch.inference_mode()
@@ -586,7 +588,10 @@ def _prepare_dflash_inputs_kernel(
         # seq_lens is the absolute sequence length the draft attention
         # reads up to (context + query), not just the count of accepted
         # tokens this step.
-        tl.store(out_seq_lens_ptr + req_idx, last_valid_pos + 1 + num_query_per_req)
+        tl.store(
+            out_seq_lens_ptr + req_idx,
+            tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len),
+        )
         # Copy sampling state.
         tl.store(
             out_temperature_ptr + req_state_idx,

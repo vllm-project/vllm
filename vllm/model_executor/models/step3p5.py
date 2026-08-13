@@ -24,7 +24,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     MoERunner,
     fused_moe_make_expert_params_mapping,
 )
@@ -303,7 +303,6 @@ class FusedMoEBlock(nn.Module):
         self.layer_idx = extract_layer_index(prefix)
 
         self.ep_size = get_ep_group().device_group.size()
-        self.ep_rank = get_ep_group().device_group.rank()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
@@ -315,11 +314,6 @@ class FusedMoEBlock(nn.Module):
         self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         if self.tp_size > config.moe_num_experts:
             raise ValueError(
@@ -376,7 +370,7 @@ class FusedMoEBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.share_expert",
         )
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.share_expert,
             gate=self.gate,
             num_experts=config.moe_num_experts,
@@ -399,16 +393,9 @@ class FusedMoEBlock(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if self.experts.is_internal_router:
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=hidden_states
-            )
-        else:
-            # TODO(bnell): this gate could be moved into the FusedMoE?
-            router_logits, _ = self.gate(hidden_states)
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
-            )
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=hidden_states
+        )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 

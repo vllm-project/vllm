@@ -5,7 +5,15 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Generic,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 import torch
 from typing_extensions import Self
@@ -18,7 +26,7 @@ from vllm.config.weight_transfer import WeightTransferConfig
 
 TInitInfo = TypeVar("TInitInfo", bound="WeightTransferInitInfo")
 TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")
-TConfig = TypeVar("TConfig", bound="WeightTransferConfig")
+TTrainerInitInfo = TypeVar("TTrainerInitInfo", bound="TrainerInitInfo")
 
 # A trainer supplies its parameters as a `WeightSource` (defined below): a
 # re-iterable stream of materialized `(name, tensor)` pairs plus a `metadata()`
@@ -69,6 +77,15 @@ class WeightSource(ABC):
 
     @abstractmethod
     def metadata(self) -> list[ParamMeta]:
+        """Declare what iteration will yield, without transferring anything.
+
+        Must agree with iteration element for element: the same parameters, in
+        the same order, with the same dtypes and shapes. Backends may read both
+        channels and trust that they match (dense NCCL sizes the worker's receive
+        buffers and its packed chunk boundaries from this, then sends the bytes
+        from iteration), so a source that disagrees between the two splits the
+        stream differently on each side.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -108,7 +125,7 @@ class WeightTransferInitInfo(ABC):  # noqa: B024
 
 
 @dataclass
-class TrainerInitInfo(WeightTransferInitInfo):
+class TrainerInitInfo:
     """Base trainer-side init info: which trainer rank drives the transfer.
 
     `rank` is this trainer process's rank, provided **explicitly** by the
@@ -118,9 +135,24 @@ class TrainerInitInfo(WeightTransferInitInfo):
     while every rank still runs the trainer-side collectives. Backend subclasses
     add their own (positional) fields; `rank` is keyword-only so that ordering
     never conflicts.
+
+    Every concrete subclass sets a class-level `backend` string (the same key it
+    registers under in `WeightTransferTrainerFactory`). The factory reads it to
+    dispatch, so callers pass only the init info/ It is a `ClassVar`
+    (a fixed per-backend constant), so it is not an ``__init__`` field.
     """
 
+    backend: ClassVar[str]
+
     rank: int = field(kw_only=True)
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if not getattr(cls, "backend", None):
+            raise TypeError(
+                f"{cls.__name__} must set a class-level `backend` string "
+                "(the WeightTransferTrainerFactory registry key)."
+            )
 
     @property
     def is_sender(self) -> bool:
@@ -318,32 +350,6 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         raise NotImplementedError
 
-    @staticmethod
-    @abstractmethod
-    def trainer_send_weights(
-        iterator: Iterator[Any],
-        trainer_args: dict[str, Any] | Any,
-    ) -> None:
-        """
-        Send weights from trainer to inference workers.
-
-        This is a static method that can be called from the trainer process
-        to send weights to all inference workers.
-
-        Args:
-            iterator: Iterator of backend-specific items to send.
-            trainer_args: Dictionary containing backend-specific arguments needed
-                         to send weights. The structure depends on the backend:
-                         - NCCL: Contains 'group', 'src', 'packed', etc.
-                         - IPC: Contains 'mode' ('http' or 'ray'),
-                                'llm_handle' (for Ray), 'url' (for HTTP), etc.
-
-        Example:
-            >>> param_iter = ((n, p) for n, p in model.named_parameters())
-            >>> engine.trainer_send_weights(param_iter, trainer_args)
-        """
-        raise NotImplementedError
-
 
 @runtime_checkable
 class VLLMWeightSyncClient(Protocol):
@@ -373,14 +379,20 @@ class VLLMWeightSyncClient(Protocol):
     def finish_weight_update(self, weight_version: str | None = None) -> None: ...
 
 
-class TrainerWeightTransferEngine(ABC, Generic[TConfig, TInitInfo]):
+class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
     """Trainer-side weight transfer engine.
 
     Symmetric to `WeightTransferEngine` but lives in the training process.
     Constructed via the `trainer_init` factory classmethod; carries any
     backend-specific state (NCCL communicators, IPC device info, transfer
-    plans) on `self`. The `WeightSource` is required at `trainer_init`,
-    then replayed each round by the no-argument `send_weights()`.
+    plans) on `self`.
+
+    Unlike the worker engine, the trainer side does not take a
+    `WeightTransferConfig`: the backend is selected from the init info's
+    `backend` `ClassVar` (so callers pass only the init info), and the static
+    wire params (packed, buffer sizes) ride the backend-specific
+    `TrainerInitInfo`, which the sender also propagates to the worker at the init
+    handshake.
 
     Multi-rank trainers: `trainer_init` and `send_weights` are
     called on *every* trainer rank. Rank 0 is the sender, resolved once at
@@ -392,22 +404,18 @@ class TrainerWeightTransferEngine(ABC, Generic[TConfig, TInitInfo]):
 
     Subclasses should define:
         init_info_cls: Type of backend-specific trainer init info
-        config_cls: Type of backend-specific config
     """
 
-    # Subclasses should override these class attributes
-    init_info_cls: type[TInitInfo]
-    config_cls: type[TConfig]
+    # Subclasses should override this class attribute
+    init_info_cls: type[TTrainerInitInfo]
 
     def __init__(
         self,
-        config: TConfig,
         *,
         client: "VLLMWeightSyncClient",
-        source: "WeightSource",
+        source: "WeightSource | None" = None,
         is_sender: bool = True,
     ) -> None:
-        self.config = config
         self.is_sender = is_sender
         # The real client is held on every rank; each engine only *calls* it when
         # `is_sender`, so non-sender ranks never touch the wire.
@@ -418,28 +426,27 @@ class TrainerWeightTransferEngine(ABC, Generic[TConfig, TInitInfo]):
     @abstractmethod
     def trainer_init(
         cls,
-        config: TConfig,
-        init_info: TInitInfo,
+        init_info: TTrainerInitInfo,
         *,
         client: "VLLMWeightSyncClient",
-        source: "WeightSource",
+        source: "WeightSource | None" = None,
     ) -> Self:
         """Rendezvous with the inference side and return a ready instance.
 
         Called on every trainer rank. The sender drives the full handshake via
         `client` (build the worker-side init info, call
         `client.init_weight_transfer_engine`, open the trainer-side endpoint);
-        non-sender ranks skip the rendezvous and the RPC. `source` is stored on
-        `self.source`; after return, `send_weights()` is callable.
+        non-sender ranks skip the rendezvous and the RPC.
         """
         raise NotImplementedError
 
     @abstractmethod
     def send_weights(self) -> None:
-        """Push `self.source`'s weights to inference workers and drive the full
-        update round trip: `start_weight_update`, `update_weights` (run
-        concurrently with the trainer-side broadcast when the backend requires
-        it), then `finish_weight_update`. Called on every trainer rank."""
+        """Push weights to inference workers and drive the full update round
+        trip: `start_weight_update`, `update_weights` (run concurrently with the
+        trainer-side broadcast when the backend requires it), then
+        `finish_weight_update`. Called on every trainer rank.
+        """
         raise NotImplementedError
 
     def shutdown(self) -> None:

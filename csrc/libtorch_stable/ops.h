@@ -269,6 +269,14 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
     double eps, int64_t cache_block_size);
 
+void fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out(
+    torch::stable::Tensor const& q_in, torch::stable::Tensor const& kv,
+    torch::stable::Tensor& q_out, torch::stable::Tensor& k_cache,
+    torch::stable::Tensor const& slot_mapping,
+    torch::stable::Tensor const& position_ids,
+    torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
+    double eps, int64_t cache_block_size);
+
 void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
     torch::stable::Tensor& q, torch::stable::Tensor const& kv,
     torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
@@ -291,6 +299,16 @@ void fused_kimi_k3_mla_key_concat_ds_mla_insert(
     torch::stable::Tensor const& slot_mapping, int64_t cache_block_size,
     std::optional<torch::stable::Tensor> position_ids,
     std::optional<torch::stable::Tensor> cos_sin_cache);
+
+void fused_kimi_k3_mla_kv_concat(torch::stable::Tensor const& k_nope,
+                                 torch::stable::Tensor const& k_pe,
+                                 torch::stable::Tensor& k_out);
+
+void fused_kimi_k3_mla_kv_concat_quant_fp8(torch::stable::Tensor const& k_nope,
+                                           torch::stable::Tensor const& k_pe,
+                                           torch::stable::Tensor const& v,
+                                           torch::stable::Tensor& k_fp8,
+                                           torch::stable::Tensor& v_fp8);
 
 void fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert(
     torch::stable::Tensor const& q, torch::stable::Tensor const& k_nope,
@@ -368,7 +386,8 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor> index_cache, int64_t block_size,
     std::optional<torch::stable::Tensor> q_out,
     std::optional<torch::stable::Tensor> index_q_out,
-    const std::string& kv_cache_dtype, bool skip_index_branch);
+    const std::string& kv_cache_dtype, bool skip_index_branch,
+    std::optional<torch::stable::Tensor> q_fp8_out, double q_fp8_scale);
 
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
 void fused_kda_decode(

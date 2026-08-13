@@ -42,7 +42,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -144,7 +144,6 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -165,15 +164,10 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
         # For custom routing function
         self.n_groups = getattr(config, "router_n_groups", -1)
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
