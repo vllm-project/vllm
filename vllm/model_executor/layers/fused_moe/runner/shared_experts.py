@@ -52,6 +52,9 @@ class SharedExperts(torch.nn.Module):
         # index is always 0 and the second output list element is ignored.
         self.enable_dbo = enable_dbo
         self._output: list[torch.Tensor | None] = [None, None]
+        # Holds the cloned shared-experts input alive across the aux-stream
+        # launch. Indexed by DBO ubatch id, mirroring `_output`.
+        self._input_clone: list[torch.Tensor | None] = [None, None]
         self._layer = layer
         self._moe_config = moe_config
 
@@ -147,11 +150,19 @@ class SharedExperts(torch.nn.Module):
         idx = self._output_idx
         assert self._output[idx] is None
 
-        # Clone as some models (Qwen3.5) alias shared experts input and hidden states,
-        # and later mutate the hidden state in the routed experts. That can lead to
-        # reading mutated memory in the shared experts producing incorrect results.
+        # Some models (e.g. Qwen3.5) alias the shared-experts input with
+        # hidden_states, which the routed path then mutates; the aux stream would
+        # otherwise read mutated memory and produce wrong results. Snapshot the
+        # input with a clone on the main stream before the routed path runs.
+        #
+        # Do NOT use record_stream() here: it is the caching-allocator async-free
+        # path and is not legal inside cudagraph capture (it breaks the
+        # event-based overlap and hangs on ROCm under capture). Instead keep the
+        # clone alive via `_input_clone` until its output is consumed; the join
+        # event (`_output_ready_event`) orders the main stream after the aux
+        # stream, so the buffer is never freed while still in use.
         shared_experts_input = shared_experts_input.clone()
-        shared_experts_input.record_stream(self._stream)
+        self._input_clone[idx] = shared_experts_input
 
         self._input_ready_event[idx].record(current_stream())
         with torch.cuda.stream(self._stream):
@@ -174,6 +185,9 @@ class SharedExperts(torch.nn.Module):
         assert self._output[self._output_idx] is not None
         output = self._output[self._output_idx]
         self._output[self._output_idx] = None
+        # The clone is no longer needed once the aux-stream output is consumed
+        # (the main stream is already event-ordered after the aux stream here).
+        self._input_clone[self._output_idx] = None
         return output
 
     def forward(
