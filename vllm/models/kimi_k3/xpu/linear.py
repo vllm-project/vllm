@@ -30,6 +30,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 
+from .kda import KimiK3DeltaAttention
 from .ops.attn_res import attn_res
 
 
@@ -420,44 +421,51 @@ class KimiDecoderLayer(nn.Module):
 		quant_config = vllm_config.quant_config
 
 		if config.is_kda_layer(layer_idx):
-			raise NotImplementedError(
-				"XPU KimiDecoderLayer does not yet support full-rank KDA layers"
+			kda_config = config.linear_attn_config
+			if not kda_config or not kda_config.get("use_full_rank_gate", False):
+				raise NotImplementedError(
+					"XPU KimiDecoderLayer only supports full-rank KDA layers"
+				)
+			self.self_attn = KimiK3DeltaAttention(
+				config,
+				vllm_config,
+				prefix=f"{prefix}.self_attn",
 			)
-
-		qk_nope_head_dim = config.qk_nope_head_dim
-		qk_rope_head_dim = config.qk_rope_head_dim
-		v_head_dim = config.v_head_dim
-		kv_lora_rank = config.kv_lora_rank
-		if any(
-			value is None
-			for value in (
-				qk_nope_head_dim,
-				qk_rope_head_dim,
-				v_head_dim,
-				kv_lora_rank,
+		else:
+			qk_nope_head_dim = config.qk_nope_head_dim
+			qk_rope_head_dim = config.qk_rope_head_dim
+			v_head_dim = config.v_head_dim
+			kv_lora_rank = config.kv_lora_rank
+			if any(
+				value is None
+				for value in (
+					qk_nope_head_dim,
+					qk_rope_head_dim,
+					v_head_dim,
+					kv_lora_rank,
+				)
+			):
+				raise ValueError("Kimi-K3 MLA dimensions must be configured")
+			if not config.mla_use_nope:
+				raise NotImplementedError("XPU Kimi-K3 MLA currently requires NoPE")
+			assert qk_nope_head_dim is not None
+			assert qk_rope_head_dim is not None
+			assert v_head_dim is not None
+			assert kv_lora_rank is not None
+			self.self_attn = KimiMLAAttention(
+				config=config,
+				hidden_size=self.hidden_size,
+				num_heads=config.num_attention_heads,
+				qk_nope_head_dim=qk_nope_head_dim,
+				qk_rope_head_dim=qk_rope_head_dim,
+				v_head_dim=v_head_dim,
+				q_lora_rank=config.q_lora_rank,
+				kv_lora_rank=kv_lora_rank,
+				use_nope=True,
+				cache_config=vllm_config.cache_config,
+				quant_config=quant_config,
+				prefix=f"{prefix}.self_attn",
 			)
-		):
-			raise ValueError("Kimi-K3 MLA dimensions must be configured")
-		if not config.mla_use_nope:
-			raise NotImplementedError("XPU Kimi-K3 MLA currently requires NoPE")
-		assert qk_nope_head_dim is not None
-		assert qk_rope_head_dim is not None
-		assert v_head_dim is not None
-		assert kv_lora_rank is not None
-		self.self_attn = KimiMLAAttention(
-			config=config,
-			hidden_size=self.hidden_size,
-			num_heads=config.num_attention_heads,
-			qk_nope_head_dim=qk_nope_head_dim,
-			qk_rope_head_dim=qk_rope_head_dim,
-			v_head_dim=v_head_dim,
-			q_lora_rank=config.q_lora_rank,
-			kv_lora_rank=kv_lora_rank,
-			use_nope=True,
-			cache_config=vllm_config.cache_config,
-			quant_config=quant_config,
-			prefix=f"{prefix}.self_attn",
-		)
 
 		self.is_moe_layer = (
 			config.is_moe

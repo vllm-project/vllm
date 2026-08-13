@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -9,9 +9,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+from vllm.models.kimi_k3.xpu import kda as kimi_xpu_kda
 from vllm.models.kimi_k3.xpu import linear as kimi_xpu
 from vllm.models.kimi_k3.xpu.ops.attn_res import attn_res
 from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 
 class _ResidualNorm(nn.Module):
@@ -48,6 +51,13 @@ class _TupleIdentity(nn.Module):
         return hidden_states, None
 
 
+class _GatedAdd(nn.Module):
+    def forward(
+        self, hidden_states: torch.Tensor, gate: torch.Tensor
+    ) -> torch.Tensor:
+        return hidden_states + gate.unsqueeze(0)
+
+
 class _ConstantProjection(nn.Module):
     def __init__(self, output: torch.Tensor) -> None:
         super().__init__()
@@ -60,6 +70,124 @@ class _ConstantProjection(nn.Module):
 class _FakeMLA(nn.Module):
     def forward(self, *args: object, **kwargs: object) -> torch.Tensor:
         return torch.full((1, 1), 4.0)
+
+
+def test_xpu_kda_adapter_dispatches_native_op(monkeypatch) -> None:
+    attention = object.__new__(kimi_xpu_kda.KimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.prefix = "model.layers.0.self_attn"
+    attention.local_num_heads = 2
+    attention.head_dim = 2
+    attention.local_projection_size = 4
+    attention.conv1d = nn.Linear(2, 12, bias=False)
+    attention.conv1d.weight.data = attention.conv1d.weight.data.unsqueeze(1)
+    attention.A_log = nn.Parameter(torch.zeros(2, dtype=torch.float32))
+    attention.dt_bias = nn.Parameter(torch.zeros(4, dtype=torch.float32))
+    attention.gate_lower_bound = -5.0
+    attention.o_norm = _GatedAdd()
+    conv_state = torch.zeros(1, 12, 1)
+    recurrent_state = torch.zeros(1, 2, 2, 2)
+    attention.kv_cache = (conv_state, recurrent_state)
+
+    metadata = GDNAttentionMetadata(
+        num_prefills=1,
+        num_prefill_tokens=2,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=2,
+        has_initial_state=torch.tensor([False]),
+        non_spec_query_start_loc=torch.tensor([0, 2]),
+        non_spec_state_indices_tensor=torch.tensor([0]),
+    )
+    forward_context = type(
+        "ForwardContext",
+        (),
+        {"attn_metadata": {attention.prefix: metadata}},
+    )()
+    monkeypatch.setattr(kimi_xpu_kda, "get_forward_context", lambda: forward_context)
+
+    captured: dict[str, object] = {}
+
+    def fake_kda_attention(*args: object) -> None:
+        captured["args"] = args
+        output = args[0]
+        assert isinstance(output, torch.Tensor)
+        output.fill_(3)
+
+    monkeypatch.setattr(
+        torch.ops._xpu_C, "kda_attention", fake_kda_attention, raising=False
+    )
+    mixed_qkv = torch.arange(24, dtype=torch.bfloat16).view(2, 12)
+    raw_gate = torch.ones(1, 2, 2, 2, dtype=torch.bfloat16)
+    raw_beta = torch.ones(1, 2, 2, dtype=torch.bfloat16)
+    output_gate = torch.full((2, 2, 2), 2, dtype=torch.bfloat16)
+    output = torch.empty(1, 2, 2, 2, dtype=torch.bfloat16)
+
+    attention._forward(mixed_qkv, raw_gate, output_gate, raw_beta, output)
+
+    args = captured["args"]
+    assert isinstance(args, tuple)
+    q_proj, k_proj, v_proj = args[1:4]
+    assert isinstance(q_proj, torch.Tensor)
+    assert isinstance(k_proj, torch.Tensor)
+    assert isinstance(v_proj, torch.Tensor)
+    assert q_proj.shape == k_proj.shape == v_proj.shape == (1, 2, 2, 2)
+    assert q_proj.stride() == k_proj.stride() == v_proj.stride()
+    assert args[5].dtype == torch.float32
+    assert args[5].is_contiguous()
+    assert args[6] is conv_state
+    assert args[7] is recurrent_state
+    assert args[13:16] == (1, 0, 0)
+    assert args[16] is metadata.has_initial_state
+    assert args[17] is metadata.non_spec_query_start_loc
+    assert args[19] is metadata.non_spec_state_indices_tensor
+    assert args[24:] == (2, -5.0)
+    torch.testing.assert_close(output, torch.full_like(output, 5))
+
+
+def test_xpu_decoder_layer_selects_full_rank_kda(monkeypatch) -> None:
+    class _FakeLayer(nn.Module):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__()
+
+    class _FakeKDA(nn.Module):
+        def __init__(
+            self,
+            config: KimiLinearConfig,
+            vllm_config: object,
+            prefix: str,
+        ) -> None:
+            super().__init__()
+            self.config = config
+            self.vllm_config = vllm_config
+            self.prefix = prefix
+
+    monkeypatch.setattr(kimi_xpu, "KimiK3DeltaAttention", _FakeKDA)
+    monkeypatch.setattr(kimi_xpu, "KimiMLP", _FakeLayer)
+    monkeypatch.setattr(kimi_xpu, "RMSNorm", _FakeLayer)
+    config = KimiLinearConfig(
+        hidden_size=4,
+        intermediate_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        linear_attn_config={
+            "kda_layers": [1],
+            "full_attn_layers": [],
+            "use_full_rank_gate": True,
+        },
+    )
+    vllm_config = SimpleNamespace(quant_config=None)
+
+    layer = kimi_xpu.KimiDecoderLayer(
+        config,
+        vllm_config,  # type: ignore[arg-type]
+        prefix="model.layers.0",
+    )
+
+    assert isinstance(layer.self_attn, _FakeKDA)
+    assert layer.self_attn.prefix == "model.layers.0.self_attn"
 
 
 def test_mla_output_gate_is_applied_before_output_projection() -> None:
