@@ -102,6 +102,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
+        print(  # DIAG
+            f"[DIAG-COMM] CudaCommunicator name={unique_name!r} "
+            f"use_flashinfer_allreduce={self.use_flashinfer_allreduce} "
+            f"world_size={self.world_size}",
+            flush=True,
+        )
         if self.use_flashinfer_allreduce and self.world_size > 1:
             self.fi_ar_comm = FlashInferAllReduce(
                 group=self.cpu_group,

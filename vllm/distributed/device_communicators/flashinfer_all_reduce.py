@@ -53,6 +53,15 @@ def _create_workspace(
     group: ProcessGroup,
 ):
     """Create a flashinfer allreduce workspace, returning None on failure."""
+    import traceback  # DIAG
+
+    print(  # DIAG
+        f"[DIAG-CREATE] _create_workspace backend={backend} "
+        f"max_token_num={max_token_num} hidden_dim={hidden_dim} dtype={dtype}",
+        flush=True,
+    )
+    print("[DIAG-CREATE] caller stack:", flush=True)  # DIAG
+    traceback.print_stack(limit=8)  # DIAG
     comm_backend = TorchDistBackend(group=group)
     rng_state = random.getstate()
     try:
@@ -365,6 +374,10 @@ class FlashInferAllReduce:
 
     def _ensure_workspace(self, hidden_dim: int, dtype: torch.dtype) -> bool:
         """Ensure the all reduce workspace is initialized."""
+        print(  # DIAG
+            f"[DIAG-STANDALONE] _ensure_workspace entered hidden_dim={hidden_dim}",
+            flush=True,
+        )
         if self.max_num_tokens == 0:
             element_size = torch.tensor([], dtype=dtype, device="cpu").element_size()
             self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
@@ -406,6 +419,11 @@ class FlashInferAllReduce:
 
     def all_reduce(self, input_tensor: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = input_tensor.shape
+        print(  # DIAG
+            f"[DIAG-STANDALONE] all_reduce entered num_tokens={num_tokens} "
+            f"hidden_dim={hidden_dim}",
+            flush=True,
+        )
         workspace = get_fi_ar_workspace(
             world_size=self.world_size,
             rank=self.rank,

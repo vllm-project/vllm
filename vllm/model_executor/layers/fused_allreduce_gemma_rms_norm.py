@@ -81,6 +81,11 @@ def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool
         return False, 0
 
     num_tokens, hidden_size = hidden_states.shape
+    print(  # DIAG
+        f"[DIAG-GEMMA] _can_use_flashinfer entered num_tokens={num_tokens} "
+        f"hidden_size={hidden_size}",
+        flush=True,
+    )
     max_token_num = _max_token_num(tp_size, hidden_size, hidden_states.dtype)
     if max_token_num is None or num_tokens > max_token_num:
         return False, 0

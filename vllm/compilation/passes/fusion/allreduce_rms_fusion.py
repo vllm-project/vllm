@@ -209,6 +209,11 @@ if flashinfer_comm is not None:
             if norm_out is not None:
                 norm_out = norm_out.view(-1, hidden)
         num_tokens, hidden_size = allreduce_in.shape
+        print(  # DIAG
+            f"[DIAG-RUNTIME] call_trtllm_fused_allreduce_norm num_tokens={num_tokens} "
+            f"hidden_size={hidden_size} max_token_num={max_token_num}",
+            flush=True,
+        )
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
         max_tensor_size = max_token_num * hidden_size * element_size
@@ -1006,6 +1011,19 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             )
             return
         self.hidden_dim = config.model_config.get_hidden_size()
+        _spec = config.speculative_config  # DIAG
+        _draft_cfg = (
+            getattr(_spec, "draft_model_config", None) if _spec else None
+        )  # DIAG
+        _draft_hidden = (  # DIAG
+            _draft_cfg.get_hidden_size() if _draft_cfg is not None else None
+        )
+        print(  # DIAG
+            f"[DIAG-INIT] pass __init__ model={config.model_config.model} "
+            f"model_hidden={self.hidden_dim} spec={'yes' if _spec else 'no'} "
+            f"draft_hidden={_draft_hidden}",
+            flush=True,
+        )
         self.group = get_tp_group().cpu_group
         rank = get_tensor_model_parallel_rank()
         if flashinfer_comm is None:
@@ -1047,7 +1065,13 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             dtype=self.model_dtype,
             group=self.group,
         )
-        if get_fi_ar_workspace(**workspace_kwargs) is None:
+        _eager_ws = get_fi_ar_workspace(**workspace_kwargs)  # DIAG
+        print(  # DIAG
+            f"[DIAG-INIT] eager get_fi_ar_workspace(hidden_dim={self.hidden_dim}) "
+            f"returned={'None' if _eager_ws is None else 'workspace'}",
+            flush=True,
+        )
+        if _eager_ws is None:
             logger.warning_once(
                 "Failed to initialize Flashinfer allreduce workspace. "
                 "Flashinfer allreduce-norm fusion will be disabled."
