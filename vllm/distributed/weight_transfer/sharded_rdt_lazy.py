@@ -34,21 +34,32 @@ def _freeze_kwargs(kwargs: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
 
 
 @dataclass
-class _BakedCopy:
-    """One recorded scatter: pull ``src`` and copy it into ``param_name`` at the
-    recorded strided region.
+class _Scatter:
+    """One recorded scatter: pull ``src`` and copy it into ``layer``'s
+    ``param_name`` at the recorded strided region.
 
-    Captured once during the bake; the destination geometry comes from the meta
-    view, so no real storage is needed. Later syncs reconstruct it as
-    ``param.as_strided(shape, stride, offset)`` -- no loader, no lazy, no
-    discovery.
+    Captured once during the bake and self-contained, so replay needs no lookups:
+    the destination geometry is read off the meta view (no real storage needed)
+    and rebuilt each sync as ``param.as_strided(shape, stride, offset)``, while
+    ``dtype``/``nbytes`` describe the slice ON THE WIRE and feed the packed
+    layout. ``layer`` is resolved to a param at replay time, never baked -- every
+    sync re-materializes fresh tensors.
+
+    ``dtype`` is the PRODUCED dtype, i.e. the lazy's after its op chain, which is
+    what the producer packs. Taking it from the source name's metadata instead
+    would be wrong for any chain that reinterprets dtype (``view(dtype)`` is in
+    the allowlist): the two sides would size the same slice differently and split
+    the packed blob at different offsets.
     """
 
-    src: FetchKey
+    layer: Any
     param_name: str
+    src: FetchKey
     offset: int
     shape: tuple[int, ...]
     stride: tuple[int, ...]
+    dtype: torch.dtype
+    nbytes: int
 
 
 def _meta_copy_(dest: torch.Tensor, src: "LazyRDTTensor") -> torch.Tensor:
@@ -83,7 +94,7 @@ class BakeSink:
     object, so iterating it yields each leaf module once.
     """
 
-    copies_by_layer: "dict[Any, list[_BakedCopy | None]]" = field(
+    copies_by_layer: "dict[Any, list[_Scatter | None]]" = field(
         default_factory=lambda: defaultdict(list)
     )
     current: "tuple[Any, str] | None" = None
@@ -97,12 +108,15 @@ class BakeSink:
         if self.current is not None:
             layer, param_name = self.current
             self.copies_by_layer[layer].append(
-                _BakedCopy(
-                    src._key(),
-                    param_name,
-                    dest.storage_offset(),
-                    tuple(dest.shape),
-                    tuple(dest.stride()),
+                _Scatter(
+                    layer=layer,
+                    param_name=param_name,
+                    src=src._key(),
+                    offset=dest.storage_offset(),
+                    shape=tuple(dest.shape),
+                    stride=tuple(dest.stride()),
+                    dtype=src.dtype,
+                    nbytes=src.numel() * src.dtype.itemsize,
                 )
             )
         return _meta_copy_(dest, src)

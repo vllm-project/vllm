@@ -27,13 +27,12 @@ from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
     _CallPlan,
     _dtype_from_name,
-    _ModulePlan,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_lazy import (
     BakeSink,
     LazyRDTTensor,
     PullSink,
-    _BakedCopy,
+    _Scatter,
     _UnsupportedLazyOp,
 )
 
@@ -56,8 +55,18 @@ class _FakeLayer:
         return f"_FakeLayer({self.tag!r})"
 
 
-def _copy(name, layer_param="weight", *, offset=0, shape=(4,), ops=()):
-    """A `_BakedCopy` as the bake would record it: source key + meta dest region."""
+def _module(layer, copies):
+    """What the bake records for one leaf module: a scatter list whose entries
+    all carry that module as their ``layer``."""
+    for c in copies:
+        c.layer = layer
+    return copies
+
+
+def _copy(name, layer_param="weight", *, offset=0, shape=(4,), ops=(), layer=None,
+          dtype=torch.bfloat16):
+    """A `_Scatter` as the bake would record it: source key, owning layer, and
+    the meta destination region."""
     stride = (
         (1,)
         if len(shape) == 1
@@ -65,12 +74,17 @@ def _copy(name, layer_param="weight", *, offset=0, shape=(4,), ops=()):
             int(torch.empty(shape, device=META).stride()[i]) for i in range(len(shape))
         )
     )
-    return _BakedCopy(
-        src=(name, tuple(ops)),
+    from math import prod
+
+    return _Scatter(
+        layer=layer,
         param_name=layer_param,
+        src=(name, tuple(ops)),
         offset=offset,
         shape=tuple(shape),
         stride=stride,
+        dtype=dtype,
+        nbytes=prod(shape) * dtype.itemsize,
     )
 
 
@@ -112,7 +126,7 @@ def _one_module_per_layer(n_layers, *, dtype="bfloat16", numel=4):
     baked = {}
     for n in names:
         layer = _FakeLayer(n)
-        baked[n] = _ModulePlan(layer=layer, copies=[_copy(n, shape=(numel,))])
+        baked[n] = _module(layer, [_copy(n, shape=(numel,))])
     name_meta = {n: (dtype, [numel]) for n in names}
     group_lens = [1] * len(names)
     return baked, name_meta, names, group_lens
@@ -314,6 +328,26 @@ class TestBakeRecording:
         assert recorded.src == ("w", (("narrow", (0, 2, 4), ()),))
         assert recorded.shape == (4, 6)
 
+    def test_the_recorded_dtype_is_the_chains_output_not_the_sources(self):
+        """``view(dtype)`` is allowlisted, so a chain can reinterpret dtype. The
+        producer packs what the replay yields, so the record must carry the
+        POST-chain dtype: taking it from the source name's metadata instead sizes
+        the slice with the wrong itemsize and shifts every later slice in the
+        chunk, carving the packed blob differently on the two sides."""
+        rec, lazy = self._recorder_and_lazy(shape=(4,))
+        layer = _FakeLayer("reinterpreted")
+        rec.current = (layer, "weight")
+        viewed = lazy.view(torch.float32)  # 4 x bf16 -> 2 x f32
+        param = torch.empty((2,), dtype=torch.float32, device=META)
+        param.copy_(viewed)
+
+        (recorded,) = rec.copies_by_layer[layer]
+        assert recorded.dtype is torch.float32, "recorded the source dtype"
+        assert recorded.nbytes == 2 * torch.float32.itemsize == 8
+        # What the source name alone would have said, and what the producer
+        # would NOT have sent.
+        assert 2 * torch.bfloat16.itemsize == 4
+
 
 # ---------------------------------------------------------------------------
 # Packed layout: the cross-process invariant
@@ -353,8 +387,10 @@ class TestPackedLayout:
         copies = []
         for name, dtype_name, shape in specs:
             name_meta[name] = (dtype_name, shape)
-            copies.append(_copy(name, shape=tuple(shape)))
-        mod_plan = _ModulePlan(layer=layer, copies=copies)
+            copies.append(
+                _copy(name, shape=tuple(shape), dtype=_dtype_from_name(dtype_name))
+            )
+        mod_plan = _module(layer, copies)
         for name, _d, _s in specs:
             baked[name] = mod_plan
 
@@ -372,7 +408,7 @@ class TestPackedLayout:
         specs = [(f"w{i}", "bfloat16", [i * 3 + 1]) for i in range(6)]
         layer = _FakeLayer("l")
         copies = [_copy(n, shape=tuple(s)) for n, _d, s in specs]
-        mod_plan = _ModulePlan(layer=layer, copies=copies)
+        mod_plan = _module(layer, copies)
         eng = _planner(
             {n: mod_plan for n, _d, _s in specs},
             name_meta={n: (d, s) for n, d, s in specs},
@@ -392,11 +428,12 @@ class TestPackedLayout:
         layer = _FakeLayer("l")
         shared = ("w", ())
         copies = [
-            _BakedCopy(src=shared, param_name="a", offset=0, shape=(4,), stride=(1,)),
-            _BakedCopy(src=shared, param_name="b", offset=0, shape=(4,), stride=(1,)),
+            _copy("w", "a", shape=(4,)),
+            _copy("w", "b", shape=(4,)),
         ]
+        assert copies[0].src == shared and copies[1].src == shared
         eng = _planner(
-            {"w": _ModulePlan(layer=layer, copies=copies)},
+            {"w": _module(layer, copies)},
             name_meta={"w": ("bfloat16", [4])},
         )
         (chunk,) = eng._build_call_plan(["w"], [1]).chunks
@@ -419,7 +456,7 @@ class TestChunkModuleScatters:
         layer = _FakeLayer("l")
         copies = [_copy(f"w{i}", shape=(4,)) for i in range(5)]
         eng = _planner({}, name_meta={f"w{i}": ("bfloat16", [4]) for i in range(5)})
-        chunks = eng._chunk_module_scatters([_ModulePlan(layer=layer, copies=copies)])
+        chunks = eng._chunk_module_scatters([_module(layer, copies)])
         assert [er for er, _s in chunks] == [-1]
         assert len(chunks[0][1]) == 5
 
@@ -432,7 +469,7 @@ class TestChunkModuleScatters:
             name_meta={n: ("bfloat16", [4]) for n in names},
             name_ep_rank={"e0": 0, "e2": 1, "e5": 2},
         )
-        chunks = eng._chunk_module_scatters([_ModulePlan(layer=layer, copies=copies)])
+        chunks = eng._chunk_module_scatters([_module(layer, copies)])
         assert [er for er, _s in chunks] == [-1, 0, 1, 2]
         assert [[s.src[0] for s in sc] for _er, sc in chunks] == [
             ["norm"],
@@ -453,7 +490,7 @@ class TestChunkModuleScatters:
             name_ep_rank={n: 0 for n in names},
         )
         ((er, scatters),) = eng._chunk_module_scatters(
-            [_ModulePlan(layer=layer, copies=copies)]
+            [_module(layer, copies)]
         )
         assert er == 0
         assert [s.src[0] for s in scatters] == names
@@ -463,11 +500,9 @@ class TestChunkModuleScatters:
         module-then-bake order."""
         a, b = _FakeLayer("a"), _FakeLayer("b")
         mods = [
-            _ModulePlan(
-                layer=a, copies=[_copy("a0", shape=(4,)), _copy("a1", shape=(4,))]
+            _module(a, [_copy("a0", shape=(4,)), _copy("a1", shape=(4,))]
             ),
-            _ModulePlan(
-                layer=b, copies=[_copy("b0", shape=(4,)), _copy("b1", shape=(4,))]
+            _module(b, [_copy("b0", shape=(4,)), _copy("b1", shape=(4,))]
             ),
         ]
         eng = _planner(
@@ -482,10 +517,13 @@ class TestChunkModuleScatters:
         ]
 
     def test_scatters_carry_their_own_dtype_and_nbytes(self):
+        """dtype rides the record from the bake, where it is the lazy's dtype
+        AFTER its op chain — not a plan-time lookup of the source name, which
+        would be wrong for any chain that reinterprets dtype."""
         layer = _FakeLayer("l")
         eng = _planner({}, name_meta={"w": ("float32", [10])})
         ((_er, scatters),) = eng._chunk_module_scatters(
-            [_ModulePlan(layer=layer, copies=[_copy("w", shape=(10,))])]
+            [_module(layer, [_copy("w", shape=(10,), dtype=torch.float32)])]
         )
         (sc,) = scatters
         assert sc.dtype is torch.float32
@@ -511,7 +549,7 @@ class TestBuildCallPlan:
         layer = _FakeLayer("l")
         names = [f"w{i}" for i in range(4)]
         copies = [_copy(n, shape=(4,)) for n in names]
-        mod_plan = _ModulePlan(layer=layer, copies=copies)
+        mod_plan = _module(layer, copies)
         eng = _planner(
             {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
@@ -526,7 +564,7 @@ class TestBuildCallPlan:
         layer = _FakeLayer("spanning")
         names = [f"w{i}" for i in range(4)]
         copies = [_copy(n, shape=(4,)) for n in names]
-        mod_plan = _ModulePlan(layer=layer, copies=copies)
+        mod_plan = _module(layer, copies)
         eng = _planner(
             {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
@@ -539,7 +577,7 @@ class TestBuildCallPlan:
         layer = _FakeLayer("spanning")
         names = [f"w{i}" for i in range(4)]
         copies = [_copy(n, shape=(4,)) for n in names]
-        mod_plan = _ModulePlan(layer=layer, copies=copies)
+        mod_plan = _module(layer, copies)
         eng = _planner(
             {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
@@ -561,7 +599,7 @@ class TestBuildCallPlan:
         layer = _FakeLayer("l")
         names = [f"w{i}" for i in range(4)]
         copies = [_copy(n, shape=(4,)) for n in names]
-        mod_plan = _ModulePlan(layer=layer, copies=copies)
+        mod_plan = _module(layer, copies)
         eng = _planner(
             {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
@@ -579,8 +617,7 @@ class TestBuildCallPlan:
         baked, name_meta, stamps = {}, {}, {}
         for names in (names_a, names_b):
             layer = _FakeLayer(names[0])
-            mod_plan = _ModulePlan(
-                layer=layer, copies=[_copy(n, shape=(4,)) for n in names]
+            mod_plan = _module(layer, [_copy(n, shape=(4,)) for n in names]
             )
             for i, n in enumerate(names):
                 baked[n] = mod_plan
@@ -638,12 +675,12 @@ class TestBuildCallPlan:
         assert plan.name_group_idx == {n: i for i, n in enumerate(names)}
 
     def test_modules_are_deduped_within_a_group(self):
-        """Several names of one fused module map to the same _ModulePlan; the
+        """Several names of one fused module map to the same scatter list; the
         plan must not chunk it twice."""
         layer = _FakeLayer("fused")
         names = ["qkv.q", "qkv.k", "qkv.v"]
         copies = [_copy(n, shape=(4,)) for n in names]
-        mod_plan = _ModulePlan(layer=layer, copies=copies)
+        mod_plan = _module(layer, copies)
         eng = _planner(
             {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
@@ -809,8 +846,8 @@ class TestSignalCompleteness:
         names = ["embed.weight"]
         group_lens = [1]
         baked = {
-            "embed.weight": _ModulePlan(
-                layer=_FakeLayer("embed"), copies=[_copy("embed.weight", shape=(4,))]
+            "embed.weight": _module(
+                _FakeLayer("embed"), [_copy("embed.weight", shape=(4,))]
             )
         }
         name_meta = {"embed.weight": ("bfloat16", [4])}
@@ -823,12 +860,9 @@ class TestSignalCompleteness:
             group_lens.append(1 + n_experts)
             name_meta[norm] = ("bfloat16", [4])
             live.add(norm)
-            baked[norm] = _ModulePlan(
-                layer=_FakeLayer(f"norm{li}"), copies=[_copy(norm, shape=(4,))]
+            baked[norm] = _module(_FakeLayer(f"norm{li}"), [_copy(norm, shape=(4,))]
             )
-            fused = _ModulePlan(
-                layer=_FakeLayer(f"moe{li}"),
-                copies=[
+            fused = _module(_FakeLayer(f"moe{li}"), [
                     _copy(f"model.layers.{li}.experts.{e}.w", shape=(4,))
                     for e in worker_experts
                 ],
@@ -842,8 +876,8 @@ class TestSignalCompleteness:
                     live.add(n)
         names.append("lm_head.weight")
         group_lens.append(1)
-        baked["lm_head.weight"] = _ModulePlan(
-            layer=_FakeLayer("head"), copies=[_copy("lm_head.weight", shape=(4,))]
+        baked["lm_head.weight"] = _module(
+            _FakeLayer("head"), [_copy("lm_head.weight", shape=(4,))]
         )
         name_meta["lm_head.weight"] = ("bfloat16", [4])
         live.add("lm_head.weight")

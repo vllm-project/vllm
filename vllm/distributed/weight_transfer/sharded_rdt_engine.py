@@ -41,7 +41,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_lazy import (
     FetchKey,
     LazyRDTTensor,
     PullSink,
-    _BakedCopy,
+    _Scatter,
 )
 from vllm.logger import init_logger
 
@@ -49,46 +49,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class _ModulePlan:
-    """How to fill one leaf module: the module itself plus every copy the bake
-    recorded into its params.
-
-    The unit of materialize and quant — the planner finds each module's first
-    and last chunk so empty params are allocated once, before the first scatter,
-    and ``process_weights_after_loading`` runs once, after the last.
-
-    ``layer`` is a strong ref held for the engine's lifetime and cleared in
-    ``shutdown``; the module persists across syncs, and its
-    ``LayerReloadingInfo`` is re-established every update. Whether it needs
-    quantizing is decided at replay time, so it is not stored here.
-    """
-
-    layer: Any
-    copies: list[_BakedCopy]
-
-
-@dataclass
-class _Scatter:
-    """One self-contained scatter: pull ``src`` and copy the slice into
-    ``layer``'s ``param_name`` at the recorded strided region.
-
-    ``_BakedCopy`` enriched for the runtime plan: carries its own ``dtype`` /
-    ``nbytes`` so the pack layout needs no side-table, plus a strong ref to the
-    leaf. The param is resolved at RUNTIME — every sync re-materializes fresh
-    tensors, so a handle captured at plan time would be stale.
-    """
-
-    layer: Any
-    param_name: str
-    src: FetchKey
-    offset: int
-    shape: tuple[int, ...]
-    stride: tuple[int, ...]
-    dtype: torch.dtype
-    nbytes: int
 
 
 @dataclass
@@ -320,7 +280,7 @@ class ShardedRDTWeightTransferEngine(
     stay inside ``SUPPORTED_OPS`` — anything needing real data (``.to``,
     ``.item``, arithmetic, bool-mask indexing) raises during the bake.
 
-    The plan is baked once at ``init_transfer_engine`` into one ``_ModulePlan``
+    The plan is baked once at ``init_transfer_engine`` into one scatter list
     per fully-loaded leaf module, indexed by source name; every
     ``update_weights`` replays the modules its gathered names cover.
     """
@@ -363,7 +323,7 @@ class ShardedRDTWeightTransferEngine(
         # Source name -> the plan for the module consuming it. Several names of a
         # fused module share one entry; replay dedups. A name absent here is
         # unbaked and takes the plain load.
-        self._name_to_plan: dict[str, _ModulePlan] = {}
+        self._name_to_plan: dict[str, list[_Scatter]] = {}
         # name -> (dtype_name, shape) for every init name, so the plain-load
         # fallback can rebuild lazies from just the gathered names.
         self._name_meta: dict[str, tuple[str, list[int]]] = {}
@@ -908,7 +868,7 @@ class ShardedRDTWeightTransferEngine(
         bypass ``online_process_loader``, so ``_layerwise_process`` is never in
         the path). Nothing materializes or pulls; the lazy's ``copy_`` records
         the source op chain and the meta destination's geometry. Afterwards one
-        ``_ModulePlan`` per fully-loaded leaf module (copied numel == loadable
+        scatter list per fully-loaded leaf module (copied numel == loadable
         size) is indexed by source name; partial or unrecordable modules take the
         plain load. The model is restored.
 
@@ -952,14 +912,15 @@ class ShardedRDTWeightTransferEngine(
             for module, recorded in recorder.copies_by_layer.items():
                 if not recorded or any(c is None for c in recorded):
                     continue  # unrecordable copy_ -> slow path
-                # Guard above guarantees every entry is a real _BakedCopy.
-                copies = cast("list[_BakedCopy]", recorded)
+                # Guard above guarantees every entry is a real _Scatter.
+                copies = cast("list[_Scatter]", recorded)
                 copied = sum(prod(c.shape) for c in copies)
                 if copied < get_layer_size(module):
                     continue  # partial -> slow path
-                plan = _ModulePlan(layer=module, copies=copies)
                 for c in copies:
-                    self._name_to_plan[c.src[0]] = plan
+                    # Every name of the module shares ONE list, so identity
+                    # dedups them back to one module at plan time.
+                    self._name_to_plan[c.src[0]] = copies
             self._restore_after_dry_run(model)
 
         # Names whose copy_ fired during the bake (baked + unbaked-but-live).
@@ -1186,24 +1147,8 @@ class ShardedRDTWeightTransferEngine(
         assert self._proc_queue is not None
         self._proc_queue.put(item)
 
-    def _scatter_of(self, layer: Any, c: "_BakedCopy") -> "_Scatter":
-        """Build a self-contained ``_Scatter`` from a bake-time ``_BakedCopy``,
-        folding in the produced slice's dtype/nbytes (dtype from the source
-        name's metadata; produced shape == the destination region ``c.shape``)."""
-        dtype = _dtype_from_name(self._name_meta[c.src[0]][0])
-        return _Scatter(
-            layer=layer,
-            param_name=c.param_name,
-            src=c.src,
-            offset=c.offset,
-            shape=tuple(c.shape),
-            stride=tuple(c.stride),
-            dtype=dtype,
-            nbytes=prod(c.shape) * dtype.itemsize,
-        )
-
     def _chunk_module_scatters(
-        self, modules: "list[_ModulePlan]"
+        self, modules: "list[list[_Scatter]]"
     ) -> "list[tuple[int, list[_Scatter]]]":
         """Cut the modules' copies into one chunk per distinct producer
         ``ep_rank`` present — ``-1`` (replicated) first, then ascending — as
@@ -1214,10 +1159,10 @@ class ShardedRDTWeightTransferEngine(
         bake order, and a module's copies may span chunks (materialize/quant
         fire on its first/last chunk; see ``_build_call_plan``)."""
         by_rank: dict[int, list[_Scatter]] = {}
-        for m in modules:
-            for c in m.copies:
+        for copies in modules:
+            for c in copies:
                 er = self._name_ep_rank.get(c.src[0], -1)
-                by_rank.setdefault(er, []).append(self._scatter_of(m.layer, c))
+                by_rank.setdefault(er, []).append(c)
         return [(er, by_rank[er]) for er in sorted(by_rank, key=lambda k: (k >= 0, k))]
 
     def _build_call_plan(self, names: list[str], group_lens: list[int]) -> "_CallPlan":
@@ -1249,7 +1194,7 @@ class ShardedRDTWeightTransferEngine(
             pos += glen
             for n in gnames:
                 name_group_idx[n] = gi
-            modules: list[_ModulePlan] = []
+            modules: list[list[_Scatter]] = []
             seen: set[int] = set()
             for n in gnames:
                 mod = self._name_to_plan.get(n)
