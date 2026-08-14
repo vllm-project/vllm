@@ -3,6 +3,7 @@
 
 from math import lcm
 
+import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
@@ -248,6 +249,32 @@ def test_coordinator_fine_grained_clips_when_one_group_missing_tail():
     _masks, hit = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
+    assert hit == 32
+
+
+def test_coordinator_revalidates_reconciled_partial_tail_key():
+    """A longer FA hit does not imply its reconciled partial key exists."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(32)),
+        KVCacheGroupSpec(["L1"], _mamba_align(32)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    hs = _hashes(4)
+    # FullAttention reaches token 64 via hs[3], while Mamba clips the joint
+    # hit to token 48 via hs[2]. FullAttention has no hs[2] object, so token
+    # 48 is not externally loadable; both groups do have token 32 via hs[1].
+    exists = {
+        (0, bytes(hs[1])),
+        (0, bytes(hs[3])),
+        (1, bytes(hs[1])),
+        (1, bytes(hs[2])),
+    }
+    cmap = ExternalCachedBlockPool(16, exists)
+
+    _masks, hit = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
+
     assert hit == 32
 
 
@@ -647,3 +674,51 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
     # The final 256-token segment has no lookahead block, so EAGLE falls back
     # to the previous aligned boundary instead of consuming all 768 tokens.
     assert hit == 512
+
+
+# ----- DCP-scaled attention block vs the exact-boundary retry -----
+
+
+@pytest.mark.parametrize("dcp", [1, 2, 4, 8])
+def test_reported_hit_is_an_object_boundary_for_every_group_under_dcp(dcp):
+    """A Mooncake key is a whole block, so the reported hit must land on one.
+
+    Under DCP the attention block is scaled by dcp while Mamba is not, which
+    makes attention the coarse group and opens a block_size/hash_block_size-wide
+    interior for a fine-grained hit to land in. EAGLE puts it there by
+    construction: it subtracts exactly one hash unit from a block-aligned hit.
+    Loading such a boundary asks Mooncake for a key nobody wrote (-704).
+    """
+    mamba_block, hash_block_size = 1536, 128
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(mamba_block * dcp)),
+        KVCacheGroupSpec(["L1"], _mamba_align(mamba_block)),
+    ]
+    block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    coord = _make_coord(groups, hash_block_size, use_eagle=True)
+
+    # 42 * 1536: a Mamba and hash boundary, but not a scaled attention one.
+    max_length = 64512
+    hashes = _hashes(max_length // hash_block_size)
+
+    # What the store actually holds: one object per group per block boundary.
+    exists = {
+        (g_idx, bytes(hashes[end // hash_block_size - 1]))
+        for g_idx, block_size in enumerate(block_sizes)
+        for end in range(block_size, max_length + 1, block_size)
+    }
+
+    _masks, hit = coord.find_longest_cache_hit(
+        hashes,
+        max_length=max_length,
+        cached_block_pool=ExternalCachedBlockPool(hash_block_size, exists),
+    )
+
+    if hit == 0:
+        return
+    key = bytes(hashes[hit // hash_block_size - 1])
+    for g_idx, block_size in enumerate(block_sizes):
+        assert (g_idx, key) in exists, (
+            f"dcp={dcp}: reported hit {hit} is not an object boundary for "
+            f"group {g_idx} (block_size={block_size})"
+        )
