@@ -675,6 +675,61 @@ def test_stale_engine_evicted_on_push():
     w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
 
 
+def _recv_metadata(remote_engine_id: str, req_id: str = "req") -> NixlConnectorMetadata:
+    """Build metadata with a single ``reqs_to_recv`` entry pointing at
+    ``remote_engine_id`` (the prefill remote D receives a push from)."""
+    params = {
+        "remote_block_ids": ([0],),
+        "remote_engine_id": remote_engine_id,
+        "remote_request_id": "p-req",
+        "remote_host": "localhost",
+        "remote_port": 1234,
+        "tp_size": 1,
+    }
+    meta = NixlConnectorMetadata()
+    meta.add_new_req_to_recv(req_id, ([0],), params)
+    return meta
+
+
+def test_start_load_kv_refreshes_engine_last_active_on_d_side():
+    """D receiving a push refreshes ``_engine_last_active`` for the prefill
+    remote, but only once that engine is connected (handshaked into
+    ``_remote_agents`` via heartbeats), mirroring the P-side refresh which runs
+    after ``_ensure_handshake``. Without it the prefill engine is reaped
+    mid-stream once it passes its TTL."""
+    w = _StubWriterWorker.fresh()
+    w._send_heartbeats = lambda metadata: None
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    # Connected prefill engine (already handshaked in).
+    w._remote_agents["prefill-engine"] = {(0, 0): "agent-p"}
+
+    stale = time.perf_counter() - 5.0
+    w._engine_last_active["prefill-engine"] = stale
+
+    w.start_load_kv(_recv_metadata("prefill-engine"))
+
+    assert w._engine_last_active["prefill-engine"] > stale
+    assert "req" in w._recving_metadata
+
+
+def test_start_load_kv_skips_liveness_for_unconnected_engine():
+    """If the prefill engine was never handshaked into ``_remote_agents`` (e.g.
+    its heartbeat handshake never succeeded), the D-side refresh must NOT record
+    an ``_engine_last_active`` entry -- otherwise a later eviction pass hits the
+    ``_remote_agents`` invariant in ``_cleanup_remote_engine`` and crashes on
+    the D node."""
+    w = _eviction_worker(engine_ttl=30.0)
+    w._send_heartbeats = lambda metadata: None
+
+    w.start_load_kv(_recv_metadata("prefill-engine"))
+
+    # Unconnected -> no orphaned liveness entry, so eviction has nothing to trip on.
+    assert "prefill-engine" not in w._engine_last_active
+    assert "prefill-engine" not in w._remote_agents
+
+    w._evict_stale_engines()  # nothing to reap, must not raise
+
+
 class TestPushWriterNotifs:
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
