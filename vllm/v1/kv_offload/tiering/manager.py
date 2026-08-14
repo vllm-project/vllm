@@ -888,7 +888,26 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def shutdown(self) -> None:
-        """Shutdown all tiers and release resources."""
-        for tier in self.secondary_tiers:
-            tier.shutdown()
-        self.primary_tier.shutdown()
+        """Release resources held by every tier.
+
+        Tiers are shut down in order. Ordinary failures are logged without
+        aborting cleanup of the remaining tiers.
+        """
+        for tier_idx, tier in enumerate(self.secondary_tiers):
+            try:
+                tier.shutdown()
+            except Exception:
+                logger.exception(
+                    "Failed to shut down secondary tier #%d (tier_type=%s, class=%s)",
+                    tier_idx,
+                    tier.tier_type,
+                    type(tier).__name__,
+                )
+
+        try:
+            self.primary_tier.shutdown()
+        except Exception:
+            logger.exception(
+                "Failed to shut down primary tier (class=%s)",
+                type(self.primary_tier).__name__,
+            )
