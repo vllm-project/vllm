@@ -30,7 +30,9 @@ from vllm.entrypoints.cohere.protocol import (
     CohereChatV2Response,
 )
 from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
-from vllm.entrypoints.serve.exception_handling.handlers.http import http_exception_handler
+from vllm.entrypoints.serve.exception_handling.handlers.http import (
+    http_exception_handler
+)
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
