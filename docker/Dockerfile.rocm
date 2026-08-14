@@ -6,9 +6,7 @@ ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
 ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
-# Per-connector switches, independent so this flag is not an input to the cache
-# key of unrelated stages. Booleans, not a list, because stages select via
-# FROM <stage>_${ARG}. Release jobs pass each one explicitly.
+# Release jobs enable optional connectors explicitly.
 ARG INSTALL_LMCACHE=false
 # NIC backend for MoRI RDMA support.
 # By default (all), drivers and userspace libraries for all supported NIC types
@@ -475,88 +473,70 @@ RUN cd /opt/nixl && \
         /tmp/nixl_wheels/repaired/*.whl && \
     cp /tmp/nixl_wheels/repaired/*.whl /app/install
 
-# LMCache ships no ROCm wheel on PyPI, so build the HIP extension from source.
-FROM base AS build_lmcache
+# Build pinned LMCache source against this image's torch and ROCm ABI.
+FROM base AS lmcache_source
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
-ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b" # v0.5.3
+ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b"
 ARG LMCACHE_VERSION="0.5.3"
-# Arch lists use PYTORCH_ROCM_ARCH-style ';' (space and ',' also accepted).
-# Archs covered by the published ROCm wheel. When
-# the effective set is a subset, download it instead of compiling; anything wider
-# falls back to a source build so coverage is never silently narrowed.
-ARG LMCACHE_PREBUILT_ARCHS="gfx942;gfx950"
-# Archs LMCache upstream supports on ROCm. The inherited set is intersected with
-# this and anything dropped is logged, so unsupported GPUs are skipped loudly
-# rather than shipping non-runnable device code. Set LMCACHE_ROCM_ARCH to
-# override (e.g. gfx90a, which builds from source but has no published wheel).
-ARG LMCACHE_SUPPORTED_ARCHS="gfx942;gfx950"
-# Empty: inherit the image's PYTORCH_ROCM_ARCH minus the consumer archs, matching
-# the set vLLM compiles its own kernels for (see Dockerfile.rocm_base).
-ARG LMCACHE_ROCM_ARCH=""
-ARG COMMON_WORKDIR
-ARG USE_SCCACHE
+
+# Drop CUDA-only dependencies from LMCache's shared wheel metadata.
+RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
+    && git clone --depth=1 --branch "v${LMCACHE_VERSION}" --single-branch \
+        "${LMCACHE_REPO}" /app/lmcache \
+    && test "$(git -C /app/lmcache rev-parse HEAD)" = "${LMCACHE_REF}" \
+    && test "$(grep -Ec '^(cufile-python|nvtx)([<=>[:space:]]|$)' \
+        /app/lmcache/requirements/common.txt)" -eq 2 \
+    && sed -i -E '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
+        /app/lmcache/requirements/common.txt \
+    && rm -rf /app/lmcache/.git
+
+FROM base AS lmcache_build_deps
+COPY --from=lmcache_source \
+    /app/lmcache/requirements/build.txt /tmp/lmcache-build-requirements.txt
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
+    uv pip install --system -r /tmp/lmcache-build-requirements.txt
+
+FROM lmcache_build_deps AS build_lmcache
+ARG LMCACHE_VERSION="0.5.3"
+ARG LMCACHE_ROCM_ARCH="gfx942;gfx950"
+ARG USE_SCCACHE
+
+COPY --from=lmcache_source /app/lmcache /app/lmcache
+WORKDIR /app/lmcache
+
+RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
     set -eu; \
+    printf '%s\n' "${LMCACHE_ROCM_ARCH}" \
+        | grep -Eq '^gfx[0-9a-z]+(;gfx[0-9a-z]+)*$'; \
+    offload_flags="$(printf '%s' "${LMCACHE_ROCM_ARCH}" \
+        | sed 's/;/ --offload-arch=/g; s/^/--offload-arch=/')"; \
+    if [ "${USE_SCCACHE:-0}" = "1" ]; then \
+        export HIP_CLANG_PATH=/opt/sccache-wrappers; \
+    fi; \
     mkdir -p /app/install; \
-    SUPPORTED=" $(echo "${LMCACHE_SUPPORTED_ARCHS}" | tr ';,' '  ') "; \
-    PREBUILT_SET=" $(echo "${LMCACHE_PREBUILT_ARCHS}" | tr ';,' '  ') "; \
-    ARCHS="${LMCACHE_ROCM_ARCH:-$(echo "${PYTORCH_ROCM_ARCH}" | sed -e 's/;gfx1[0-9]\{3\}//g')}"; \
-    if [ -z "${LMCACHE_ROCM_ARCH}" ]; then \
-        KEPT=""; SKIPPED=""; \
-        for a in $(echo "${ARCHS}" | tr ';,' '  '); do \
-            case "${SUPPORTED}" in \
-                *" ${a} "*) KEPT="${KEPT}${KEPT:+;}${a}" ;; \
-                *) SKIPPED="${SKIPPED} ${a}" ;; \
-            esac; \
-        done; \
-        [ -n "${SKIPPED}" ] && echo "[LMCACHE] not supported upstream, skipping:${SKIPPED}"; \
-        [ -z "${KEPT}" ] && echo "[LMCACHE] no supported arch in '${ARCHS}'" && exit 1; \
-        ARCHS="${KEPT}"; \
-    fi; \
-    echo "[LMCACHE] effective PYTORCH_ROCM_ARCH: ${ARCHS}"; \
-    PREBUILT=1; \
-    for a in $(echo "${ARCHS}" | tr ';,' '  '); do \
-        case "${PREBUILT_SET}" in *" ${a} "*) ;; *) PREBUILT=0 ;; esac; \
-    done; \
-    if [ "${PREBUILT}" = "1" ] \
-       && pip download --no-deps --no-index --only-binary=:all: -d /app/install \
-            --find-links "https://github.com/LMCache/LMCache/releases/expanded_assets/v${LMCACHE_VERSION}-rocm" \
-            "lmcache==${LMCACHE_VERSION}"; then \
-        echo "[LMCACHE] using published ROCm wheel"; \
-    else \
-        echo "[LMCACHE] building from source for ${ARCHS}"; \
-        rm -f /app/install/*.whl; \
-        git clone "${LMCACHE_REPO}" "${COMMON_WORKDIR}/lmcache"; \
-        cd "${COMMON_WORKDIR}/lmcache"; \
-        git checkout "${LMCACHE_REF}"; \
-        uv pip install --system -r requirements/build.txt; \
-        if [ "${USE_SCCACHE:-0}" = "1" ]; then export HIP_CLANG_PATH=/opt/sccache-wrappers; fi; \
-        PYTORCH_ROCM_ARCH="${ARCHS}" BUILD_WITH_HIP=1 CXX=hipcc \
-            TORCH_DONT_CHECK_COMPILER_ABI=1 \
-            python3 setup.py bdist_wheel --dist-dir=dist; \
-        cp dist/*.whl /app/install; \
-    fi; \
-    (cd /app/install && sha256sum *.whl > wheel.sha256); \
-    ARCHS="${ARCHS}" python3 -c "import glob, os, zipfile, sys; \
-z = zipfile.ZipFile(glob.glob('/app/install/*.whl')[0]); \
-so = [n for n in z.namelist() if n.endswith('.so')]; \
-sys.exit('no compiled extension in wheel') if not so else None; \
-blob = b''.join(z.read(n) for n in so); \
-missing = [a for a in os.environ['ARCHS'].replace(';', ' ').split() if a.encode() not in blob]; \
-sys.exit('wheel has no code objects for: ' + ' '.join(missing)) if missing else None"
+    SETUPTOOLS_SCM_PRETEND_VERSION="${LMCACHE_VERSION}" \
+    PYTORCH_ROCM_ARCH="${LMCACHE_ROCM_ARCH}" \
+    HIPCC_COMPILE_FLAGS_APPEND="${offload_flags}" \
+    BUILD_WITH_HIP=1 CXX=hipcc \
+        python3 setup.py bdist_wheel --dist-dir=/app/install; \
+    test "$(find /app/install -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
 
-# Gated so the hipcc build is skipped entirely when not requested.
-FROM scratch AS export_lmcache_true
-COPY --from=build_lmcache /app/install/*.whl /app/install/wheel.sha256 /
-FROM scratch AS export_lmcache_false
-FROM export_lmcache_${INSTALL_LMCACHE} AS export_lmcache
+RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
+    set -eu; \
+    python3 -m zipfile -e /app/install/*.whl /tmp/lmcache-wheel; \
+    c_ops="$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so')"; \
+    test "$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so' | wc -l)" -eq 1; \
+    expected="$(printf '%s' "${LMCACHE_ROCM_ARCH}" | tr ';' '\n' | sort -u)"; \
+    actual="$(/opt/rocm/llvm/bin/llvm-objdump --offloading "${c_ops}" \
+        | grep -oE 'gfx[0-9a-z]+' | sort -u)"; \
+    if [ "${actual}" != "${expected}" ]; then \
+        printf 'LMCache code objects mismatch\nexpected:\n%s\nactual:\n%s\n' \
+            "${expected}" "${actual}" >&2; \
+        exit 1; \
+    fi
 
-# Digest alone, so the install layer can key on the wheel without committing it.
-FROM scratch AS export_lmcache_digest_true
-COPY --from=build_lmcache /app/install/wheel.sha256 /
-FROM scratch AS export_lmcache_digest_false
-FROM export_lmcache_digest_${INSTALL_LMCACHE} AS export_lmcache_digest
+FROM scratch AS export_lmcache
+COPY --from=build_lmcache /app/install/*.whl /
 
 # ROCShmem build stage - split from DeepEP so changing DEEPEP_BRANCH does not
 # invalidate the slow ROCShmem build.
@@ -783,7 +763,7 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 # CI base image (Tier 1) - stable, rarely changing CI dependencies.
 # Per-PR test builds pull this as CI_BASE_IMAGE so the test stage only layers
 # in the vLLM artifacts for the current commit.
-FROM mori_base AS ci_base
+FROM mori_base AS ci_base_common
 ARG COMMON_WORKDIR
 
 ENV CARGO_HOME=/root/.cargo
@@ -860,8 +840,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     FASTSAFETENSORS_REQ="$(grep -E '^fastsafetensors(==| @ )' /tmp/rocm-test-reqs.txt | head -1)" \
     && test -n "${FASTSAFETENSORS_REQ}" \
     && python3 -m pip install --force-reinstall --no-deps \
-        --no-binary fastsafetensors "${FASTSAFETENSORS_REQ}" \
-    && rm /tmp/rocm-test-reqs.txt
+        --no-binary fastsafetensors "${FASTSAFETENSORS_REQ}"
 
 # Set MIOPEN ENVS to resolve performance regressions in MIOpen 3D convolution kernel.
 # See: https://github.com/pytorch/pytorch/issues/169857
@@ -883,6 +862,14 @@ COPY tests/vllm_test_utils /tmp/vllm_test_utils
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system /tmp/vllm_test_utils \
     && rm -rf /tmp/vllm_test_utils
+
+FROM ci_base_common AS ci_base
+RUN --mount=type=bind,from=export_lmcache,src=/,target=/lmcache_install \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --constraint /tmp/rocm-test-reqs.txt \
+        /lmcache_install/*.whl \
+    && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)" \
+    && rm /tmp/rocm-test-reqs.txt
 
 # -----------------------
 # Test vLLM image (Tier 2) - vLLM-only layer on top of ci_base.
@@ -909,7 +896,7 @@ RUN mkdir src && mv vllm src/vllm
 
 # -----------------------
 # Final vLLM image
-FROM mori_base AS final
+FROM mori_base AS final_common
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
@@ -935,30 +922,6 @@ RUN case "$(which python3)" in \
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --upgrade huggingface-hub[cli]
-
-# --no-deps: lmcache's metadata is shared with its CUDA build and pins
-# numpy<=2.2.6, which would downgrade vLLM's. These four are the only runtime
-# deps requirements/rocm.txt lacks; the otel exporter is needed because
-# `lmcache server` initialises observability unconditionally.
-# LMCache's builtin hashing uses Python hash(), randomised per process: export a
-# fixed PYTHONHASHSEED (any value) or TP>1 workers disagree on keys and never hit.
-# Placed before the vLLM wheel install: this layer varies only with LMCACHE_REF
-# and the arch set, so it stays reusable across vLLM source changes.
-ARG INSTALL_LMCACHE
-# Digest only — puts the wheel in this layer's cache key (a bind mount alone lets
-# a warm builder reuse a stale install) without committing the blob to a layer.
-COPY --from=export_lmcache_digest / /lmcache_digest/
-RUN --mount=type=bind,from=export_lmcache,src=/,target=/lmcache_install \
-    --mount=type=cache,target=/root/.cache/uv \
-    if [ "$INSTALL_LMCACHE" = "true" ]; then \
-        (cd /lmcache_install && sha256sum -c /lmcache_digest/wheel.sha256) \
-        && uv pip install --system --no-deps /lmcache_install/*.whl \
-        && uv pip install --system sortedcontainers cupy-rocm-7-0 aiofile \
-           opentelemetry-exporter-prometheus \
-        && python3 -c "import lmcache, lmcache.c_ops, importlib.metadata as m; \
-[m.version(d) for d in ('sortedcontainers','aiofile','cupy-rocm-7-0','opentelemetry-exporter-prometheus')]; \
-print('lmcache', lmcache.__version__)"; \
-    fi
 
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
@@ -1009,6 +972,17 @@ RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt \
     && echo "AINIC_VERSION=${AINIC_VERSION}" >> ${COMMON_WORKDIR}/versions.txt
 
 CMD ["/bin/bash"]
+
+FROM final_common AS final_lmcache_false
+
+FROM final_common AS final_lmcache_true
+RUN --mount=type=bind,from=export_lmcache,src=/,target=/lmcache_install \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system /lmcache_install/*.whl six \
+    && uv pip check --system \
+    && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
+
+FROM final_lmcache_${INSTALL_LMCACHE} AS final
 
 #Set entrypoint for vllm-openai official images
 FROM final AS vllm-openai
