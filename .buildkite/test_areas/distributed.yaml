@@ -182,7 +182,7 @@ steps:
 
 - label: Distributed Tests (8xH100)
   key: distributed-tests-8xh100
-  timeout_in_minutes: 20
+  timeout_in_minutes: 30
   device: h100
   num_devices: 8
   working_dir: "/vllm-workspace/tests"
@@ -194,6 +194,11 @@ steps:
   - vllm/v1/engine/llm_engine.py
   - vllm/v1/executor/uniproc_executor.py
   - vllm/v1/worker/gpu_worker.py
+  - vllm/v1/attention/ops/dcp_utils.py
+  - vllm/model_executor/layers/attention/mla_attention.py
+  - vllm/model_executor/layers/attention/sparse_mla_attention.py
+  - csrc/libtorch_stable/attention/dcp_utils/
+  - tests/distributed/test_dcp_direct_a2a_lse_reduce.py
   - tests/distributed/test_mnnvl_alltoall.py
 
   commands:
@@ -201,6 +206,7 @@ steps:
   - export NCCL_CUMEM_HOST_ENABLE=0
   # test with torchrun tp=2 and dp=4 with ep
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
+  - pytest -v -s distributed/test_dcp_direct_a2a_lse_reduce.py
 
 - label: Distributed Tests (4xA100)
   key: distributed-tests-4xa100

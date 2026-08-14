@@ -3,6 +3,7 @@
 """Tests for direct symmetric-memory DCP collectives."""
 
 import functools
+import time
 from unittest.mock import MagicMock
 
 import multiprocess as mp
@@ -15,6 +16,7 @@ from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
 mp.set_start_method("spawn", force=True)
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def _has_multicast_support() -> bool:
@@ -115,8 +117,9 @@ def _distributed_run(fn, world_size: int, extra_env: dict[str, str]) -> None:
         processes.append(process)
         process.start()
 
+    deadline = time.monotonic() + 120
     for process in processes:
-        process.join(timeout=120)
+        process.join(timeout=max(0, deadline - time.monotonic()))
 
     for process in processes:
         if process.is_alive():
@@ -222,7 +225,13 @@ class TestDirectDCPGating:
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "1")
         dcp_utils.get_direct_dcp_kv_gather_workspace.cache_clear()
         workspace = dcp_utils.get_direct_dcp_kv_gather_workspace(
-            _FakeGroupCoordinator(), torch.device("cpu"), 64, 576, torch.bfloat16, 1
+            _FakeGroupCoordinator(),
+            torch.device("cpu"),
+            64,
+            576,
+            512,
+            torch.bfloat16,
+            1,
         )
         assert workspace is None
 
@@ -240,7 +249,13 @@ class TestDirectDCPGating:
         )
 
         result = dcp_utils.get_direct_dcp_kv_gather_workspace(
-            _FakeGroupCoordinator(), torch.device("cpu"), 64, 576, torch.bfloat16, 1
+            _FakeGroupCoordinator(),
+            torch.device("cpu"),
+            64,
+            576,
+            512,
+            torch.bfloat16,
+            1,
         )
 
         assert result is workspace
@@ -256,7 +271,7 @@ class TestDirectDCPGating:
             (
                 "VLLM_USE_DIRECT_DCP_KV_GATHER",
                 "get_direct_dcp_kv_gather_workspace",
-                (64, 576, torch.bfloat16, 1),
+                (64, 576, 512, torch.bfloat16, 1),
             ),
         ],
     )
@@ -284,16 +299,37 @@ class TestDirectDCPGating:
     def test_kv_gather_rejects_invalid_workspace_geometry(self):
         with pytest.raises(ValueError, match="ubatch"):
             dcp_utils.DirectDCPKVGatherWorkspace(
-                None, torch.device("cpu"), 64, 576, num_ubatches=0
+                None, torch.device("cpu"), 64, 576, 512, num_ubatches=0
             )
         with pytest.raises(ValueError, match="divide evenly"):
             dcp_utils.DirectDCPKVGatherWorkspace(
-                _FakeProcessGroup(), torch.device("cpu"), 63, 576
+                _FakeProcessGroup(), torch.device("cpu"), 63, 576, 512
             )
         with pytest.raises(ValueError, match="16-byte"):
             dcp_utils.DirectDCPKVGatherWorkspace(
-                _FakeProcessGroup(), torch.device("cpu"), 64, 3
+                _FakeProcessGroup(), torch.device("cpu"), 64, 16, 4
             )
+
+    @pytest.mark.parametrize(
+        ("token_dim", "plane_split_dim", "dtype", "supported"),
+        [
+            (576, 512, torch.bfloat16, True),
+            (576, 512, torch.float16, True),
+            (576, 512, torch.float8_e4m3fn, True),
+            (16, 8, torch.bfloat16, True),
+            (16, 4, torch.bfloat16, False),
+            (24, 16, torch.float8_e4m3fn, False),
+            (16, 0, torch.bfloat16, False),
+            (16, 16, torch.bfloat16, False),
+        ],
+    )
+    def test_kv_gather_requires_each_plane_aligned(
+        self, token_dim, plane_split_dim, dtype, supported
+    ):
+        assert (
+            dcp_utils._kv_gather_layout_supported(token_dim, plane_split_dim, dtype)
+            is supported
+        )
 
     def test_q_gather_rejects_invalid_workspace_geometry(self):
         with pytest.raises(ValueError, match="ubatch"):
@@ -365,13 +401,29 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
         is_lse_base_on_e=False,
         use_pcp=False,
     )
-    workspace = torch.empty(96, 8)
-
     assert manager.query_gather == direct_query.gather
-    manager.init_kv_gather(workspace, 64)
-    gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
-    manager.kv_gather(gathered_kv, local_kv)
-    direct_kv.gather.assert_called_once_with(gathered_kv, local_kv)
+    assert manager.init_kv_gather(64, 16, 8, torch.bfloat16)
+    dcp_manager.get_direct_dcp_kv_gather_workspace.assert_called_once_with(
+        group,
+        torch.device("cpu"),
+        64,
+        16,
+        8,
+        torch.bfloat16,
+        1,
+    )
+    local_kv = torch.empty(2, 8)
+    dst_rows = torch.tensor([0, 1], dtype=torch.int32)
+    compact_kv = (torch.empty(2, 1, 6), torch.empty(2, 1, 2))
+    direct_kv.gather.return_value = compact_kv
+    assert manager.use_direct_kv_gather
+    assert manager.direct_kv_gather(local_kv, dst_rows, 2, 1) is compact_kv
+    direct_kv.gather.assert_called_once_with(
+        local_kv,
+        dst_rows,
+        2,
+        1,
+    )
     output, lse = torch.empty(1), torch.empty(1)
     seq_lens = torch.ones(1, dtype=torch.int32)
     query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
@@ -424,8 +476,7 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
 
     all_gather = MagicMock()
     monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", all_gather)
-    workspace = torch.empty(96, 8)
-    manager.init_kv_gather(workspace, 64)
+    assert not manager.init_kv_gather(64, 16, 8, torch.bfloat16)
     output, local = torch.empty(4, 8), torch.empty(2, 8)
     manager.kv_gather(output, local)
     all_gather.assert_called_once_with(output, local, group=group.device_group)
@@ -502,7 +553,8 @@ def test_dcp_chunk_workspace_alignment_covers_interleave():
     assert align_mla_chunked_context_workspace_size(config, 8) == 64
 
 
-def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
+@pytest.mark.parametrize("use_direct", [False, True])
+def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch, use_direct):
     import vllm.model_executor.layers.attention.sparse_mla_attention as sparse_mla
 
     monkeypatch.setattr(
@@ -522,7 +574,7 @@ def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
     )
 
     manager = object.__new__(dcp_utils.MLADCPManager)
-    manager.init_kv_gather = MagicMock()
+    manager.init_kv_gather = MagicMock(return_value=use_direct)
     layer = MagicMock(dcp_manager=manager)
     config = MagicMock()
     config.model_config.dtype = torch.bfloat16
@@ -545,9 +597,18 @@ def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
 
     assert builder.dcp_manager is manager
     manager.init_kv_gather.assert_called_once_with(
-        builder.chunked_prefill_workspace,
         builder.chunked_prefill_workspace_size,
+        12,
+        8,
+        torch.bfloat16,
     )
+    local_rows = builder.chunked_prefill_workspace_size // 2
+    expected_rows = (
+        local_rows
+        if use_direct
+        else builder.chunked_prefill_workspace_size + local_rows
+    )
+    assert builder.chunked_prefill_workspace.shape == (expected_rows, 12)
 
 
 def test_sparse_mla_workspace_preserves_non_dcp_size():
@@ -744,49 +805,306 @@ def _distributed_direct_kv_gather_worker(env: dict[str, str]) -> None:
     try:
         rank = dist.get_rank()
         world_size = dist.get_world_size()
-        token_dim = 576
-        max_gathered_tokens = 128 * world_size
+        token_dim, plane_split_dim = 576, 512
+        max_gathered_tokens = 64
         active_ubatch = [0]
         dcp_utils.dbo_current_ubatch_id = lambda: active_ubatch[0]
 
-        for dtype_idx, dtype_name in enumerate(("bfloat16", "float16")):
+        full_layout = (
+            [4, 4, 6],
+            [4, 0, 0],
+            [[8, 8, 7, 6], [4, 2, 2, 2], [6, 6, 5, 4]],
+        )
+        alternate_layout = (
+            [4, 4, 6],
+            [4, 0, 0],
+            [[8, 8, 8, 6], [3, 2, 2, 2], [6, 6, 5, 4]],
+        )
+        small_layout = ([4], [4], [[8, 8, 7, 6]])
+
+        def layout_maps(layout) -> tuple[list[list[int]], int]:
+            padded_lens, local_starts, context_lens = layout
+            maps: list[list[int]] = [[] for _ in range(world_size)]
+            output_start = 0
+            for padded_len, local_start, request_lens in zip(
+                padded_lens, local_starts, context_lens, strict=True
+            ):
+                valid_lens = [
+                    min(max(0, length - local_start), padded_len)
+                    for length in request_lens
+                ]
+                for source_rank, valid_len in enumerate(valid_lens):
+                    rank_start = output_start + sum(valid_lens[:source_rank])
+                    maps[source_rank].extend(range(rank_start, rank_start + valid_len))
+                    maps[source_rank].extend([-1] * (padded_len - valid_len))
+                output_start += sum(valid_lens)
+            valid_rows = sorted(row for rows in maps for row in rows if row >= 0)
+            assert valid_rows == list(range(output_start))
+            return maps, output_start
+
+        def make_local(
+            source_rank: int,
+            iteration: int,
+            num_rows: int,
+            dtype: torch.dtype,
+        ) -> torch.Tensor:
+            values = torch.arange(
+                num_rows * token_dim,
+                dtype=torch.int32,
+                device=device,
+            )
+            values = (values + source_rank * 7 + iteration * 13).remainder(29) - 14
+            return values.view(num_rows, token_dim).to(dtype)
+
+        def expected_planes(layout, iteration: int, dtype: torch.dtype):
+            maps, output_tokens = layout_maps(layout)
+            output = torch.empty(output_tokens, token_dim, dtype=dtype, device=device)
+            covered = torch.zeros(output_tokens, dtype=torch.bool, device=device)
+            for source_rank, rows in enumerate(maps):
+                source = make_local(source_rank, iteration, len(rows), dtype)
+                dst_rows = torch.tensor(rows, dtype=torch.int32, device=device)
+                valid = dst_rows >= 0
+                assert not torch.any(covered[dst_rows[valid]])
+                output[dst_rows[valid]] = source[valid]
+                covered[dst_rows[valid]] = True
+            assert torch.all(covered)
+            return (
+                output[:, :plane_split_dim].unsqueeze(1),
+                output[:, plane_split_dim:].unsqueeze(1),
+            )
+
+        def publish(workspace, dtype, iteration: int, buffer_slot: int, layout):
+            maps, output_tokens = layout_maps(layout)
+            actual = workspace.gather(
+                make_local(rank, iteration, len(maps[rank]), dtype),
+                torch.tensor(maps[rank], dtype=torch.int32, device=device),
+                output_tokens,
+                buffer_slot,
+            )
+            return actual, expected_planes(layout, iteration, dtype)
+
+        def assert_planes(actual, expected) -> None:
+            for actual_plane, expected_plane in zip(actual, expected, strict=True):
+                assert torch.equal(
+                    actual_plane.view(torch.uint8), expected_plane.view(torch.uint8)
+                )
+
+        def check_case(
+            workspace: dcp_utils.DirectDCPKVGatherWorkspace,
+            dtype: torch.dtype,
+            iteration: int,
+            ubatch: int,
+            buffer_slot: int,
+            layout,
+        ) -> None:
+            maps, output_tokens = layout_maps(layout)
+            local_kv = make_local(rank, iteration, len(maps[rank]), dtype)
+            dst_rows = torch.tensor(maps[rank], dtype=torch.int32, device=device)
+            active_ubatch[0] = ubatch
+
+            other_ubatch = 1 - ubatch
+            torch.accelerator.synchronize()
+            other_ubatch_before = workspace.received_kv[other_ubatch].clone()
+            inactive_slot_before = workspace.received_kv[
+                ubatch, 1 - buffer_slot
+            ].clone()
+            slot = workspace.received_kv[ubatch, buffer_slot].view(-1)
+            kv_c_capacity = max_gathered_tokens * plane_split_dim
+            kv_c_storage = slot[:kv_c_capacity].view(
+                max_gathered_tokens, plane_split_dim
+            )
+            k_pe_storage = slot[kv_c_capacity:].view(
+                max_gathered_tokens, token_dim - plane_split_dim
+            )
+            kv_c_tail_before = kv_c_storage[output_tokens:].clone()
+            k_pe_tail_before = k_pe_storage[output_tokens:].clone()
+            epochs_before = workspace.epoch.clone()
+            torch.accelerator.synchronize()
+
+            kv_c, k_pe = workspace.gather(
+                local_kv,
+                dst_rows,
+                output_tokens,
+                buffer_slot,
+            )
+            torch.accelerator.synchronize()
+
+            expected_kv_c, expected_k_pe = expected_planes(layout, iteration, dtype)
+            assert kv_c.shape == expected_kv_c.shape
+            assert k_pe.shape == expected_k_pe.shape
+            assert kv_c.dtype == k_pe.dtype == dtype
+            assert kv_c.is_contiguous() and k_pe.is_contiguous()
+            assert torch.equal(kv_c.view(torch.uint8), expected_kv_c.view(torch.uint8))
+            assert torch.equal(k_pe.view(torch.uint8), expected_k_pe.view(torch.uint8))
+            assert (
+                kv_c.data_ptr() == workspace.received_kv[ubatch, buffer_slot].data_ptr()
+            )
+            assert k_pe.data_ptr() == (
+                kv_c.data_ptr() + kv_c_capacity * workspace.received_kv.element_size()
+            )
+            assert int(workspace.epoch[ubatch].item()) == (
+                int(epochs_before[ubatch].item()) + 1
+            )
+            assert int(workspace.epoch[other_ubatch].item()) == int(
+                epochs_before[other_ubatch].item()
+            )
+            assert not torch.count_nonzero(workspace.completion)
+            assert torch.equal(
+                workspace.received_kv[other_ubatch].view(torch.uint8),
+                other_ubatch_before.view(torch.uint8),
+            )
+            assert torch.equal(
+                workspace.received_kv[ubatch, 1 - buffer_slot].view(torch.uint8),
+                inactive_slot_before.view(torch.uint8),
+            )
+            assert torch.equal(
+                kv_c_storage[output_tokens:].view(torch.uint8),
+                kv_c_tail_before.view(torch.uint8),
+            )
+            assert torch.equal(
+                k_pe_storage[output_tokens:].view(torch.uint8),
+                k_pe_tail_before.view(torch.uint8),
+            )
+            # The gather itself synchronizes publication, but a faster rank
+            # may otherwise start the next test case and multicast into what
+            # a slower rank is still validating as this case's inactive slot.
+            # Production keeps this ordering through same-stream attention
+            # consumption followed by K3's TP-wide rendezvous; the test needs
+            # an explicit rank barrier around its host-side assertions.
+            dist.barrier()
+
+        # Exercise the ownership contract once in depth for BF16, then retain
+        # one byte-exact kernel smoke for each additional supported dtype.
+        eager_cases = {
+            "bfloat16": (
+                (0, 0, 0, full_layout),
+                (1, 0, 1, alternate_layout),
+                (2, 0, 0, small_layout),
+            ),
+            "float16": ((3, 0, 0, full_layout),),
+            "float8_e4m3fn": ((4, 0, 0, full_layout),),
+        }
+        for dtype_name, cases in eager_cases.items():
             dtype = _dtype_from_name(dtype_name)
             workspace = dcp_utils.DirectDCPKVGatherWorkspace(
                 dist.group.WORLD,
                 device,
                 max_gathered_tokens,
                 token_dim,
+                plane_split_dim,
                 dtype,
                 num_ubatches=2,
             )
+            for args in cases:
+                check_case(workspace, dtype, *args)
 
-            # Use disjoint slices of one persistent chunked-context workspace.
-            storage = torch.zeros(
-                (world_size + 1) * 128, token_dim, device=device, dtype=dtype
-            )
-            for iteration, num_tokens in enumerate((1, 128, 17)):
-                generator = torch.Generator(device=device)
-                generator.manual_seed(7000 + rank * 101 + dtype_idx * 977 + iteration)
-                local_kv = storage[:num_tokens]
-                local_kv.copy_(
-                    torch.randn(
-                        num_tokens,
-                        token_dim,
-                        device=device,
-                        dtype=torch.float32,
-                        generator=generator,
-                    ).to(dtype)
-                )
-                gathered = storage[128 : 128 + num_tokens * world_size]
-                active_ubatch[0] = iteration % 2
-                workspace.gather(gathered, local_kv)
+            if dtype == torch.bfloat16:
+                active_ubatch[0] = 0
+
+                # A gather on the other slot is the all-rank rendezvous that
+                # makes the first slot reusable. Rank 0 deliberately consumes
+                # slot 0 late; no explicit barrier protects the critical
+                # slot-0 -> slot-1 -> slot-0 sequence.
+                first, expected = publish(workspace, dtype, 30, 0, full_layout)
                 torch.accelerator.synchronize()
+                if rank == 0:
+                    time.sleep(0.25)
+                assert_planes(first, expected)
+                publish(workspace, dtype, 31, 1, alternate_layout)
+                torch.accelerator.synchronize()
+                reused, expected = publish(workspace, dtype, 32, 0, small_layout)
+                torch.accelerator.synchronize()
+                assert_planes(reused, expected)
+                dist.barrier()  # Isolate the next ownership scenario.
 
-                expected = torch.empty_like(gathered)
-                dist.all_gather_into_tensor(expected, local_kv.contiguous())
-                assert torch.equal(
-                    gathered.view(torch.uint8), expected.view(torch.uint8)
+                # Model execution may reset to slot 0 at a layer boundary.
+                # Simulate attention consumption followed by its downstream
+                # TP collective, then reuse the same slot immediately.
+                first, expected = publish(workspace, dtype, 33, 0, full_layout)
+                consumed = sum(plane.float().sum() for plane in first)
+                expected_consumed = sum(plane.float().sum() for plane in expected)
+                dist.all_reduce(consumed)
+                reused, expected = publish(workspace, dtype, 34, 0, small_layout)
+                torch.accelerator.synchronize()
+                torch.testing.assert_close(consumed, expected_consumed * world_size)
+                assert_planes(reused, expected)
+                dist.barrier()
+
+            if env.get("TEST_CUDA_GRAPH") != "1" or dtype != torch.bfloat16:
+                continue
+
+            graph_workspace = dcp_utils.DirectDCPKVGatherWorkspace(
+                dist.group.WORLD,
+                device,
+                max_gathered_tokens,
+                token_dim,
+                plane_split_dim,
+                dtype,
+                num_ubatches=2,
+            )
+            capture_maps, capture_output_tokens = layout_maps(full_layout)
+            captured_input = make_local(rank, 20, len(capture_maps[rank]), dtype)
+            captured_dst_rows = torch.tensor(
+                capture_maps[rank], dtype=torch.int32, device=device
+            )
+            active_ubatch[0] = 1
+            torch.accelerator.synchronize()
+            dist.barrier()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured_kv_c, captured_k_pe = graph_workspace.gather(
+                    captured_input,
+                    captured_dst_rows,
+                    capture_output_tokens,
+                    buffer_slot=1,
                 )
+            dist.barrier()
+            graph.replay()
+            torch.accelerator.synchronize()
+            dist.barrier()
+            expected_kv_c, expected_k_pe = expected_planes(full_layout, 20, dtype)
+            assert torch.equal(
+                captured_kv_c.view(torch.uint8), expected_kv_c.view(torch.uint8)
+            )
+            assert torch.equal(
+                captured_k_pe.view(torch.uint8), expected_k_pe.view(torch.uint8)
+            )
+            dist.barrier()
+
+            # DBO owns a separate pair of buffers per ubatch. An eager call in
+            # ubatch 0 must not disturb the captured ubatch-1 slot.
+            check_case(
+                graph_workspace,
+                dtype,
+                iteration=21,
+                ubatch=0,
+                buffer_slot=0,
+                layout=small_layout,
+            )
+            maps, output_tokens = layout_maps(alternate_layout)
+            assert output_tokens == capture_output_tokens
+            captured_input.copy_(make_local(rank, 22, len(maps[rank]), dtype))
+            captured_dst_rows.copy_(
+                torch.tensor(maps[rank], dtype=torch.int32, device=device)
+            )
+            epochs_before = graph_workspace.epoch.clone()
+            torch.accelerator.synchronize()
+            active_ubatch[0] = 0  # Replay retains the ubatch captured above.
+            graph.replay()
+            torch.accelerator.synchronize()
+            expected_kv_c, expected_k_pe = expected_planes(alternate_layout, 22, dtype)
+            assert torch.equal(
+                captured_kv_c.view(torch.uint8), expected_kv_c.view(torch.uint8)
+            )
+            assert torch.equal(
+                captured_k_pe.view(torch.uint8), expected_k_pe.view(torch.uint8)
+            )
+            assert int(graph_workspace.epoch[1].item()) == (
+                int(epochs_before[1].item()) + 1
+            )
+            assert int(graph_workspace.epoch[0].item()) == int(epochs_before[0].item())
+            assert not torch.count_nonzero(graph_workspace.completion)
+            dist.barrier()
     finally:
         dist.destroy_process_group()
 
@@ -807,7 +1125,7 @@ def test_distributed_direct_kv_gather_matches_reference(world_size: int):
     _distributed_run(
         _distributed_direct_kv_gather_worker,
         world_size=world_size,
-        extra_env={},
+        extra_env={"TEST_CUDA_GRAPH": "1"},
     )
 
 

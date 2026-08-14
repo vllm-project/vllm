@@ -140,16 +140,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim
         )
         workspace_rows = self.chunked_prefill_workspace_size
-        if self.dcp_world_size > 1:
-            # DCP gathers each rank's local KV shard into the workspace, so it
-            # needs an extra 1/DCP rows beyond the TP allocation.
-            assert self.chunked_prefill_workspace_size % self.dcp_world_size == 0
-            workspace_rows += self.chunked_prefill_workspace_size // self.dcp_world_size
-        self.chunked_prefill_workspace = torch.empty(
-            (workspace_rows, workspace_head_size),
-            dtype=self.model_config.dtype,
-            device=device,
-        )
         self.topk_mask_workspace: torch.Tensor | None = None
         if _is_masked_mha_available(
             self.model_config.model_arch_config.total_num_attention_heads,
@@ -170,13 +160,31 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         layer_prefill_backend = attention_layer.prefill_backend
         self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
+            assert self.chunked_prefill_workspace_size % self.dcp_world_size == 0
             self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
             assert isinstance(self.dcp_manager, MLADCPManager)
             if layer_prefill_backend is not None:
-                self.dcp_manager.init_kv_gather(
-                    self.chunked_prefill_workspace,
+                use_direct_kv_gather = self.dcp_manager.init_kv_gather(
                     self.chunked_prefill_workspace_size,
+                    workspace_head_size,
+                    self.mla_dims.kv_lora_rank,
+                    self.model_config.dtype,
                 )
+                local_rows = self.chunked_prefill_workspace_size // self.dcp_world_size
+                workspace_rows = (
+                    local_rows
+                    if use_direct_kv_gather
+                    else self.chunked_prefill_workspace_size + local_rows
+                )
+            else:
+                workspace_rows += (
+                    self.chunked_prefill_workspace_size // self.dcp_world_size
+                )
+        self.chunked_prefill_workspace = torch.empty(
+            (workspace_rows, workspace_head_size),
+            dtype=self.model_config.dtype,
+            device=device,
+        )
         self._prefill_backend = (
             layer_prefill_backend.clone() if layer_prefill_backend is not None else None
         )

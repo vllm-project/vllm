@@ -8,10 +8,14 @@ chunk never covers a prefill without context (which is why the partial no
 longer needs an empty-span masking pass).
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+import vllm.model_executor.layers.attention.mla_attention as mla_attention
 from vllm.model_executor.layers.attention.mla_attention import (
+    build_dcp_kv_final_layout_dst_rows,
     build_mla_chunked_context_metadata,
     init_mla_context_partial,
     reorg_kvcache,
@@ -27,10 +31,16 @@ def build_chunked_context(
     block_size: int = BLOCK_SIZE,
     dcp_world_size: int = 1,
     dcp_local_block_size: int = 1,
+    dcp_manager=None,
 ):
     query_start_loc = torch.zeros(len(query_lens) + 1, dtype=torch.int32)
     query_start_loc[1:] = torch.tensor(query_lens, dtype=torch.int32).cumsum(0)
-    workspace_rows = workspace_size + workspace_size // dcp_world_size
+    if dcp_world_size == 1:
+        workspace_rows = workspace_size
+    elif dcp_manager is not None and dcp_manager.use_direct_kv_gather:
+        workspace_rows = workspace_size // dcp_world_size
+    else:
+        workspace_rows = workspace_size + workspace_size // dcp_world_size
     return build_mla_chunked_context_metadata(
         context_lens_cpu=torch.tensor(context_lens, dtype=torch.int32),
         prefill_query_start_loc_cpu=query_start_loc,
@@ -42,6 +52,7 @@ def build_chunked_context(
         dcp_world_size=dcp_world_size,
         dcp_local_block_size=dcp_local_block_size,
         dcp_virtual_block_size=dcp_local_block_size * dcp_world_size,
+        dcp_manager=dcp_manager,
     )
 
 
@@ -253,7 +264,7 @@ def test_dcp_reorg_uses_each_chunks_local_starts():
 
         toks = chunk.num_local_context_tokens
         rank_buffers = [torch.full((toks, 1, 1), -1) for _ in range(dcp_world_size)]
-        expected = []
+        expected: list[torch.Tensor] = []
         src_token_idx = 0
         for request, (padded_len, local_lens, local_start) in enumerate(
             zip(
@@ -286,3 +297,141 @@ def test_dcp_reorg_uses_each_chunks_local_starts():
         )
 
         torch.testing.assert_close(reorganized, torch.cat(expected))
+
+
+@pytest.mark.skip_global_cleanup
+def test_dcp_final_layout_dst_rows_maps_padding_and_continuations():
+    """The publish map is compact, disjoint, and skips padded local rows."""
+    padded_local_seq_lens = [4, 3]
+    local_context_lens_allranks = [[4, 3], [7, 5]]
+    local_starts = [0, 4]
+
+    rank_0 = build_dcp_kv_final_layout_dst_rows(
+        padded_local_seq_lens,
+        local_context_lens_allranks,
+        local_starts,
+        [7, 4],
+        dcp_rank=0,
+    )
+    rank_1 = build_dcp_kv_final_layout_dst_rows(
+        padded_local_seq_lens,
+        local_context_lens_allranks,
+        local_starts,
+        [7, 4],
+        dcp_rank=1,
+    )
+
+    assert rank_0.tolist() == [0, 1, 2, 3, 7, 8, 9]
+    assert rank_1.tolist() == [4, 5, 6, -1, 10, -1, -1]
+    valid_rows = sorted(row for row in [*rank_0.tolist(), *rank_1.tolist()] if row >= 0)
+    assert valid_rows == list(range(11))
+
+    zero_valid_maps = [
+        build_dcp_kv_final_layout_dst_rows(
+            padded_local_seq_lens=[2],
+            local_context_lens_allranks=[[4, 4, 3, 2]],
+            local_starts=[2],
+            output_seq_lens=[5],
+            dcp_rank=rank,
+        ).tolist()
+        for rank in range(4)
+    ]
+    assert zero_valid_maps == [[0, 1], [2, 3], [4, -1], [-1, -1]]
+
+
+@pytest.mark.skip_global_cleanup
+def test_dcp_final_layout_validates_each_request_exact_coverage():
+    """Equal batch totals cannot hide a gap in one request and overlap in another."""
+    with pytest.raises(ValueError, match="exactly cover request 0"):
+        build_dcp_kv_final_layout_dst_rows(
+            padded_local_seq_lens=[2, 2],
+            local_context_lens_allranks=[[1, 1], [2, 2]],
+            local_starts=[0, 0],
+            output_seq_lens=[3, 3],
+            dcp_rank=0,
+        )
+
+    mismatched_manager = SimpleNamespace(
+        use_direct_kv_gather=True,
+        group=SimpleNamespace(rank_in_group=0, world_size=4),
+    )
+    with pytest.raises(ValueError, match="world sizes differ"):
+        build_chunked_context(
+            [128],
+            [4],
+            1024,
+            dcp_world_size=2,
+            dcp_local_block_size=64,
+            dcp_manager=mismatched_manager,
+        )
+
+
+@pytest.mark.skip_global_cleanup
+def test_dcp_final_layout_publish_matches_reorg(monkeypatch):
+    """All source-rank maps jointly produce the existing compact layout."""
+    dcp_world_size, interleave, workspace_size = 2, 64, 1024
+    monkeypatch.setattr(mla_attention, "np_to_pinned_tensor", torch.from_numpy)
+    metadata_by_rank = []
+    for rank in range(dcp_world_size):
+        dcp_manager = SimpleNamespace(
+            use_direct_kv_gather=True,
+            group=SimpleNamespace(rank_in_group=rank, world_size=dcp_world_size),
+        )
+        metadata = build_chunked_context(
+            [3000, 200, 200],
+            [4, 4, 4],
+            workspace_size,
+            block_size=128,
+            dcp_world_size=dcp_world_size,
+            dcp_local_block_size=interleave,
+            dcp_manager=dcp_manager,
+        )
+        assert metadata is not None
+        assert metadata.workspace.shape[0] == workspace_size // dcp_world_size
+        assert all(
+            chunk.num_local_context_tokens <= workspace_size // dcp_world_size
+            for chunk in metadata.chunks
+        )
+        metadata_by_rank.append(metadata)
+
+    for chunk_index, chunk in enumerate(metadata_by_rank[0].chunks):
+        assert chunk.padded_local_seq_lens is not None
+        assert chunk.local_context_lens_allranks is not None
+        assert chunk.local_starts is not None
+
+        toks = chunk.num_local_context_tokens
+        compact = torch.full((chunk.num_context_tokens,), -1, dtype=torch.int64)
+        expected: list[list[torch.Tensor]] = []
+        for rank in range(dcp_world_size):
+            local = torch.full((toks,), -2, dtype=torch.int64)
+            src_token_idx = 0
+            for request, (padded_len, local_lens, local_start) in enumerate(
+                zip(
+                    chunk.padded_local_seq_lens,
+                    chunk.local_context_lens_allranks,
+                    chunk.local_starts,
+                )
+            ):
+                actual_len = min(max(0, local_lens[rank] - local_start), padded_len)
+                values = (
+                    request * 100_000
+                    + rank * 10_000
+                    + torch.arange(local_start, local_start + actual_len)
+                )
+                local[src_token_idx : src_token_idx + actual_len] = values
+                if rank == 0:
+                    expected.append([])
+                expected[request].append(values)
+                src_token_idx += padded_len
+
+            dst_rows = metadata_by_rank[rank].chunks[chunk_index].final_layout_dst_rows
+            assert dst_rows is not None
+            valid = dst_rows >= 0
+            assert torch.all(compact[dst_rows[valid]] == -1)
+            compact[dst_rows[valid]] = local[valid]
+
+        assert not torch.any(compact == -1)
+        torch.testing.assert_close(
+            compact,
+            torch.cat([torch.cat(request) for request in expected]),
+        )

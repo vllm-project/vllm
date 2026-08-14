@@ -749,8 +749,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         copied per chunk.
 
         Decode context parallelism keeps using
-        ``impl._context_parallel_compute_prefill_context``; its extra allgather
-        and reorg are not fused here.
+        ``impl._context_parallel_compute_prefill_context``. Its NCCL fallback
+        retains the extra all-gather and reorganization; the direct symmetric
+        path publishes into the compact MLA layout instead.
         """
         prefill = attn_metadata.prefill
         assert prefill is not None
