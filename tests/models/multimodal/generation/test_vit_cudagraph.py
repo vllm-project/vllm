@@ -107,6 +107,12 @@ def cosmos3_edge_chat_template(content: str) -> str:
     return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n<think>\n"
 
 
+def _get_encoder_cudagraph_hit_miss_counts(worker):
+    manager = worker.model_runner.model_state.encoder_runner.cudagraph_manager
+    assert manager is not None
+    return manager.graph_hits, manager.graph_misses
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "pixtral": VitCudagraphTestConfig(
         model="mistralai/Ministral-3-3B-Instruct-2512",
@@ -539,7 +545,7 @@ def get_compilation_config(config: VitCudagraphTestConfig):
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
 )
-def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
+def test_vit_cudagraph_image(model_id, vllm_runner, image_assets, monkeypatch):
     config = MODEL_CONFIGS[model_id]
 
     if config.skip:
@@ -549,6 +555,11 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
         pytest.skip(f"{model_id} does not support the image modality.")
 
     images = [[asset.pil_image] for asset in image_assets]
+
+    if model_id == "cosmos3_edge":
+        # The callable used to read worker-local graph counters below must cross
+        # the EngineCore process boundary under default V1 multiprocessing.
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     with vllm_runner(
         config.model,
@@ -605,11 +616,10 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
         assert isinstance(output_text, str)
 
         if model_id == "cosmos3_edge":
-            runner = vllm_model.llm.llm_engine.model_executor.driver_worker.model_runner
-            manager = runner.encoder_cudagraph_manager
-            assert manager is not None
-            assert manager.graph_hits == 2
-            assert manager.graph_misses == 0
+            hit_miss_counts = vllm_model.collective_rpc(
+                _get_encoder_cudagraph_hit_miss_counts
+            )
+            assert hit_miss_counts == [(2, 0)]
 
 
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
