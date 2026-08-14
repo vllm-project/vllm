@@ -27,10 +27,15 @@ from tests.utils import (
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group, set_custom_all_reduce
 
-from .utils import order_sensitive_elements, skip_if_not_rocm
+from .utils import (
+    apply_invariance_env_overrides,
+    order_sensitive_elements,
+    skip_if_not_rocm,
+)
 
-# Can be enabled off ROCm if batch-invariant custom all reduce + fallback
-# are enabled there
+# ROCm-only for now: that is where `CudaCommunicator` replaces the collective
+# under the mode. Off ROCm it pins NCCL's algorithm, protocol and channel count
+# instead, which should be invariant too -- unskipping is a follow-up.
 pytestmark = [skip_if_not_rocm, *multi_gpu_marks(num_gpus=4)]
 
 # Token counts spanning the small-message thresholds where the collectives
@@ -78,6 +83,7 @@ def _check_all_reduce(
 ):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    apply_invariance_env_overrides(monkeypatch)
 
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)
@@ -195,6 +201,7 @@ def _check_implementations_agree(
     """
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    apply_invariance_env_overrides(monkeypatch)
 
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)

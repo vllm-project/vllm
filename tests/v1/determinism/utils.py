@@ -7,6 +7,9 @@ from typing import NamedTuple
 import pytest
 import torch
 
+from vllm.model_executor.layers.batch_invariant import (
+    override_envs_for_invariance,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
@@ -91,6 +94,29 @@ requires_mx = pytest.mark.skipif(
     not (current_platform.is_rocm() and current_platform.supports_mx()),
     reason="requires a ROCm device with native MX support (gfx95x)",
 )
+
+
+def apply_invariance_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Apply the mode's environment overrides, undone with ``monkeypatch``.
+
+    A real worker gets these from ``init_batch_invariance``, whose only caller is
+    ``gpu_worker``. A test that builds the distributed environment itself gets
+    only the parts of the mode that read ``VLLM_BATCH_INVARIANT`` directly, so it
+    has to apply the rest by hand before the communicator is created.
+
+    ``override_envs_for_invariance`` writes straight to ``os.environ``. Replay
+    what it changed through ``monkeypatch`` so the process is left as it was.
+
+    Args:
+        monkeypatch: Fixture that owns the undo.
+    """
+    before = dict(os.environ)
+    override_envs_for_invariance()
+    applied = {k: v for k, v in os.environ.items() if before.get(k) != v}
+    os.environ.clear()
+    os.environ.update(before)
+    for key, value in applied.items():
+        monkeypatch.setenv(key, value)
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:

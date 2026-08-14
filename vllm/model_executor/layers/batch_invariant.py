@@ -3,6 +3,7 @@
 import math
 import os
 from collections.abc import Callable
+from functools import lru_cache
 from typing import Any
 
 import torch
@@ -177,7 +178,7 @@ def matmul_persistent(
         },
         torch.float16: {
             "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": _fp16_block_size_n,
+            "BLOCK_SIZE_N": _fp16_block_size_n(),
             "BLOCK_SIZE_K": 64,
             "GROUP_SIZE_M": 8,
             "num_stages": 3,
@@ -767,7 +768,7 @@ def bmm_batch_invariant(a, b, *, out=None):
         },
         torch.float16: {
             "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": _fp16_block_size_n,
+            "BLOCK_SIZE_N": _fp16_block_size_n(),
             "BLOCK_SIZE_K": 64,
             "num_stages": 3,
             "num_warps": 8,
@@ -1330,12 +1331,20 @@ def reduce_scatter_batch_invariant(
 
 _batch_invariant_MODE = False
 _batch_invariant_LIB = None
-_fp16_block_size_n = 256
+
+
+# Save the eager path from constantly calling get_max_shared_memory_bytes
+# torch.compiler.assume_constant_result is necessary for Dynamo to not trace
+@lru_cache(maxsize=1)
+@torch.compiler.assume_constant_result
+def _fp16_block_size_n() -> int:
+    if current_platform.is_xpu() or get_max_shared_memory_bytes() <= 106496:
+        return 128
+    return 256
 
 
 def enable_batch_invariant_mode():
     global _batch_invariant_MODE, _batch_invariant_LIB
-    global _fp16_block_size_n
 
     if _batch_invariant_MODE:
         return
@@ -1362,7 +1371,6 @@ def enable_batch_invariant_mode():
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
 
-        _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
     elif current_platform.is_rocm():
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
@@ -1371,7 +1379,6 @@ def enable_batch_invariant_mode():
         _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
 
-        _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
     elif current_platform.is_xpu():
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
@@ -1379,8 +1386,6 @@ def enable_batch_invariant_mode():
         _batch_invariant_LIB.impl("aten::addmm.out", addmm_out_batch_invariant, key)
         # TODO: register matmul and linear for XPU
         # once suitable Triton kernels are implemented
-
-        _fp16_block_size_n = 128
 
     _batch_invariant_LIB.impl("aten::_log_softmax", _log_softmax_batch_invariant, key)
     _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, key)
