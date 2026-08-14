@@ -78,10 +78,12 @@ def _split(
     num_new_tokens: int,
     use_eagle: bool = True,
     partial_hit: bool = False,
+    replay_block_size: int | None = None,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     stub = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
+        block_size=replay_block_size or MAMBA_BLOCK_SIZE,
         use_eagle=use_eagle,
         max_num_scheduled_tokens=16384,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
@@ -207,6 +209,25 @@ def test_poisoning_is_block_size_independent(
 
     monkeypatch.setattr(sys.modules[__name__], "MAMBA_BLOCK_SIZE", block_size)
     assert _prefill(prompt_len, budgets=budgets) > 0
+
+
+def test_dcp_replay_boundary_is_not_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DCP replay boundaries must hold a materialized Mamba state."""
+    import sys
+
+    monkeypatch.setattr(sys.modules[__name__], "MAMBA_BLOCK_SIZE", 1536)
+    replay_block_size = 1536 * 8
+    (request,) = create_requests(1, num_tokens=30000, block_size=1536)
+
+    # The first budget ends on the last physical Mamba boundary it can reach.
+    assert _split(request, 8192, replay_block_size=replay_block_size) == 7680
+
+    # The next budget would reach 15360 on the physical grid. Stop at the DCP
+    # replay boundary instead so the state at 12288 can serve a prefix hit.
+    request.num_computed_tokens = 7680
+    assert _split(request, 8192, replay_block_size=replay_block_size) == 4608
 
 
 @pytest.mark.parametrize("partial_hit", [False, True])
