@@ -1589,3 +1589,10 @@ This covers stable request-indexed hint state, production dispatch, FP32/FP16
 cold starts, and exact adaptive-rung results at 50K/100K/200K. Targeted Ruff,
 Python compilation, and `git diff --check` also passed. FlashInfer autotuning
 was disabled for every fixed-GVR e2e server run.
+
+### Backup snapshot
+
+The implementation, tests, benchmark utilities, documentation, and compact
+GSM8K result artifacts were committed to the non-main branch
+`backup/gvr-fixed-fp32-20260814`. The source snapshot is commit `1daf3b4c2e`.
+The 7.3 GB generated Nsight `prof/` directory was intentionally excluded.
