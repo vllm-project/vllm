@@ -183,6 +183,7 @@ steps:
 - label: Examples
   device: h200_35gb
   key: examples
+  otel_trace: true
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:

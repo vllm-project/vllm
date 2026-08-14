@@ -5,6 +5,7 @@ steps:
 - label: Model Runner V2 Core Tests
   device: h200_35gb
   key: model-runner-v2-core-tests
+  otel_trace: true
   timeout_in_minutes: 35
   source_file_dependencies:
   - vllm/v1/worker/gpu/
