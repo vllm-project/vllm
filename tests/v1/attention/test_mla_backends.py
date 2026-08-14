@@ -844,6 +844,7 @@ def test_tokenspeed_mla_noncausal_capability():
     ("causal", "tokens_per_decode", "dcp_world_size", "dcp_rank"),
     [
         pytest.param(True, 1, 2, 1, id="causal-dcp"),
+        pytest.param(True, 3, 2, 1, id="causal-dcp-multi-token"),
         pytest.param(False, 3, 1, 0, id="noncausal-multi-token"),
     ],
 )
