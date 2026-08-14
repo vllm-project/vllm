@@ -28,8 +28,9 @@ steps:
 
 - label: LoRA TP (Distributed)
   key: lora-tp-distributed
-  timeout_in_minutes: 60
+  timeout_in_minutes: 25
   num_devices: 4
+  parallelism: 3
   source_file_dependencies:
   - vllm/lora
   - vllm/model_executor/layers/fused_moe/
@@ -42,10 +43,12 @@ steps:
     - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     # There is some Tensor Parallelism related processing logic in LoRA that
     # requires multi-GPU testing for validation.
-    - pytest -v -s -x lora/test_chatglm3_tp.py
-    - pytest -v -s -x lora/test_llama_tp.py
-    - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
-    - pytest -v -s -x lora/test_olmoe_tp.py
-    - pytest -v -s -x lora/test_gptoss_tp.py
-    - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
-    - pytest -v -s -x lora/test_gemma4_tp.py
+    # Timing-balanced static split (measured on build 83851): shard 0 ~15.2m,
+    # shard 1 ~15.3m, shard 2 ~14.3m.
+    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_chatglm3_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_llama_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_qwen3_with_multi_loras.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_olmoe_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_gptoss_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_gemma4_tp.py
