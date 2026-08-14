@@ -40,12 +40,16 @@ set -o pipefail
 # Preserve runner-only values before clear_ci_orchestration_env removes them
 # from the environment inherited by the test process.
 amd_diagnostics_expected_gpu_count="${VLLM_CI_EXPECTED_GPU_COUNT:-1}"
-amd_diagnostics_dir="${VLLM_CI_DIAGNOSTICS_DIR:-artifacts/amd-gpu-diagnostics}"
+amd_diagnostics_dir="${VLLM_CI_DIAGNOSTICS_DIR:-artifacts/amd-ci-failure-diagnostics}"
 amd_diagnostics_checkout_root="${BUILDKITE_BUILD_CHECKOUT_PATH:-$(pwd -P)}"
 amd_diagnostics_execution_mode="${VLLM_CI_EXECUTION_MODE:-single-node}"
 amd_diagnostics_test_group="${VLLM_TEST_GROUP_NAME:-${BUILDKITE_STEP_KEY:-unknown}}"
-amd_diagnostics_k8s_node_name="${VLLM_CI_K8S_NODE_NAME:-}"
+amd_diagnostics_workspace="${VLLM_CI_WORKSPACE:-/vllm-workspace}"
+amd_diagnostics_pod_name="${VLLM_CI_K8S_POD_NAME:-${POD_NAME:-}}"
+amd_diagnostics_k8s_namespace="${VLLM_CI_K8S_NAMESPACE:-${POD_NAMESPACE:-unknown}}"
+amd_diagnostics_k8s_node_name="${VLLM_CI_K8S_NODE_NAME:-${NODE_NAME:-}}"
 amd_diagnostics_collected=0
+amd_diagnostics_memory_events_path=""
 amd_diagnostics_probe_budget_seconds=25
 amd_diagnostics_command_timeout_seconds=5
 amd_diagnostics_upload_timeout_seconds=20
@@ -101,7 +105,9 @@ clear_ci_orchestration_env() {
     VLLM_CI_ARTIFACT_GLOB \
     VLLM_CI_ARTIFACT_CHECKSUM_GLOB \
     VLLM_CI_EXPECTED_GPU_COUNT \
+    VLLM_CI_K8S_NAMESPACE \
     VLLM_CI_K8S_NODE_NAME \
+    VLLM_CI_K8S_POD_NAME \
     VLLM_CI_USE_ARTIFACTS \
     VLLM_CI_RESULTS_ROOT \
     VLLM_ALLOW_DEPRECATED_BEAM_SEARCH
@@ -577,7 +583,24 @@ is_multi_node() {
   return 1
 }
 
-run_amd_diagnostic() {
+append_failure_diagnostic_section() {
+  local log_file=$1
+  local title=$2
+
+  printf '\n===============================================================================\n' \
+    >> "${log_file}"
+  printf '%s\n' "${title}" >> "${log_file}"
+  printf '===============================================================================\n' \
+    >> "${log_file}"
+}
+
+append_failure_diagnostic_note() {
+  local log_file=$1
+  shift
+  printf '%s\n' "$@" >> "${log_file}"
+}
+
+run_failure_diagnostic() {
   local log_file=$1
   local probe_deadline=$2
   shift 2
@@ -589,28 +612,403 @@ run_amd_diagnostic() {
     printf '\n$'
     printf ' %q' "$@"
     printf '\n'
-  } | tee -a "${log_file}"
+  } >> "${log_file}"
 
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "[timeout unavailable; bounded diagnostic command skipped]" \
+      >> "${log_file}"
+    return 0
+  fi
   if [[ "${remaining_seconds}" -le 0 ]]; then
     echo "[diagnostic probe budget exhausted; command skipped]" \
-      | tee -a "${log_file}"
+      >> "${log_file}"
     return 0
   fi
   if [[ "${remaining_seconds}" -lt "${command_timeout_seconds}" ]]; then
     command_timeout_seconds=${remaining_seconds}
   fi
 
-  timeout --kill-after=1s "${command_timeout_seconds}s" "$@" 2>&1 \
-    | tee -a "${log_file}"
-  command_status=${PIPESTATUS[0]}
+  timeout --kill-after=1s "${command_timeout_seconds}s" "$@" \
+    >> "${log_file}" 2>&1
+  command_status=$?
   if [[ "${command_status}" -ne 0 ]]; then
     echo "[diagnostic command exited with status ${command_status}]" \
-      | tee -a "${log_file}"
+      >> "${log_file}"
   fi
   return 0
 }
 
-collect_rocm_failure_diagnostics() {
+append_failure_diagnostic_file() {
+  local log_file=$1
+  local label=$2
+  local path=$3
+  local command_status=0
+
+  printf '\n%s:\n' "${label}" >> "${log_file}"
+  printf '$ cat %q\n' "${path}" >> "${log_file}"
+  if [[ ! -r "${path}" ]]; then
+    echo "[file unavailable]" >> "${log_file}"
+    return 0
+  fi
+
+  cat "${path}" >> "${log_file}" 2>&1
+  command_status=$?
+  if [[ "${command_status}" -ne 0 ]]; then
+    echo "[diagnostic file read exited with status ${command_status}]" \
+      >> "${log_file}"
+  fi
+  return 0
+}
+
+decode_mountinfo_path() {
+  local value=$1
+
+  value=${value//\\040/ }
+  value=${value//\\011/$'\t'}
+  value=${value//\\012/$'\n'}
+  value=${value//\\134/\\}
+  printf '%s\n' "${value}"
+}
+
+proc_cgroup_path() {
+  local controller=${1:-}
+
+  awk -F: -v controller="${controller}" '
+    $2 == "" && controller == "" {
+      print $3
+      exit
+    }
+    $2 != "" && controller != "" {
+      count = split($2, controllers, ",")
+      for (i = 1; i <= count; i++) {
+        if (controllers[i] == controller) {
+          print $3
+          exit
+        }
+      }
+    }
+  ' /proc/self/cgroup 2>/dev/null
+}
+
+resolve_cgroup_dir() {
+  local controller=${1:-}
+  local filesystem_type="cgroup"
+  local cgroup_path=""
+  local mount_root=""
+  local mount_point=""
+  local relative_path=""
+  local candidate=""
+
+  # Map the process membership through mountinfo instead of assuming the
+  # current cgroup is mounted at /sys/fs/cgroup.
+  if [[ -z "${controller}" ]]; then
+    filesystem_type="cgroup2"
+    cgroup_path=$(proc_cgroup_path)
+  else
+    cgroup_path=$(proc_cgroup_path "${controller}")
+  fi
+  [[ -n "${cgroup_path}" ]] || return 1
+
+  while IFS=$'\t' read -r mount_root mount_point; do
+    mount_root=$(decode_mountinfo_path "${mount_root}")
+    mount_point=$(decode_mountinfo_path "${mount_point}")
+    if [[ "${cgroup_path}" == "/" ]]; then
+      relative_path=""
+    elif [[ "${mount_root}" == "/" ]]; then
+      relative_path="${cgroup_path}"
+    elif [[ "${cgroup_path}" == "${mount_root}" ]]; then
+      relative_path=""
+    elif [[ "${cgroup_path}" == "${mount_root}/"* ]]; then
+      relative_path="/${cgroup_path#"${mount_root}/"}"
+    else
+      continue
+    fi
+
+    candidate="${mount_point%/}${relative_path}"
+    if [[ -d "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done < <(
+    awk -v filesystem_type="${filesystem_type}" \
+      -v controller="${controller}" '
+      {
+        separator = 0
+        for (i = 6; i <= NF; i++) {
+          if ($i == "-") {
+            separator = i
+            break
+          }
+        }
+        if (!separator || $(separator + 1) != filesystem_type) {
+          next
+        }
+        if (filesystem_type == "cgroup") {
+          found = 0
+          for (i = separator + 2; i <= NF; i++) {
+            count = split($i, options, ",")
+            for (j = 1; j <= count; j++) {
+              if (options[j] == controller) {
+                found = 1
+              }
+            }
+          }
+          if (!found) {
+            next
+          }
+        }
+        print $4 "\t" $5
+      }
+    ' /proc/self/mountinfo 2>/dev/null
+  )
+  return 1
+}
+
+collect_cgroup_files() {
+  local log_file=$1
+  local title=$2
+  local cgroup_dir=$3
+  shift 3
+  local cgroup_file=""
+  local files_collected=0
+
+  append_failure_diagnostic_section "${log_file}" "${title}"
+  if [[ -z "${cgroup_dir}" || ! -d "${cgroup_dir}" ]]; then
+    append_failure_diagnostic_note "${log_file}" \
+      "resolved_cgroup_path=unavailable"
+    return 0
+  fi
+
+  append_failure_diagnostic_note "${log_file}" \
+    "resolved_cgroup_path=${cgroup_dir}"
+  for cgroup_file in "$@"; do
+    if [[ -r "${cgroup_dir}/${cgroup_file}" ]]; then
+      append_failure_diagnostic_file "${log_file}" "${cgroup_file}" \
+        "${cgroup_dir}/${cgroup_file}"
+      files_collected=$((files_collected + 1))
+    fi
+  done
+  if [[ "${files_collected}" -eq 0 ]]; then
+    append_failure_diagnostic_note "${log_file}" \
+      "[no requested cgroup files were readable]"
+  fi
+  return 0
+}
+
+collect_cgroup_diagnostics() {
+  local log_file=$1
+  local unified_path=""
+  local cgroup_dir=""
+  local controllers_collected=0
+
+  append_failure_diagnostic_section "${log_file}" "Cgroup membership"
+  append_failure_diagnostic_file "${log_file}" "current_process" \
+    /proc/self/cgroup
+  append_failure_diagnostic_file "${log_file}" "pid_namespace_init_process" \
+    /proc/1/cgroup
+
+  unified_path=$(proc_cgroup_path)
+  # Hybrid systems can expose a v2 hierarchy alongside v1 resource
+  # controllers, so collect each membership independently.
+  if [[ -n "${unified_path}" ]]; then
+    cgroup_dir=$(resolve_cgroup_dir 2>/dev/null || true)
+    collect_cgroup_files "${log_file}" \
+      "Cgroup v2 current-process resource state" "${cgroup_dir}" \
+      cgroup.type cgroup.events \
+      memory.current memory.peak memory.max memory.high memory.low memory.min \
+      memory.oom.group memory.swap.current memory.swap.max \
+      memory.events memory.events.local memory.swap.events memory.stat \
+      memory.pressure \
+      cpu.max cpu.max.burst cpu.weight cpu.stat cpu.pressure \
+      cpuset.cpus cpuset.cpus.effective cpuset.mems cpuset.mems.effective \
+      pids.current pids.max pids.events pids.events.local \
+      io.stat io.max io.weight io.pressure
+    if [[ -r "${cgroup_dir}/memory.events" ]]; then
+      amd_diagnostics_memory_events_path="${cgroup_dir}/memory.events"
+    fi
+    controllers_collected=$((controllers_collected + 1))
+  fi
+
+  if [[ -n "$(proc_cgroup_path memory)" ]]; then
+    cgroup_dir=$(resolve_cgroup_dir memory 2>/dev/null || true)
+    collect_cgroup_files "${log_file}" "Cgroup v1 memory controller" \
+      "${cgroup_dir}" \
+      memory.usage_in_bytes memory.max_usage_in_bytes memory.limit_in_bytes \
+      memory.soft_limit_in_bytes memory.failcnt memory.oom_control \
+      memory.memsw.usage_in_bytes memory.memsw.limit_in_bytes memory.stat
+    controllers_collected=$((controllers_collected + 1))
+  fi
+
+  if [[ -n "$(proc_cgroup_path cpu)" ]]; then
+    cgroup_dir=$(resolve_cgroup_dir cpu 2>/dev/null || true)
+    collect_cgroup_files "${log_file}" "Cgroup v1 CPU controller" \
+      "${cgroup_dir}" \
+      cpu.cfs_quota_us cpu.cfs_period_us cpu.shares cpu.stat
+    controllers_collected=$((controllers_collected + 1))
+  fi
+
+  if [[ -n "$(proc_cgroup_path cpuacct)" ]]; then
+    cgroup_dir=$(resolve_cgroup_dir cpuacct 2>/dev/null || true)
+    collect_cgroup_files "${log_file}" \
+      "Cgroup v1 CPU accounting controller" "${cgroup_dir}" \
+      cpuacct.usage cpuacct.stat
+    controllers_collected=$((controllers_collected + 1))
+  fi
+
+  if [[ -n "$(proc_cgroup_path cpuset)" ]]; then
+    cgroup_dir=$(resolve_cgroup_dir cpuset 2>/dev/null || true)
+    collect_cgroup_files "${log_file}" "Cgroup v1 cpuset controller" \
+      "${cgroup_dir}" \
+      cpuset.cpus cpuset.effective_cpus cpuset.mems cpuset.effective_mems
+    controllers_collected=$((controllers_collected + 1))
+  fi
+
+  if [[ -n "$(proc_cgroup_path pids)" ]]; then
+    cgroup_dir=$(resolve_cgroup_dir pids 2>/dev/null || true)
+    collect_cgroup_files "${log_file}" "Cgroup v1 PID controller" \
+      "${cgroup_dir}" pids.current pids.max pids.events
+    controllers_collected=$((controllers_collected + 1))
+  fi
+
+  if [[ -n "$(proc_cgroup_path blkio)" ]]; then
+    cgroup_dir=$(resolve_cgroup_dir blkio 2>/dev/null || true)
+    collect_cgroup_files "${log_file}" "Cgroup v1 block I/O controller" \
+      "${cgroup_dir}" \
+      blkio.throttle.io_service_bytes blkio.throttle.io_serviced \
+      blkio.io_service_bytes blkio.io_serviced
+    controllers_collected=$((controllers_collected + 1))
+  fi
+
+  if [[ "${controllers_collected}" -eq 0 ]]; then
+    append_failure_diagnostic_note "${log_file}" \
+      "[no cgroup v1 or v2 membership could be resolved]"
+  fi
+  return 0
+}
+
+collect_process_diagnostics() {
+  local log_file=$1
+  local probe_deadline=$2
+  local shell_proc_dir="/proc/$$"
+
+  append_failure_diagnostic_section "${log_file}" \
+    "Runner process constraints and PID-namespace-visible processes"
+  append_failure_diagnostic_file "${log_file}" "diagnostic_shell_limits" \
+    "${shell_proc_dir}/limits"
+  if command -v awk >/dev/null 2>&1; then
+    # shellcheck disable=SC2016  # The expression is evaluated by awk.
+    run_failure_diagnostic "${log_file}" "${probe_deadline}" awk '
+      $1 ~ /^(Pid:|PPid:|Threads:|VmPeak:|VmSize:|VmHWM:|VmRSS:|RssAnon:|RssFile:|RssShmem:|Cpus_allowed_list:|Mems_allowed_list:|voluntary_ctxt_switches:|nonvoluntary_ctxt_switches:)$/ {
+        print
+      }
+    ' "${shell_proc_dir}/status"
+  fi
+  if command -v nproc >/dev/null 2>&1; then
+    run_failure_diagnostic "${log_file}" "${probe_deadline}" nproc
+  fi
+  run_failure_diagnostic "${log_file}" "${probe_deadline}" \
+    /bin/bash -c 'ulimit -a'
+  if command -v ps >/dev/null 2>&1 && command -v head >/dev/null 2>&1; then
+    append_failure_diagnostic_note "${log_file}" \
+      "process_snapshot=top_100_by_rss"
+    run_failure_diagnostic "${log_file}" "${probe_deadline}" \
+      /bin/bash -c \
+      'ps -eo pid,ppid,stat,etimes,nlwp,pcpu,rss,vsz,comm --sort=-rss | head -n 101'
+  fi
+  return 0
+}
+
+collect_mount_diagnostic() {
+  local log_file=$1
+  local probe_deadline=$2
+  local label=$3
+  local path=$4
+
+  printf '\n%s (%s):\n' "${label}" "${path}" >> "${log_file}"
+  if [[ ! -e "${path}" ]]; then
+    echo "[path unavailable]" >> "${log_file}"
+    return 0
+  fi
+  if command -v findmnt >/dev/null 2>&1; then
+    run_failure_diagnostic "${log_file}" "${probe_deadline}" findmnt \
+      -n -T "${path}" -o TARGET,FSTYPE,VFS-OPTIONS
+  fi
+  if command -v df >/dev/null 2>&1; then
+    run_failure_diagnostic "${log_file}" "${probe_deadline}" df -h \
+      --output=fstype,size,used,avail,pcent,itotal,iused,iavail,ipcent,target \
+      -- "${path}"
+  fi
+  return 0
+}
+
+collect_execution_resource_diagnostics() {
+  local log_file=$1
+  local probe_deadline=$2
+
+  # free and /proc/meminfo generally describe the node from a pod. Cgroups are
+  # the live source for this container's resource limits, usage, and events.
+  collect_cgroup_diagnostics "${log_file}"
+  collect_process_diagnostics "${log_file}" "${probe_deadline}"
+
+  append_failure_diagnostic_section "${log_file}" \
+    "Mount-visible filesystem capacity"
+  append_failure_diagnostic_note "${log_file}" \
+    "These values are filesystem views, not Kubernetes ephemeral-storage quotas."
+  collect_mount_diagnostic "${log_file}" "${probe_deadline}" \
+    "checkout" "${amd_diagnostics_checkout_root}"
+  if is_native_runtime; then
+    collect_mount_diagnostic "${log_file}" "${probe_deadline}" \
+      "native workspace emptyDir" "${amd_diagnostics_workspace}"
+  else
+    collect_mount_diagnostic "${log_file}" "${probe_deadline}" \
+      "test workspace (if mounted)" "${amd_diagnostics_workspace}"
+  fi
+  collect_mount_diagnostic "${log_file}" "${probe_deadline}" \
+    "temporary directory" "${TMPDIR:-/tmp}"
+  if [[ "${TMPDIR:-/tmp}" != "/tmp" ]]; then
+    collect_mount_diagnostic "${log_file}" "${probe_deadline}" \
+      "system temporary directory" /tmp
+  fi
+  if is_native_runtime; then
+    collect_mount_diagnostic "${log_file}" "${probe_deadline}" \
+      "shared-memory emptyDir" /dev/shm
+  else
+    collect_mount_diagnostic "${log_file}" "${probe_deadline}" \
+      "shared-memory mount" /dev/shm
+  fi
+  if [[ -n "${HF_HOME:-}" ]]; then
+    collect_mount_diagnostic "${log_file}" "${probe_deadline}" \
+      "Hugging Face cache" "${HF_HOME}"
+  fi
+  return 0
+}
+
+collect_amd_device_nodes() {
+  local log_file=$1
+  local probe_deadline=$2
+  local device=""
+  local device_count=0
+
+  for device in /dev/kfd /dev/dri/renderD*; do
+    if [[ ! -e "${device}" ]]; then
+      continue
+    fi
+    device_count=$((device_count + 1))
+    if command -v stat >/dev/null 2>&1; then
+      run_failure_diagnostic "${log_file}" "${probe_deadline}" stat -Lc \
+        '%n type=%F mode=%a owner=%u:%g device=%t:%T' -- "${device}"
+    else
+      append_failure_diagnostic_note "${log_file}" "device=${device}"
+    fi
+  done
+  if [[ "${device_count}" -eq 0 ]]; then
+    append_failure_diagnostic_note "${log_file}" \
+      "No /dev/kfd or /dev/dri/renderD* device nodes are visible."
+  fi
+  return 0
+}
+
+collect_amd_ci_failure_diagnostics() {
   local exit_code=$1
   local job_id="${BUILDKITE_JOB_ID:-local}"
   local retry_count="${BUILDKITE_RETRY_COUNT:-0}"
@@ -621,20 +1019,37 @@ collect_rocm_failure_diagnostics() {
   local upload_path=""
   local exit_signal=""
   local probe_deadline=0
+  local runtime="legacy-docker"
+  local diagnostics_scope="outer-runner-after-test-container-exit"
+  local identity_label="runner"
+  local identity_value="${HOSTNAME:-unknown}"
+  local k8s_pod="unknown"
+  local k8s_namespace="${amd_diagnostics_k8s_namespace}"
+  local artifact_status="unavailable"
+  local oom_kill_count=""
 
   if [[ "${amd_diagnostics_collected}" == "1" ]]; then
     return 0
   fi
   amd_diagnostics_collected=1
 
-  if [[ "${amd_diagnostics_expected_gpu_count}" == "0" ]]; then
-    echo "Skipping AMD GPU diagnostics for a CPU-only job."
-    return 0
+  if is_native_runtime; then
+    runtime="native-kubernetes"
+    diagnostics_scope="current-container-cgroup-and-namespaces"
+    if [[ -n "${amd_diagnostics_pod_name}" ]]; then
+      identity_label="pod"
+      identity_value="${amd_diagnostics_pod_name}"
+      k8s_pod="${amd_diagnostics_pod_name}"
+    else
+      identity_label="container_hostname"
+    fi
   fi
-
-  if ! command -v timeout >/dev/null 2>&1; then
-    echo "WARNING: timeout is unavailable; skipping failure diagnostics rather than risking a hung job."
-    return 0
+  if [[ "${k8s_namespace}" == "unknown" \
+    && -r /var/run/secrets/kubernetes.io/serviceaccount/namespace ]]; then
+    k8s_namespace=$(
+      tr -d '\r\n' \
+        < /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null
+    )
   fi
 
   job_id="${job_id//[^A-Za-z0-9_.-]/_}"
@@ -647,16 +1062,16 @@ collect_rocm_failure_diagnostics() {
     || "${amd_diagnostics_dir}" == /* \
     || "${amd_diagnostics_dir}" == *".."* ]]; then
     echo "WARNING: ignoring unsafe VLLM_CI_DIAGNOSTICS_DIR"
-    amd_diagnostics_dir="artifacts/amd-gpu-diagnostics"
+    amd_diagnostics_dir="artifacts/amd-ci-failure-diagnostics"
   fi
-  diagnostics_relative_path="${amd_diagnostics_dir}/${job_id}/amd-gpu-diagnostics.log"
+  diagnostics_relative_path="${amd_diagnostics_dir}/${job_id}/diagnostics.log"
   diagnostics_path="${amd_diagnostics_checkout_root}/${diagnostics_relative_path}"
   upload_path="${diagnostics_relative_path}"
 
   if ! mkdir -p "$(dirname "${diagnostics_path}")" \
     || ! : > "${diagnostics_path}"; then
-    diagnostics_path=$(mktemp -t amd-gpu-diagnostics.XXXXXX.log) || {
-      echo "WARNING: unable to create an AMD GPU diagnostics log."
+    diagnostics_path=$(mktemp -t amd-ci-failure-diagnostics.XXXXXX.log) || {
+      echo "WARNING: unable to create an AMD CI diagnostics log."
       return 0
     }
     upload_root=$(dirname "${diagnostics_path}")
@@ -668,7 +1083,7 @@ collect_rocm_failure_diagnostics() {
   fi
 
   {
-    echo "AMD GPU failure diagnostics"
+    echo "AMD CI failure diagnostics"
     echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "exit_code=${exit_code}"
     echo "exit_signal=${exit_signal:-none}"
@@ -680,88 +1095,96 @@ collect_rocm_failure_diagnostics() {
     echo "retry_count=${retry_count}"
     echo "parallel_job=${parallel_job}"
     echo "execution_mode=${amd_diagnostics_execution_mode}"
+    echo "runtime=${runtime}"
+    echo "diagnostics_scope=${diagnostics_scope}"
     echo "expected_gpu_count=${amd_diagnostics_expected_gpu_count}"
     echo "probe_budget_seconds=${amd_diagnostics_probe_budget_seconds}"
     echo "command_timeout_seconds=${amd_diagnostics_command_timeout_seconds}"
     echo "upload_timeout_seconds=${amd_diagnostics_upload_timeout_seconds}"
     echo "agent_name=${BUILDKITE_AGENT_NAME:-unknown}"
+    echo "container_hostname=${HOSTNAME:-unknown}"
+    echo "k8s_pod=${k8s_pod}"
+    echo "k8s_namespace=${k8s_namespace:-unknown}"
     echo "k8s_node=${amd_diagnostics_k8s_node_name:-unknown}"
     echo "kernel=$(uname -srmo 2>/dev/null || echo unknown)"
   } > "${diagnostics_path}"
 
-  echo "--- :rotating_light: AMD GPU failure diagnostics"
-  cat "${diagnostics_path}"
-
   probe_deadline=$((SECONDS + amd_diagnostics_probe_budget_seconds))
 
-  # Collect the most useful evidence first so auxiliary probes cannot consume
-  # the shared deadline before GPU health is captured.
-  echo "AMD GPU diagnostics" | tee -a "${diagnostics_path}"
-  if command -v amd-smi >/dev/null 2>&1; then
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi version
+  # Cgroup, process, and mount state is fast and most useful for explaining OOM,
+  # throttling, PID exhaustion, and emptyDir pressure. Capture it before external
+  # probes can consume the shared deadline.
+  collect_execution_resource_diagnostics \
+    "${diagnostics_path}" "${probe_deadline}"
+
+  append_failure_diagnostic_section "${diagnostics_path}" \
+    "AMD GPU diagnostics (tool-visible devices)"
+  if [[ "${amd_diagnostics_expected_gpu_count}" == "0" ]]; then
+    append_failure_diagnostic_note "${diagnostics_path}" \
+      "CPU-only job; AMD GPU probes skipped."
+  else
+    if [[ "${runtime}" == "native-kubernetes" ]]; then
+      append_failure_diagnostic_note "${diagnostics_path}" \
+        "SMI visibility may be broader than the Kubernetes device allocation."
+    else
+      append_failure_diagnostic_note "${diagnostics_path}" \
+        "Outer-runner SMI visibility may be broader than the test container."
+    fi
+    collect_amd_device_nodes "${diagnostics_path}" "${probe_deadline}"
+  fi
+  if [[ "${amd_diagnostics_expected_gpu_count}" != "0" ]] \
+    && command -v amd-smi >/dev/null 2>&1; then
+    run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
+      amd-smi version
     # Bus data identifies a card within the public node without publishing its
     # persistent UUID, serial number, or process list.
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi static -b -g all
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi metric -e -k -P -x -g all
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi bad-pages -p -r -u -g all
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi metric -p -t -u -m -v -g all
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi xgmi -l -g all
-  elif command -v rocm-smi >/dev/null 2>&1; then
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" rocm-smi \
+    run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
+      amd-smi static -b -g all
+    run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
+      amd-smi metric -e -k -P -x -g all
+    run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
+      amd-smi bad-pages -p -r -u -g all
+    run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
+      amd-smi metric -p -t -u -m -v -g all
+    run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
+      amd-smi xgmi -l -g all
+  elif [[ "${amd_diagnostics_expected_gpu_count}" != "0" ]] \
+    && command -v rocm-smi >/dev/null 2>&1; then
+    run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" rocm-smi \
       --showbus --showreplaycount --showrasinfo --showpagesinfo
+  elif [[ "${amd_diagnostics_expected_gpu_count}" != "0" ]]; then
+    append_failure_diagnostic_note "${diagnostics_path}" \
+      "Neither amd-smi nor rocm-smi is available."
+  fi
+
+  if [[ "${runtime}" == "native-kubernetes" ]]; then
+    append_failure_diagnostic_section "${diagnostics_path}" \
+      "Unauthenticated pod network reachability"
   else
-    echo "Neither amd-smi nor rocm-smi is available." \
-      | tee -a "${diagnostics_path}"
+    append_failure_diagnostic_section "${diagnostics_path}" \
+      "Unauthenticated outer-runner network reachability"
   fi
-
-  echo "Node resource diagnostics (runner-visible scope)" \
-    | tee -a "${diagnostics_path}"
-  if command -v df >/dev/null 2>&1; then
-    echo "checkout_filesystem:" | tee -a "${diagnostics_path}"
-    if [[ -d "${amd_diagnostics_checkout_root}" ]]; then
-      (
-        cd "${amd_diagnostics_checkout_root}" || exit 0
-        run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" df -h \
-          --output=fstype,size,used,avail,pcent,itotal,iused,iavail,ipcent \
-          -- .
-      )
-    else
-      echo "[checkout directory unavailable]" | tee -a "${diagnostics_path}"
-    fi
-    echo "tmp_filesystem:" | tee -a "${diagnostics_path}"
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" df -h \
-      --output=fstype,size,used,avail,pcent,itotal,iused,iavail,ipcent \
-      -- /tmp
-  fi
-  if command -v free >/dev/null 2>&1; then
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" free -h
-  fi
-  if [[ -r /sys/fs/cgroup/memory.events ]]; then
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" cat \
-      /sys/fs/cgroup/memory.events
-  fi
-
-  echo "Unauthenticated outer-runner network reachability diagnostics" \
-    | tee -a "${diagnostics_path}"
   if command -v curl >/dev/null 2>&1; then
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
+    run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
       --silent --location --proto '=https' --proto-redir '=https' \
       --max-redirs 3 --output /dev/null --connect-timeout 2 --max-time 4 \
       --write-out 'target=huggingface http_code=%{http_code} dns_done_s=%{time_namelookup} connect_done_s=%{time_connect} tls_done_s=%{time_appconnect} first_byte_s=%{time_starttransfer} total_s=%{time_total}\n' \
       https://huggingface.co/api/models/gpt2
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
+    run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
       --silent --location --proto '=https' --proto-redir '=https' \
       --max-redirs 3 --output /dev/null --connect-timeout 2 --max-time 4 \
       --write-out 'target=github_git_smart_http http_code=%{http_code} dns_done_s=%{time_namelookup} connect_done_s=%{time_connect} tls_done_s=%{time_appconnect} first_byte_s=%{time_starttransfer} total_s=%{time_total}\n' \
       'https://github.com/vllm-project/ci-infra.git/info/refs?service=git-upload-pack'
   else
-    echo "curl unavailable; reachability probes skipped." \
-      | tee -a "${diagnostics_path}"
+    append_failure_diagnostic_note "${diagnostics_path}" \
+      "curl unavailable; reachability probes skipped."
   fi
 
   if command -v buildkite-agent >/dev/null 2>&1 \
     && [[ -n "${BUILDKITE_JOB_ID:-}" ]]; then
-    if (
+    if ! command -v timeout >/dev/null 2>&1; then
+      artifact_status="timeout-unavailable"
+    elif (
       cd "${upload_root}" \
         && BUILDKITE_AGENT_DEBUG=false \
           BUILDKITE_AGENT_DEBUG_HTTP=false \
@@ -771,13 +1194,48 @@ collect_rocm_failure_diagnostics() {
           buildkite-agent artifact upload "${upload_path}" \
           >/dev/null 2>&1
     ); then
-      echo "Uploaded AMD GPU diagnostics artifact: ${upload_path}"
+      artifact_status="uploaded"
     else
-      echo "WARNING: failed to upload AMD GPU diagnostics artifact: ${upload_path}"
+      artifact_status="failed"
     fi
-  else
-    echo "Buildkite agent unavailable; diagnostics artifact was not uploaded."
   fi
+
+  if [[ "${runtime}" == "native-kubernetes" \
+    && -r "${amd_diagnostics_memory_events_path}" ]]; then
+    oom_kill_count=$(
+      awk '$1 == "oom_kill" { print $2; exit }' \
+        "${amd_diagnostics_memory_events_path}" 2>/dev/null
+    )
+    if [[ ! "${oom_kill_count}" =~ ^[0-9]+$ ]]; then
+      oom_kill_count=""
+    fi
+  fi
+
+  echo "--- :rotating_light: AMD CI failure summary"
+  printf 'exit=%s signal=%s runtime=%s %s=%s' \
+    "${exit_code}" "${exit_signal:-none}" "${runtime}" \
+    "${identity_label}" "${identity_value}"
+  if [[ -n "${amd_diagnostics_k8s_node_name}" ]]; then
+    printf ' node=%s' "${amd_diagnostics_k8s_node_name}"
+  fi
+  if [[ -n "${oom_kill_count}" ]]; then
+    printf ' cgroup_oom_kill=%s' "${oom_kill_count}"
+  fi
+  printf '\n'
+  case "${artifact_status}" in
+    uploaded)
+      echo "Full diagnostics uploaded as Buildkite artifact: ${upload_path}"
+      ;;
+    failed)
+      echo "WARNING: failed to upload full diagnostics artifact: ${upload_path}"
+      ;;
+    timeout-unavailable)
+      echo "WARNING: timeout unavailable; diagnostics artifact upload skipped: ${diagnostics_path}"
+      ;;
+    *)
+      echo "Full diagnostics saved locally (Buildkite upload unavailable): ${diagnostics_path}"
+      ;;
+  esac
 
   return 0
 }
@@ -789,7 +1247,7 @@ handle_pytest_exit() {
     exit 0
   fi
   if [[ "${exit_code}" -ne 0 ]]; then
-    collect_rocm_failure_diagnostics "${exit_code}"
+    collect_amd_ci_failure_diagnostics "${exit_code}"
   fi
   exit "$exit_code"
 }
@@ -953,7 +1411,7 @@ re_quote_pytest_markers() {
 handle_amd_runner_exit() {
   local exit_code=${1:-$?}
   if [[ "${exit_code}" -ne 0 ]]; then
-    collect_rocm_failure_diagnostics "${exit_code}"
+    collect_amd_ci_failure_diagnostics "${exit_code}"
   fi
   return 0
 }
