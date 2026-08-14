@@ -15,7 +15,7 @@ reason about temporal order.
 """
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 import numpy as np
@@ -1688,6 +1688,7 @@ class Gemma4ForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         modality = self.get_input_modality(mm_kwargs)
         if modality == "image":
@@ -1769,6 +1770,7 @@ class Gemma4ForConditionalGeneration(
         device: torch.device | str = "cpu",
         dtype: torch.dtype | None = None,
         path: str = "default",
+        secondary_capture_axis_key: Hashable | None = None,
         **kwargs: Any,
     ) -> "EncoderCudaGraphCaptureInputs":
         from vllm.v1.worker.encoder_cudagraph_defs import (
