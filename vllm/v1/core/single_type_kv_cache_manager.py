@@ -110,9 +110,6 @@ class SingleTypeKVCacheManager(ABC):
         # determining the attention groups.
         self.use_eagle = False
 
-        # Whether the engine runs an EAGLE/MTP drafter at all. Unlike
-        # ``use_eagle`` this is not per-group: the drop is applied to the draft
-        # attention group, but Mamba must still publish where it lands.
         self.engine_uses_eagle = False
 
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
@@ -505,7 +502,6 @@ class SingleTypeKVCacheManager(ABC):
         return None
 
     def _unreachable_boundaries(self, request: Request) -> Sequence[int]:
-        """Token boundaries no lookup can land on, so not worth caching."""
         return ()
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
