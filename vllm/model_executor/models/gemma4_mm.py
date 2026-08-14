@@ -1207,6 +1207,8 @@ class Gemma4ForConditionalGeneration(
                     self._process_video_input(multimodal_input)
                 )
             elif modality == "audio":
+                if self.audio_tower is None:
+                    continue
                 multimodal_embeddings.extend(
                     self._process_audio_input(multimodal_input)
                 )
@@ -1322,6 +1324,11 @@ class Gemma4ForConditionalGeneration(
         loader = AutoWeightsLoader(
             self,
             ignore_unexpected_prefixes=ignore_prefixes,
+            ignore_unexpected_suffixes=[
+                ".input_scale",
+                ".output_scale",
+                ".weight_shape",
+            ],
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 

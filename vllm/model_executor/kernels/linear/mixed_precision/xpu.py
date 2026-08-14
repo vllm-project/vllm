@@ -80,13 +80,17 @@ class XPUwNa16LinearKernel(MPLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
+        group_size = self.config.group_size
+        if group_size == -1:
+            # Channelwise: group_size = K (input dimension)
+            group_size = reshaped_x.shape[-1]
         out = torch.ops._xpu_C.int4_gemm_w4a16(
             reshaped_x,
             layer.weight_packed.t(),
             bias,
             layer.weight_scale,
             layer.weight_zero_point,
-            self.config.group_size,
+            group_size,
             layer.g_idx,
         )
         return out
@@ -199,3 +203,143 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
         )
 
         return out.to(x.dtype)
+
+
+class XPUDequantLinearKernel(MPLinearKernel):
+    """Generic dequantization-based fallback kernel for XPU.
+
+    For 2-bit weights: re-packs into 4-bit format and uses int4_gemm_w4a16.
+    For 8-bit weights: dequantizes to bf16 at load time (small layers only).
+    """
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return -1
+
+    @classmethod
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        if not current_platform.is_xpu():
+            return False, "XPUDequantLinear only supported on XPU"
+        if c.act_type not in (torch.bfloat16, torch.float16):
+            return False, "XPUDequantLinear only supports BF16/FP16 activations"
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        import sys
+        num_bits = self.config.weight_type.size_bits
+        w_packed = layer.weight_packed.data  # [out, in_packed] int32
+        print(f'[DEQUANT] bits={num_bits}, w_packed={list(w_packed.shape)}, dtype={w_packed.dtype}', file=sys.stderr, flush=True)
+
+        if num_bits <= 4:
+            # Re-pack into 4-bit format for int4_gemm_w4a16
+            # First unpack from N-bit to individual values
+            pack_factor = 32 // num_bits
+            mask = (1 << num_bits) - 1
+            out_features = w_packed.shape[0]
+            in_packed = w_packed.shape[1]
+            in_features = in_packed * pack_factor
+
+            w_int32 = w_packed.to(torch.int32)
+            shifts = torch.arange(
+                0, 32, num_bits, dtype=torch.int32, device=w_packed.device
+            )
+            w_unpacked = ((w_int32.unsqueeze(-1) >> shifts) & mask).reshape(
+                out_features, in_features
+            )
+
+            if num_bits == 2:
+                # Re-center 2-bit values for 4-bit zero point.
+                # 2-bit symmetric: zp=2, values [0,1,2,3] → dequant [-2,-1,0,1]*s
+                # 4-bit oneDNN:    zp=8, values [0..15]   → dequant [v-8]*s
+                # To preserve: (v2-2)*s = (v4-8)*s  →  v4 = v2 + 6
+                w_unpacked = w_unpacked + 6
+
+            # Re-pack into 4-bit (int4) packed format [out, in/8] int32
+            new_pack_factor = 8  # 32 / 4
+            if in_features % new_pack_factor != 0:
+                # Pad to multiple of 8
+                pad_size = new_pack_factor - (in_features % new_pack_factor)
+                w_unpacked = torch.nn.functional.pad(
+                    w_unpacked, (0, pad_size), value=0
+                )
+                in_features = w_unpacked.shape[1]
+
+            w_4bit = w_unpacked.reshape(out_features, in_features // new_pack_factor, new_pack_factor)
+            shifts_4 = torch.arange(0, 32, 4, dtype=torch.int32, device=w_packed.device)
+            w_repacked = ((w_4bit & 0xF) << shifts_4[None, None, :]).sum(dim=2).to(torch.int32)
+
+            replace_parameter(
+                layer,
+                self.w_q_name,
+                torch.nn.Parameter(w_repacked, requires_grad=False),
+            )
+
+            # Transpose scales for oneDNN format [n, groups] -> [groups, n]
+            layer.weight_scale.data = layer.weight_scale.t().contiguous()
+
+            # Set zero point (always 8 for int4 kernel, regardless of
+            # original num_bits, since we re-center values during repacking)
+            if not self.config.zero_points or not hasattr(layer, "weight_zero_point"):
+                weight_zero_point = torch.tensor(
+                    [8], dtype=torch.int8, device=w_packed.device
+                )
+                layer.weight_zero_point = Parameter(
+                    weight_zero_point, requires_grad=False
+                )
+            else:
+                layer.weight_zero_point.data = layer.weight_zero_point.t().contiguous()
+
+            if hasattr(layer, 'g_idx') and layer.g_idx is not None:
+                layer.g_idx.data = layer.g_idx.t().contiguous()
+            else:
+                layer.g_idx = None
+
+            self._use_int4 = True
+            self._in_features = in_features
+        else:
+            # 8-bit: dequantize to bf16 (for small layers like per_layer_*)
+            out_features = w_packed.shape[0]
+
+            # For int-quantized 8-bit, weight is stored as int8 directly
+            w_float = w_packed.to(torch.float32)
+            scale = layer.weight_scale.data
+            if self.config.zero_points and hasattr(layer, "weight_zero_point"):
+                zp = layer.weight_zero_point.data.to(torch.float32)
+            else:
+                zp = torch.tensor(
+                    [128.0], dtype=torch.float32, device=w_packed.device
+                )
+            w_float = (w_float - zp) * scale.to(torch.float32)
+
+            act_dtype = self.config.act_type
+            replace_parameter(
+                layer,
+                self.w_q_name,
+                torch.nn.Parameter(w_float.to(act_dtype), requires_grad=False),
+            )
+            self._use_int4 = False
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if getattr(self, '_use_int4', False):
+            reshaped_x = x.reshape(-1, x.shape[-1])
+            group_size = self.config.group_size
+            if group_size == -1:
+                group_size = self._in_features
+            out = torch.ops._xpu_C.int4_gemm_w4a16(
+                reshaped_x,
+                layer.weight_packed.t(),
+                bias,
+                layer.weight_scale,
+                layer.weight_zero_point,
+                group_size,
+                layer.g_idx,
+            )
+            return out
+        else:
+            w = layer.weight_packed
+            return torch.nn.functional.linear(x, w, bias)

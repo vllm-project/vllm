@@ -160,7 +160,11 @@ class CompressedTensorsConfig(QuantizationConfig):
     ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
             # collect schemes
-            quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            try:
+                quant_scheme = self.get_scheme(layer=layer,
+                                               layer_name=prefix)
+            except (ValueError, NotImplementedError):
+                quant_scheme = None
             input_tfms, output_tfms = get_linear_transform_schemes(
                 layer, prefix, self.transform_config, self.packed_modules_mapping
             )
@@ -183,7 +187,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, ParallelLMHead):
             try:
                 quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
-            except ValueError:
+            except (ValueError, NotImplementedError):
                 quant_scheme = None
             if quant_scheme is not None:
                 layer.scheme = quant_scheme
@@ -599,6 +603,32 @@ class CompressedTensorsConfig(QuantizationConfig):
         # use the per-layer format if defined, otherwise, use global format
         format = format if format is not None else self.quant_format
 
+        # XPU early fallback: for quantization types not supported by XPU
+        # kernels, fall back to WNA16 with dequantization at load time.
+        # This handles 2-bit and 4-bit pack-quantized weights.
+        # For int-quantized 8-bit (W8A8), return None to use unquantized
+        # since WNA16 assumes bit-packing which doesn't apply to int8.
+        if current_platform.is_xpu() and weight_quant is not None:
+            is_pack_quant = (format == CompressionFormat.pack_quantized.value)
+            is_int_quant = (format == CompressionFormat.int_quantized.value)
+
+            if is_int_quant and weight_quant.num_bits == 8:
+                # int-quantized 8-bit: store as unquantized (small layers)
+                return None
+
+            if (
+                (is_pack_quant or is_int_quant)
+                and weight_quant.num_bits in WNA16_SUPPORTED_BITS
+            ):
+                return CompressedTensorsWNA16(
+                    num_bits=weight_quant.num_bits,
+                    strategy=weight_quant.strategy,
+                    symmetric=weight_quant.symmetric,
+                    group_size=weight_quant.group_size,
+                    actorder=weight_quant.actorder,
+                    layer_name=layer_name,
+                )
+
         # Detect If Mixed Precision
         if self._is_nvfp4_format(weight_quant) and input_quant is None:
             return CompressedTensorsW4A16Fp4()
@@ -617,7 +647,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if (
             self._is_wNa16_group_channel(weight_quant, input_quant)
-            and (format == CompressionFormat.pack_quantized.value)
+            and (format in (CompressionFormat.pack_quantized.value,
+                            CompressionFormat.int_quantized.value))
             and (weight_quant.num_bits in WNA16_SUPPORTED_BITS)
         ):
             return CompressedTensorsWNA16(
@@ -762,6 +793,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                 format=format,
                 layer_name=layer_name,
             )
+
+        if scheme is None:
+            # Falling back to UnquantizedLinearMethod
+            return None
 
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)

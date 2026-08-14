@@ -32,8 +32,8 @@ from vllm.scalar_type import scalar_types
 logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsWNA16"]
-WNA16_SUPPORTED_TYPES_MAP = {4: scalar_types.uint4b8, 8: scalar_types.uint8b128}
-WNA16_ZP_SUPPORTED_TYPES_MAP = {4: scalar_types.uint4, 8: scalar_types.uint8}
+WNA16_SUPPORTED_TYPES_MAP = {2: scalar_types.uint2b2, 4: scalar_types.uint4b8, 8: scalar_types.uint8b128}
+WNA16_ZP_SUPPORTED_TYPES_MAP = {2: scalar_types.uint2b2, 4: scalar_types.uint4, 8: scalar_types.uint8}
 WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
 

@@ -1296,6 +1296,8 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         # Include buffers (e.g. layer_scalar) so they can be loaded too
         params_dict.update(dict(self.named_buffers()))
         loaded_params: set[str] = set()
+        # Store scales for deferred dequantization of packed embeddings
+        _deferred_scales: dict[str, torch.Tensor] = {}
         for name, loaded_weight in weights:
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
@@ -1384,7 +1386,90 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                         continue
                     if is_pp_missing_parameter(name, self):
                         continue
+                    # Skip quantization params not present in the model
+                    # (e.g., for layers treated as unquantized on XPU)
+                    if name not in params_dict:
+                        # Defer packed embedding/lm_head weights for
+                        # dequantization once both packed + scale are seen
+                        if name.endswith((".weight_packed", ".weight_scale")):
+                            base = name.rsplit(".", 1)[0]
+                            weight_name = base + ".weight"
+                            if weight_name in params_dict:
+                                _deferred_scales[name] = loaded_weight
+                                pk = base + ".weight_packed"
+                                sk = base + ".weight_scale"
+                                if pk in _deferred_scales and sk in _deferred_scales:
+                                    w_packed = _deferred_scales.pop(pk)
+                                    scale = _deferred_scales.pop(sk)
+                                    param = params_dict[weight_name]
+                                    expected_cols = param.shape[1] if param.dim() > 1 else param.shape[0]
+                                    if w_packed.dtype == torch.int32:
+                                        pack_factor = expected_cols // w_packed.shape[-1] if w_packed.shape[-1] > 0 else 16
+                                        num_bits = 32 // pack_factor
+                                        mask = (1 << num_bits) - 1
+                                        shifts = torch.arange(0, 32, num_bits, dtype=torch.int32, device=w_packed.device)
+                                        w_unpacked = ((w_packed.to(torch.int32).unsqueeze(-1) >> shifts) & mask)
+                                        w_unpacked = w_unpacked.reshape(w_packed.shape[0], -1)
+                                        if w_unpacked.shape[-1] > expected_cols:
+                                            w_unpacked = w_unpacked[..., :expected_cols]
+                                        zp = 1 << (num_bits - 1)
+                                        w_float = w_unpacked.to(torch.float32) - zp
+                                        # Apply grouped scales
+                                        s = scale.to(torch.float32)
+                                        if s.shape[-1] == 1:
+                                            # Per-channel scale
+                                            w_float = w_float * s
+                                        else:
+                                            # Group scale: reshape weight
+                                            # into [rows, num_groups, group_size]
+                                            num_groups = s.shape[-1]
+                                            in_dim = w_float.shape[-1]
+                                            gs = in_dim // num_groups
+                                            w_float = w_float.reshape(
+                                                w_float.shape[0], num_groups, gs
+                                            ) * s.unsqueeze(-1)
+                                            w_float = w_float.reshape(
+                                                w_float.shape[0], in_dim
+                                            )
+                                        dequant_w = w_float.to(param.dtype)
+                                    else:
+                                        dequant_w = w_packed.to(param.dtype)
+                                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                                    weight_loader(param, dequant_w)
+                                    loaded_params.add(weight_name)
+                                # Also check for int8 weight + scale
+                                elif weight_name in _deferred_scales and sk in _deferred_scales:
+                                    w_int = _deferred_scales.pop(weight_name)
+                                    scale = _deferred_scales.pop(sk)
+                                    param = params_dict[weight_name]
+                                    dequant_w = (w_int.to(torch.float32)
+                                                 * scale.to(torch.float32))
+                                    dequant_w = dequant_w.to(param.dtype)
+                                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                                    weight_loader(param, dequant_w)
+                                    loaded_params.add(weight_name)
+                                continue
+                        continue
                     param = params_dict[name]
+                    # Handle int8 quantized weights: defer until scale
+                    # is available, then dequantize
+                    if (loaded_weight.dtype == torch.int8
+                            and name.endswith(".weight")):
+                        base = name.rsplit(".", 1)[0]
+                        sk = base + ".weight_scale"
+                        _deferred_scales[name] = loaded_weight
+                        if sk in _deferred_scales:
+                            scale = _deferred_scales.pop(sk)
+                            w_int = _deferred_scales.pop(name)
+                            dequant_w = (w_int.to(torch.float32)
+                                         * scale.to(torch.float32))
+                            dequant_w = dequant_w.to(param.dtype)
+                            weight_loader = getattr(
+                                param, "weight_loader",
+                                default_weight_loader)
+                            weight_loader(param, dequant_w)
+                            loaded_params.add(name)
+                        continue
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
