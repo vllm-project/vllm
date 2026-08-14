@@ -107,14 +107,19 @@ __device__ __forceinline__ void scan_scores_vectorized(
 // values share a coarse histogram bin. This is intentionally slower than the
 // buffered paths and is entered only after an overflow is detected.
 template <uint32_t TopK, uint32_t BlockSize, bool FuseOutputScan = false,
-          uint32_t VecSize = 1>
+          uint32_t VecSize = 1, bool UseWideRadix = false>
 __device__ void exact_topk_rescan(const float* __restrict__ scores,
                                   int32_t* __restrict__ output,
                                   uint32_t length, void* _smem) {
   static_assert(BlockSize >= RADIX);
   static_assert(VecSize == 1 || VecSize == 2 || VecSize == 4);
+  constexpr uint32_t kHistogramBins = UseWideRadix ? 2048 : RADIX;
+  constexpr uint32_t kRadixRounds = UseWideRadix ? 3 : 4;
+  static_assert(!UseWideRadix || kHistogramBins % BlockSize == 0);
+  using BlockScan = cub::BlockScan<uint32_t, BlockSize>;
   struct ExactSmem {
-    uint32_t histogram[RADIX];
+    uint32_t histogram[kHistogramBins];
+    typename BlockScan::TempStorage scan;
     uint32_t prefix;
     uint32_t remaining;
     uint32_t output_counter;
@@ -130,34 +135,71 @@ __device__ void exact_topk_rescan(const float* __restrict__ scores,
   __syncthreads();
 
 #pragma unroll
-  for (uint32_t round = 0; round < 4; ++round) {
-    if (tx < RADIX) smem->histogram[tx] = 0;
+  for (uint32_t round = 0; round < kRadixRounds; ++round) {
+    for (uint32_t bin = tx; bin < kHistogramBins; bin += BlockSize) {
+      smem->histogram[bin] = 0;
+    }
     __syncthreads();
 
-    const uint32_t shift = 24 - round * 8;
-    const uint32_t mask =
-        (round == 0) ? 0u : (~0u << (32 - round * 8));
+    uint32_t shift;
+    uint32_t digit_mask;
+    uint32_t prefix_mask;
+    if constexpr (UseWideRadix) {
+      shift = (round == 0) ? 21 : ((round == 1) ? 10 : 0);
+      digit_mask = (round < 2) ? 0x7FFu : 0x3FFu;
+      prefix_mask =
+          (round == 0) ? 0u : ((round == 1) ? 0xFFE00000u : 0xFFFFFC00u);
+    } else {
+      shift = 24 - round * 8;
+      digit_mask = 0xFFu;
+      prefix_mask = (round == 0) ? 0u : (~0u << (32 - round * 8));
+    }
     const uint32_t prefix = smem->prefix;
 
     if constexpr (VecSize == 1) {
       for (uint32_t idx = tx; idx < length; idx += BlockSize) {
         const uint32_t ordered = convert_to_uint32_v2(scores[idx]);
-        if ((ordered & mask) == prefix) {
-          atomicAdd(&smem->histogram[(ordered >> shift) & 0xFF], 1);
+        if ((ordered & prefix_mask) == prefix) {
+          atomicAdd(&smem->histogram[(ordered >> shift) & digit_mask], 1);
         }
       }
     } else {
       scan_scores_vectorized<BlockSize, VecSize>(
           scores, length, [&](uint32_t, float score) {
             const uint32_t ordered = convert_to_uint32_v2(score);
-            if ((ordered & mask) == prefix) {
-              atomicAdd(&smem->histogram[(ordered >> shift) & 0xFF], 1);
+            if ((ordered & prefix_mask) == prefix) {
+              atomicAdd(&smem->histogram[(ordered >> shift) & digit_mask], 1);
             }
           });
     }
     __syncthreads();
 
-    if (tx == 0) {
+    if constexpr (UseWideRadix) {
+      constexpr uint32_t kBinsPerThread = kHistogramBins / BlockSize;
+      uint32_t counts[kBinsPerThread];
+      uint32_t local_sum = 0;
+#pragma unroll
+      for (uint32_t i = 0; i < kBinsPerThread; ++i) {
+        counts[i] = smem->histogram[tx * kBinsPerThread + i];
+        local_sum += counts[i];
+      }
+
+      uint32_t lower_prefix;
+      uint32_t total;
+      BlockScan(smem->scan).ExclusiveSum(local_sum, lower_prefix, total);
+      uint32_t count_above = total - lower_prefix - local_sum;
+      const uint32_t remaining = smem->remaining;
+#pragma unroll
+      for (int i = static_cast<int>(kBinsPerThread) - 1; i >= 0; --i) {
+        const uint32_t count = counts[i];
+        if (count_above < remaining && count_above + count >= remaining) {
+          const uint32_t bin = tx * kBinsPerThread + i;
+          smem->remaining = remaining - count_above;
+          smem->prefix |= bin << shift;
+        }
+        count_above += count;
+      }
+    } else if (tx == 0) {
       uint32_t count_above = 0;
       for (int bin = RADIX - 1; bin >= 0; --bin) {
         const uint32_t count = smem->histogram[bin];
