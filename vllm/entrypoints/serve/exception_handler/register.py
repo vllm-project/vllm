@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from http.client import HTTPException
+from fastapi import HTTPException
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
