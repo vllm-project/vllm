@@ -744,6 +744,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # The context lengths are therefore
                 # [10-3, 7-1, 12-4, 0-0] = [7, 6, 8, 0].
 
+                # Adaptive verification may redistribute decode rows on device,
+                # but compact_batch() and reallocate_drafts() preserve the batch
+                # token total. output_size relies on that invariant to avoid a
+                # device synchronization here.
                 # 3 + 1 + 4 + 0 = 8
                 actual_expanded = int(decode_lens_cpu.sum().item())
 
