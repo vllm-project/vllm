@@ -1300,6 +1300,41 @@ class EngineCoreProc(EngineCore):
                     vllm_config.kv_transfer_config.engine_id,
                 )
 
+            # declare engine core as None and register signal handler before
+            # engine_core initialization in case engine core process is terminated
+            # in the middle of initialization. For example, frontend process exits
+            # unexpectedly, if signal handler is not registered, engine core process
+            # will use default signal handler which will terminate the process
+            # silently. If engine core model executor has been initialized, it will
+            # not be terminated asap. Register signal handler early and only log a
+            # message will make engine core process alive. engine core process and
+            # its subprocesses(model executor processes) will be force killed in
+            # CoreEngineProcManager.shutdown.
+            engine_core = None
+
+            def wakeup_engine():
+                # Wakes up idle engine via input_queue when shutdown is requested
+                # Not safe in a signal handler - we may interrupt the main thread
+                # while it is holding the non-reentrant input_queue.mutex
+                if engine_core is None:
+                    return
+                engine_core.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
+
+            signal_callback = SignalCallback(wakeup_engine)
+
+            def signal_handler(signum, frame):
+                signal_name = signal.Signals(signum).name
+                logger.info(
+                    "[shutdown] EngineCore: trigger received signal=%s",
+                    signal_name,
+                )
+                if engine_core is not None:
+                    engine_core.shutdown_state = EngineShutdownState.REQUESTED
+                signal_callback.trigger()
+
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGINT, signal_handler)
+
             parallel_config.data_parallel_index = dp_rank
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
@@ -1313,27 +1348,6 @@ class EngineCoreProc(EngineCore):
                 engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
 
             assert engine_core is not None
-
-            def wakeup_engine():
-                # Wakes up idle engine via input_queue when shutdown is requested
-                # Not safe in a signal handler - we may interrupt the main thread
-                # while it is holding the non-reentrant input_queue.mutex
-                engine_core.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
-
-            signal_callback = SignalCallback(wakeup_engine)
-
-            def signal_handler(signum, frame):
-                signal_name = signal.Signals(signum).name
-                logger.info(
-                    "[shutdown] EngineCore: trigger received signal=%s",
-                    signal_name,
-                )
-                engine_core.shutdown_state = EngineShutdownState.REQUESTED
-                signal_callback.trigger()
-
-            signal.signal(signal.SIGTERM, signal_handler)
-            signal.signal(signal.SIGINT, signal_handler)
-
             engine_core.run_busy_loop()
 
         except SystemExit:
