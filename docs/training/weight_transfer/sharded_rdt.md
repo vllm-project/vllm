@@ -87,7 +87,7 @@ Declaring `held_names()` comes with three requirements. `metadata()` must still 
 
 Each trainer rank owns a `_RDTProducerServer` Ray actor sharing its GPU. One group's life:
 
-```
+```text
 engine                      server                          consumer
   begin_sync(live_count) ──►  reset counts, set the barrier target
   wait_freed() while > lookahead groups are unfreed (the credit gate)

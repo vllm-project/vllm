@@ -277,7 +277,7 @@ def test_sharded_rdt_non_sender_skips_client(monkeypatch):
         def update_weights(self, update_info):
             raise AssertionError("non-sender must not touch the client")
 
-        def finish_weight_update(self):
+        def finish_weight_update(self, weight_version: str | None = None):
             raise AssertionError("non-sender must not touch the client")
 
     server = _FakeProducerServer(auto_free=True)

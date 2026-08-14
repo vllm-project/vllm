@@ -456,9 +456,12 @@ class TestEndSync:
         _publish(server, GI_A, GROUP_A)
 
         done = threading.Event()
-        threading.Thread(
-            target=lambda: (server.end_sync(), done.set()), daemon=True
-        ).start()
+
+        def _end_then_signal():
+            server.end_sync()
+            done.set()
+
+        threading.Thread(target=_end_then_signal, daemon=True).start()
         assert not done.wait(timeout=0.3)
         server.set_gather_error("boom")
         assert done.wait(timeout=5)
@@ -753,15 +756,17 @@ class TestFakeServerAgreesWithTheRealOne:
         return _FakeProducerServer(auto_free=False)
 
     def test_the_barrier_and_early_signal_semantics_match(self, server_factory):
-        real = server_factory()
+        def publish_fake(srv, gi, names):
+            return srv.publish_group(gi, _entries(names))
+
         for server, publish in (
-            (real, lambda gi, names: _publish(server, gi, names)),
-            (self._fake(), lambda gi, names: server.publish_group(gi, _entries(names))),
+            (server_factory(), _publish),
+            (self._fake(), publish_fake),
         ):
             server.begin_sync(2)
             # early signal, then publish, then the closing signal
             server.free_group(GI_A)
-            assert publish(GI_A, GROUP_A) is None, "publish returns nothing"
+            assert publish(server, GI_A, GROUP_A) is None, "publish returns nothing"
             assert server._inflight_groups == [GI_A]
             server.free_group(GI_A)
             assert server._inflight_groups == []

@@ -542,6 +542,9 @@ class ShardedRDTTrainerWeightTransferEngine(
         # group index. CUDA-IPC exports must outlive the importer, so we hold
         # them until the server reports the group freed. See send_weights.
         self._inflight: dict[int, dict[str, torch.Tensor]] = {}
+        # Set by trainer_init from the server-name all-gather; retained so a
+        # restarted consumer can be re-initialized without another collective.
+        self._server_names: list[str] | None = None
 
     def _rpc(self, method: str, *args: Any) -> Any:
         """Call one of the server actor's methods and block for the result.
@@ -647,7 +650,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         Raises:
             RuntimeError: called before ``trainer_init`` cached the server names.
         """
-        if getattr(self, "_server_names", None) is None:
+        if self._server_names is None:
             raise RuntimeError(
                 "get_worker_init_payload requires trainer_init to have run (the "
                 "producer server names are gathered there)."
@@ -696,7 +699,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         # order, plus the digest of the metadata it indexes into. The digest is
         # what makes partial ownership safe: only the sender's metadata reaches
         # the consumers, so a rank describing just its own share would silently
-        # mis-serve the model.
+        # serve the wrong weights.
         digest = self._meta_digest()
         mask = bytearray((len(names) + 7) // 8)
         for i, n in enumerate(names):

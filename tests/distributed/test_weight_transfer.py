@@ -1502,9 +1502,8 @@ class TestWeightSourceGroupContract:
         """The extension point: materialize a whole group in one step instead of
         one generator resume per tensor."""
         calls = []
-        base = self._Source
 
-        class _Batched(base):
+        class _Batched(TestWeightSourceGroupContract._Source):
             def iter_groups(self):
                 for group in self.groups():
                     calls.append(len(group))

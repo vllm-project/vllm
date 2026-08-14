@@ -1071,6 +1071,9 @@ class ShardedRDTWeightTransferEngine(
              instead of by runtime counters.
           3. Assemble ``_Chunk``s: dedup keys and precompute the packed layout.
         """
+        router = self._router
+        assert router is not None, "init_transfer_engine() must run before planning"
+
         # --- pass 1: gather groups -> per-owner-class scatter chunks -----------
         raw_chunks: list[list[_Scatter]] = []
         free_at: dict[int, list[int]] = {}  # chunk idx -> groups to signal after it
@@ -1155,9 +1158,7 @@ class ShardedRDTWeightTransferEngine(
                     free=free_at.get(ci, []),
                     # Every name of a chunk shares an owner class and a group,
                     # so any of them resolves the same producer.
-                    owner=self._router.producer_for(
-                        self._router.consumer_id, scatters[0].src[0]
-                    ),
+                    owner=router.producer_for(router.consumer_id, scatters[0].src[0]),
                 )
             )
         return _CallPlan(chunks=chunks, pre_free=pre_free)
