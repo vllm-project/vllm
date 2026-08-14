@@ -155,7 +155,7 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_log_deltas = enable_log_deltas
 
         self.enable_auto_tools: bool = enable_auto_tools
-        self._include_reasoning_tokens_details = reasoning_parser is not None
+        self._include_reasoning_tokens_details = bool(reasoning_parser)
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -449,6 +449,8 @@ class OpenAIServingChat(GenerateBaseServing):
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
+        # TODO: Remove once all reasoning parsers use the Parser Engine.
+        generated_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
         previous_reasoning_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
@@ -653,8 +655,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
                     if parser is not None:
+                        generated_token_ids[i].extend(output.token_ids)
                         previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
-                            output.token_ids
+                            tuple(generated_token_ids[i])
                         )
 
                     # if the message delta is None (e.g. because it was a

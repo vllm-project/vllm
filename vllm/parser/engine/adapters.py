@@ -47,6 +47,8 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs) -> None:
         super().__init__(tokenizer, *args, **kwargs)
         self._parser_engine = self._parser_engine_cls(tokenizer, **kwargs)  # type: ignore[call-arg]
+        self._parser_engine_kwargs = kwargs
+        self._counting_parser_engine: ParserEngine | None = None
 
     @contextmanager
     def _skip_tool_parsing(self) -> Iterator[None]:
@@ -122,7 +124,18 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         return self._parser_engine.get_streaming_fallback_content(text, request)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        return self._parser_engine.count_reasoning_tokens(token_ids)
+        if self._parser_engine._streaming_initialized:
+            return self._parser_engine.count_reasoning_tokens(token_ids)
+        if not token_ids:
+            return 0
+        if self._counting_parser_engine is None:
+            self._counting_parser_engine = self._parser_engine_cls(
+                self.model_tokenizer, **self._parser_engine_kwargs
+            )  # type: ignore[call-arg]
+        self._counting_parser_engine._single_pass_parse(
+            self.model_tokenizer.decode(token_ids), token_ids
+        )
+        return self._counting_parser_engine.count_reasoning_tokens(token_ids)
 
 
 class ParserEngineToolAdapter(ToolParser):

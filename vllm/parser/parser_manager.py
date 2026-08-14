@@ -139,10 +139,6 @@ class ParserManager:
 
         reasoning_engine_cls = cls._get_parser_engine_cls(reasoning_parser_cls)
         tool_engine_cls = cls._get_parser_engine_cls(tool_parser_cls)
-        if reasoning_engine_cls is not None and tool_parser_cls is None:
-            return reasoning_engine_cls
-        if tool_engine_cls is not None and reasoning_parser_cls is None:
-            return tool_engine_cls
         if reasoning_engine_cls is not None and reasoning_engine_cls is tool_engine_cls:
             return reasoning_engine_cls
 

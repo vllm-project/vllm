@@ -925,7 +925,7 @@ def test_parser_manager_uses_shared_engine_directly(monkeypatch):
     assert parser.count_reasoning_tokens([]) == 2
 
 
-def test_parser_manager_uses_reasoning_only_engine_directly(monkeypatch):
+def test_parser_manager_preserves_reasoning_only_adapter(monkeypatch):
     monkeypatch.setattr(
         ParserManager,
         "get_reasoning_parser",
@@ -940,16 +940,47 @@ def test_parser_manager_uses_reasoning_only_engine_directly(monkeypatch):
     parser_cls = ParserManager.get_parser(reasoning_parser_name="combined")
 
     assert parser_cls is not None
-    assert parser_cls is _CombinedTestEngine
     parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    assert parser.reasoning_parser is not None
+    assert parser.tool_parser is None
     reasoning, content, _ = parser.parse(
-        "ab</think>c",
+        'ab</think><tool_call>{"name":"h","arguments":{}}</tool_call>',
         _make_delegating_request(),
-        model_output_token_ids=[ord("a"), ord("b"), 201, ord("c")],
+        model_output_token_ids=[ord("a"), ord("b"), 201],
     )
     assert reasoning == "ab"
-    assert content == "c"
-    assert parser.count_reasoning_tokens([]) == 2
+    assert content == '<tool_call>{"name":"h","arguments":{}}</tool_call>'
+    assert parser.count_reasoning_tokens([ord("a"), ord("b"), 201]) == 2
+
+
+def test_parser_manager_preserves_tool_only_adapter(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: None),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: _CombinedToolAdapter),
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="combined", enable_auto_tools=True
+    )
+
+    assert parser_cls is not None
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    assert parser.reasoning_parser is None
+    assert parser.tool_parser is not None
+    reasoning, content, tool_calls = parser.parse(
+        "<think>ab</think>c",
+        _make_delegating_request(),
+        model_output_token_ids=[200, ord("a"), ord("b"), 201, ord("c")],
+    )
+    assert reasoning is None
+    assert content == "<think>ab</think>c"
+    assert tool_calls == []
 
 
 def test_parser_manager_rejects_non_engine_adapter_metadata():
