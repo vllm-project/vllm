@@ -128,9 +128,7 @@ class RejectionSampler:
             if self.enable_adaptive_verification:
                 # Adaptive verification keeps the true per-request boundaries
                 # on device only; cu_num_logits_np holds the pre-compacted
-                # layout. Clone: the buffer is overwritten by the next step's
-                # reallocate_drafts while the async D2H copy may still be
-                # pending on the copy stream.
+                # layout.
                 cu_num_generated_tokens = cu_num_logits.clone()
             else:
                 cu_num_generated_tokens = cu_num_logits_np.tolist()

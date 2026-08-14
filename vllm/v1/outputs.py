@@ -100,8 +100,7 @@ class LogprobsTensors(NamedTuple):
     cu_num_generated_tokens: list[int] | None = None
     # [num_reqs + 1]. Set instead of cu_num_generated_tokens when the
     # boundaries only exist on device (adaptive verification); rides along on
-    # the async D2H copy and is materialized as a list in tolists(). A
-    # separate field because msgspec cannot decode list[int] | torch.Tensor.
+    # the async D2H copy.
     cu_num_generated_tokens_tensor: torch.Tensor | None = None
 
     def tolists(self, cu_num_generated_tokens: list[int] | None = None):
