@@ -215,6 +215,33 @@ def test_reasoning_then_parallel_calls():
     )
 
 
+# ---------------------------------------------------------- reasoning boundary
+
+
+def test_reasoning_end_requires_a_post_reasoning_channel():
+    """``is_reasoning_end`` must fire once the turn leaves ``to=self`` for the
+    ``to=user`` answer OR a tool channel -- this is the gate the structured-
+    outputs backend uses to start applying the JSON grammar. It must NOT fire
+    while still reasoning, nor for a channel header the model merely quotes
+    inside an open reasoning span.
+    """
+    tokenizer = SimpleNamespace(decode=lambda token_ids: "".join(map(chr, token_ids)))
+    parser = MuseGlimmerReasoningParser(tokenizer)
+
+    def is_end(text):
+        return parser.is_reasoning_end(list(map(ord, text)))
+
+    reasoning = " to=self<|message|>thinking"
+    answer = "<|eom|><|start|>assistant to=user<|message|>"
+    tool = "<|eom|><|start|>assistant to=weather.get<|message|>"
+    echoed = ' to=user<|message|> <atem:invoke name="weather.get">'
+
+    assert is_end(reasoning + answer)
+    assert is_end(reasoning + tool)
+    assert not is_end(reasoning)
+    assert not is_end(reasoning + echoed)
+
+
 # ----------------------------------------------------------------- streaming
 
 
@@ -236,7 +263,7 @@ def _stream(raw: str, chunk: int):
             content_delta = getattr(dm, "content", None)
             # Tool-channel content is an internal handoff to the tool parser,
             # not client-visible content from the unified parser.
-            if content_delta and "<atem:function_calls>" not in content_delta:
+            if content_delta and R._response_recipient(cur) == "user":
                 content.append(content_delta)
         dt = MuseGlimmerToolParser.extract_tool_calls_streaming(
             T, prev, cur, delta, [], [], [], _FakeReq()

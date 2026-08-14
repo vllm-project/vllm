@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reasoning-content parser for MuseGlimmer.
-Port of the ``reasoning_content`` rule from the HuggingFace MuseGlimmer
-``MUSE_GLIMMER_RESPONSE_SCHEMA`` (synced with internal master). MuseGlimmer emits
-chain-of-thought in ``to=self`` channels delimited by ``<|message|>`` ... ``<|eom|>``:
+
+Implements the ``reasoning_content`` rule of the MuseGlimmer response schema.
+MuseGlimmer emits chain-of-thought in ``to=self`` channels delimited by
+``<|message|>`` ... ``<|eom|>``:
     to=self<|message|>...reasoning...<|eom|>
 A turn may contain several ``to=self`` blocks interleaved with tool calls, and a
 tool call or final answer follows in its own channel.
@@ -121,35 +122,41 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         self._emitted_reasoning: str = ""
         self._emitted_content: str = ""
         self._tool_handoff_done: bool = False
+        self._streaming_to_user: bool = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         """Preserve MuseGlimmer's ATEM framing tokens in the decoded output.
+
         vLLM's serving default is ``skip_special_tokens=True``, which strips
         ``<|start|>`` / ``<|message|>`` / ``<|eom|>`` / ``<|eot|>`` before the
         parsers run, collapsing reasoning into content and breaking channel
-        scoping. Unlike the base tool-parser hook we do NOT touch
-        ``structured_outputs`` -- MuseGlimmer emits native ATEM, not JSON.
+        scoping. ``structured_outputs`` is deliberately left alone so a caller's
+        ``response_format`` still reaches the grammar backend, which applies it
+        once ``is_reasoning_end`` fires.
         """
         request.skip_special_tokens = False
         return request
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        """Whether the model has left reasoning and opened a TOOL channel.
-        A ``to=user`` answer is NOT a reason to leave the reasoning phase -- this
-        parser surfaces that content itself. Only a real tool channel switches
-        the ``DelegatingParser`` phase machine over to the tool parser.
-        Both closed and unterminated reasoning spans are stripped before the
-        check, so an ``<atem:invoke>`` the model merely echoes inside its CoT
-        never flips the phase.
+        """Return True once the turn has left the ``to=self`` reasoning phase.
+
+        Reasoning ends as soon as the model opens any other channel: the
+        ``to=user`` final answer or a ``to=<tool>`` call. Reporting the
+        ``to=user`` boundary is what lets the structured-outputs backend engage,
+        since it only applies the grammar after reasoning ends -- an unreported
+        answer channel leaves ``response_format`` requests unconstrained and the
+        model free-generates prose.
+
+        Reasoning spans are stripped first (see ``_scoped_turn``), so channel
+        markup quoted inside the chain-of-thought never ends the phase.
         """
         try:
             text = self.model_tokenizer.decode(input_ids)
         except Exception:
             return False
-        remainder = self._tool_channel_remainder(text)
-        return _FUNCTION_CALLS_OPEN in remainder or "<atem:invoke" in remainder
+        return self._response_recipient(text) is not None
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
@@ -167,6 +174,47 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         scoped = _current_assistant_turn(text)
         scoped = _STRIP_REASONING_RE.sub("", scoped)
         return _STRIP_OPEN_REASONING_RE.sub("", scoped)
+
+    @classmethod
+    def _response_recipient(cls, text: str) -> str | None:
+        """Recipient of the channel currently being written, or None.
+
+        ``"user"`` for the final answer, a tool name for a tool call, None while
+        the turn is still purely reasoning. The chat template renders a turn as a
+        flat sequence of ``<|start|>assistant to=X<|message|>`` blocks, so the
+        recipient that matters is the one belonging to the LAST header, not the
+        first: a turn may answer the user and then open a tool channel. Reading
+        the first header would pin the turn to ``user`` for good and strand the
+        tool call.
+
+        A ``to=user`` header inside a still-open reasoning span (no ``<|eom|>``
+        yet) counts as reasoning text, because the model sometimes writes one as
+        an example mid-thought. Tool headers are not held back that way -- the
+        model legitimately opens a tool channel without closing reasoning first.
+        """
+        current_turn = _current_assistant_turn(text)
+        without_closed_reasoning = _STRIP_REASONING_RE.sub("", current_turn)
+        has_open_reasoning = _REASONING_OPEN in without_closed_reasoning
+        scoped = _STRIP_OPEN_REASONING_RE.sub("", without_closed_reasoning)
+
+        for recipient in reversed(_CHANNEL_HEADER_RE.findall(scoped)):
+            if recipient == "self":
+                continue
+            if recipient == "user" and has_open_reasoning:
+                continue
+            return recipient
+        return None
+
+    def should_stream_content_after_reasoning(self) -> bool:
+        """Whether this parser keeps emitting content after reasoning ends.
+
+        Opt-in hook for ``DelegatingParser``: while True it stays in the
+        reasoning phase rather than handing off to the tool parser. Needed for
+        the ``to=user`` answer, where ``is_reasoning_end`` must report True to
+        gate the grammar even though this parser is still streaming the body.
+        Tool channels leave it False so the tool parser owns their output.
+        """
+        return self._streaming_to_user
 
     @classmethod
     def _tool_channel_remainder(cls, text: str) -> str:
@@ -288,6 +336,10 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         emitted yet, so no framing token is ever surfaced and a delta straddling
         a channel boundary only contributes the portion inside a real body.
         """
+        # Track whether the turn is answering the user rather than calling a
+        # tool; ``should_stream_content_after_reasoning`` reports this upward so
+        # DelegatingParser keeps the answer body on this parser.
+        self._streaming_to_user = self._response_recipient(current_text) == "user"
         curr_reason, curr_content = self._classify_bodies(current_text)
         reasoning_delta = ""
         if curr_reason.startswith(self._emitted_reasoning) and len(curr_reason) > len(
@@ -301,19 +353,15 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         ):
             content_delta = curr_content[len(self._emitted_content) :]
             self._emitted_content = curr_content
-        # Hand the tool channel to the tool parser exactly once, starting at its
-        # header. parse_delta discards anything not returned here.
-        #
-        # This MUST fire on the same delta where is_reasoning_end() flips, i.e.
-        # only once the tool channel actually contains ATEM. Emitting it earlier
-        # -- when only the bare `to=<name><|message|>` header has arrived -- keeps
-        # the parser in the reasoning phase, so parse_delta never replaces this
-        # DeltaMessage with the tool parser's and the header is delivered to the
-        # client as visible content.
+        # On the delta that opens a tool channel, hand the remainder (from the
+        # ``to=<tool><|message|>`` header onward) to the tool parser, exactly
+        # once. This fires on the delta ``is_reasoning_end`` flips, so the header
+        # becomes the tool parser's opening context instead of visible content.
+        # ``to=user`` answers yield no remainder -- this parser streams them.
         handoff = ""
         if not self._tool_handoff_done:
             remainder = self._tool_channel_remainder(current_text)
-            if _FUNCTION_CALLS_OPEN in remainder or "<atem:invoke" in remainder:
+            if remainder:
                 handoff = remainder
                 self._tool_handoff_done = True
         if handoff:

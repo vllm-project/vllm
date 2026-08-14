@@ -742,12 +742,32 @@ class DelegatingParser(Parser):
     def _in_reasoning_phase(self, state: StreamState) -> bool:
         if self._reasoning_parser is None:
             return False
-        return not state.reasoning_ended
+        return (
+            not state.reasoning_ended
+            or self._reasoning_parser_streams_content_after_reasoning()
+        )
+
+    def _reasoning_parser_streams_content_after_reasoning(self) -> bool:
+        """Whether the reasoning parser emits the answer content itself.
+
+        By default ``reasoning_ended`` hands the stream from the reasoning parser
+        to the tool parser (see ``_in_tool_call_phase``). A parser whose reasoning
+        phase produces the final user-facing answer -- and only needs
+        ``reasoning_ended`` to gate structured outputs -- keeps the stream by
+        returning True from ``should_stream_content_after_reasoning``; the base
+        implementation returns False, so other parsers are unaffected.
+        """
+        if self._reasoning_parser is None:
+            return False
+        return self._reasoning_parser.should_stream_content_after_reasoning()
 
     def _in_tool_call_phase(self, state: StreamState) -> bool:
         if self._tool_parser is None:
             return False
-        return state.reasoning_ended
+        return (
+            state.reasoning_ended
+            and not self._reasoning_parser_streams_content_after_reasoning()
+        )
 
     def _append_unstreamed_tool_args(
         self,
@@ -851,9 +871,20 @@ class DelegatingParser(Parser):
                 should_transition = self.is_reasoning_end_streaming(
                     current_token_ids, delta_token_ids
                 )
-            if should_transition:
+            just_ended = should_transition and not state.reasoning_ended
+            if just_ended:
                 state.reasoning_ended = True
                 reasoning_transitioned = True
+            # Hand the stream over on the first delta where the tool phase is
+            # actually active. For a reasoning parser that keeps streaming
+            # content after reasoning ends, that is NOT the delta where
+            # reasoning ended -- it is the later delta where a tool channel
+            # opens and the parser releases the stream. Doing it at
+            # reasoning-end instead leaves the tool parser to be re-fed the
+            # whole turn by ``tool_call_text_started``, duplicating content.
+            if (
+                self._in_tool_call_phase(state) and not state.tool_call_text_started
+            ) or (just_ended and self._tool_parser is None):
                 current_token_ids = self.extract_content_ids(delta_token_ids)
                 # Flush whenever the reasoning parser is engine-based (not only
                 # when _engine_based is True): it buffers the post-marker text

@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ATEM tool-call parser for MuseGlimmer.
 
-Faithful port of the MuseGlimmer ``response_schema`` tool-call contract from the
-HuggingFace MuseGlimmer export (``convert_muse_glimmer_weights_to_hf.py``:
-``MUSE_GLIMMER_RESPONSE_SCHEMA``).
+Implements the MuseGlimmer response schema's tool-call contract.
 
 MuseGlimmer emits tool calls in an XML-ish ATEM format inside channel-scoped messages:
 
@@ -91,7 +89,7 @@ _MAX_MARKER_LEN = max(len(m) for m in _STRUCTURAL_MARKERS)
 # "<|start|>assistant", so the model's first emitted text is " to=self<|message|>").
 _OPEN_TAIL_TO_RE = re.compile(r"[^\S\n]+to=[A-Za-z0-9_.\-]*$")
 
-# --- Tool-call extraction (unchanged from MUSE_GLIMMER_RESPONSE_SCHEMA) -------------
+# --- Tool-call extraction --------------------------------------------------
 _INVOKE_RE = re.compile(r"(<atem:invoke\b.*?</atem:invoke>)", re.DOTALL)
 _NAME_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"')
 _PARAM_RE = re.compile(

@@ -118,6 +118,29 @@ def test_parse_delta_no_tools_reasoning_then_answer(parser_cls, tok):
     assert tools == []
 
 
+def test_parse_delta_tool_choice_none_streams_clean_answer(parser_cls, tok):
+    """With ``tool_choice="none"`` (the structured-output default), a reasoning
+    -> ``to=user`` answer must stream as clean reasoning + clean content, with
+    no channel framing leaked. This guards the streaming half of the fix: now
+    that reasoning-end fires on ``to=user``, the answer body is still surfaced
+    by the reasoning parser rather than dropped or leaked via a tool handoff.
+    """
+    req = _Req()
+    req.tool_choice = "none"
+    reasoning, content, tools = _drive(
+        parser_cls,
+        tok,
+        " to=self<|message|>Check the result.<|eom|>"
+        "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>",
+        req=req,
+    )
+    _assert_no_framing(reasoning)
+    _assert_no_framing(content)
+    assert reasoning == "Check the result.", repr(reasoning)
+    assert content == "The answer is 42.", repr(content)
+    assert tools == []
+
+
 def test_parse_delta_content_only(parser_cls, tok):
     reasoning, content, tools = _drive(
         parser_cls,
