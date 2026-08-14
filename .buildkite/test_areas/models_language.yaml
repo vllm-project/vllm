@@ -100,7 +100,7 @@ steps:
 - label: Language Models Test (Extended Generation) # 80min
   device: h200_35gb
   key: language-models-test-extended-generation
-  timeout_in_minutes: 65
+  timeout_in_minutes: 80
   optional: true
   source_file_dependencies:
   - vllm/
