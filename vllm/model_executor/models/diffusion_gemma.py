@@ -867,7 +867,7 @@ class DiffusionGemmaModelState(ModelState):
         self.diffusion_states.add_request(req_index)
         if not new_req_data.req_id.startswith("_warmup_"):
             prompt_len = len(new_req_data.prompt_token_ids)
-            self.diffusion_states.prompt_len[req_index] = prompt_len
+            self.diffusion_states.prompt_len[req_index].fill_(prompt_len)
 
     def remove_request(self, req_id: str) -> None:
         idx = self._req_id_to_index.pop(req_id, None)
@@ -1276,7 +1276,10 @@ class DiffusionSampler:
         # before canvas padding so phantom positions stay uniform.
         if num_decode > 0:
             top_k, top_p = self.sampling_states.get_top_k_top_p(
-                decode_slots.repeat_interleave(valid_canvas_len), decode_slots_np
+                decode_slots.repeat_interleave(
+                    valid_canvas_len, output_size=int(valid_canvas_len_np.sum())
+                ),
+                decode_slots_np,
             )
             if top_k is not None or top_p is not None:
                 logits = apply_top_k_top_p(logits.float(), top_k, top_p)
