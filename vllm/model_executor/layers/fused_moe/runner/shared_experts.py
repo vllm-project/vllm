@@ -23,12 +23,18 @@ from vllm.v1.worker.ubatching import (
 logger = init_logger(__name__)
 
 # TEMP stream-topology instrumentation (read-only). Enable with
-# VLLM_DEBUG_MOE_STREAMS=1; grep logs for "[MOE-STREAM-DEBUG]". Capped so it
-# fires only a handful of times (during eager warmup/capture and the first
-# eager steps), not every step. Remove once the stream question is resolved.
+# VLLM_DEBUG_MOE_STREAMS=1; grep logs for "[MOE-STREAM-DEBUG]". The detailed
+# lines fire ONLY on the MULTI_STREAM_OVERLAPPED (decode) path, so the budget
+# is not consumed by warmup/prefill NO_OVERLAP calls. Remove once the stream
+# question is resolved.
 _STREAM_DEBUG = os.getenv("VLLM_DEBUG_MOE_STREAMS", "0") == "1"
-_STREAM_DEBUG_MAX = 24
+_STREAM_DEBUG_MAX = 40
 _stream_debug_count = 0
+
+# Order-distribution tracking, used to prove the MULTI_STREAM path is reached
+# and to separate it from the warmup/prefill NO_OVERLAP calls.
+_order_counts: dict[str, int] = {}
+_first_multi_logged = False
 
 
 def _fmt_stream(stream: object) -> str:
@@ -43,6 +49,20 @@ def _stream_debug(msg: str) -> None:
         return
     _stream_debug_count += 1
     logger.warning("[MOE-STREAM-DEBUG] %s", msg)
+
+
+def _track_order(order_name: str) -> None:
+    """Count SharedExpertsOrder occurrences; log the first MULTI_STREAM once."""
+    global _first_multi_logged
+    _order_counts[order_name] = _order_counts.get(order_name, 0) + 1
+    if order_name == "MULTI_STREAM_OVERLAPPED" and not _first_multi_logged:
+        _first_multi_logged = True
+        logger.warning(
+            "[MOE-STREAM-DEBUG] FIRST MULTI_STREAM_OVERLAPPED seen "
+            "(NO_OVERLAP count so far=%d, full order counts=%s)",
+            _order_counts.get("NO_OVERLAP", 0),
+            _order_counts,
+        )
 
 
 class SharedExpertsOrder(IntEnum):
@@ -172,11 +192,13 @@ class SharedExperts(torch.nn.Module):
         """
         order = self._determine_shared_experts_order(shared_experts_input)
         if _STREAM_DEBUG:
-            _stream_debug(
-                f"maybe_forward_async: order={order.name} "
-                f"main(current_stream)={_fmt_stream(current_stream())} "
-                f"aux(self._stream)={_fmt_stream(self._stream)}"
-            )
+            _track_order(order.name)
+            if order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
+                _stream_debug(
+                    f"maybe_forward_async: order={order.name} "
+                    f"main(current_stream)={_fmt_stream(current_stream())} "
+                    f"aux(self._stream)={_fmt_stream(self._stream)}"
+                )
         if order != SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
             return False
         assert self._stream is not None
