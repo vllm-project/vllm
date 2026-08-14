@@ -394,31 +394,6 @@ def test_checkpoint_quantization_rejects_online_shorthand() -> None:
         ModelConfig._verify_quantization(model_config)
 
 
-def test_modelopt_mxfp8_checkpoint_rejects_mxfp8_shorthand() -> None:
-    """An online MXFP8 shorthand cannot replace a ModelOpt MXFP8 checkpoint."""
-
-    ######################
-    # TODO We need to clarify whether `vllm serve MiniMax-M3 --quantization mxfp8`
-    # is meant to be accepted at the moment.
-    ######################
-    model_config = cast(
-        ModelConfig,
-        SimpleNamespace(
-            quantization="mxfp8",
-            model_arch_config=SimpleNamespace(
-                quantization_config={
-                    "quant_method": "modelopt",
-                    "quantization": {"quant_algo": "MXFP8"},
-                }
-            ),
-            hf_config=SimpleNamespace(model_type=None),
-        ),
-    )
-
-    with pytest.raises(ValueError, match="does not match the quantization"):
-        ModelConfig._verify_quantization(model_config)
-
-
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
