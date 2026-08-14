@@ -82,7 +82,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM = 16
@@ -93,6 +93,72 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_workspace_buffer = None
+
+
+class _FlashInferDCPManager:
+    """Own persistent buffers and collectives for FlashInfer DCP decode."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        num_heads: int,
+        head_size: int,
+        dtype: torch.dtype,
+    ) -> None:
+        parallel_config = vllm_config.parallel_config
+        scheduler_config = vllm_config.scheduler_config
+        speculative_config = vllm_config.speculative_config
+
+        self.world_size = parallel_config.decode_context_parallel_size
+        self.max_seq_len = scheduler_config.max_num_seqs
+        num_spec_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            else 0
+        )
+        self.max_num_tokens = min(
+            scheduler_config.max_num_batched_tokens,
+            self.max_seq_len * (1 + num_spec_tokens),
+        )
+
+        num_heads_in_dcp = num_heads * self.world_size
+        num_ubatches = max(parallel_config.num_ubatches, 1)
+        self.output = torch.empty(
+            (
+                num_ubatches,
+                self.max_num_tokens,
+                num_heads_in_dcp,
+                head_size,
+            ),
+            dtype=dtype,
+            device="cuda",
+        )
+        self.lse = torch.empty(
+            (num_ubatches, self.max_num_tokens, num_heads_in_dcp),
+            dtype=torch.float32,
+            device="cuda",
+        )
+
+        combine_fn = (
+            dcp_a2a_lse_reduce
+            if parallel_config.dcp_comm_backend == "a2a"
+            else cp_lse_ag_out_rs
+        )
+        self.combine = partial(combine_fn, is_lse_base_on_e=False)
+
+    def get_decode_buffers(
+        self, num_decode_tokens: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if num_decode_tokens > self.max_num_tokens:
+            raise RuntimeError(
+                "FlashInfer DCP decode batch exceeds the persistent buffer: "
+                f"{num_decode_tokens} > {self.max_num_tokens}."
+            )
+        ubatch_id = dbo_current_ubatch_id()
+        return (
+            self.output[ubatch_id, :num_decode_tokens],
+            self.lse[ubatch_id, :num_decode_tokens],
+        )
 
 
 def _get_trtllm_workspace_buffer():
@@ -1763,6 +1829,16 @@ class FlashInferImpl(AttentionImpl):
             if vllm_config is not None
             else 1
         )
+        self.dcp_manager = (
+            _FlashInferDCPManager(
+                vllm_config,
+                num_heads,
+                head_size,
+                vllm_config.model_config.dtype,
+            )
+            if vllm_config is not None and self.dcp_world_size > 1
+            else None
+        )
 
         # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
         if self.is_kvcache_nvfp4 and vllm_config is not None:
@@ -1774,16 +1850,6 @@ class FlashInferImpl(AttentionImpl):
             )
         else:
             self._nvfp4_fp8_out = None
-
-        dcp_a2a = (
-            vllm_config is not None
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
-            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
-        )
-        if dcp_a2a:
-            self.dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
-        else:
-            self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         # XQA does not support FP8/NVFP4 output, so require trtllm-gen
@@ -2250,16 +2316,9 @@ class FlashInferImpl(AttentionImpl):
                     out_decode = output[:num_decode_tokens]
 
                 if use_dcp:
-                    num_heads_in_dcp = self.num_heads * self.dcp_world_size
-                    buffer_shape = (
-                        num_decode_tokens,
-                        num_heads_in_dcp,
-                        self.head_size,
-                    )
-                    lse_shape = (num_decode_tokens, num_heads_in_dcp)
-                    output_tmp, lse = current_workspace_manager().get_simultaneous(
-                        (buffer_shape, query.dtype),
-                        (lse_shape, torch.float32),
+                    assert self.dcp_manager is not None
+                    output_tmp, lse = self.dcp_manager.get_decode_buffers(
+                        num_decode_tokens
                     )
                     decode_query = get_dcp_group().all_gather(
                         decode_query.contiguous(), dim=-2
@@ -2276,7 +2335,7 @@ class FlashInferImpl(AttentionImpl):
                         kv_cache_sf=kv_cache_sf,
                         sinks=self.sinks,
                     )
-                    output[:num_decode_tokens] = self.dcp_combine(
+                    output[:num_decode_tokens] = self.dcp_manager.combine(
                         output_tmp,
                         lse,
                         get_dcp_group(),
