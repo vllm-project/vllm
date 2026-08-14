@@ -24,7 +24,9 @@ import pytest
 import torch
 
 import vllm._aiter_ops  # noqa: F401 - ensure ops are registered
+from tests.kernels.utils import bf16_ulp_distance
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific tests"
@@ -35,21 +37,19 @@ pytestmark = pytest.mark.skipif(
 def setup_cuda_device():
     """Set default device to CUDA and seed RNG for all tests."""
     torch.set_default_device("cuda")
-    torch.manual_seed(0)
+    set_random_seed(0)
 
 
 def require_aiter():
     from vllm._aiter_ops import is_aiter_found_and_supported
 
-    assert is_aiter_found_and_supported(), (
-        "aiter is required on supported ROCm hardware for this test"
-    )
+    if not is_aiter_found_and_supported():
+        pytest.skip("aiter is not found or not supported on this hardware")
 
 
 def require_fp8():
-    assert current_platform.supports_fp8(), (
-        "FP8 is expected on supported ROCm hardware for this test"
-    )
+    if not current_platform.supports_fp8():
+        pytest.skip("FP8 is not supported on this hardware")
 
 
 def _format_observed_rate(count: int, total: int) -> str:
@@ -213,13 +213,11 @@ def test_rocm_aiter_rms_norm_vs_torch(dtype):
     ref = _rms_norm_reference(x, weight, eps).to(dtype)
 
     out = rocm_aiter_ops.rms_norm(x, weight, eps)
-    _assert_close_budget(
-        out.float(),
-        ref.float(),
-        label=f"rms_norm dtype={dtype}",
-        atol=1e-2,
-        rtol=1e-2,
-    )
+
+    # Allow max 1 ULP difference due to different accumulation order.
+    ulp = bf16_ulp_distance(out, ref)
+    max_ulp = int(ulp.max().item())
+    assert max_ulp <= 1, f"rms_norm dtype={dtype}: max ULP distance {max_ulp} > 1"
 
 
 # -- Numerical accuracy tests for AITER custom ops -------------------------
@@ -244,14 +242,18 @@ def test_rocm_aiter_rmsnorm_with_add_vs_torch():
 
     out, res_out = rocm_aiter_ops.rms_norm2d_with_add(x, residual, weight, eps)
 
-    _assert_close_budget(
-        out.float(),
-        ref_normed.float(),
-        label="rmsnorm_with_add normed",
-        atol=1e-2,
-        rtol=1e-2,
+    # Allow max 1 ULP difference due to different accumulation order.
+    ulp_normed = bf16_ulp_distance(out, ref_normed)
+    max_ulp_normed = int(ulp_normed.max().item())
+    assert max_ulp_normed <= 1, (
+        f"rmsnorm_with_add normed: max ULP distance {max_ulp_normed} > 1"
     )
-    torch.testing.assert_close(res_out, ref_residual, atol=1e-2, rtol=1.6e-2)
+
+    ulp_residual = bf16_ulp_distance(res_out, ref_residual)
+    max_ulp_residual = int(ulp_residual.max().item())
+    assert max_ulp_residual <= 1, (
+        f"rmsnorm_with_add residual: max ULP distance {max_ulp_residual} > 1"
+    )
 
 
 @pytest.mark.xfail(
