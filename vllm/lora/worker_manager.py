@@ -306,8 +306,8 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 # Use case for LoRA inplace
                 self._adapter_manager.remove_adapter(lora.id)
 
-                # Loading succeeded, now check if we will exceed cache capacity
-                # and evict if the oldest adapter if so
+                # Loading succeeded, now check if we will exceed cache capacity and
+                # evict if the oldest adapter if so
                 if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
                     assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
                     self._adapter_manager.remove_oldest_adapter()
