@@ -768,6 +768,21 @@ def test_b12x_mxfp8_reload_reuses_packed_tensor_addresses(monkeypatch) -> None:
     assert layer.weight_scale.numel() == 0
 
 
+@pytest.fixture
+def _mock_b12x_cuda_fp8_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    import vllm.model_executor.layers.quantization.utils.fp8_utils as fp8_utils
+
+    monkeypatch.setattr(
+        fp8_utils,
+        "current_platform",
+        types.SimpleNamespace(
+            is_fp8_fnuz=lambda: False,
+            is_rocm=lambda: False,
+        ),
+    )
+
+
+@pytest.mark.usefixtures("_mock_b12x_cuda_fp8_platform")
 def test_b12x_block_fp8_process_weights_keeps_native_block_layout() -> None:
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(
@@ -797,6 +812,7 @@ def test_b12x_block_fp8_process_weights_keeps_native_block_layout() -> None:
 
 
 @pytest.mark.parametrize("scale_dtype", [torch.float8_e8m0fnu, torch.uint8])
+@pytest.mark.usefixtures("_mock_b12x_cuda_fp8_platform")
 def test_b12x_block_fp8_upcasts_e8m0_weight_scales(scale_dtype) -> None:
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(
