@@ -32,6 +32,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
+from vllm.model_executor.layers.mamba.ops.kda_decode import (
+    is_fused_kda_decode_supported,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     sharded_weight_loader,
@@ -131,33 +134,6 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
             self.tp_rank = tp_rank
             if param_tp_rank is not None:
                 param.tp_rank = param_tp_rank
-
-
-def is_fused_kda_decode_supported(
-    num_heads: int,
-    head_dim: int,
-    conv_width: int,
-    num_spec: int,
-    input_dtype: torch.dtype,
-    conv_state_dtype: torch.dtype,
-) -> bool:
-    if (
-        num_heads not in (12, 24, 48, 96)
-        or head_dim != 128
-        or conv_width != 4
-        or num_spec != 0
-        or input_dtype != torch.bfloat16
-        or conv_state_dtype != torch.bfloat16
-        or is_conv_state_dim_first()
-        or not hasattr(torch.ops._C, "fused_kda_decode")
-    ):
-        return False
-    # SM90 is architecture-specific; SM10x and SM12x use family binaries.
-    return (
-        current_platform.is_device_capability(90)
-        or current_platform.is_device_capability_family(100)
-        or current_platform.is_device_capability_family(120)
-    )
 
 
 def is_flashkda_supported(
