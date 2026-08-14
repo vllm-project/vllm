@@ -3,9 +3,11 @@
 """Pydantic models for Anthropic API protocol"""
 
 import time
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+import vllm.envs as envs
 
 
 class AnthropicError(BaseModel):
@@ -93,6 +95,7 @@ class AnthropicToolChoice(BaseModel):
 
     type: Literal["auto", "any", "tool", "none"]
     name: str | None = None
+    disable_parallel_tool_use: bool | None = None
 
     @model_validator(mode="after")
     def validate_name_required_for_tool(self) -> "AnthropicToolChoice":
@@ -123,7 +126,9 @@ class AnthropicMessagesRequest(BaseModel):
     max_tokens: int
     metadata: dict[str, Any] | None = None
     output_config: AnthropicOutputConfig | None = None
-    stop_sequences: list[str] | None = None
+    stop_sequences: (
+        Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
+    ) = None
     stream: bool | None = False
     system: str | list[AnthropicContentBlock] | None = None
     temperature: float | None = None

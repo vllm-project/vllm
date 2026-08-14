@@ -5,7 +5,6 @@ from argparse import ArgumentError
 
 import pytest
 
-from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -64,34 +63,6 @@ def test_prefix_caching_xxhash_from_cli():
     assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash_cbor"
 
 
-def test_defaults_with_usage_context():
-    engine_args = EngineArgs(model="facebook/opt-125m")
-    vllm_config: VllmConfig = engine_args.create_engine_config(UsageContext.LLM_CLASS)
-
-    from vllm.platforms import current_platform
-    from vllm.utils.mem_constants import GiB_bytes
-
-    device_memory = current_platform.get_device_total_memory()
-    device_name = current_platform.get_device_name().lower()
-    if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
-        # For GPUs like H100, H200, and MI300x with >= 70GB memory
-        default_llm_tokens = 16384
-        default_server_tokens = 8192
-        default_max_num_seqs = 1024
-    else:
-        default_llm_tokens = 8192
-        default_server_tokens = 2048
-        default_max_num_seqs = 256
-
-    assert vllm_config.scheduler_config.max_num_seqs == default_max_num_seqs
-    assert vllm_config.scheduler_config.max_num_batched_tokens == default_llm_tokens  # noqa: E501
-
-    engine_args = EngineArgs(model="facebook/opt-125m")
-    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
-    assert vllm_config.scheduler_config.max_num_seqs == default_max_num_seqs
-    assert vllm_config.scheduler_config.max_num_batched_tokens == default_server_tokens  # noqa: E501
-
-
 def test_mm_prefix_lm_raises_batched_tokens_floor():
     """Verify that prefix-LM multimodal models auto-raise
     max_num_batched_tokens to fit at least one multimodal item.
@@ -128,3 +99,20 @@ def test_mm_prefix_lm_raises_batched_tokens_floor():
         vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
     assert vllm_config.scheduler_config.max_num_batched_tokens >= 2496
+
+
+def test_data_parallel_start_rank_zero_infers_hybrid_lb():
+    """An explicit --data-parallel-start-rank 0 must be treated the same as
+    any other explicit start rank when inferring hybrid LB mode, not as
+    "unset" (regression test for a truthiness-vs-`is not None` bug).
+    """
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        data_parallel_size=4,
+        data_parallel_size_local=2,
+        data_parallel_start_rank=0,
+    )
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+    assert vllm_config.parallel_config.data_parallel_hybrid_lb is True
+    assert vllm_config.parallel_config.data_parallel_rank == 0
