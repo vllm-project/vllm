@@ -36,7 +36,7 @@ Discovering the chains means running the model's loaders, which is expensive. So
 1. `initialize_layerwise_reload` puts the params on meta and saves the kernel tensors.
 2. `_install_recording_stamps` wraps each loadable param's *original* `weight_loader` (bypassing `online_process_loader`, so `_layerwise_process` never fires) with a stamp that sets `BakeSink.current = (leaf_module, param_name)`.
 3. One `model.load_weights` pass over every name. Each `copy_` reaches `BakeSink.accept_copy`, which records a `_BakedCopy`: the op chain from the source lazy, and the `offset/shape/stride` of the destination read off the **meta** view (valid on meta — no real storage needed). Then it fires a meta `copy_`, which moves nothing but still counts against the layer's loaded numel.
-4. Modules that fully loaded (copied numel ≥ `get_layer_size`) become `_BakedModule`s indexed by source name. Partial, unattributable or attention-scale modules are left out and fall back to a plain load.
+4. Modules that fully loaded (copied numel ≥ `get_layer_size`) become `_ModulePlan`s indexed by source name. Partial, unattributable or attention-scale modules are left out and fall back to a plain load.
 5. The model is restored.
 
 Every later sync is pure replay: no `load_weights`, no lazy dispatch, no discovery. Reconstruct each destination as `param.as_strided(shape, stride, offset)` and `copy_` the received slice in.
