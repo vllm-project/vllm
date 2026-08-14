@@ -164,3 +164,57 @@ class TestSanitizeMessageFilePaths:
         result = sanitize_message(msg)
         assert "0x" not in result
         assert "/usr/local/" not in result
+
+
+class TestSanitizeMessageReDoSResistance:
+    """Regression tests for GHSA-f2g9-pmwr-xwc7.
+
+    Verifies that sanitize_message performs bounded near-linear work
+    on adversarial slash-delimited input with no filename extension.
+    """
+
+    def test_slash_segments_no_extension_completes_quickly(self):
+        """50k slash-segments without dot-extension must complete in < 0.1s."""
+        import time
+
+        message = "/a" * 50000
+        t0 = time.perf_counter()
+        result = sanitize_message(message)
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 0.1, f"Took {elapsed:.2f}s (expected < 0.1s)"
+        assert result == message
+
+    def test_alphanumeric_control_completes(self):
+        """100k alphanumeric chars must complete near-instantly."""
+        import time
+
+        message = "a" * 100000
+        t0 = time.perf_counter()
+        result = sanitize_message(message)
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 0.1, f"Took {elapsed:.2f}s"
+        assert result == message
+
+    def test_linear_scaling(self):
+        """Verify near-linear scaling across input sizes."""
+        import time
+
+        times = []
+        for n in [1000, 10000, 50000]:
+            message = "/a" * n
+            t0 = time.perf_counter()
+            sanitize_message(message)
+            times.append(time.perf_counter() - t0)
+
+        ratio = times[-1] / max(times[0], 1e-9)
+        assert ratio < 100, (
+            f"50k/1k time ratio is {ratio:.0f}x (expected < 100x for linear)"
+        )
+
+    def test_path_redaction_still_works(self):
+        """Legitimate paths are still redacted after the fix."""
+        assert "<path>" in sanitize_message("Error in /app/server.py")
+        assert "<path>" in sanitize_message("at /workspace/vllm/engine.py")
+        assert "<path>" in sanitize_message(
+            "error at /usr/lib/python3.12/dist-packages/vllm/core.py"
+        )
