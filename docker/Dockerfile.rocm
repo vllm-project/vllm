@@ -6,7 +6,6 @@ ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
 ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
-# Release jobs enable optional connectors explicitly.
 ARG INSTALL_LMCACHE=false
 # NIC backend for MoRI RDMA support.
 # By default (all), drivers and userspace libraries for all supported NIC types
@@ -473,15 +472,15 @@ RUN cd /opt/nixl && \
         /tmp/nixl_wheels/repaired/*.whl && \
     cp /tmp/nixl_wheels/repaired/*.whl /app/install
 
-# Build pinned LMCache source against this image's torch and ROCm ABI.
+# Fetch and verify pinned LMCache source.
 FROM base AS lmcache_source
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b"
 ARG LMCACHE_VERSION="0.5.3"
 
-# Drop CUDA-only dependencies from LMCache's shared wheel metadata.
+# Remove NVIDIA-only optional dependencies from the ROCm wheel metadata.
 RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
-    && git clone --depth=1 --branch "v${LMCACHE_VERSION}" --single-branch \
+    && git clone --depth=1 --branch "v${LMCACHE_VERSION}" \
         "${LMCACHE_REPO}" /app/lmcache \
     && test "$(git -C /app/lmcache rev-parse HEAD)" = "${LMCACHE_REF}" \
     && test "$(grep -Ec '^(cufile-python|nvtx)([<=>[:space:]]|$)' \
@@ -490,13 +489,12 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
         /app/lmcache/requirements/common.txt \
     && rm -rf /app/lmcache/.git
 
-FROM base AS lmcache_build_deps
+FROM base AS build_lmcache
 COPY --from=lmcache_source \
     /app/lmcache/requirements/build.txt /tmp/lmcache-build-requirements.txt
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system -r /tmp/lmcache-build-requirements.txt
 
-FROM lmcache_build_deps AS build_lmcache
 ARG LMCACHE_VERSION="0.5.3"
 ARG LMCACHE_ROCM_ARCH="gfx942;gfx950"
 ARG USE_SCCACHE
@@ -534,9 +532,6 @@ RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
             "${expected}" "${actual}" >&2; \
         exit 1; \
     fi
-
-FROM scratch AS export_lmcache
-COPY --from=build_lmcache /app/install/*.whl /
 
 # ROCShmem build stage - split from DeepEP so changing DEEPEP_BRANCH does not
 # invalidate the slow ROCShmem build.
@@ -763,7 +758,7 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 # CI base image (Tier 1) - stable, rarely changing CI dependencies.
 # Per-PR test builds pull this as CI_BASE_IMAGE so the test stage only layers
 # in the vLLM artifacts for the current commit.
-FROM mori_base AS ci_base_common
+FROM mori_base AS ci_base
 ARG COMMON_WORKDIR
 
 ENV CARGO_HOME=/root/.cargo
@@ -840,7 +835,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     FASTSAFETENSORS_REQ="$(grep -E '^fastsafetensors(==| @ )' /tmp/rocm-test-reqs.txt | head -1)" \
     && test -n "${FASTSAFETENSORS_REQ}" \
     && python3 -m pip install --force-reinstall --no-deps \
-        --no-binary fastsafetensors "${FASTSAFETENSORS_REQ}"
+        --no-binary fastsafetensors "${FASTSAFETENSORS_REQ}" \
+    && rm /tmp/rocm-test-reqs.txt
 
 # Set MIOPEN ENVS to resolve performance regressions in MIOpen 3D convolution kernel.
 # See: https://github.com/pytorch/pytorch/issues/169857
@@ -863,13 +859,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system /tmp/vllm_test_utils \
     && rm -rf /tmp/vllm_test_utils
 
-FROM ci_base_common AS ci_base
-RUN --mount=type=bind,from=export_lmcache,src=/,target=/lmcache_install \
+RUN --mount=type=bind,from=build_lmcache,src=/app/install,target=/lmcache_install \
+    --mount=type=bind,source=requirements/test/rocm.txt,target=/tmp/lmcache-constraints.txt \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --constraint /tmp/rocm-test-reqs.txt \
+    uv pip install --system --constraint /tmp/lmcache-constraints.txt \
         /lmcache_install/*.whl \
-    && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)" \
-    && rm /tmp/rocm-test-reqs.txt
+    && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
 
 # -----------------------
 # Test vLLM image (Tier 2) - vLLM-only layer on top of ci_base.
@@ -936,7 +931,6 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     uv pip install --system /nixl_install/*.whl
 
-
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
 ARG NIC_BACKEND
@@ -976,9 +970,9 @@ CMD ["/bin/bash"]
 FROM final_common AS final_lmcache_false
 
 FROM final_common AS final_lmcache_true
-RUN --mount=type=bind,from=export_lmcache,src=/,target=/lmcache_install \
+RUN --mount=type=bind,from=build_lmcache,src=/app/install,target=/lmcache_install \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system /lmcache_install/*.whl six \
+    uv pip install --system /lmcache_install/*.whl \
     && uv pip check --system \
     && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
 
