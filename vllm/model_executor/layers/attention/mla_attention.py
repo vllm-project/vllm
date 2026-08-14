@@ -559,10 +559,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             indexer=indexer,
             **extra_impl_args,
         )
-        self.impl.layer_name = prefix
-        self.impl._kimi_k3_fp8_calibration_amax = self._kimi_k3_fp8_calibration_amax
-        self.impl._kimi_k3_fp8_static_descale = self._kimi_k3_fp8_static_descale
-        self.impl._kimi_k3_fp8_calibration_state = self._kimi_k3_fp8_calibration_state
+        mla_impl = cast(MLACommonBaseImpl, self.impl)
+        mla_impl.layer_name = prefix
+        mla_impl._kimi_k3_fp8_calibration_amax = self._kimi_k3_fp8_calibration_amax
+        mla_impl._kimi_k3_fp8_static_descale = self._kimi_k3_fp8_static_descale
+        mla_impl._kimi_k3_fp8_calibration_state = self._kimi_k3_fp8_calibration_state
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
         # AMX reads kv_b_proj's weight directly and never calls it live; the
@@ -2614,6 +2615,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     """
 
     _use_flashinfer_concat_mla_k: bool
+    _kimi_k3_fp8_calibration_amax: torch.Tensor
+    _kimi_k3_fp8_static_descale: torch.Tensor
+    _kimi_k3_fp8_calibration_state: dict[str, bool]
 
     def __init__(
         self,
