@@ -246,6 +246,21 @@ class WorkerWrapperBase:
 
         load_general_plugins()
 
+        # Only the config-building process pulled non-tensor model files from
+        # Object Storage; pull them here before anything reads the model dir.
+        model_configs = [vllm_config.model_config]
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None:
+            draft_config = spec_config.draft_model_config
+            if (
+                draft_config is not None
+                and draft_config is not vllm_config.model_config
+            ):
+                model_configs.append(draft_config)
+
+        for model_config in model_configs:
+            model_config.maybe_pull_model_files_for_runai_worker()
+
         parallel_config = vllm_config.parallel_config
         if isinstance(parallel_config.worker_cls, str):
             worker_class: type[WorkerBase] = resolve_obj_by_qualname(
