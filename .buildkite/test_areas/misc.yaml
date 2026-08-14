@@ -315,7 +315,7 @@ steps:
   key: async-engine-inputs-utils-worker-config-cpu
   depends_on:
   - image-build-cpu
-  timeout_in_minutes: 65
+  timeout_in_minutes: 25
   source_file_dependencies:
   - vllm/assets/
   - vllm/config/
@@ -358,22 +358,25 @@ steps:
   - tests/transformers_utils
   - tests/config
   device: cpu-small
+  parallelism: 3
   commands:
-  - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s test_envs.py
-  - pytest -v -s test_inputs.py
-  - pytest -v -s test_outputs.py
-  - pytest -v -s test_pooling_params.py
-  - pytest -v -s test_ray_env.py
-  - pytest -v -s test_sampling_params.py
-  - pytest -v -s -m 'cpu_test' multimodal
-  - pytest -v -s renderers
-  - pytest -v -s reasoning
-  - pytest -v -s tool_parsers
-  - pytest -v -s tokenizers_
-  - pytest -v -s parser
-  - pytest -v -s transformers_utils
-  - pytest -v -s config
+  # Timing-balanced static split (measured on build 83851): shard 0 ~17.1m,
+  # shard 1 ~17.1m, shard 2 ~16.8m. tokenizers_ (~16.5m) anchors shard 0.
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || python3 standalone_tests/lazy_imports.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s test_envs.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s test_inputs.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s test_outputs.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_pooling_params.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_ray_env.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s test_sampling_params.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -m 'cpu_test' multimodal
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s renderers
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s reasoning
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s tool_parsers
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s tokenizers_
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s parser
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s transformers_utils
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s config
 
 - label: Batch Invariance (A100)
   key: batch-invariance-a100
