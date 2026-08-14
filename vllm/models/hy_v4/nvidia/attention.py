@@ -18,6 +18,7 @@ import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config, PretrainedConfig
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -647,13 +648,15 @@ class HYV4MLAAttention(nn.Module):
             hidden_states.shape[0],
             self.num_local_heads * self.v_head_dim,
         )
-        if self.indexer is not None and self.is_sparse and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
-        attn_out = self.mla_attn(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=output_shape,
+        # Single coarse eager break covering the indexer and MLA attention, as
+        # the breakable cudagraph contract requires: everything that reads
+        # per-batch metadata runs in one eager segment, so no tensor has to stay
+        # alive across a capture-segment boundary.
+        attn_out = torch.empty(
+            output_shape, dtype=hidden_states.dtype, device=hidden_states.device
+        )
+        self._indexer_and_attn(
+            hidden_states, q_c, positions, q, kv_c_normed, k_pe, attn_out
         )
 
         if self.gated_mla and self.linear_gate is not None:
@@ -668,3 +671,34 @@ class HYV4MLAAttention(nn.Module):
 
         out, _ = self.o_proj(attn_out)
         return out
+
+    @eager_break_during_capture
+    def _indexer_and_attn(
+        self,
+        hidden_states: torch.Tensor,
+        q_c: torch.Tensor | None,
+        positions: torch.Tensor,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        out: torch.Tensor,  # [num_tokens, heads * v_head_dim], written in place
+    ) -> None:
+        """Run the lightning indexer and MLA attention in one eager segment.
+
+        Both read per-batch attention metadata, so under the breakable cudagraph
+        they must not be captured. Keeping them in a single break (instead of one
+        break each) also means the attention inputs never have to survive a
+        capture-segment boundary. The nested ``sparse_attn_indexer`` and
+        ``unified_mla_attention_with_output`` breaks short-circuit here, since
+        the capture is no longer active inside an eager segment.
+        """
+        if self.indexer is not None and self.is_sparse and not self.skip_topk:
+            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+        out.copy_(
+            self.mla_attn(
+                q,
+                kv_c_normed,
+                k_pe,
+                output_shape=out.shape,
+            )
+        )
