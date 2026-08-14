@@ -188,14 +188,13 @@ class MambaForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "backbone")
         )
 
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if config.tie_word_embeddings:
-            self.lm_head = self.backbone.embeddings
-        else:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.backbone.embeddings)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 

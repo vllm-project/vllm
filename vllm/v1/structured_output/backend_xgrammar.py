@@ -284,6 +284,14 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     so_params = sampling_params.structured_outputs
 
     if so_params.regex:
+        # A NUL byte is never meaningful in a regex pattern and is not handled
+        # by xgrammar's native regex converter. Reject it here, before the
+        # pattern reaches that native code; the try/except below does not cover
+        # this case.
+        if "\x00" in so_params.regex:
+            raise ValueError(
+                "structured_outputs.regex must not contain a NUL character ('\\x00')"
+            )
         try:
             compile_regex_with_timeout(
                 xgr.Grammar.from_regex,

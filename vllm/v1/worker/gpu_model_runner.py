@@ -586,6 +586,9 @@ class GPUModelRunner(
         # Async scheduling
         self.use_async_scheduling = self.scheduler_config.async_scheduling
 
+        # Async PP broadcast of sampled token ids, waited on in _prepare_input_ids.
+        self._pp_recv_work: torch.distributed.Work | None = None
+
         # Sampler
         self.sampler = Sampler(
             logprobs_mode=self.model_config.logprobs_mode,
@@ -1842,6 +1845,11 @@ class GPUModelRunner(
         Uses self.prev_positions[:num_reqs] which maps current pos -> prev pos
         (-1 for new requests).
         """
+
+        # Sync the async PP broadcast before reading sampled tokens.
+        if self._pp_recv_work is not None:
+            self._pp_recv_work.wait()
+            self._pp_recv_work = None
 
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
@@ -3123,18 +3131,24 @@ class GPUModelRunner(
             token_lora_mapping = []
             lora_requests = set()
             encoder_token_counts = []
+            connector_token_counts = []
 
-            for req_id, pos_info in mm_lora_refs:
+            for (req_id, pos_info), (modality, mm_item) in zip(
+                mm_lora_refs,
+                mm_kwargs,
+            ):
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 lora_id = int(self.input_batch.request_lora_mapping[req_idx])
 
-                # Prefer pos_info.get_num_embeds to count precise MM embedding tokens.
-                num_tokens = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
-                    pos_info.get_num_embeds()
+                tower_tokens, connector_tokens = self.model.get_mm_lora_token_counts(  # type: ignore[attr-defined]
+                    modality=modality,
+                    mm_kwargs=mm_item,
+                    num_mm_embeds=pos_info.get_num_embeds(),
                 )
                 prompt_lora_mapping.append(lora_id)
-                token_lora_mapping.extend([lora_id] * num_tokens)
-                encoder_token_counts.append(num_tokens)
+                token_lora_mapping.extend([lora_id] * tower_tokens)
+                encoder_token_counts.append(tower_tokens)
+                connector_token_counts.append(connector_tokens)
 
                 if lora_id > 0:
                     lora_request = self.input_batch.lora_id_to_lora_request.get(lora_id)
@@ -3162,16 +3176,11 @@ class GPUModelRunner(
             if (
                 mm_mapping is not None
                 and mm_mapping.connector
-                and hasattr(self.model, "get_num_mm_connector_tokens")
+                and all(count is not None for count in connector_token_counts)
             ):
-                post_op_counts = [
-                    self.model.get_num_mm_connector_tokens(num_tokens)  # type: ignore[attr-defined]
-                    for num_tokens in encoder_token_counts
-                ]
-
                 connector_token_mapping = np.repeat(
                     np.array(prompt_lora_mapping, dtype=np.int32),
-                    np.array(post_op_counts, dtype=np.int32),
+                    np.array(connector_token_counts, dtype=np.int32),
                 )
                 connector_mapping = LoRAMapping(
                     index_mapping=tuple(connector_token_mapping.tolist()),
@@ -4962,7 +4971,9 @@ class GPUModelRunner(
         recv = torch.empty((num_reqs, 1), dtype=torch.int32, device=self.device)
         # skip for chunked prefill.
         if not self._is_all_reqs_chunked_prefill():
-            torch.distributed.broadcast(recv, src=pp.last_rank, group=pp.device_group)
+            self._pp_recv_work = torch.distributed.broadcast(
+                recv, src=pp.last_rank, group=pp.device_group, async_op=True
+            )
         self.input_batch.prev_sampled_token_ids = recv
 
         # construct `prev_req_id_to_index` here so `_prepare_input_ids`
