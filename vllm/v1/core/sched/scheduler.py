@@ -390,15 +390,12 @@ class Scheduler(SchedulerInterface):
             return num_new_tokens
 
         block_size = self.cache_config.block_size
-        replay_block_size = self.block_size
-        # The last replay-aligned position whose state can be cached. With
-        # Eagle, FullAttn prunes the last matching replay block, so back off
-        # one block to avoid a Mamba cache miss.
-        last_cache_position = (
-            request.num_tokens - request.num_tokens % replay_block_size
-        )
+        # The last block-aligned position whose state can be cached. With
+        # Eagle, FullAttn prunes the last matching block, so back off one
+        # block to avoid a Mamba cache miss.
+        last_cache_position = request.num_tokens - request.num_tokens % block_size
         if self.use_eagle:
-            last_cache_position = max(last_cache_position - replay_block_size, 0)
+            last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
         # Invariant: slot p holds the state after exactly (p + 1) * block_size
