@@ -11,6 +11,7 @@ and multiple GPUs, so it is exercised separately.
 from unittest.mock import Mock
 
 import pytest
+import ray
 import torch
 
 from vllm.distributed.weight_transfer import (
@@ -37,6 +38,8 @@ from vllm.distributed.weight_transfer.m2n_source import (
     placements_from_tensor,
 )
 from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
+from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
 
 class TestLayout:
@@ -217,3 +220,194 @@ class TestRegistration:
     def test_init_info_dispatches_to_the_backend(self):
         """Trainer init info selects the nccl_m2n factory entry."""
         assert M2NTrainerInitInfo.backend == "nccl_m2n"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end transfer
+#
+# Transport-only, in the style of the NCCL/sparse tests in
+# test_weight_transfer.py: two Ray tasks with one GPU each drive the two engines
+# directly, so no HTTP server or LLM instance is involved. The worker is not an
+# RPC endpoint here, so the trainer engine gets a no-op control-plane client --
+# the NCCL rendezvous and the reshard itself are the real thing.
+# ---------------------------------------------------------------------------
+
+SHAPE = [64, 32]
+DTYPE = "float32"
+
+
+def _init_ray() -> None:
+    if ray.is_initialized():
+        return
+    ray.init(
+        ignore_reinit_error=True,
+        runtime_env={
+            "env_vars": {
+                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "1",
+                "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES": "1",
+            }
+        },
+    )
+
+
+def _assigned_device() -> "torch.device":
+    gpu_ids = ray.get_gpu_ids()
+    device = torch.device(f"cuda:{int(gpu_ids[0])}" if gpu_ids else "cuda:0")
+    current_platform.set_device(device)
+    return device
+
+
+@ray.remote(num_gpus=1)
+def _m2n_trainer_send(master_address: str, master_port: int, world_size: int) -> bool:
+    """Send one parameter through the real trainer engine."""
+    device = _assigned_device()
+
+    from vllm.distributed.weight_transfer import WeightTransferTrainerFactory
+    from vllm.distributed.weight_transfer.m2n_source import DTensorModuleSource
+    from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
+
+    class NoopClient:
+        def init_weight_transfer_engine(self, init_info):
+            pass
+
+        def start_weight_update(self):
+            pass
+
+        def update_weights(self, update_info):
+            pass
+
+        def finish_weight_update(self, weight_version=None):
+            pass
+
+    class Tiny(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(
+                torch.arange(
+                    SHAPE[0] * SHAPE[1], dtype=torch.float32, device=device
+                ).reshape(SHAPE)
+            )
+
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=M2NTrainerInitInfo(
+            master_address=master_address,
+            master_port=master_port,
+            world_size=world_size,
+            num_trainer_ranks=1,
+            rank=0,
+        ),
+        client=NoopClient(),
+        source=DTensorModuleSource(Tiny(), num_trainer_ranks=1),
+    )
+    engine.send_weights()
+    torch.accelerator.synchronize()
+    engine.shutdown()
+    return True
+
+
+@ray.remote(num_gpus=1)
+def _m2n_worker_receive(master_address: str, master_port: int, world_size: int) -> dict:
+    """Receive that parameter through the real worker engine."""
+    import contextlib
+    from unittest.mock import MagicMock
+
+    device = _assigned_device()
+
+    from vllm.config.parallel import ParallelConfig
+    from vllm.config.weight_transfer import WeightTransferConfig
+    from vllm.distributed.weight_transfer.m2n_engine import (
+        M2NWeightTransferEngine,
+        M2NWeightTransferInitInfo,
+        M2NWeightTransferUpdateInfo,
+    )
+
+    class Recorder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.received = []
+
+        def load_weights(self, weights):
+            for name, tensor in weights:
+                self.received.append((name, tensor.clone()))
+
+    parallel_config = MagicMock(spec=ParallelConfig)
+    parallel_config.rank = 0
+    parallel_config.world_size = 1
+    parallel_config.data_parallel_rank = 0
+    parallel_config.data_parallel_index = 0
+    parallel_config.tensor_parallel_size = 1
+    parallel_config.pipeline_parallel_size = 1
+    vllm_config = MagicMock()
+    vllm_config.parallel_config = parallel_config
+    vllm_config.model_config = MagicMock()
+    vllm_config.model_config.quantization = None
+
+    recorder = Recorder()
+    engine = M2NWeightTransferEngine(
+        WeightTransferConfig(backend="nccl_m2n"), vllm_config, device, recorder
+    )
+    # Transport-only: receive_weights enters set_current_vllm_config, and
+    # vllm_config here is a mock.
+    import vllm.config as _vllm_config_mod
+
+    _vllm_config_mod.set_current_vllm_config = lambda cfg: contextlib.nullcontext()
+
+    engine.init_transfer_engine(
+        M2NWeightTransferInitInfo(
+            master_address=master_address,
+            master_port=master_port,
+            rank_offset=1,  # trainer occupies rank 0
+            world_size=world_size,
+            src_mesh_dims=[1, 1],
+            dst_mesh_dims=[1, 1],
+            names=["weight"],
+            dtype_names=[DTYPE],
+            shapes=[SHAPE],
+            src_placements=[None],  # replicated on the single trainer rank
+        )
+    )
+    engine.receive_weights(M2NWeightTransferUpdateInfo(names=["weight"]))
+    torch.accelerator.synchronize()
+
+    expected = torch.arange(
+        SHAPE[0] * SHAPE[1], dtype=torch.float32, device=device
+    ).reshape(SHAPE)
+    name, got = recorder.received[0] if recorder.received else (None, None)
+    result = {
+        "count": len(recorder.received),
+        "name": name,
+        "shape": list(got.shape) if got is not None else None,
+        "exact": bool(torch.equal(got, expected)) if got is not None else False,
+    }
+    engine.shutdown()
+    return result
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2,
+    reason="Need at least 2 GPUs: one trainer rank and one inference worker.",
+)
+def test_m2n_weight_transfer_between_processes():
+    """A parameter survives a real reshard from a trainer process to a worker.
+
+    This is the only test here that moves bytes: it builds both engines, joins
+    one NCCL communicator across two processes, and reshards. Everything else
+    in this file checks how a transfer is *described*.
+    """
+    pytest.importorskip("nccl.m2n", reason="nccl_m2n backend needs the m2n runtime")
+    _init_ray()
+
+    master_address = "127.0.0.1"
+    master_port = get_open_port()
+    world_size = 2  # 1 trainer + 1 inference worker
+
+    worker = _m2n_worker_receive.remote(master_address, master_port, world_size)
+    trainer = _m2n_trainer_send.remote(master_address, master_port, world_size)
+    trainer_ok, result = ray.get([trainer, worker])
+
+    assert trainer_ok, "trainer engine did not complete"
+    assert result["count"] == 1, f"expected one parameter, got {result['count']}"
+    assert result["name"] == "weight"
+    assert result["shape"] == SHAPE
+    assert result["exact"], "resharded tensor does not match what the trainer sent"
