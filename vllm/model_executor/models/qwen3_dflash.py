@@ -588,9 +588,7 @@ class DFlashQwen3Model(nn.Module):
                     [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
                 )
         elif self._kv_strategy == ContextKVStrategy.FUSED_DEQUANT:
-            # Dequant to the compute dtype, keep the fused F.linear. The buffers
-            # are built lazily on first use (after ``process_weights_after_loading``),
-            # so quantized weights are in their final layout.
+            # Dequant to the compute dtype, keep the fused F.linear.
             kv_weights = [
                 get_and_maybe_dequant_weights(p, out_dtype=self.compute_dtype)[
                     a.q_size :
@@ -773,9 +771,6 @@ class DFlashQwen3Model(nn.Module):
         the computation runs, and no K/V is written to cache.
         """
         if not hasattr(self, "_num_attn_layers"):
-            # Build the fused-KV buffers on first use.  This runs after the
-            # loader has called ``process_weights_after_loading``, so quantized
-            # weights are in their final layout.
             self._build_fused_kv_buffers()
 
         num_ctx = context_states.shape[0]

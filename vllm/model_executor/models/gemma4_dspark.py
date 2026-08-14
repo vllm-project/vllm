@@ -332,7 +332,6 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
                     p = params[name]
                     getattr(p, "weight_loader", default_weight_loader)(p, w)
                     loaded.add(name)
-        # The fused-KV buffers are built lazily on first use (after the loader
-        # has called ``process_weights_after_loading``), so quantized weights
+        # Fused-KV buffers are built lazily on first use so quantized weights
         # are in their final layout.
         return loaded
