@@ -110,10 +110,11 @@ steps:
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
-- label: PyTorch Fullgraph Test
+- label: PyTorch Fullgraph Test %N
   device: h200_35gb
   key: pytorch-fullgraph-test
   timeout_in_minutes: 90
+  parallelism: 3
   source_file_dependencies:
   - vllm/__init__.py
   - vllm/_aiter_ops.py
@@ -146,7 +147,26 @@ steps:
   # as it is a heavy test that is covered in other steps.
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  - |-
+    shard_status=0
+    if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then
+      pytest -s -v 'compile/fullgraph/test_basic_correctness.py::test_compile_correctness[test_setting0]' || shard_status=1
+    elif [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then
+      pytest -s -v 'compile/fullgraph/test_basic_correctness.py::test_compile_correctness[test_setting1]' || shard_status=1
+    fi
+    for test_file in $$(find compile/fullgraph/ -name 'test_*.py' \
+      -not -name 'test_full_cudagraph.py' \
+      -not -name 'test_basic_correctness.py' -print | sort); do
+      case "$$test_file" in
+        */test_full_graph.py) target_shard=1 ;;
+        */test_multimodal_compile.py|*/test_toy_llama.py) target_shard=2 ;;
+        *) target_shard=0 ;;
+      esac
+      if [ "$$BUILDKITE_PARALLEL_JOB" = "$$target_shard" ]; then
+        pytest -s -v "$$test_file" || shard_status=1
+      fi
+    done
+    [ "$$shard_status" -eq 0 ]
 
 # Hopper-only DeepSeek-V2-Lite cases in this file require two 29.3-GiB model
 # instances and cannot fit a 35GB MIG slice. L4 retains the original coverage:
