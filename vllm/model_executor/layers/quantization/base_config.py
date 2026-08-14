@@ -228,15 +228,15 @@ class QuantizationConfig(ABC):
             base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
         )
         online_target = self.online_quant_config.get_quantization_target(layer, prefix)
-        online_is_quantized = online_target is not None
-
-        if checkpoint_is_quantized and online_is_quantized:
-            raise ValueError(
-                f"Cannot apply requested online quantization {online_target[1]} to "
-                f"pre-quantized layer {prefix}: {base_quant_method} was already "
-                "selected by the checkpoint quantization config."
-            )
-        if checkpoint_is_quantized or not online_is_quantized:
+        if checkpoint_is_quantized:
+            if online_target is not None:
+                raise ValueError(
+                    f"Cannot apply requested online quantization {online_target[1]} to "
+                    f"pre-quantized layer {prefix}: {base_quant_method} was already "
+                    "selected by the checkpoint quantization config."
+                )
+            return base_quant_method
+        if online_target is None:
             return base_quant_method
         return self.online_quant_config.get_quant_method(layer, prefix)
 
