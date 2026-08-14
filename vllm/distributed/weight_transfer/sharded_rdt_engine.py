@@ -32,17 +32,10 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
-
-# The op allowlist, M:N binding and arena sizing all live in
-# sharded_rdt_common so the producer (trainer) side agrees with the consumer
-# here.
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     RdtRouter,
     arena_alloc_bytes,
 )
-
-# Op-chain recording: the lazy tensor the model's loaders see, and the two sinks
-# its ``copy_`` can mean (record during the bake / fetch on the plain load).
 from vllm.distributed.weight_transfer.sharded_rdt_lazy import (
     BakeSink,
     FetchKey,
@@ -59,17 +52,18 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class _BakedModule:
-    """A baked leaf module and the recorded copies that fill its params.
+class _ModulePlan:
+    """How to fill one leaf module: the module itself plus every copy the bake
+    recorded into its params.
 
-    Named "module", not "group": a *group* here is always one of the driver's
-    gather groups, and one gather group covers many baked modules.
+    The unit of materialize and quant — the planner finds each module's first
+    and last chunk so empty params are allocated once, before the first scatter,
+    and ``process_weights_after_loading`` runs once, after the last.
 
     ``layer`` is a strong ref held for the engine's lifetime and cleared in
     ``shutdown``; the module persists across syncs, and its
     ``LayerReloadingInfo`` is re-established every update. Whether it needs
-    ``process_weights_after_loading`` is decided at replay time, so it is not
-    stored here.
+    quantizing is decided at replay time, so it is not stored here.
     """
 
     layer: Any
@@ -326,7 +320,7 @@ class ShardedRDTWeightTransferEngine(
     stay inside ``SUPPORTED_OPS`` — anything needing real data (``.to``,
     ``.item``, arithmetic, bool-mask indexing) raises during the bake.
 
-    The plan is baked once at ``init_transfer_engine`` into one ``_BakedModule``
+    The plan is baked once at ``init_transfer_engine`` into one ``_ModulePlan``
     per fully-loaded leaf module, indexed by source name; every
     ``update_weights`` replays the modules its gathered names cover.
     """
@@ -366,10 +360,10 @@ class ShardedRDTWeightTransferEngine(
         # Driver-supplied total consumer count (init_info.num_consumers); 0 => infer
         # from parallel_config. See _num_consumers.
         self._num_consumers_override: int = 0
-        # Source name -> the _BakedModule consuming it. Several names of a fused
-        # module share one entry; replay dedups. A name absent here is unbaked and
-        # takes the plain load.
-        self._name_to_module: dict[str, _BakedModule] = {}
+        # Source name -> the plan for the module consuming it. Several names of a
+        # fused module share one entry; replay dedups. A name absent here is
+        # unbaked and takes the plain load.
+        self._name_to_plan: dict[str, _ModulePlan] = {}
         # name -> (dtype_name, shape) for every init name, so the plain-load
         # fallback can rebuild lazies from just the gathered names.
         self._name_meta: dict[str, tuple[str, list[int]]] = {}
@@ -914,7 +908,7 @@ class ShardedRDTWeightTransferEngine(
         bypass ``online_process_loader``, so ``_layerwise_process`` is never in
         the path). Nothing materializes or pulls; the lazy's ``copy_`` records
         the source op chain and the meta destination's geometry. Afterwards one
-        ``_BakedModule`` per fully-loaded leaf module (copied numel == loadable
+        ``_ModulePlan`` per fully-loaded leaf module (copied numel == loadable
         size) is indexed by source name; partial or unrecordable modules take the
         plain load. The model is restored.
 
@@ -963,20 +957,20 @@ class ShardedRDTWeightTransferEngine(
                 copied = sum(prod(c.shape) for c in copies)
                 if copied < get_layer_size(module):
                     continue  # partial -> slow path
-                group = _BakedModule(layer=module, copies=copies)
+                plan = _ModulePlan(layer=module, copies=copies)
                 for c in copies:
-                    self._name_to_module[c.src[0]] = group
+                    self._name_to_plan[c.src[0]] = plan
             self._restore_after_dry_run(model)
 
         # Names whose copy_ fired during the bake (baked + unbaked-but-live).
         # Residual names not in here no-op for this worker and are skipped.
         self._live_names = set(recorder.copied_names)
 
-        n_groups = len({id(g) for g in self._name_to_module.values()})
+        n_groups = len({id(g) for g in self._name_to_plan.values()})
         logger.info(
             "Sharded RDT dry-run baked %d/%d names into %d leaf modules "
             "(%d live) in %.3fs",
-            len(self._name_to_module),
+            len(self._name_to_plan),
             len(names),
             n_groups,
             len(self._live_names),
@@ -1209,7 +1203,7 @@ class ShardedRDTWeightTransferEngine(
         )
 
     def _chunk_module_scatters(
-        self, modules: "list[_BakedModule]"
+        self, modules: "list[_ModulePlan]"
     ) -> "list[tuple[int, list[_Scatter]]]":
         """Cut the modules' copies into one chunk per distinct producer
         ``ep_rank`` present — ``-1`` (replicated) first, then ascending — as
@@ -1255,10 +1249,10 @@ class ShardedRDTWeightTransferEngine(
             pos += glen
             for n in gnames:
                 name_group_idx[n] = gi
-            modules: list[_BakedModule] = []
+            modules: list[_ModulePlan] = []
             seen: set[int] = set()
             for n in gnames:
-                mod = self._name_to_module.get(n)
+                mod = self._name_to_plan.get(n)
                 if mod is None:
                     if n in self._live_names:
                         residual.append(n)
@@ -1554,7 +1548,7 @@ class ShardedRDTWeightTransferEngine(
         self._producer_actors = []
         self._produce_methods = []
         # Drop strong references to baked modules so the model can be freed.
-        self._name_to_module.clear()
+        self._name_to_plan.clear()
         self._name_meta.clear()
         self._live_names.clear()
         # Drop the cached plan (holds _Scatter refs to the baked layers).

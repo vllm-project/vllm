@@ -25,9 +25,9 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
-    _BakedModule,
     _CallPlan,
     _dtype_from_name,
+    _ModulePlan,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_lazy import (
     BakeSink,
@@ -88,7 +88,7 @@ def _planner(baked, *, name_meta, live=None, name_ep_rank=None):
     not owner values.
     """
     eng = object.__new__(ShardedRDTWeightTransferEngine)
-    eng._name_to_module = dict(baked)
+    eng._name_to_plan = dict(baked)
     eng._name_meta = dict(name_meta)
     eng._live_names = set(live or name_meta)
     eng._name_ep_rank = {n: er for n, er in (name_ep_rank or {}).items() if er >= 0}
@@ -112,7 +112,7 @@ def _one_module_per_layer(n_layers, *, dtype="bfloat16", numel=4):
     baked = {}
     for n in names:
         layer = _FakeLayer(n)
-        baked[n] = _BakedModule(layer=layer, copies=[_copy(n, shape=(numel,))])
+        baked[n] = _ModulePlan(layer=layer, copies=[_copy(n, shape=(numel,))])
     name_meta = {n: (dtype, [numel]) for n in names}
     group_lens = [1] * len(names)
     return baked, name_meta, names, group_lens
@@ -354,9 +354,9 @@ class TestPackedLayout:
         for name, dtype_name, shape in specs:
             name_meta[name] = (dtype_name, shape)
             copies.append(_copy(name, shape=tuple(shape)))
-        group = _BakedModule(layer=layer, copies=copies)
+        mod_plan = _ModulePlan(layer=layer, copies=copies)
         for name, _d, _s in specs:
-            baked[name] = group
+            baked[name] = mod_plan
 
         eng = _planner(baked, name_meta=name_meta)
         plan = eng._build_call_plan([n for n, _, _ in specs], [len(specs)])
@@ -372,9 +372,9 @@ class TestPackedLayout:
         specs = [(f"w{i}", "bfloat16", [i * 3 + 1]) for i in range(6)]
         layer = _FakeLayer("l")
         copies = [_copy(n, shape=tuple(s)) for n, _d, s in specs]
-        group = _BakedModule(layer=layer, copies=copies)
+        mod_plan = _ModulePlan(layer=layer, copies=copies)
         eng = _planner(
-            {n: group for n, _d, _s in specs},
+            {n: mod_plan for n, _d, _s in specs},
             name_meta={n: (d, s) for n, d, s in specs},
         )
         (chunk,) = eng._build_call_plan([n for n, _, _ in specs], [len(specs)]).chunks
@@ -396,7 +396,7 @@ class TestPackedLayout:
             _BakedCopy(src=shared, param_name="b", offset=0, shape=(4,), stride=(1,)),
         ]
         eng = _planner(
-            {"w": _BakedModule(layer=layer, copies=copies)},
+            {"w": _ModulePlan(layer=layer, copies=copies)},
             name_meta={"w": ("bfloat16", [4])},
         )
         (chunk,) = eng._build_call_plan(["w"], [1]).chunks
@@ -419,7 +419,7 @@ class TestChunkModuleScatters:
         layer = _FakeLayer("l")
         copies = [_copy(f"w{i}", shape=(4,)) for i in range(5)]
         eng = _planner({}, name_meta={f"w{i}": ("bfloat16", [4]) for i in range(5)})
-        chunks = eng._chunk_module_scatters([_BakedModule(layer=layer, copies=copies)])
+        chunks = eng._chunk_module_scatters([_ModulePlan(layer=layer, copies=copies)])
         assert [er for er, _s in chunks] == [-1]
         assert len(chunks[0][1]) == 5
 
@@ -432,7 +432,7 @@ class TestChunkModuleScatters:
             name_meta={n: ("bfloat16", [4]) for n in names},
             name_ep_rank={"e0": 0, "e2": 1, "e5": 2},
         )
-        chunks = eng._chunk_module_scatters([_BakedModule(layer=layer, copies=copies)])
+        chunks = eng._chunk_module_scatters([_ModulePlan(layer=layer, copies=copies)])
         assert [er for er, _s in chunks] == [-1, 0, 1, 2]
         assert [[s.src[0] for s in sc] for _er, sc in chunks] == [
             ["norm"],
@@ -453,7 +453,7 @@ class TestChunkModuleScatters:
             name_ep_rank={n: 0 for n in names},
         )
         ((er, scatters),) = eng._chunk_module_scatters(
-            [_BakedModule(layer=layer, copies=copies)]
+            [_ModulePlan(layer=layer, copies=copies)]
         )
         assert er == 0
         assert [s.src[0] for s in scatters] == names
@@ -463,10 +463,10 @@ class TestChunkModuleScatters:
         module-then-bake order."""
         a, b = _FakeLayer("a"), _FakeLayer("b")
         mods = [
-            _BakedModule(
+            _ModulePlan(
                 layer=a, copies=[_copy("a0", shape=(4,)), _copy("a1", shape=(4,))]
             ),
-            _BakedModule(
+            _ModulePlan(
                 layer=b, copies=[_copy("b0", shape=(4,)), _copy("b1", shape=(4,))]
             ),
         ]
@@ -485,7 +485,7 @@ class TestChunkModuleScatters:
         layer = _FakeLayer("l")
         eng = _planner({}, name_meta={"w": ("float32", [10])})
         ((_er, scatters),) = eng._chunk_module_scatters(
-            [_BakedModule(layer=layer, copies=[_copy("w", shape=(10,))])]
+            [_ModulePlan(layer=layer, copies=[_copy("w", shape=(10,))])]
         )
         (sc,) = scatters
         assert sc.dtype is torch.float32
@@ -511,9 +511,9 @@ class TestBuildCallPlan:
         layer = _FakeLayer("l")
         names = [f"w{i}" for i in range(4)]
         copies = [_copy(n, shape=(4,)) for n in names]
-        group = _BakedModule(layer=layer, copies=copies)
+        mod_plan = _ModulePlan(layer=layer, copies=copies)
         eng = _planner(
-            {n: group for n in names},
+            {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
             name_ep_rank={"w2": 0, "w3": 1},
         )
@@ -525,9 +525,10 @@ class TestBuildCallPlan:
         including a FusedMoE-like module whose copies span ep_rank chunks."""
         layer = _FakeLayer("spanning")
         names = [f"w{i}" for i in range(4)]
-        group = _BakedModule(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
+        copies = [_copy(n, shape=(4,)) for n in names]
+        mod_plan = _ModulePlan(layer=layer, copies=copies)
         eng = _planner(
-            {n: group for n in names},
+            {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
             name_ep_rank={"w0": 0, "w1": 0, "w2": 1, "w3": 1},
         )
@@ -537,9 +538,10 @@ class TestBuildCallPlan:
     def test_quant_defers_to_a_modules_last_chunk(self):
         layer = _FakeLayer("spanning")
         names = [f"w{i}" for i in range(4)]
-        group = _BakedModule(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
+        copies = [_copy(n, shape=(4,)) for n in names]
+        mod_plan = _ModulePlan(layer=layer, copies=copies)
         eng = _planner(
-            {n: group for n in names},
+            {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
             name_ep_rank={"w0": 0, "w1": 0, "w2": 1, "w3": 1},
         )
@@ -558,9 +560,10 @@ class TestBuildCallPlan:
         drop the gather buffers while a later chunk's RDMA is still reading."""
         layer = _FakeLayer("l")
         names = [f"w{i}" for i in range(4)]
-        group = _BakedModule(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
+        copies = [_copy(n, shape=(4,)) for n in names]
+        mod_plan = _ModulePlan(layer=layer, copies=copies)
         eng = _planner(
-            {n: group for n in names},
+            {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
             name_ep_rank={"w2": 0, "w3": 1},
         )
@@ -576,11 +579,11 @@ class TestBuildCallPlan:
         baked, name_meta, stamps = {}, {}, {}
         for names in (names_a, names_b):
             layer = _FakeLayer(names[0])
-            group = _BakedModule(
+            mod_plan = _ModulePlan(
                 layer=layer, copies=[_copy(n, shape=(4,)) for n in names]
             )
             for i, n in enumerate(names):
-                baked[n] = group
+                baked[n] = mod_plan
                 name_meta[n] = ("bfloat16", [4])
                 stamps[n] = i // 2  # two stamps per group
         eng = _planner(baked, name_meta=name_meta, name_ep_rank=stamps)
@@ -625,7 +628,7 @@ class TestBuildCallPlan:
         plan = eng._build_call_plan(names, group_lens)
         assert plan.residual == []
 
-    def test_the_plan_carries_a_name_to_module_map(self):
+    def test_the_plan_carries_a_name_to_plan_map(self):
         """It selects the owning producer for a residual name's on-demand pull.
         The planner returns it rather than writing engine state, so the plan stays
         a pure function of its inputs."""
@@ -635,13 +638,14 @@ class TestBuildCallPlan:
         assert plan.name_group_idx == {n: i for i, n in enumerate(names)}
 
     def test_modules_are_deduped_within_a_group(self):
-        """Several names of one fused module map to the same _BakedModule; the
+        """Several names of one fused module map to the same _ModulePlan; the
         plan must not chunk it twice."""
         layer = _FakeLayer("fused")
         names = ["qkv.q", "qkv.k", "qkv.v"]
-        group = _BakedModule(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
+        copies = [_copy(n, shape=(4,)) for n in names]
+        mod_plan = _ModulePlan(layer=layer, copies=copies)
         eng = _planner(
-            {n: group for n in names},
+            {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
         )
         plan = eng._build_call_plan(names, [3])
@@ -805,7 +809,7 @@ class TestSignalCompleteness:
         names = ["embed.weight"]
         group_lens = [1]
         baked = {
-            "embed.weight": _BakedModule(
+            "embed.weight": _ModulePlan(
                 layer=_FakeLayer("embed"), copies=[_copy("embed.weight", shape=(4,))]
             )
         }
@@ -819,10 +823,10 @@ class TestSignalCompleteness:
             group_lens.append(1 + n_experts)
             name_meta[norm] = ("bfloat16", [4])
             live.add(norm)
-            baked[norm] = _BakedModule(
+            baked[norm] = _ModulePlan(
                 layer=_FakeLayer(f"norm{li}"), copies=[_copy(norm, shape=(4,))]
             )
-            fused = _BakedModule(
+            fused = _ModulePlan(
                 layer=_FakeLayer(f"moe{li}"),
                 copies=[
                     _copy(f"model.layers.{li}.experts.{e}.w", shape=(4,))
@@ -838,7 +842,7 @@ class TestSignalCompleteness:
                     live.add(n)
         names.append("lm_head.weight")
         group_lens.append(1)
-        baked["lm_head.weight"] = _BakedModule(
+        baked["lm_head.weight"] = _ModulePlan(
             layer=_FakeLayer("head"), copies=[_copy("lm_head.weight", shape=(4,))]
         )
         name_meta["lm_head.weight"] = ("bfloat16", [4])
