@@ -314,22 +314,18 @@ _DOWNLOAD_CHUNK_SIZE = 1 << 20
 
 class BatchProgressTracker:
     def __init__(self):
-        self._total = 0
         self._pbar: tqdm | None = None
-
-    def submitted(self):
-        self._total += 1
 
     def completed(self):
         if self._pbar:
             self._pbar.update()
 
-    def pbar(self, total: int | None = None) -> tqdm:
+    def pbar(self, total: int) -> tqdm:
         enable_tqdm = (
             not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
         )
         self._pbar = tqdm(
-            total=self._total if total is None else total,
+            total=total,
             unit="req",
             desc="Running batch",
             mininterval=5,
@@ -595,7 +591,6 @@ class EndpointConfig(TypedDict):
 
 def handle_endpoint_request(
     request: BatchRequestInput,
-    tracker: BatchProgressTracker,
     url_matcher: Callable[[str], bool],
     handler_getter: Callable[[], Callable | None],
     wrapper_fn: WrapperFn | None = None,
@@ -605,7 +600,6 @@ def handle_endpoint_request(
 
     Args:
         request: The batch request input
-        tracker: Progress tracker for the batch
         url_matcher: Function that takes a URL and returns True if it matches
         handler_getter: Function that returns the handler function or None
         wrapper_fn: Optional function to wrap the handler (e.g., for transcriptions)
@@ -626,7 +620,6 @@ def handle_endpoint_request(
     if wrapper_fn is not None:
         handler_fn = wrapper_fn(handler_fn)
 
-    tracker.submitted()
     return run_request(handler_fn, request)
 
 
@@ -831,7 +824,6 @@ def validate_run_batch_args(args):
 async def run_one_request(
     request_json: str,
     endpoint_registry: dict[str, EndpointConfig],
-    tracker: BatchProgressTracker,
 ) -> BatchRequestOutput:
     """Route a single line of the batch to its endpoint handler."""
     request = BatchRequestInput.model_validate_json(request_json)
@@ -845,7 +837,6 @@ async def run_one_request(
         endpoint_config = endpoint_registry[endpoint_key]
         result = handle_endpoint_request(
             request,
-            tracker,
             url_matcher=endpoint_config["url_matcher"],
             handler_getter=endpoint_config["handler_getter"],
             wrapper_fn=endpoint_config["wrapper_fn"],
@@ -891,9 +882,7 @@ async def dispatch_batch(
                 continue
 
             pending.add(
-                asyncio.create_task(
-                    run_one_request(request_json, endpoint_registry, tracker)
-                )
+                asyncio.create_task(run_one_request(request_json, endpoint_registry))
             )
             if len(pending) >= max_inflight:
                 finished, pending = await asyncio.wait(
