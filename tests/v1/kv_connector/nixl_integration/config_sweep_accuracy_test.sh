@@ -62,6 +62,14 @@ run_tests() {
 
   echo "=== Running tests (${label}) ==="
   for cfg in "${configs[@]}"; do
+    # turboquant kv-cache-dtype requires the dedicated TurboQuant attention
+    # backend, which is only reachable via auto-selection. Forcing a
+    # different backend (e.g. TRITON_ATTN on AMD) is an invalid combination.
+    if [[ -n "${cmdline_args:-}" && "${cfg}" == *"kv-cache-dtype=turboquant"* ]]; then
+      echo "-> Skipping ${cfg} (turboquant requires auto-selected backend, not ${label})"
+      continue
+    fi
+
     local -a cfg_parts extra_args_parts
     read -r -a cfg_parts <<< "$cfg"
     read -r -a extra_args_parts <<< "$extra_args"
