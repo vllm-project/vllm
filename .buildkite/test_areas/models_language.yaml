@@ -114,7 +114,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_1
+      device: mi355_1
       timeout_in_minutes: 69
       depends_on:
       - image-build-amd
@@ -134,32 +134,6 @@ steps:
   - tests/models/language/generation_ppl_test
   commands:
     - pytest -v -s models/language/generation_ppl_test
-  mirror:
-    amd:
-      dind: false
-      device: mi250_1
-      timeout_in_minutes: 64
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - vllm/model_executor/models/qwen3_5.py
-      - vllm/model_executor/models/qwen3_5_mtp.py
-      - vllm/transformers_utils/configs/qwen3_5.py
-      - vllm/transformers_utils/configs/qwen3_5_moe.py
-      - vllm/model_executor/models/qwen2.py
-      - vllm/model_executor/models/qwen3.py
-      - vllm/model_executor/models/qwen3_next.py
-      - vllm/model_executor/models/qwen3_next_mtp.py
-      - vllm/model_executor/layers/fla/ops/
-      - vllm/_aiter_ops.py
-      - vllm/v1/attention/backends/triton_attn.py
-      - vllm/v1/attention/backends/rocm_attn.py
-      - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
-      - vllm/v1/attention/backends/rocm_aiter_fa.py
-      - vllm/v1/attention/backends/flex_attention.py
-      - vllm/v1/attention/ops/
-      - vllm/platforms/rocm.py
-      - tests/models/language/generation_ppl_test
 
 - label: Language Models Test (Extended Pooling)
   device: h200_35gb
@@ -191,10 +165,3 @@ steps:
   - tests/models/language/pooling_mteb_test
   commands:
     - pytest -v -s models/language/pooling_mteb_test
-  mirror:
-    amd:
-      dind: false
-      device: mi250_1
-      timeout_in_minutes: 58
-      depends_on:
-      - image-build-amd
