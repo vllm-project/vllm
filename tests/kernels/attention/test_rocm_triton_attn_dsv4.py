@@ -24,16 +24,48 @@ def _on_split_decode_arch() -> bool:
         return False
 
 
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    try:
+        from vllm.platforms.rocm import _ON_GFX950
+
+        return bool(_ON_GFX950)
+    except Exception:
+        return False
+
+
 # The flash-decode split-K decode path is only tuned for AMD gfx942/gfx950; other
 # architectures take the fallback decode kernel, so its tests are skipped there.
 requires_split_decode_arch = pytest.mark.skipif(
     not _on_split_decode_arch(),
     reason="split-K decode kernel is only tuned for AMD gfx942/gfx950",
 )
+requires_gfx950 = pytest.mark.skipif(
+    not _on_gfx950(), reason="Gluon sparse decode kernel is only used on gfx950"
+)
 
 NOPE_HEAD_DIM = 448
 ROPE_HEAD_DIM = 64
 HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
+
+
+def _make_split_k_buffers(
+    num_queries: int,
+    num_splits: int,
+    num_heads: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    partitions = num_queries * num_splits
+    return (
+        torch.empty((partitions, num_heads), dtype=torch.float32, device=device),
+        torch.empty((partitions, num_heads), dtype=torch.float32, device=device),
+        torch.empty(
+            (partitions, num_heads, HEAD_DIM),
+            dtype=torch.float32,
+            device=device,
+        ),
+    )
 
 
 def _ref_global_topk_ragged(
@@ -425,6 +457,66 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+@requires_gfx950
+@torch.inference_mode()
+def test_sparse_attn_decode_ue8m0_scale_groups() -> None:
+    """Each packed UE8M0 byte scales exactly one 64-column NoPE group."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    device = torch.device("cuda")
+    block_size = 1
+    cache = torch.zeros(
+        (1, block_size, 584),
+        dtype=torch.uint8,
+        device=device,
+    )
+    cache_flat = cache.flatten()
+    one_bits = (
+        torch.ones(NOPE_HEAD_DIM, dtype=torch.float32, device=device)
+        .to(torch.float8_e4m3fn)
+        .view(torch.uint8)
+    )
+    cache_flat[:NOPE_HEAD_DIM].copy_(one_bits)
+    encoded_scales = torch.tensor(
+        [0, 125, 126, 127, 128, 129, 130],
+        dtype=torch.uint8,
+        device=device,
+    )
+    cache_flat[576:583].copy_(encoded_scales)
+    cache_flat[583] = 0
+
+    q = torch.zeros((1, 1, HEAD_DIM), dtype=torch.bfloat16, device=device)
+    empty_indices = torch.empty(0, dtype=torch.int32, device=device)
+    empty_indptr = torch.zeros(2, dtype=torch.int32, device=device)
+    extra_indices = torch.zeros(1, dtype=torch.int32, device=device)
+    extra_indptr = torch.tensor([0, 1], dtype=torch.int32, device=device)
+
+    actual = mod._rocm_sparse_attn_decode_ragged_triton(
+        q=q,
+        main_cache=cache,
+        main_indices=empty_indices,
+        main_indptr=empty_indptr,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=cache,
+        extra_indices=extra_indices,
+        extra_indptr=extra_indptr,
+    )
+
+    expected_bits = encoded_scales.to(torch.int32) << 23
+    expected_bits[0] = 1 << 22
+    expected_scales = expected_bits.view(torch.float32)
+    expected = torch.cat(
+        [
+            expected_scales.repeat_interleave(64),
+            torch.zeros(ROPE_HEAD_DIM, dtype=torch.float32, device=device),
+        ]
+    ).to(torch.bfloat16)
+    torch.testing.assert_close(actual[0, 0], expected, atol=1e-3, rtol=1e-3)
+
+
 @requires_split_decode_arch
 @torch.inference_mode()
 def test_decode_num_splits_heuristic(monkeypatch) -> None:
@@ -439,19 +531,82 @@ def test_decode_num_splits_heuristic(monkeypatch) -> None:
     # A tiny batch on a large device should split to add parallelism.
     assert mod._decode_num_splits(2, 1, avg_main_len=256.0, avg_extra_len=0.0) > 1
 
-    # Long C128A rows need 32 splits to fill a 256-CU device at low batch.
-    assert mod._decode_num_splits(1, 1, 128.0, 8192.0) == 32
-    assert mod._decode_num_splits(8, 1, 128.0, 8192.0) == 32
-    assert mod._decode_num_splits(64, 1, 128.0, 8192.0) == 4
+    # Preserve the standard-kernel limit while allowing gfx950's long-context
+    # path to opt into 32 splits.
+    assert mod._decode_num_splits(1, 1, 128.0, 8192.0) == 16
+    assert mod._decode_num_splits(1, 1, 128.0, 8192.0, max_splits=32) == 32
+    assert mod._decode_num_splits(8, 1, 128.0, 8192.0, max_splits=32) == 32
+    assert mod._decode_num_splits(64, 1, 128.0, 8192.0, max_splits=32) == 4
+    max_queries = 512
+    max_partitions = mod._max_decode_partitions(max_queries, 1, 32)
+    assert all(
+        queries
+        * mod._decode_num_splits(
+            queries,
+            1,
+            avg_main_len=128.0,
+            avg_extra_len=8192.0,
+            max_splits=32,
+        )
+        <= max_partitions
+        for queries in range(1, max_queries + 1)
+    )
 
-    # The chosen count always stays within the searched [1, 32] range, and a
+    # The default count always stays within the standard [1, 16] range, and a
     # zero-length workload never splits (no work to parallelize).
     for num_queries in (1, 4, 24, 224, 1024):
         splits = mod._decode_num_splits(
             num_queries, 1, avg_main_len=512.0, avg_extra_len=128.0
         )
-        assert 1 <= splits <= 32
+        assert 1 <= splits <= 16
     assert mod._decode_num_splits(2, 1, avg_main_len=0.0, avg_extra_len=0.0) >= 1
+
+
+@requires_split_decode_arch
+@torch.inference_mode()
+def test_sparse_attn_decode_rejects_invalid_indices(monkeypatch) -> None:
+    """Full-tile sentinels and tail OOB slots are ignored."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    device = torch.device("cuda")
+    torch.manual_seed(17)
+    block_size = 4
+    num_kv = 8
+    num_heads = 3
+    q = torch.randn(1, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    kv = torch.randn(num_kv, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    cache = _pack_fp8_ds_mla_cache(
+        kv,
+        block_size,
+        use_fnuz=current_platform.is_fp8_fnuz(),
+    )
+    row = [i % num_kv for i in range(65)]
+    row[5] = -1
+    row[64] = num_kv
+    indices, indptr = _ragged_from_rows([row], device)
+
+    monkeypatch.setattr(mod, "_decode_num_splits", lambda *args, **kwargs: 1)
+    actual = mod._rocm_sparse_attn_decode_ragged_triton(
+        q=q,
+        main_cache=cache,
+        main_indices=indices,
+        main_indptr=indptr,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+    )
+    expected = _ref_sparse_decode_ragged(
+        q=q,
+        main_cache=cache,
+        main_rows=[[slot for slot in row if 0 <= slot < num_kv]],
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        block_size=block_size,
+        main_use_fnuz=current_platform.is_fp8_fnuz(),
+    )
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
 @requires_split_decode_arch
@@ -460,7 +615,10 @@ def test_decode_num_splits_heuristic(monkeypatch) -> None:
 @pytest.mark.parametrize("with_sink", [True, False])
 @torch.inference_mode()
 def test_sparse_attn_decode_split_k_kernel(
-    monkeypatch, num_splits: int, with_extra: bool, with_sink: bool
+    monkeypatch,
+    num_splits: int,
+    with_extra: bool,
+    with_sink: bool,
 ) -> None:
     """Flash-decode split-K decode path (partial + reduce kernels).
 
@@ -510,6 +668,7 @@ def test_sparse_attn_decode_split_k_kernel(
 
     # Pin the split count so each parametrized value is exercised deterministically.
     monkeypatch.setattr(mod, "_decode_num_splits", lambda *args, **kwargs: num_splits)
+    split_k_buffers = _make_split_k_buffers(num_queries, num_splits, num_heads, device)
 
     actual = mod._rocm_sparse_attn_decode_ragged_triton(
         q=q,
@@ -523,6 +682,7 @@ def test_sparse_attn_decode_split_k_kernel(
         extra_cache=extra_cache,
         extra_indices=extra_indices,
         extra_indptr=extra_indptr,
+        split_k_buffers=split_k_buffers,
     )
     expected = _ref_sparse_decode_ragged(
         q=q,
@@ -568,6 +728,7 @@ def test_sparse_attn_decode_long_context(monkeypatch) -> None:
     scale = HEAD_DIM**-0.5
 
     monkeypatch.setattr(mod, "_decode_num_splits", lambda *args, **kwargs: 32)
+    split_k_buffers = _make_split_k_buffers(1, 32, num_heads, device)
     actual = mod._rocm_sparse_attn_decode_ragged_triton(
         q=q,
         main_cache=main_cache,
@@ -580,6 +741,7 @@ def test_sparse_attn_decode_long_context(monkeypatch) -> None:
         extra_cache=extra_cache,
         extra_indices=extra_indices,
         extra_indptr=extra_indptr,
+        split_k_buffers=split_k_buffers,
     )
 
     kv = _read_fp8_ds_mla_cache_rows(
