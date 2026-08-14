@@ -281,7 +281,10 @@ class TestTurboQuantKVCacheSpec:
     @pytest.mark.parametrize("preset", ALL_PRESETS)
     def test_kv_cache_spec_sets_kv_quant_mode(self, preset):
         from vllm.model_executor.layers.attention.attention import Attention
-        from vllm.v1.kv_cache_interface import KVQuantMode, TQFullAttentionSpec
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionBackend,
+        )
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
 
         layer = SimpleNamespace(
             attn_type="decoder",
@@ -294,10 +297,16 @@ class TestTurboQuantKVCacheSpec:
         )
         vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=32))
 
+        # The layer builds an unpacked spec; the worker's spec-collection
+        # loop applies TQ slot packing via the backend's customize_spec hook.
         spec = Attention.get_kv_cache_spec(layer, vllm_config)
+        assert isinstance(spec, FullAttentionSpec)
+        assert spec.kv_quant_mode.is_turboquant
+        assert spec.state_content_bytes is None
 
-        assert isinstance(spec, TQFullAttentionSpec)
-        assert spec.kv_quant_mode == KVQuantMode.TURBOQUANT
+        spec = TurboQuantAttentionBackend.customize_spec(spec)
+        expected_slot = TurboQuantConfig.from_cache_dtype(preset, 128).slot_size_aligned
+        assert spec.state_content_bytes == expected_slot
 
 
 class TestTurboQuantWorkspaceReservation:
@@ -333,15 +342,15 @@ class TestTurboQuantWorkspaceReservation:
 
     @staticmethod
     def _fake_kv_cache_spec():
-        from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-        return TQFullAttentionSpec(
+        return FullAttentionSpec(
             block_size=32,
             num_kv_heads=4,
             head_size=128,
             head_size_v=128,
             dtype=torch.uint8,
-            tq_slot_size=102,
+            state_content_bytes=102,
         )
 
     def test_metadata_builder_reserves_decode_and_continuation_prefill_workspace(

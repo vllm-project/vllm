@@ -70,3 +70,36 @@ def test_degenerate_structured_outputs_rejected(structured_outputs, match):
             StructuredOutputsConfig(),
             tokenizer=object(),
         )
+
+
+@pytest.mark.parametrize(
+    "regex",
+    [
+        "\x00",  # a lone leading NUL
+        "\x00\x01\x02\x1f",  # a NUL followed by other control chars
+        "[0-9]\x00",  # an embedded NUL
+    ],
+)
+def test_regex_with_nul_byte_rejected(regex):
+    """A NUL byte is never meaningful in a structured-outputs regex and is not
+    handled by xgrammar's native regex converter. It must be rejected at request
+    validation in every backend mode (a clean 400), instead of reaching that
+    native code or silently falling back to another backend in the default
+    'auto' mode."""
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(regex=regex))
+
+    # Rejected before backend selection, so it is a 400 even in 'auto' mode
+    # (which would otherwise catch the error and fall back to another backend).
+    with pytest.raises(VLLMValidationError, match="NUL"):
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(),
+            tokenizer=object(),
+        )
+
+    # The xgrammar backend also rejects it directly (defense in depth), before
+    # the pattern reaches the native from_regex call.
+    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+
+    with pytest.raises(ValueError, match="NUL"):
+        validate_xgrammar_grammar(params)

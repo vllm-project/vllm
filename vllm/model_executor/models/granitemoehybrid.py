@@ -663,7 +663,7 @@ class GraniteMoeHybridForCausalLM(
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(
             config.vocab_size,
             config.vocab_size,
