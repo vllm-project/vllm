@@ -59,7 +59,8 @@ Fusions:
 - `-cc.pass_config.fuse_mla_dual_rms_norm=True`†
 
 \* These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.</br>
-† These fusions are ROCm-only and require AITER.
+† This optimization-level default is ROCm-only and requires AITER. CUDA support
+for `fuse_rope_kvcache` is opt-in through `PassConfig`.
 
 ### `-O2`: Full Optimization (Default)
 
