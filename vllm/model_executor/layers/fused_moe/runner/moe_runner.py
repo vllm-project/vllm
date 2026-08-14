@@ -50,6 +50,7 @@ from vllm.utils.torch_utils import (
     LayerName,
     direct_register_custom_op,
 )
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -262,6 +263,14 @@ class MoERunner(MoERunnerInterface):
         self.shared_expert_gate = shared_expert_gate
         self.routed_experts = routed_experts
         self.enable_dbo = enable_dbo
+
+        # Persistent copy targets (one per DBO ubatch id) for the routed input,
+        # used only when it aliases an overlapped shared-experts input that the
+        # aux stream is still reading (see `_maybe_copy_routed_input`). Sized to
+        # the largest cudagraph decode batch so the copy is allocation-free on
+        # the hot path and stable-address under graph capture.
+        self._routed_input_buffer: list[torch.Tensor | None] = [None, None]
+        self._max_routed_input_rows = moe_config.max_capture_size
 
         # When both gates are present and FSE is enabled, fuse their
         # weight matrices into [num_experts + num_shared, hidden] so one
@@ -567,6 +576,61 @@ class MoERunner(MoERunnerInterface):
             assert shared_experts_input is not None
             self._shared_experts(shared_experts_input, order)
 
+    def _maybe_copy_routed_input(
+        self,
+        hidden_states: torch.Tensor,
+        shared_experts_input: torch.Tensor,
+    ) -> torch.Tensor:
+        """Copy the routed input when it aliases the overlapped shared input.
+
+        The shared experts read ``shared_experts_input`` on the aux stream. When
+        the routed input still shares storage with it (the internal-MK path that
+        did not reassign ``hidden_states`` to a fresh gathered buffer, and no
+        padding intervened), the routed kernel's in-place write would corrupt
+        that concurrent read. Copy the routed input into a persistent,
+        main-stream-only buffer and return it so the kernel overwrites the copy
+        instead. Returns ``hidden_states`` unchanged when the alias was already
+        broken (e.g. by DP dispatch or padding), so no copy is paid then.
+
+        The copy uses no cross-stream event and no ``record_stream``, so it stays
+        cudagraph-capture-safe. The buffer is sized to the largest cudagraph
+        decode batch and reused across steps; growth only happens eagerly
+        (warmup/eager), never mid-capture.
+
+        Args:
+            hidden_states: The routed input handed to the fused MoE kernel.
+            shared_experts_input: The tensor the aux stream is reading.
+
+        Returns:
+            A private copy of ``hidden_states`` when it shares storage with
+            ``shared_experts_input``, otherwise ``hidden_states`` unchanged.
+        """
+        if (
+            hidden_states.untyped_storage().data_ptr()
+            != shared_experts_input.untyped_storage().data_ptr()
+        ):
+            return hidden_states
+
+        idx = dbo_current_ubatch_id() if self.enable_dbo else 0
+        buf = self._routed_input_buffer[idx]
+        num_rows = hidden_states.shape[0]
+        if (
+            buf is None
+            or buf.shape[0] < num_rows
+            or buf.shape[1:] != hidden_states.shape[1:]
+            or buf.dtype != hidden_states.dtype
+        ):
+            rows = max(num_rows, self._max_routed_input_rows)
+            buf = torch.empty(
+                (rows, *hidden_states.shape[1:]),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            self._routed_input_buffer[idx] = buf
+        out = buf[:num_rows]
+        out.copy_(hidden_states)
+        return out
+
     def _apply_quant_method(
         self,
         hidden_states: torch.Tensor,
@@ -589,15 +653,17 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        # When shared experts run on the aux stream, they alias
-        # `shared_experts_input` with `hidden_states`, which the routed kernel
-        # below overwrites in place. Wait until the aux stream has taken its own
-        # snapshot of that buffer before launching the routed kernel. The
-        # snapshot is issued early (before the gate/dispatch above), so this
-        # resolves with essentially no stall while the shared MLP still overlaps.
-        if shared_experts_overlapping:
-            assert self._shared_experts is not None
-            self._shared_experts.wait_input_consumed()
+        # When shared experts overlap on the aux stream, they read
+        # `shared_experts_input`. If the routed input below still shares storage
+        # with it (some models, e.g. Qwen3.5, alias the two, and the ROCm AITER
+        # routed kernel overwrites its input in place), copy the routed input so
+        # the kernel mutates a private buffer instead of the tensor the aux
+        # stream is reading. The copy is main-stream-only and is not waited on by
+        # either stream, so the shared MLP overlaps it.
+        if shared_experts_overlapping and shared_experts_input is not None:
+            hidden_states = self._maybe_copy_routed_input(
+                hidden_states, shared_experts_input
+            )
 
         if self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
