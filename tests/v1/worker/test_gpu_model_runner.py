@@ -404,8 +404,8 @@ def test_preferred_block_size_satisfies_all_backends():
     main = _make_backend_cls_for_kernel_block_size([32, 64])
     indexer = _make_backend_cls_for_kernel_block_size([64])
 
-    assert Platform._preferred_block_size_for_backends([main, indexer], 16) == 64
-    assert Platform._preferred_block_size_for_backends([main], 16) == 32
+    assert Platform._preferred_block_size_for_backends([main, indexer], 16, None) == 64
+    assert Platform._preferred_block_size_for_backends([main], 16, None) == 32
 
 
 def test_preferred_block_size_single_backend_keeps_default():
@@ -413,7 +413,7 @@ def test_preferred_block_size_single_backend_keeps_default():
 
     backend = _make_backend_cls_for_kernel_block_size([MultipleOf(16)])
 
-    assert Platform._preferred_block_size_for_backends([backend], 16) == 16
+    assert Platform._preferred_block_size_for_backends([backend], 16, None) == 16
 
 
 def test_kernel_block_granularity_lcm():
@@ -432,7 +432,10 @@ def test_preferred_block_size_extends_to_common_multiple():
     backend_a = _make_backend_cls_for_kernel_block_size([32])
     backend_b = _make_backend_cls_for_kernel_block_size([48])
 
-    assert Platform._preferred_block_size_for_backends([backend_a, backend_b], 16) == 96
+    assert (
+        Platform._preferred_block_size_for_backends([backend_a, backend_b], 16, None)
+        == 96
+    )
 
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
