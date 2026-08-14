@@ -405,7 +405,14 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     assert manager.block_pools[0].get_num_free_blocks() == 1
 
     second = make_request("second", list(range(16)), block_size, sha256)
-    assert manager.allocate_slots(second, num_new_tokens=16) is None
+    assert (
+        manager.allocate_slots(
+            second,
+            num_new_tokens=16,
+            full_sequence_must_fit=True,
+        )
+        is None
+    )
     assert manager.hisparse_coordinator.has_pending_reclamation()
     spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
     assert len(spills) == 4
@@ -414,7 +421,14 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     )
     assert not manager.hisparse_coordinator.has_pending_reclamation()
     assert not manager.hisparse_coordinator.are_requests_fully_resident(["first"])
-    assert manager.allocate_slots(second, num_new_tokens=16) is not None
+    assert (
+        manager.allocate_slots(
+            second,
+            num_new_tokens=16,
+            full_sequence_must_fit=True,
+        )
+        is not None
+    )
 
     first_blocks = manager.get_block_ids("first")
     assert first_blocks[2][:4] == [0, 0, 0, 0]
