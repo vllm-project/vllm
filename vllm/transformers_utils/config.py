@@ -1127,6 +1127,12 @@ def get_hf_text_config(config: PretrainedConfig):
     """
     text_config = config.get_text_config()
 
+    # Transformers >=5.15 raises AmbiguousGlobalPerLayerAttributeError for
+    # heterogeneous per-layer attributes (e.g. head_dim on Gemma4-E4B).
+    # vLLM handles per-layer differences explicitly, so enable global access.
+    if hasattr(text_config, "allow_global_per_layer_attribute_access"):
+        text_config.allow_global_per_layer_attribute_access = True
+
     if text_config is not config and not hasattr(text_config, "num_attention_heads"):
         raise ValueError(
             "The text_config extracted from the model config does not have "

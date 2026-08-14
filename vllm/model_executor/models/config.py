@@ -76,14 +76,23 @@ class Gemma4Config(VerifyAndUpdateConfig):
         with different head dimensions for prefill-decode disaggregation.
         """
         hf_text_config = vllm_config.model_config.hf_text_config
-        head_dim = getattr(hf_text_config, "head_dim", None)
-        global_head_dim = getattr(hf_text_config, "global_head_dim", None)
+        try:
+            head_dim = getattr(hf_text_config, "head_dim", None)
+        except Exception:
+            # Transformers >=5.15 raises for heterogeneous per-layer attrs
+            per_layer = getattr(hf_text_config, "per_layer_config", None)
+            head_dim = min(lc.head_dim for lc in per_layer) if per_layer else None
+        try:
+            global_head_dim = getattr(hf_text_config, "global_head_dim", None)
+        except Exception:
+            per_layer = getattr(hf_text_config, "per_layer_config", None)
+            global_head_dim = max(lc.head_dim for lc in per_layer) if per_layer else None
 
         # Only force Triton when head dimensions actually differ AND the
         # larger one exceeds FlashAttention's kernel limit (head_size <= 256).
-        # This avoids unnecessary backend forcing on smaller models where
-        # the config carries global_head_dim but all layers can still use
-        # the same FA backend.
+        # On XPU, per-layer backend routing is handled in xpu.py's
+        # get_attn_backend_cls, so skip the global forcing.
+        from vllm.platforms import current_platform
         max_head_dim = max(head_dim or 0, global_head_dim or 0)
         if (
             head_dim is not None
@@ -91,6 +100,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
             and head_dim != global_head_dim
             and max_head_dim > 256
             and vllm_config.attention_config.backend is None
+            and current_platform.device_type != "xpu"
         ):
             from vllm.v1.attention.backends.registry import (
                 AttentionBackendEnum,

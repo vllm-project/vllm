@@ -92,6 +92,17 @@ class XPUPlatform(Platform):
                 f"with use_mla: {attn_selector_config.use_mla}"
             )
 
+        # XPU Flash Attention SYCL kernel supports head_size <= 256.
+        # Route larger head sizes (e.g. Gemma4 global attention) to Triton.
+        head_size = attn_selector_config.head_size
+        if head_size is not None and head_size > 256:
+            logger.info(
+                "head_size=%d exceeds XPU Flash Attention limit (256). "
+                "Falling back to Triton Attention for this layer.",
+                head_size,
+            )
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
+
         logger.info("Using Flash Attention backend.")
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 

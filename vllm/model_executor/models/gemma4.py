@@ -211,7 +211,13 @@ def _get_text_config(config):
     transparently returns the text config regardless of nesting.
     """
     if hasattr(config, "text_config"):
-        return config.text_config
+        config = config.text_config
+    # Transformers >=5.15 raises AmbiguousGlobalPerLayerAttributeError
+    # for heterogeneous per-layer attributes (e.g. head_dim on E4B).
+    # Gemma4 already handles per-layer head_dim via layer_types, so
+    # enable global access to avoid the exception.
+    if hasattr(config, "allow_global_per_layer_attribute_access"):
+        config.allow_global_per_layer_attribute_access = True
     return config
 
 
@@ -559,7 +565,12 @@ class Gemma4DecoderLayer(nn.Module):
         # Gemma4 uses different head dimensions for sliding vs full attention
         layer_type = config.layer_types[layer_idx]
         self.is_full_attention = layer_type == "full_attention"
-        if self.is_full_attention:
+        # Use per-layer config if available (transformers >=5.15
+        # heterogeneous configs, e.g. E4B where global_head_dim is absent)
+        per_layer = getattr(config, "per_layer_config", None)
+        if per_layer is not None:
+            head_dim = per_layer[layer_idx].head_dim
+        elif self.is_full_attention:
             head_dim = getattr(config, "global_head_dim", config.head_dim)
         else:
             head_dim = config.head_dim
