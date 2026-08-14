@@ -19,7 +19,6 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
@@ -29,8 +28,6 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadataBuilder,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-    SparseDecodeSplitKBuffers,
-    _max_decode_partitions,
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
     rocm_sparse_attn_decode,
@@ -454,44 +451,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
     def __init__(self, *args, **kwargs):
-        vllm_config = args[0] if args else kwargs["vllm_config"]
         super().__init__(*args, **kwargs)
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
-        self._split_k_buffers: SparseDecodeSplitKBuffers | None = None
-        max_capture_size = (
-            vllm_config.compilation_config.max_cudagraph_capture_size or 0
-        )
-        if _ON_GFX950 and not vllm_config.parallel_config.enable_dbo:
-            self._split_k_max_queries = min(
-                self.max_num_batched_tokens, max_capture_size
-            )
-            heads_blocks = triton.cdiv(self.n_local_heads, 16)
-            self._split_k_max_partitions = (
-                _max_decode_partitions(self._split_k_max_queries, heads_blocks, 32)
-                if self._split_k_max_queries > 0
-                else 0
-            )
-        else:
-            self._split_k_max_queries = 0
-            self._split_k_max_partitions = 0
-
-    def _get_split_k_buffers(
-        self, num_queries: int
-    ) -> SparseDecodeSplitKBuffers | None:
-        if num_queries > self._split_k_max_queries:
-            return None
-        if self._split_k_buffers is None:
-            partitions = self._split_k_max_partitions
-            heads = self.n_local_heads
-            part_m, part_l, part_acc = current_workspace_manager().get_simultaneous(
-                ((partitions, heads), torch.float32),
-                ((partitions, heads), torch.float32),
-                ((partitions, heads, self.head_dim), torch.float32),
-            )
-            self._split_k_buffers = (part_m, part_l, part_acc)
-        return self._split_k_buffers
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -703,7 +666,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             nope_head_dim=self.nope_head_dim,
             rope_head_dim=self.rope_head_dim,
             output=output,
-            split_k_buffers=self._get_split_k_buffers(q.shape[0]),
         )
 
     def _forward_prefill(
