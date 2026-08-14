@@ -68,7 +68,7 @@ def _apply(
     num_computed_tokens = torch.zeros(MAX_NUM_REQS, dtype=torch.int32, device=DEVICE)
     for batch_idx, req_index in enumerate(batch.idx_mapping.tolist()):
         num_computed_tokens[req_index] = num_computed[batch_idx]
-    base = torch.randn(num_tokens, HIDDEN, device=DEVICE)
+    base = torch.randn(num_tokens, HIDDEN, dtype=torch.float32, device=DEVICE)
     inputs_embeds = base.clone()
     state.apply(batch, num_computed_tokens, inputs_embeds)
     torch.accelerator.synchronize()
@@ -80,8 +80,8 @@ def test_overlay_chunked_prefill_and_decode():
     num_computed offset; requests without embeds and requests past their
     embeds length (decode) keep the base embedding."""
     state = _make_state()
-    embeds_a = torch.randn(6, HIDDEN)
-    embeds_b = torch.randn(5, HIDDEN)
+    embeds_a = torch.randn(6, HIDDEN, dtype=torch.float32)
+    embeds_b = torch.randn(5, HIDDEN, dtype=torch.float32)
     state.add_request(0, _NewReqData("a", embeds_a))
     state.add_request(1, _NewReqData("b", embeds_b))
     state.add_request(2, _NewReqData("c", None))
@@ -99,7 +99,7 @@ def test_overlay_clamps_to_embeds_length():
     """A window straddling the end of the prompt embeds writes only the
     in-range rows (e.g. final prefill chunk + sampled token)."""
     state = _make_state()
-    embeds = torch.randn(4, HIDDEN)
+    embeds = torch.randn(4, HIDDEN, dtype=torch.float32)
     state.add_request(3, _NewReqData("a", embeds))
     state.apply_staged_writes()
 
@@ -114,7 +114,7 @@ def test_overlay_respects_is_token_ids_mask():
     """Mixed mode: positions marked as real token ids keep the base
     embedding; only embed positions are overwritten."""
     state = _make_state()
-    embeds = torch.randn(5, HIDDEN)
+    embeds = torch.randn(5, HIDDEN, dtype=torch.float32)
     is_token_ids = [True, False, False, True, False]
     state.add_request(0, _NewReqData("a", embeds, is_token_ids))
     state.apply_staged_writes()
@@ -132,10 +132,10 @@ def test_index_reuse_clears_stale_entry():
     """A request added at a previously-used index without embeds must not
     inherit the prior occupant's pointer-table entry."""
     state = _make_state()
-    state.add_request(0, _NewReqData("a", torch.randn(4, HIDDEN)))
+    state.add_request(0, _NewReqData("a", torch.randn(4, HIDDEN, dtype=torch.float32)))
     # A second live embeds request so the kernel actually launches (the
     # overlay is skipped entirely when no request holds embeds).
-    other = torch.randn(2, HIDDEN)
+    other = torch.randn(2, HIDDEN, dtype=torch.float32)
     state.add_request(1, _NewReqData("other", other))
     state.apply_staged_writes()
     state.remove_request("a")

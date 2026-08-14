@@ -76,6 +76,8 @@ class PromptEmbedsState:
         """Overlay prompt embeddings onto `inputs_embeds` for the batch."""
         if not self.gpu_tensors:
             return
+        # The kernel reinterprets raw source pointers as inputs_embeds' dtype.
+        assert inputs_embeds.dtype == self.dtype
         num_reqs = input_batch.num_reqs
         max_query_len = int(input_batch.num_scheduled_tokens.max())
         grid = (num_reqs, triton.cdiv(max_query_len, TOKEN_BLOCK))
