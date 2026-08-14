@@ -19,6 +19,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
     selective_state_update_replayssm_triton,
+    update_replayssm_ring_trackers,
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -41,6 +42,29 @@ try:
     HAS_FLASHINFER_CHECKPOINTING_SSU = True
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_flashinfer_replayssm_ring_tracker_lifecycle():
+    ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
+    prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
+    state_batch_indices = torch.tensor([1], dtype=torch.int32, device="cuda")
+
+    observed = []
+    for _ in range(33):
+        update_replayssm_ring_trackers(
+            ring_start,
+            prev_num_accepted,
+            state_batch_indices,
+            logical_window=16,
+        )
+        observed.append((int(ring_start[1]), int(prev_num_accepted[1])))
+
+    assert observed[4] == (0, 5)
+    assert observed[15] == (0, 16)
+    assert observed[16] == (16, 1)
+    assert observed[31] == (16, 16)
+    assert observed[32] == (15, 1)
 
 
 def _kv_cache_config_with_ssu(
