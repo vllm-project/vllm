@@ -371,11 +371,14 @@ class MuseGlimmerAssistantConfig(Qwen3Config):
         self,
         vocab_size: int = 202048,
         use_sliding_window: bool = True,
+        dflash_config: dict | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
             vocab_size=vocab_size, use_sliding_window=use_sliding_window, **kwargs
         )
+        # muse_glimmer_assistant uses non-causal attention.
+        self.dflash_config = {"causal": False} | (dflash_config or {})
 
 
 __all__ = [
