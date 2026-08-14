@@ -110,19 +110,23 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
-  parallelism: 3
+  parallelism: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
+    # An index outside 0-3 would skip every guard and pass empty; fail it instead.
+    - case "$$BUILDKITE_PARALLEL_JOB" in 0|1|2|3) ;; *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" && exit 1;; esac
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     # Timing-balanced index buckets over the 7 hybrid_ssm_configs (measured on
-    # build 83851): shard 0 = configs 0,4 (~14.5m), shard 1 = configs 5,6
-    # (~13.2m), shard 2 = configs 1,2,3 (~16.3m). CONFIG_EXPECTED_COUNT makes
-    # the sweep fail loudly if the config array changes without rebalancing.
-    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || HYBRID_SSM=1 CONFIG_EXPECTED_COUNT=7 CONFIG_INDICES=0,4 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
-    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || HYBRID_SSM=1 CONFIG_EXPECTED_COUNT=7 CONFIG_INDICES=5,6 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
-    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || HYBRID_SSM=1 CONFIG_EXPECTED_COUNT=7 CONFIG_INDICES=1,2,3 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    # build 83924): shard 0 = config 0 (~8.2m), shard 1 = configs 4,5 (~13.0m),
+    # shard 2 = configs 6,1 (~12.9m), shard 3 = configs 2,3 (~11.4m).
+    # CONFIG_EXPECTED_COUNT makes the sweep fail loudly if the config array
+    # changes without rebalancing.
+    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || HYBRID_SSM=1 CONFIG_EXPECTED_COUNT=7 CONFIG_INDICES=0 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || HYBRID_SSM=1 CONFIG_EXPECTED_COUNT=7 CONFIG_INDICES=4,5 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || HYBRID_SSM=1 CONFIG_EXPECTED_COUNT=7 CONFIG_INDICES=6,1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - test "$$BUILDKITE_PARALLEL_JOB" != "3" || HYBRID_SSM=1 CONFIG_EXPECTED_COUNT=7 CONFIG_INDICES=2,3 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
       dind: false
