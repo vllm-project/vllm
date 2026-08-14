@@ -1016,11 +1016,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
-        # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is
-        # installed. Chained with && through the mooncake swap below: this RUN has no
-        # `set -e`, so its status is that of the last command, and a trailing no-op
-        # would otherwise mask a failure here.
-        uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR} && \
         # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
         # cuda13 variant. Uninstall first; both ship the `mooncake` package.
         # Mirrors .buildkite/scripts/install-kv-connectors.sh.
