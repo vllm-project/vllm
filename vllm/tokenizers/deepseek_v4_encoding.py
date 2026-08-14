@@ -199,6 +199,37 @@ def find_last_user_index(messages: List[Dict[str, Any]]) -> int:
 # Message Rendering
 # ============================================================
 
+def opens_thinking_block(
+    index: int,
+    messages: List[Dict[str, Any]],
+    thinking_mode: str,
+    drop_thinking: bool,
+    last_user_idx: int,
+) -> bool:
+    """
+    Whether the assistant turn at `index` opens a real `<think>` block.
+
+    False means the turn is encoded chat-style, with `</think>` placed directly after
+    `<｜Assistant｜>`. An assistant turn whose reasoning is not rendered has no thinking
+    block to open, so emitting `<think></think>` for it would put a token sequence in the
+    prompt that does not appear in any of the reference encoding's expected outputs.
+
+    `index` past the end of `messages` means there is no turn to render yet, i.e. this is
+    the generation prompt, which must open a real block so the model can reason.
+    """
+    if thinking_mode != "thinking":
+        return False
+    msg = messages[index] if 0 <= index < len(messages) else None
+    if msg is None or msg.get("role") != "assistant":
+        return True
+    # A task marker on the preceding message makes this a task output (no thinking).
+    if index - 1 >= 0 and messages[index - 1].get("task") is not None:
+        return False
+    if drop_thinking and index <= last_user_idx:
+        return False
+    return bool(msg.get("reasoning"))
+
+
 def render_message(
     index: int,
     messages: List[Dict[str, Any]],
@@ -334,9 +365,21 @@ def render_message(
         # Check if previous message has a task - if so, this is a task output (no thinking)
         prev_has_task = index - 1 >= 0 and messages[index - 1].get("task") is not None
 
+        # Transition tokens are emitted by the preceding user/developer message; only
+        # close the thinking block here if that message actually opened one.
+        opened_by_prev = (
+            index - 1 >= 0
+            and messages[index - 1].get("role") in ["user", "developer"]
+            and opens_thinking_block(
+                index, messages, thinking_mode, drop_thinking, last_user_idx
+            )
+        )
         if thinking_mode == "thinking" and not prev_has_task:
             if not drop_thinking or index > last_user_idx:
-                thinking_part = thinking_template.format(reasoning=reasoning) + thinking_end_token
+                if opened_by_prev or reasoning:
+                    thinking_part = thinking_template.format(reasoning=reasoning) + thinking_end_token
+                else:
+                    thinking_part = ""
             else:
                 thinking_part = ""
 
@@ -377,9 +420,9 @@ def render_message(
     elif messages[index].get("role") in ["user", "developer"]:
         # Normal generation: append Assistant + thinking token
         prompt += ASSISTANT_SP_TOKEN
-        if not drop_thinking and thinking_mode == "thinking":
-            prompt += thinking_start_token
-        elif drop_thinking and thinking_mode == "thinking" and index >= last_user_idx:
+        if opens_thinking_block(
+            index + 1, messages, thinking_mode, drop_thinking, last_user_idx
+        ):
             prompt += thinking_start_token
         else:
             prompt += thinking_end_token

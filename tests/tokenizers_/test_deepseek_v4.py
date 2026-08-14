@@ -315,3 +315,57 @@ def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
 
     expected = (FIXTURES_DIR / f"test_output_{case_id}.txt").read_text()
     assert prompt == expected
+
+
+def _thinking_prompt_with_reasoning(reasoning):
+    """Render a tool-calling conversation whose first assistant turn has `reasoning`."""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    assistant = {"role": "assistant", "content": "On it."}
+    if reasoning is not None:
+        assistant["reasoning"] = reasoning
+
+    return _tokenizer().apply_chat_template(
+        [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Weather?"},
+            assistant,
+            {"role": "user", "content": "And tomorrow?"},
+        ],
+        tools=tools,
+        tokenize=False,
+        reasoning_effort="high",
+    )
+
+
+@pytest.mark.parametrize("reasoning", ["", None])
+def test_deepseek_v4_no_empty_thinking_block_for_reasoningless_turn(reasoning):
+    """An assistant turn without reasoning is encoded chat-style.
+
+    Declaring tools disables `drop_thinking`, so every prior assistant turn keeps its
+    thinking block. When the client did not send reasoning back for a turn there is
+    nothing to put in that block, and emitting `<think></think>` produces a sequence
+    that appears in none of the reference encoding's expected outputs.
+    """
+    prompt = _thinking_prompt_with_reasoning(reasoning)
+
+    assert "<think></think>" not in prompt
+    assert "<｜Assistant｜></think>On it." in prompt
+    # The generation prompt must still open a real thinking block.
+    assert prompt.endswith("<｜Assistant｜><think>")
+
+
+def test_deepseek_v4_keeps_thinking_block_when_reasoning_present():
+    """Turns that do carry reasoning are unchanged."""
+    prompt = _thinking_prompt_with_reasoning("Let me check the forecast.")
+
+    assert "<｜Assistant｜><think>Let me check the forecast.</think>On it." in prompt
+    assert "<think></think>" not in prompt
+    assert prompt.endswith("<｜Assistant｜><think>")
