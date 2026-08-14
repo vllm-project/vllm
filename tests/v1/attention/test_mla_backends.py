@@ -885,6 +885,9 @@ def test_flashinfer_mla_dcp_multi_token_decode_uses_per_query_bounds(monkeypatch
             block_table=block_table,
             seq_lens=torch.tensor([5, 6], dtype=torch.int32),
             dcp_tot_seq_lens=torch.tensor([10, 13], dtype=torch.int32),
+            flattened_block_table=None,
+            flattened_seq_lens=None,
+            query_len=0,
         ),
     )
     query = torch.empty(6, 2, 576, dtype=torch.bfloat16)
