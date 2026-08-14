@@ -316,6 +316,11 @@ class UBatchWrapper:
 
         results: list[tuple[int, torch.Tensor]] = []
 
+        # Tracing/compilation warmups run with fake prefetch ops, so make sure
+        # any initial or prior-iteration H2D copies have completed before the
+        # first layer consumes its static buffers.
+        get_offloader().sync_prev_onload()
+
         # Ubatch threads will manually manage the forward context, so we
         # override it to None here so we can have it restored correctly
         # after both threads have finished

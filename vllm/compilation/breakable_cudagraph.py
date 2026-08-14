@@ -186,6 +186,10 @@ class BreakableCUDAGraphCapture:
         if not self._capturing:
             return
         assert self._current_graph is not None
+        # Drain any in-flight prefetch H2D copies that were started during
+        # this segment but not yet joined to the compute stream — otherwise
+        # capture_end raises cudaErrorStreamCaptureUnjoined.
+        get_offloader().join_after_forward()
         self._current_graph.capture_end()
         self.segments.append(self._current_graph.replay)
         self._num_graphs += 1

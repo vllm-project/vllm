@@ -16,6 +16,16 @@ from vllm.utils.torch_utils import direct_register_custom_op
 # --- wait_prefetch op ---
 
 
+def _mark_tensor_mutated(tensor: torch.Tensor) -> None:
+    """Bump tensor version without changing values.
+
+    The custom op schema declares a mutation to create a scheduling dependency
+    for torch.compile. Make that contract real so functionalization and alias
+    analysis do not have to reason about a phantom mutation.
+    """
+    tensor.add_(0)
+
+
 def _wait_prefetch_impl(
     input_tensor: torch.Tensor,
     layer_idx: int,
@@ -31,6 +41,7 @@ def _wait_prefetch_impl(
         layer_idx: Index of the layer to wait for.
     """
     get_offloader()._wait_for_layer(layer_idx)
+    _mark_tensor_mutated(input_tensor)
 
 
 def _wait_prefetch_fake(
@@ -47,6 +58,7 @@ def _wait_prefetch_fake(
 def _start_prefetch_impl(
     output_tensor: torch.Tensor,
     layer_idx: int,
+    is_tail_prefetch: bool,
 ) -> None:
     """Start async prefetch of layer_idx weights.
 
@@ -57,13 +69,17 @@ def _start_prefetch_impl(
             prevent torch.compile from reordering this op before the
             computation that produces output_tensor.
         layer_idx: Index of the layer to prefetch.
+        is_tail_prefetch: Whether this prefetch wraps around to the next
+            forward's initial units.
     """
-    get_offloader()._start_prefetch(layer_idx)
+    get_offloader()._start_prefetch(layer_idx, is_tail_prefetch=is_tail_prefetch)
+    _mark_tensor_mutated(output_tensor)
 
 
 def _start_prefetch_fake(
     output_tensor: torch.Tensor,
     layer_idx: int,
+    is_tail_prefetch: bool,
 ) -> None:
     """Fake implementation for torch.compile tracing."""
     return

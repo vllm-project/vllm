@@ -9,6 +9,7 @@ steps:
   source_file_dependencies:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
+  - vllm/config/offload.py
   - vllm/model_executor
   - vllm/model_executor/warmup
   - tests/model_executor
@@ -36,6 +37,7 @@ steps:
       source_file_dependencies:
       - vllm/engine/arg_utils.py
       - vllm/config/model.py
+      - vllm/config/offload.py
       - vllm/model_executor
       - vllm/model_executor/warmup
       - tests/model_executor

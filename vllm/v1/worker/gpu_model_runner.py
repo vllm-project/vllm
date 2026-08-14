@@ -4558,6 +4558,7 @@ class GPUModelRunner(
                 scheduler_output,
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
+            get_offloader().record_forward_stats(),
         ):
             model_output = self._model_forward(
                 input_ids=input_ids,
