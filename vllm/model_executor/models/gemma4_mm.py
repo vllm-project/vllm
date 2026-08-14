@@ -160,18 +160,18 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(Gemma4Config)
 
     def get_default_tok_params(self):
-        """Gemma4's chat template already embeds a literal ``<bos>`` token in
-        the rendered text.  If ``add_special_tokens=True`` (the base-class
-        default), the tokenizer prepends *another* BOS, producing a
-        ``[2, 2, ...]`` double-BOS sequence that the model was not trained on.
+        """Keep the base-class default (``add_special_tokens=True``).
 
-        Setting ``add_special_tokens=False`` here prevents the duplicate and
-        ensures both ``llm.generate()`` and the chat/completions API behave
-        correctly.
+        The Gemma4 tokenizer has ``add_bos_token=False`` by default, so
+        BOS is only prepended via ``add_special_tokens``.  Disabling it
+        would strip BOS from raw-text prompts (e.g. lm_eval GSM8k),
+        producing garbled output because the model expects a leading BOS.
+
+        For chat-template prompts that already contain a literal ``<bos>``
+        token, the tokenizer's ``add_bos_token=False`` prevents double-BOS
+        without needing to override ``add_special_tokens``.
         """
-        params = super().get_default_tok_params()
-        params = params.with_kwargs(add_special_tokens=False)
-        return params
+        return super().get_default_tok_params()
 
     def get_hf_processor(self, **kwargs: object) -> Gemma4Processor:
         return self.ctx.get_hf_processor(
