@@ -89,28 +89,6 @@ class FP8Params(Params):
         )
 
 
-@dataclass
-class Int8Params(Params):
-    """Int8 layer parameters with typed fields"""
-
-    input_zero_point: torch.Tensor | None
-    azp_adj: torch.Tensor | None
-
-    INPUT_ZERO_POINT: ClassVar[str] = "input_zero_point"
-    AZP_ADJ: ClassVar[str] = "azp_adj"
-
-    @classmethod
-    def from_layer(cls, layer: torch.nn.Module) -> "Int8Params":
-        """Extract parameters from layer"""
-        return cls(
-            weight=getattr(layer, cls.WEIGHT),
-            weight_scale=getattr(layer, cls.WEIGHT_SCALE),
-            input_scale=getattr(layer, cls.INPUT_SCALE, None),
-            input_zero_point=getattr(layer, cls.INPUT_ZERO_POINT, None),
-            azp_adj=getattr(layer, cls.AZP_ADJ, None),
-        )
-
-
 _ParamsT = TypeVar("_ParamsT", bound=Params)
 _ConfigT = TypeVar("_ConfigT", bound=MMLinearLayerConfig)
 
@@ -130,7 +108,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
 
     Typical Usage:
         1. Define a config dataclass inheriting from MMLinearLayerConfig
-        2. Define a params dataclass inheriting from Params (or FP8Params/Int8Params)
+        2. Define a params dataclass inheriting from Params
         3. Subclass MMLinearKernel with your config and params types
         4. Implement all abstract methods
         5. Register the kernel with the quantization method
