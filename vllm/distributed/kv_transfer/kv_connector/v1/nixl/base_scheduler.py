@@ -51,6 +51,11 @@ logger = init_logger(__name__)
 class NixlBaseConnectorScheduler:
     """Base implementation of Scheduler side methods shared by pull and push."""
 
+    # Emitted in kv_transfer_params so an external router can distinguish a
+    # pull (READ) producer from a push (WRITE) one. Overridden by the push
+    # scheduler.
+    _TRANSFER_MODE: str = "pull"
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

@@ -90,6 +90,11 @@ logger = init_logger(__name__)
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
+    # Transfer mode included in the NIXL compatibility hash so that a push
+    # (WRITE) connector and a pull (READ) connector never handshake together.
+    # Overridden by NixlPushConnectorWorker.
+    _TRANSFER_MODE: str = "pull"
+
     def _compute_desc_ids(
         self,
         block_ids: BlockIds,
@@ -976,6 +981,7 @@ class NixlBaseConnectorWorker:
             self.vllm_config,
             self.backend_name,
             self.transfer_topo.cross_layers_blocks,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
         total_size = storage.nbytes()
@@ -1066,7 +1072,10 @@ class NixlBaseConnectorWorker:
             is_mamba=self._has_mamba,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
-            self.vllm_config, self.backend_name, self.transfer_topo.cross_layers_blocks
+            self.vllm_config,
+            self.backend_name,
+            self.transfer_topo.cross_layers_blocks,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
         if self.use_host_buffer:
