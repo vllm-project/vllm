@@ -203,6 +203,12 @@ def cpu_platform_plugin() -> str | None:
                 "AMD Zen CPU detected but zentorch not installed, "
                 "falling back to CpuPlatform."
             )
+        except Exception as e:
+            logger.warning(
+                "AMD Zen CPU detected but zentorch failed to import: %s. "
+                "Falling back to CpuPlatform.",
+                str(e),
+            )
 
     return "vllm.platforms.cpu.CpuPlatform"
 
