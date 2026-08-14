@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections import deque
 from types import SimpleNamespace
 from typing import Any
 
@@ -262,7 +263,8 @@ def test_hisparse_worker_enqueues_fused_page_spill(monkeypatch):
         SimpleNamespace(runtime=SimpleNamespace(resident_source_index=0)),
         SimpleNamespace(runtime=SimpleNamespace(resident_source_index=1)),
     ]
-    worker._completed_transfer_ids = []
+    worker._enqueued_transfer_ids = []
+    worker._pending_transfer_events = deque()
     worker.hot_backing = SimpleNamespace(device="cuda:0")
     worker.backup_layer_offsets = object()
     worker.backup_host_anchor = object()
@@ -278,8 +280,11 @@ def test_hisparse_worker_enqueues_fused_page_spill(monkeypatch):
     monkeypatch.setattr(
         torch.accelerator, "current_stream", lambda device: current_stream
     )
-    created_events: list[object] = []
-    monkeypatch.setattr(hisparse_worker_module.torch, "Event", created_events.append)
+    completion_recorded_streams: list[object] = []
+    completion_event = SimpleNamespace(
+        query=lambda: True, record=completion_recorded_streams.append
+    )
+    monkeypatch.setattr(hisparse_worker_module.torch, "Event", lambda: completion_event)
     monkeypatch.setattr(
         hisparse_worker_module.torch,
         "ops",
@@ -306,10 +311,11 @@ def test_hisparse_worker_enqueues_fused_page_spill(monkeypatch):
     assert worker.spill_dst_gpu[:4].tolist() == [44, 45, 46, 47]
     assert worker.spill_src_gpu.dtype == torch.int64
     assert worker.spill_dst_gpu.dtype == torch.int64
-    assert worker._completed_transfer_ids == [7]
-    assert created_events == []
+    assert worker._enqueued_transfer_ids == [7]
+    assert list(worker._pending_transfer_events) == [(completion_event, (7,))]
     assert staging_recorded_streams == [current_stream]
     assert recorded_streams == [current_stream]
+    assert completion_recorded_streams == [current_stream]
 
 
 def test_hisparse_worker_finish_forward_enqueues_deferred_spills(monkeypatch):
@@ -335,10 +341,14 @@ def test_hisparse_worker_finish_forward_enqueues_deferred_spills(monkeypatch):
 
 def test_hisparse_worker_reports_each_completed_transfer_once():
     worker = object.__new__(HiSparseWorker)
-    worker._completed_transfer_ids = [3, 5]
+    worker._enqueued_transfer_ids = [3, 5]
+    queries = iter((False, True))
+    event = SimpleNamespace(query=lambda: next(queries))
+    worker._pending_transfer_events = deque([(event, (3, 5))])
 
-    assert worker.take_completed_transfer_ids() == [3, 5]
-    assert worker.take_completed_transfer_ids() is None
+    assert worker.take_transfer_updates() == ([3, 5], [])
+    assert worker.take_transfer_updates() == ([], [3, 5])
+    assert worker.take_transfer_updates() == ([], [])
 
 
 def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):

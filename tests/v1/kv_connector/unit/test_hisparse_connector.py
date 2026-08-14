@@ -52,7 +52,7 @@ def test_hisparse_connector_routes_commands_and_completions():
     coordinator.build_offload_command.assert_called_once_with(["request"])
 
     hisparse_worker = MagicMock()
-    hisparse_worker.take_completed_transfer_ids.return_value = [3, 7]
+    hisparse_worker.take_transfer_updates.return_value = ([3, 7], [3])
     worker_connector = HiSparseConnector(
         _vllm_config(), KVConnectorRole.WORKER, _kv_cache_config()
     )
@@ -64,12 +64,15 @@ def test_hisparse_connector_routes_commands_and_completions():
 
     hisparse_worker.prepare_step.assert_called_once_with(command, scheduler_output)
     hisparse_worker.finish_forward.assert_called_once_with()
-    assert worker_metadata == HiSparseConnectorWorkerMetadata([3, 7])
+    assert worker_metadata == HiSparseConnectorWorkerMetadata(
+        enqueued_transfer_counts={3: 1, 7: 1},
+        completed_transfer_counts={3: 1},
+    )
 
     scheduler_connector.update_connector_output(
         KVConnectorOutput(kv_connector_worker_meta=worker_metadata)
     )
-    coordinator.complete_spills.assert_called_once_with([3, 7])
+    coordinator.update_spills.assert_called_once_with({3: 1, 7: 1}, {3: 1})
 
 
 def test_hisparse_connector_composes_without_replacing_existing_connector():

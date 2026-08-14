@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from vllm.distributed.kv_events import KVCacheEvent
@@ -32,7 +32,10 @@ class _PendingSpill:
     host_block: KVCacheBlock
     resident_blocks: tuple[KVCacheBlock, ...]
     release_after: bool
-    copy_enqueued: bool = False
+    expected_worker_completions: int = 0
+    worker_completions: int = 0
+    enqueue_applied: bool = False
+    resident_released: bool = False
 
 
 class HiSparseCoordinator:
@@ -250,7 +253,7 @@ class HiSparseCoordinator:
         eventual = sum(
             len(pending.resident_blocks)
             for pending in self.pending_spills.values()
-            if pending.release_after
+            if pending.release_after and not pending.resident_released
         )
         for request_id, pages in sorted(
             by_request.items(), key=lambda item: len(item[1]), reverse=True
@@ -297,6 +300,8 @@ class HiSparseCoordinator:
             eventual -= hot_cost
             if reclaimed + eventual >= num_blocks:
                 break
+        self._apply_enqueued_spills()
+        self._complete_host_writes()
         return reclaimed
 
     def _mark_or_plan_release(
@@ -425,7 +430,8 @@ class HiSparseCoordinator:
 
     def has_pending_reclamation(self) -> bool:
         return bool(self.transition_target_pages) or any(
-            pending.release_after for pending in self.pending_spills.values()
+            pending.release_after and not pending.resident_released
+            for pending in self.pending_spills.values()
         )
 
     def are_requests_fully_resident(self, request_ids: Sequence[str]) -> bool:
@@ -439,17 +445,30 @@ class HiSparseCoordinator:
             )
         )
 
-    def complete_spills(self, spill_ids: Sequence[int] | None) -> None:
-        if not spill_ids:
-            return
-        for spill_id in spill_ids:
+    def update_spills(
+        self,
+        enqueued_counts: Mapping[int, int],
+        completed_counts: Mapping[int, int],
+    ) -> None:
+        for spill_id, count in enqueued_counts.items():
+            pending = self.pending_spills.get(spill_id)
+            if pending is not None and pending.expected_worker_completions == 0:
+                pending.expected_worker_completions = count
+        for spill_id, count in completed_counts.items():
             pending = self.pending_spills.get(spill_id)
             if pending is not None:
-                pending.copy_enqueued = True
+                pending.worker_completions += count
 
+        self._apply_enqueued_spills()
+        self._complete_host_writes()
+
+    def _apply_enqueued_spills(self) -> None:
         ready_by_request: dict[str, list[_PendingSpill]] = {}
         for pending in self.pending_spills.values():
-            if pending.copy_enqueued:
+            if pending.expected_worker_completions and (
+                not pending.enqueue_applied
+                or (pending.release_after and not pending.resident_released)
+            ):
                 ready_by_request.setdefault(pending.page[0], []).append(pending)
 
         for request_id, ready in ready_by_request.items():
@@ -463,7 +482,7 @@ class HiSparseCoordinator:
                     or transition_ready
                     or not pending.release_after
                 ):
-                    self._finalize_spill(pending)
+                    self._apply_enqueued_spill(pending)
             if not transition_ready:
                 continue
 
@@ -476,28 +495,41 @@ class HiSparseCoordinator:
                     manager.activate_hot(request_id)
                 self.block_table_updates.add(request_id)
 
-    def _finalize_spill(self, pending: _PendingSpill) -> None:
+    def _apply_enqueued_spill(self, pending: _PendingSpill) -> None:
         request_id, page_idx = pending.page
-        self.pending_spills.pop(pending.transfer_id, None)
-        self.pending_pages.pop(pending.page, None)
         table_changed = False
         for manager, block in zip(self.resident_managers, pending.resident_blocks):
             current = manager.get_resident_page(request_id, page_idx)
-            if current is block:
+            if current is block and not pending.enqueue_applied:
                 self.host_valid_pages.setdefault(request_id, set()).add(page_idx)
-                if pending.release_after:
-                    released = manager.release_resident_page(
-                        request_id,
-                        page_idx,
-                        expected_block=block,
-                    )
-                    assert released is block
-                    table_changed = True
-            manager.block_pool.free_blocks([block])
-        assert self.host_manager is not None
-        self.host_manager.block_pool.free_blocks([pending.host_block])
+            if current is block and pending.release_after:
+                released = manager.release_resident_page(
+                    request_id,
+                    page_idx,
+                    expected_block=block,
+                )
+                assert released is block
+                table_changed = True
+            if not pending.enqueue_applied:
+                manager.block_pool.free_blocks([block])
+        pending.enqueue_applied = True
+        pending.resident_released = pending.release_after
         if table_changed:
             self.block_table_updates.add(request_id)
+
+    def _complete_host_writes(self) -> None:
+        completed = [
+            pending
+            for pending in self.pending_spills.values()
+            if pending.enqueue_applied
+            and pending.expected_worker_completions
+            and pending.worker_completions >= pending.expected_worker_completions
+        ]
+        for pending in completed:
+            self.pending_spills.pop(pending.transfer_id, None)
+            self.pending_pages.pop(pending.page, None)
+            assert self.host_manager is not None
+            self.host_manager.block_pool.free_blocks([pending.host_block])
 
     def free(self, request_id: str) -> None:
         self.host_valid_pages.pop(request_id, None)

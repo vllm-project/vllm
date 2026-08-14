@@ -45,16 +45,25 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
 
 @dataclass
 class HiSparseConnectorWorkerMetadata(KVConnectorWorkerMetadata):
-    completed_transfer_ids: list[int]
+    enqueued_transfer_counts: dict[int, int]
+    completed_transfer_counts: dict[int, int]
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, HiSparseConnectorWorkerMetadata)
+
+        def add_counts(first: dict[int, int], second: dict[int, int]) -> dict[int, int]:
+            combined = first.copy()
+            for transfer_id, count in second.items():
+                combined[transfer_id] = combined.get(transfer_id, 0) + count
+            return combined
+
         return HiSparseConnectorWorkerMetadata(
-            completed_transfer_ids=list(
-                dict.fromkeys(
-                    self.completed_transfer_ids + other.completed_transfer_ids
-                )
-            )
+            enqueued_transfer_counts=add_counts(
+                self.enqueued_transfer_counts, other.enqueued_transfer_counts
+            ),
+            completed_transfer_counts=add_counts(
+                self.completed_transfer_counts, other.completed_transfer_counts
+            ),
         )
 
 
@@ -117,10 +126,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
 
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         assert self._worker is not None
-        completed = self._worker.take_completed_transfer_ids()
-        if completed is None:
+        enqueued, completed = self._worker.take_transfer_updates()
+        if not enqueued and not completed:
             return None
-        return HiSparseConnectorWorkerMetadata(completed)
+        return HiSparseConnectorWorkerMetadata(
+            enqueued_transfer_counts={transfer_id: 1 for transfer_id in enqueued},
+            completed_transfer_counts={transfer_id: 1 for transfer_id in completed},
+        )
 
     def shutdown(self) -> None:
         if self._worker is not None:
@@ -156,7 +168,10 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         if metadata is None:
             return
         assert isinstance(metadata, HiSparseConnectorWorkerMetadata)
-        self._coordinator.complete_spills(metadata.completed_transfer_ids)
+        self._coordinator.update_spills(
+            metadata.enqueued_transfer_counts,
+            metadata.completed_transfer_counts,
+        )
 
     def request_finished_all_groups(
         self,

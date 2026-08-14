@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -96,7 +97,10 @@ class HiSparseWorker:
         self._block_staging_event: torch.Event | None = None
         self._pending_invalid_block_ids: list[int] = []
         self._post_forward_transfers: list[SparseKVPageTransfer] = []
-        self._completed_transfer_ids: list[int] = []
+        self._enqueued_transfer_ids: list[int] = []
+        self._pending_transfer_events: deque[tuple[torch.Event, tuple[int, ...]]] = (
+            deque()
+        )
         self._init_backup_plan(device, max_model_len, max_concurrent_batches)
 
     def set_request_state_indices(self, indices: torch.Tensor) -> None:
@@ -305,7 +309,8 @@ class HiSparseWorker:
             src_staging[:, :num_rows], non_blocking=True
         )
         self.spill_dst_gpu[:num_rows].copy_(dst_staging[:num_rows], non_blocking=True)
-        staging_event.record(torch.accelerator.current_stream(self.hot_backing.device))
+        current_stream = torch.accelerator.current_stream(self.hot_backing.device)
+        staging_event.record(current_stream)
         self._spill_staging_index = (staging_idx + 1) % len(self._spill_staging_events)
         torch.ops._C_cache_ops.hisparse_backup_layers(
             self.hot_backing,
@@ -320,12 +325,12 @@ class HiSparseWorker:
             self.backup_src_rows,
             self.backup_row_value_bytes,
         )
-        self.host_write_event.record(
-            torch.accelerator.current_stream(self.hot_backing.device)
-        )
-        self._completed_transfer_ids.extend(
-            transfer.transfer_id for transfer in transfers
-        )
+        self.host_write_event.record(current_stream)
+        transfer_ids = tuple(transfer.transfer_id for transfer in transfers)
+        completion_event = torch.Event()
+        completion_event.record(current_stream)
+        self._pending_transfer_events.append((completion_event, transfer_ids))
+        self._enqueued_transfer_ids.extend(transfer_ids)
 
     def finish_forward(self) -> None:
         current_stream = torch.accelerator.current_stream(self.hot_backing.device)
@@ -334,10 +339,17 @@ class HiSparseWorker:
         self._enqueue_transfers(transfers)
         self.host_write_event.record(current_stream)
 
-    def take_completed_transfer_ids(self) -> list[int] | None:
-        completed = self._completed_transfer_ids
-        self._completed_transfer_ids = []
-        return completed or None
+    def take_transfer_updates(self) -> tuple[list[int], list[int]]:
+        enqueued = self._enqueued_transfer_ids
+        self._enqueued_transfer_ids = []
+        completed: list[int] = []
+        while self._pending_transfer_events:
+            event, transfer_ids = self._pending_transfer_events[0]
+            if not event.query():
+                break
+            self._pending_transfer_events.popleft()
+            completed.extend(transfer_ids)
+        return enqueued, completed
 
     def shutdown(self) -> None:
         release_pinned_state([cache.runtime for cache in self.cache_handles])

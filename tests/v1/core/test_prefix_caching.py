@@ -416,9 +416,8 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     assert manager.hisparse_coordinator.has_pending_reclamation()
     spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
     assert len(spills) == 4
-    manager.hisparse_coordinator.complete_spills(
-        [transfer.transfer_id for transfer in spills]
-    )
+    spill_counts = {transfer.transfer_id: 1 for transfer in spills}
+    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
     assert not manager.hisparse_coordinator.has_pending_reclamation()
     assert not manager.hisparse_coordinator.are_requests_fully_resident(["first"])
     assert (
@@ -442,9 +441,8 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     assert manager.hisparse_coordinator.has_pending_reclamation()
     spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
     assert len(spills) == 2
-    manager.hisparse_coordinator.complete_spills(
-        [transfer.transfer_id for transfer in spills]
-    )
+    spill_counts = {transfer.transfer_id: 1 for transfer in spills}
+    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
     assert not manager.hisparse_coordinator.has_pending_reclamation()
     assert manager.allocate_slots(first, num_new_tokens=16) is not None
 
@@ -516,9 +514,8 @@ def test_hisparse_reclamation_caps_each_worker_spill_batch():
     assert len(spills) * block_size == max_model_len
     assert manager.hisparse_coordinator.has_pending_reclamation()
 
-    manager.hisparse_coordinator.complete_spills(
-        [transfer.transfer_id for transfer in spills]
-    )
+    spill_counts = {transfer.transfer_id: 1 for transfer in spills}
+    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
     assert not manager.hisparse_coordinator.has_pending_reclamation()
 
 
@@ -592,7 +589,8 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
     assert len(spills) == 1
     assert spills[0].after_forward
-    manager.hisparse_coordinator.complete_spills([spills[0].transfer_id])
+    spill_counts = {spills[0].transfer_id: 1}
+    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
     blocks = manager.get_block_ids(request.request_id)
     assert len(blocks[2]) == 1
     assert blocks[3] == []
