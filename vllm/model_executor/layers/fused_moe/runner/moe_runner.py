@@ -60,7 +60,7 @@ logger = init_logger(__name__)
 # fires only a handful of times, not every step. Remove once the stream question
 # is resolved.
 _STREAM_DEBUG = os.getenv("VLLM_DEBUG_MOE_STREAMS", "0") == "1"
-_STREAM_DEBUG_MAX = 40
+_STREAM_DEBUG_MAX = 48
 _stream_debug_count = 0
 
 
@@ -701,7 +701,7 @@ class MoERunner(MoERunnerInterface):
                 hidden_states, shared_experts_input
             )
 
-        if _STREAM_DEBUG and shared_experts_overlapping:
+        if _STREAM_DEBUG:
             _stream_debug(
                 f"routed kernel launch: layer={self.layer_name} "
                 f"overlapping={shared_experts_overlapping} "
@@ -969,7 +969,7 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input
             )
 
-        if _STREAM_DEBUG and shared_experts_overlapping:
+        if _STREAM_DEBUG:
             _stream_debug(
                 f"_forward_impl gate: layer={self.layer_name} "
                 f"overlapping={shared_experts_overlapping} "
@@ -990,7 +990,7 @@ class MoERunner(MoERunnerInterface):
             # TODO(bnell): parts of the dispatch/combine steps will go away once
             # #32567 lands and the remaining kernels are made MKs.  The PCP
             # code will probably remain
-            if _STREAM_DEBUG and shared_experts_overlapping:
+            if _STREAM_DEBUG:
                 _stream_debug(
                     f"_forward_impl dispatch: layer={self.layer_name} "
                     f"stream={_fmt_stream(torch.cuda.current_stream())}"
