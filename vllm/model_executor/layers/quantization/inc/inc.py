@@ -73,7 +73,7 @@ class INCConfig(QuantizationConfig):
     def __init__(
         self,
         weight_bits: int,
-        group_size: int | list[int] | tuple[int, int],
+        group_size: int | tuple[int, int],
         sym: bool = True,
         packing_format: str = DEFAULT_INT_PACKING_FORMAT,
         block_name_to_quantize: str | list[str] | None = None,
