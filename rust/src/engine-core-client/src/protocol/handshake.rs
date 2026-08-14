@@ -87,6 +87,15 @@ pub struct EngineCoreReadyResponse {
     /// KV-event publisher configuration, if configured.
     #[serde(default)]
     pub kv_events_config: Option<KvEventsConfig>,
+    /// Configured RL weight-transfer backend, if weight transfer is enabled.
+    #[serde(default)]
+    pub weight_transfer_backend: Option<String>,
+    /// Whether the engine was started with sleep mode enabled.
+    #[serde(default)]
+    pub enable_sleep_mode: bool,
+    /// Whether the engine has a speculative draft model that can be updated.
+    #[serde(default)]
+    pub supports_draft_weight_updates: bool,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

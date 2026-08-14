@@ -92,6 +92,9 @@ class EngineCoreReadyResponse:
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
     kv_events_config: KVEventsConfig | None = None
+    weight_transfer_backend: str | None = None
+    enable_sleep_mode: bool = False
+    supports_draft_weight_updates: bool = False
 
 
 class EngineCoreRequest(
