@@ -30,8 +30,8 @@ from vllm.entrypoints.cohere.protocol import (
     CohereChatV2Response,
 )
 from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
-from vllm.entrypoints.serve.utils.server_utils import (
-    http_exception_handler,
+from vllm.entrypoints.serve.exception_handler.handler.http import http_exception_handler
+from vllm.entrypoints.serve.exception_handler.handler.validation import (
     validation_exception_handler,
 )
 
@@ -422,4 +422,4 @@ class TestCohereErrorEnvelope:
             )
         assert r.status_code == HTTPStatus.BAD_REQUEST
         body = r.json()
-        assert body.get("id") == "req-abc"
+        assert body.get("id") == 
