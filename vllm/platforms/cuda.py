@@ -229,6 +229,10 @@ class CudaPlatformBase(Platform):
         with contextlib.suppress(ImportError):
             import vllm._qutlass_C  # noqa: F401
 
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.has_device_capability(80):

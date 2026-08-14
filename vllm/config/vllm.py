@@ -83,26 +83,10 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     }
 )
 
-# Architectures that default to V1 on ROCm: the V2 runner faults during the
-# profile run. VLLM_USE_V2_MODEL_RUNNER=1 still forces V2.
-# TODO: fix V2 enablement
-ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
-    {
-        "KimiK3ForConditionalGeneration",
-    }
-)
-
 
 @lru_cache
 def default_v2_model_runner_architectures() -> frozenset[str]:
     """Architectures defaulting to the V2 model runner on this platform."""
-    from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        return (
-            DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
-            - ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES
-        )
     return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
 
 
@@ -1039,6 +1023,31 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
+    def _verify_sampling_replay_config(self) -> None:
+        model_config = self.model_config
+        if model_config is None or not model_config.return_sampling_mask:
+            return
+        if not self.use_v2_model_runner:
+            raise ValueError("sampling distribution replay requires Model Runner V2")
+        if self.speculative_config is not None:
+            raise ValueError(
+                "sampling distribution replay does not support speculative decoding"
+            )
+        if model_config.is_diffusion:
+            raise ValueError(
+                "sampling distribution replay does not support diffusion models"
+            )
+        if model_config.logits_processors:
+            raise ValueError(
+                "sampling distribution replay does not support custom logits processors"
+            )
+        if model_config.logprobs_mode != "processed_logprobs":
+            raise ValueError(
+                "sampling distribution replay requires "
+                "logprobs_mode='processed_logprobs' so that returned logprobs "
+                "are normalized over the same nucleus as the sampling mask"
+            )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1065,6 +1074,14 @@ class VllmConfig:
                     "--enable-return-routed-experts is incompatible with "
                     "pipeline parallelism (PP > 1)."
                 )
+            if (
+                self.parallel_config.decode_context_parallel_size > 1
+                or self.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "--enable-return-routed-experts is incompatible with context "
+                    "parallelism (DCP > 1 or PCP > 1)."
+                )
 
             # Incompatible with any KV connector — covers both PD disaggregation
             # (kv_producer/kv_consumer: routing captured on P can't reach D) and
@@ -1079,6 +1096,8 @@ class VllmConfig:
                     "--enable-return-routed-experts is incompatible with KV "
                     "connectors (PD disaggregation, KV cache offload)."
                 )
+
+        self._verify_sampling_replay_config()
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
