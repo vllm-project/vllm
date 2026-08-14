@@ -44,7 +44,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
-from vllm.entrypoints.serve.utils.server_utils import validation_exception_handler
+from vllm.entrypoints.serve.exception_handling.handlers.validation import (
+    validation_exception_handler,
+)
 
 _convert = AnthropicServingMessages._convert_anthropic_to_openai_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
