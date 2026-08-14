@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Generator
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -8,6 +10,11 @@ import torch.nn.functional as F
 from vllm.model_executor.kernels.linear import (
     FlashInferTrtllmMxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+    MXFP8_TRTLLM_LAYOUT_ENV,
+    MXFP8_TRTLLM_SWITCH_M_ENV,
+    _mxfp8_trtllm_layout_config,
 )
 from vllm.platforms import current_platform
 from vllm.utils import flashinfer as vllm_flashinfer
@@ -40,6 +47,13 @@ def _make_layer(weight: torch.Tensor) -> torch.nn.Module:
     return layer
 
 
+@pytest.fixture(autouse=True)
+def clear_mxfp8_trtllm_layout_config() -> Generator[None, None, None]:
+    _mxfp8_trtllm_layout_config.cache_clear()
+    yield
+    _mxfp8_trtllm_layout_config.cache_clear()
+
+
 @pytest.mark.parametrize("shape", [(1, 130, 256), (7, 256, 512), (128, 130, 768)])
 @torch.inference_mode()
 def test_flashinfer_trtllm_mxfp8_linear_numerics(
@@ -47,6 +61,35 @@ def test_flashinfer_trtllm_mxfp8_linear_numerics(
 ) -> None:
     torch.manual_seed(0)
     m, n, k = shape
+    x = torch.randn((m, k), dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn((n, k), dtype=torch.bfloat16, device="cuda")
+    layer = _make_layer(weight)
+    kernel = FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearLayerConfig())
+    kernel.process_weights_after_loading(layer)
+
+    output = kernel.apply_weights(layer, x)
+    reference = torch.mm(x, weight.t())
+    similarity = F.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    )
+
+    assert output.shape == (m, n)
+    assert output.is_contiguous()
+    assert similarity.item() > 0.98
+
+
+@pytest.mark.parametrize(
+    ("layout", "m"),
+    [("128x4", 512), ("adaptive", 256), ("adaptive", 257)],
+)
+@torch.inference_mode()
+def test_flashinfer_trtllm_mxfp8_alternate_layout_numerics(
+    monkeypatch, layout: str, m: int
+) -> None:
+    monkeypatch.setenv(MXFP8_TRTLLM_LAYOUT_ENV, layout)
+    monkeypatch.setenv(MXFP8_TRTLLM_SWITCH_M_ENV, "256")
+    torch.manual_seed(0)
+    n, k = 256, 512
     x = torch.randn((m, k), dtype=torch.bfloat16, device="cuda")
     weight = torch.randn((n, k), dtype=torch.bfloat16, device="cuda")
     layer = _make_layer(weight)
@@ -76,6 +119,10 @@ def test_flashinfer_trtllm_mxfp8_custom_ops() -> None:
         torch.ops.vllm.flashinfer_mxfp8_quantize_8x4.default,
         (x,),
     )
+    torch.library.opcheck(
+        torch.ops.vllm.flashinfer_mxfp8_quantize_128x4.default,
+        (x,),
+    )
     x_mxfp8, x_scale = vllm_flashinfer.flashinfer_mxfp8_quantize_8x4(x)
     # SchemaCheckMode compares inputs with allclose, which CUDA does not
     # implement for float8. The numerical tests above guard input mutation.
@@ -96,12 +143,29 @@ def test_flashinfer_trtllm_mxfp8_custom_ops() -> None:
             "test_aot_dispatch_dynamic",
         ),
     )
+    torch.library.opcheck(
+        torch.ops.vllm.mxfp8_trtllm_adaptive_linear.default,
+        (x, layer.weight, layer.weight_scale, 256),
+        test_utils=(
+            "test_autograd_registration",
+            "test_faketensor",
+            "test_aot_dispatch_dynamic",
+        ),
+    )
 
 
 @torch.inference_mode()
-def test_flashinfer_trtllm_mxfp8_linear_cuda_graph() -> None:
+@pytest.mark.parametrize(
+    ("layout", "m"),
+    [("8x4", 7), ("128x4", 512), ("adaptive", 7), ("adaptive", 512)],
+)
+def test_flashinfer_trtllm_mxfp8_linear_cuda_graph(
+    monkeypatch, layout: str, m: int
+) -> None:
+    monkeypatch.setenv(MXFP8_TRTLLM_LAYOUT_ENV, layout)
+    monkeypatch.setenv(MXFP8_TRTLLM_SWITCH_M_ENV, "256")
     torch.manual_seed(0)
-    m, n, k = 7, 130, 512
+    n, k = 130, 512
     weight = torch.randn((n, k), dtype=torch.bfloat16, device="cuda")
     layer = _make_layer(weight)
     kernel = FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearLayerConfig())

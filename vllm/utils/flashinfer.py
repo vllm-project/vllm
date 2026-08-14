@@ -740,6 +740,36 @@ if has_flashinfer():
         )
 
     @torch.library.custom_op(
+        "vllm::flashinfer_mxfp8_quantize_128x4",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_mxfp8_quantize_128x4(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer import SfLayout
+        from flashinfer import mxfp8_quantize as mxfp8_quantize_
+
+        return mxfp8_quantize_(
+            a,
+            backend="cuda",
+            sf_swizzle_layout=SfLayout.layout_128x4,
+        )
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_mxfp8_quantize_128x4",
+    )
+    def flashinfer_mxfp8_quantize_128x4_fake(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        m, k = a.shape
+        scale_size = cdiv(m, 128) * 128 * cdiv(k // 32, 4) * 4
+        return (
+            torch.empty(m, k, dtype=torch.float8_e4m3fn, device=a.device),
+            torch.empty(scale_size, dtype=torch.uint8, device=a.device),
+        )
+
+    @torch.library.custom_op(
         "vllm::mm_mxfp8",
         mutates_args=[],
         device_types="cuda",

@@ -37,7 +37,12 @@ following `quantization.quant_algo` values:
     For MXFP8 checkpoints on SM100, SM103, and SM107 GPUs, BF16 models can
     select FlashInfer's TRTLLM dense GEMM explicitly with
     `--linear-backend flashinfer_trtllm`. Automatic MXFP8 kernel selection is
-    unchanged.
+    unchanged. This backend preserves its original `8x4` activation-scale
+    layout by default. Set `VLLM_MXFP8_TRTLLM_LAYOUT=128x4` to force the
+    high-M layout, or set it to `adaptive` to use `8x4` through M=256 and
+    `128x4` above that point. Here, M is the flattened activation row count.
+    Override the adaptive boundary with `VLLM_MXFP8_TRTLLM_SWITCH_M`, which
+    must be a positive integer.
 
 ## Quantizing HuggingFace Models with PTQ
 

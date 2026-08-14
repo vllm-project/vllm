@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
+from typing import NamedTuple
+
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm import envs
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     mxfp8_e4m3_quantize,
@@ -12,8 +16,118 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import flashinfer as vllm_flashinfer
 from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutedsl
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
+
+MXFP8_TRTLLM_LAYOUT_ENV = "VLLM_MXFP8_TRTLLM_LAYOUT"
+MXFP8_TRTLLM_SWITCH_M_ENV = "VLLM_MXFP8_TRTLLM_SWITCH_M"
+
+
+class _Mxfp8TrtllmLayoutConfig(NamedTuple):
+    policy: str
+    switch_m: int | None
+
+
+@cache
+def _mxfp8_trtllm_layout_config() -> _Mxfp8TrtllmLayoutConfig:
+    policy = envs.VLLM_MXFP8_TRTLLM_LAYOUT.strip().lower()
+    if policy != "adaptive":
+        return _Mxfp8TrtllmLayoutConfig(policy, None)
+
+    switch_m = envs.VLLM_MXFP8_TRTLLM_SWITCH_M
+    if switch_m <= 0:
+        raise ValueError(
+            f"{MXFP8_TRTLLM_SWITCH_M_ENV} must be positive; got {switch_m}."
+        )
+    return _Mxfp8TrtllmLayoutConfig(policy, switch_m)
+
+
+def mxfp8_trtllm_use_8x4_sf_layout(m: int) -> bool:
+    config = _mxfp8_trtllm_layout_config()
+    if config.policy == "8x4":
+        return True
+    if config.policy == "128x4":
+        return False
+    assert config.switch_m is not None
+    return m <= config.switch_m
+
+
+def _mxfp8_trtllm_linear_fixed_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output_features: int,
+    *,
+    use_8x4_sf_layout: bool,
+) -> torch.Tensor:
+    quantize = (
+        vllm_flashinfer.flashinfer_mxfp8_quantize_8x4
+        if use_8x4_sf_layout
+        else vllm_flashinfer.flashinfer_mxfp8_quantize_128x4
+    )
+    input_mxfp8, input_scale = quantize(x)
+    output = vllm_flashinfer.mm_mxfp8(
+        input_mxfp8,
+        weight.t(),
+        input_scale,
+        weight_scale,
+        out_dtype=x.dtype,
+        backend="trtllm",
+        use_8x4_sf_layout=use_8x4_sf_layout,
+    )
+    return output[:, :output_features].contiguous()
+
+
+def _mxfp8_trtllm_adaptive_linear_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output_features: int,
+) -> torch.Tensor:
+    return _mxfp8_trtllm_linear_fixed_impl(
+        x,
+        weight,
+        weight_scale,
+        output_features,
+        use_8x4_sf_layout=mxfp8_trtllm_use_8x4_sf_layout(int(x.shape[0])),
+    )
+
+
+def mxfp8_trtllm_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output_features: int,
+) -> torch.Tensor:
+    config = _mxfp8_trtllm_layout_config()
+    if config.policy == "adaptive":
+        return torch.ops.vllm.mxfp8_trtllm_adaptive_linear(
+            x, weight, weight_scale, output_features
+        )
+    return _mxfp8_trtllm_linear_fixed_impl(
+        x,
+        weight,
+        weight_scale,
+        output_features,
+        use_8x4_sf_layout=config.policy == "8x4",
+    )
+
+
+def _mxfp8_trtllm_linear_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    output_features: int,
+) -> torch.Tensor:
+    return torch.empty((x.shape[0], output_features), dtype=x.dtype, device=x.device)
+
+
+direct_register_custom_op(
+    op_name="mxfp8_trtllm_adaptive_linear",
+    op_func=_mxfp8_trtllm_adaptive_linear_impl,
+    fake_impl=_mxfp8_trtllm_linear_fake,
+)
 
 
 class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
@@ -261,20 +375,12 @@ class FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearKernel):
         input_shape = x.shape
         input_2d = x.view(-1, K)
 
-        input_mxfp8, input_scale = vllm_flashinfer.flashinfer_mxfp8_quantize_8x4(
-            input_2d
-        )
-        output = vllm_flashinfer.mm_mxfp8(
-            input_mxfp8,
-            weight.t(),
-            input_scale,
+        output = mxfp8_trtllm_linear(
+            input_2d,
+            weight,
             weight_scale,
-            out_dtype=x.dtype,
-            backend="trtllm",
-            use_8x4_sf_layout=True,
+            output_size,
         )
-        if output.shape[-1] != output_size:
-            output = output[:, :output_size].contiguous()
 
         if bias is not None:
             output = output + bias
