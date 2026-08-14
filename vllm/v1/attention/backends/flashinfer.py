@@ -2430,12 +2430,12 @@ class FlashInferImpl(AttentionImpl):
                 )
 
                 if use_dcp:
+                    assert self.dcp_manager is not None
                     assert isinstance(out, torch.Tensor)
                     assert lse is not None
-                    output[:num_decode_tokens] = self.dcp_combine(
+                    output[:num_decode_tokens] = self.dcp_manager.combine(
                         out,
                         lse,
-                        get_dcp_group(),
                     )
                 elif needs_fp8_out:
                     output[:num_decode_tokens].copy_(out.to(output.dtype))
