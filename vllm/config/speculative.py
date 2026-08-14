@@ -1318,10 +1318,15 @@ class SpeculativeConfig:
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
-        This is mostly a copy of the target parallel config, except the tp_size.
+        This is mostly a copy of the target parallel config, except the tp_size
+        and the pp_size: a draft model is always built whole on the PP rank
+        that samples tokens, never split across pipeline stages, so its
+        parallel config describes a single-stage pipeline. This also means
+        draft models are not required to implement `SupportsPP` even when the
+        target runs with pipeline parallelism.
         """
         draft_parallel_config = ParallelConfig(
-            pipeline_parallel_size=target_parallel_config.pipeline_parallel_size,
+            pipeline_parallel_size=1,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
             distributed_executor_backend=target_parallel_config.distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.max_parallel_loading_workers,

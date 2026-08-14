@@ -467,6 +467,34 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.world_size == 8
 
 
+def test_mtp_draft_model_not_required_to_support_pp():
+    """Regression test for https://github.com/vllm-project/vllm/issues/52069.
+
+    A draft model always runs whole on a single PP rank (the V2 runner builds
+    it on the last rank only), so constructing a speculative config under
+    pipeline parallelism must not demand the SupportsPP interface from it -
+    no MTP head implements SupportsPP.
+    """
+    # nnodes=2 keeps the config valid on hosts with fewer than 2 GPUs.
+    parallel_config = ParallelConfig(pipeline_parallel_size=2, nnodes=2)
+    model_config = ModelConfig(
+        "luccafong/deepseek_mtp_main_random",
+        max_model_len=2048,
+        trust_remote_code=True,
+    )
+    # Raised NotImplementedError("Pipeline parallelism is not supported for
+    # this model...") before the fix.
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        target_model_config=model_config,
+        target_parallel_config=parallel_config,
+    )
+    # Only the verification treats the draft as single-stage; the draft's
+    # parallel config must keep the target's PP size for rank bookkeeping.
+    assert speculative_config.draft_parallel_config.pipeline_parallel_size == 2
+
+
 def test_draft_model_enables_async_scheduling_by_default():
     parallel_config = ParallelConfig(distributed_executor_backend="uni")
     model_config = ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048)
