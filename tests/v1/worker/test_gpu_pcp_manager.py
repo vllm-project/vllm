@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, ParallelConfig
 from vllm.model_executor.layers.attention import pcp as attention_pcp
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
@@ -55,6 +55,7 @@ def _make_capture_manager(block_table: torch.Tensor):
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=False,
         max_num_reqs=4,
         max_num_tokens=8,
         block_tables=block_tables,
@@ -82,6 +83,7 @@ def test_sharded_decode_piecewise_graph_padding(monkeypatch):
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=True,
         dcp_world_size=1,
     )
     monkeypatch.setattr(pcp_manager_module, "async_copy_to_gpu", _copy_to_cpu)
@@ -115,6 +117,7 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=False,
         max_num_reqs=4,
         max_num_tokens=8,
     )
@@ -142,6 +145,7 @@ def test_num_tokens_for_dispatch_uses_largest_pcp_rank(
         pcp_world_size=pcp_world_size,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=True,
     )
 
     actual = manager.get_num_tokens_for_dispatch(
@@ -157,6 +161,7 @@ def test_graph_padding_cannot_be_smaller_than_largest_pcp_rank(monkeypatch):
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=True,
         dcp_world_size=1,
     )
     monkeypatch.setattr(pcp_manager_module, "async_copy_to_gpu", _copy_to_cpu)
@@ -278,6 +283,7 @@ def test_pcp_only_decode_requests_are_round_robin_balanced_each_step():
         pcp_world_size=4,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=True,
         dcp_world_size=1,
     )
     req_ids = [f"request-{idx}" for idx in range(18)]
@@ -312,6 +318,7 @@ def test_decode_requests_remain_replicated_when_dcp_is_enabled():
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=False,
         dcp_world_size=2,
     )
     req_ids = ["request-a", "request-b", "request-c"]
@@ -325,6 +332,7 @@ def test_prefill_partitioning_is_preserved_with_sharded_decode():
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=True,
         dcp_world_size=1,
     )
     segments_by_rank = [
@@ -362,6 +370,7 @@ def test_sharded_decode_layout_selects_owner_kv_for_replication(monkeypatch):
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=True,
         dcp_world_size=1,
     )
     monkeypatch.setattr(pcp_manager_module, "async_copy_to_gpu", _copy_to_cpu)
@@ -413,6 +422,7 @@ def _rank_rows(
         pcp_world_size=pcp_world_size,
         pcp_rank=pcp_rank,
         device=torch.device("cpu"),
+        shard_decode_requests=False,
         dcp_world_size=2,
     )
     query_start_loc_np = np.concatenate([[0], np.cumsum(num_scheduled_tokens)]).astype(
@@ -506,6 +516,7 @@ def test_dcp_replicates_prefills_too_short_to_split(query_len):
             pcp_world_size=pcp_world_size,
             pcp_rank=rank,
             device=torch.device("cpu"),
+            shard_decode_requests=False,
             dcp_world_size=2,
         )
         assert manager.replicated_requests(num_scheduled_tokens, is_prefilling)[0]
@@ -531,6 +542,7 @@ def test_pcp_first_chunk_row_is_never_short(pcp_world_size, query_len):
             pcp_world_size=pcp_world_size,
             pcp_rank=rank,
             device=torch.device("cpu"),
+            shard_decode_requests=False,
             dcp_world_size=pcp_world_size,
         )
         chunk_lens = [
@@ -606,6 +618,7 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
         pcp_world_size=2,
         pcp_rank=0,
         device=device,
+        shard_decode_requests=False,
         max_num_reqs=4,
         max_num_tokens=8,
         dcp_world_size=2,
@@ -651,3 +664,18 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
     )
     assert local_batch.dcp_local_seq_lens is not None
     assert torch.equal(local_batch.dcp_local_seq_lens.cpu(), expected)
+
+
+@pytest.mark.parametrize(
+    ("pcp_world_size", "dcp_world_size", "expected"),
+    [(1, 1, False), (2, 1, True), (2, 2, False)],
+)
+def test_parallel_config_manages_decode_sharding(
+    pcp_world_size: int, dcp_world_size: int, expected: bool
+):
+    parallel_config = ParallelConfig(
+        prefill_context_parallel_size=pcp_world_size,
+        decode_context_parallel_size=dcp_world_size,
+    )
+
+    assert parallel_config.pcp_shard_decode_requests is expected

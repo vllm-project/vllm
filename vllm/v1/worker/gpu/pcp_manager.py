@@ -49,6 +49,7 @@ class PCPManager:
         pcp_world_size: int,
         pcp_rank: int,
         device: torch.device,
+        shard_decode_requests: bool,
         max_num_reqs: int | None = None,
         max_num_tokens: int | None = None,
         block_tables: BlockTables | None = None,
@@ -62,11 +63,7 @@ class PCPManager:
         self.dcp_world_size = dcp_world_size
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
-        # PCP-only deployments replicate KV cache across PCP ranks, so decode
-        # requests can be treated as a virtual data-parallel batch. When DCP
-        # spans multiple ranks, every decode query must still run on every DCP
-        # rank to consume its local KV shard.
-        self.shard_decode_requests = dcp_world_size == 1
+        self.shard_decode_requests = shard_decode_requests
 
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
@@ -886,6 +883,7 @@ def maybe_build_pcp_manager(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
         device=device,
+        shard_decode_requests=parallel_config.pcp_shard_decode_requests,
         max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
         max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
         block_tables=block_tables,

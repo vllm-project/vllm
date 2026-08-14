@@ -129,6 +129,7 @@ def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
         pcp_world_size=pcp_world_size,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=False,
         max_num_reqs=num_reqs,
         max_num_tokens=num_tokens,
         block_tables=pcp_block_tables,
