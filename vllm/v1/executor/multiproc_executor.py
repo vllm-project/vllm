@@ -63,11 +63,11 @@ from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
-from vllm.utils.debug.debug_stat import worker_debug_stat_loop, engine_debug_stat_loop, get_engine_debug_stat, get_vllm_debug_stat
+from vllm.utils.debug.debug_stat import worker_debug_stat_loop, engine_debug_stat_loop, get_engine_debug_stat, get_worker_debug_stat
 
 logger = init_logger(__name__)
 engine_debug_stat = get_engine_debug_stat()
-worker_debug_stat = get_vllm_debug_stat()
+worker_debug_stat = get_worker_debug_stat()
 
 class FutureWrapper(Future):
     def __init__(
@@ -397,6 +397,7 @@ class MultiprocExecutor(Executor):
                 )
                 try:
                     status, result = mq.dequeue(timeout=dequeue_timeout)
+                    engine_debug_stat.recv_rpc += 1
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
@@ -948,6 +949,7 @@ class WorkerProc:
         else:
             result = (WorkerProc.ResponseStatus.SUCCESS, output)
         if (response_mq := self.worker_response_mq) is not None:
+            worker_debug_stat.resp_rpc += 1
             response_mq.enqueue(result)
 
     def handle_output(self, output: Any):
@@ -981,7 +983,7 @@ class WorkerProc:
     def worker_busy_loop(self):
         debug_thread = Thread(
             target=worker_debug_stat_loop,
-            name="vllm_debug_stat_loop",
+            name="worker_debug_stat_loop",
             daemon=True,
         )
         debug_thread.start()

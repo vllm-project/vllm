@@ -56,9 +56,9 @@ SPINLOOP_TIMEOUT_SECONDS = 0.1
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
 
-from vllm.utils.debug.debug_stat import get_vllm_debug_stat
+from vllm.utils.debug.debug_stat import get_worker_debug_stat
 
-worker_debug_stat = get_vllm_debug_stat()
+worker_debug_stat = get_worker_debug_stat()
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 

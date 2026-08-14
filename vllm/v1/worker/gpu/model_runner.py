@@ -109,7 +109,6 @@ from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import KVBlockZeroer
-from vllm.utils.debug.debug_stat import get_vllm_debug_stat
 
 logger = init_logger(__name__)
 
@@ -1088,8 +1087,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        get_vllm_debug_stat().inc_execute_count()
-        get_vllm_debug_stat().set_call_step(0, 1)
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()

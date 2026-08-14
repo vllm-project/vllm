@@ -36,19 +36,21 @@ SLEEP_TIME = 300  # 10 minutes
 class EngineDebugStat:
     def __init__(self):
         self.send_rpc = 0
+        self.recv_rpc = 0
         self.execute = 0
         self.sample = 0
         self.dummy = 0
         self.take_draft = 0
 
     def print(self):
-        logger.info(f"[ENGINE-DEBUG-STAT][pid={g_self_pid}] send={self.send_rpc}, execute={self.execute}, "
-                    f"sample={self.sample}, dummy={self.dummy}, take_draft={self.take_draft}")
+        logger.info(f"[ENGINE-DEBUG-STAT][pid={g_self_pid}] send={self.send_rpc}, recv={self.recv_rpc}, "
+                    f"execute={self.execute}, sample={self.sample}, dummy={self.dummy}, take_draft={self.take_draft}")
 
 
 class WorkerDebugStat:
     def __init__(self):
         self.recv_rpc = 0
+        self.resp_rpc = 0
         self.execute = 0
         self.sample = 0
         self.dummy = 0
@@ -58,9 +60,6 @@ class WorkerDebugStat:
         self.reduce_count = 0
         self.skip_count = 0
         self.skip_reason = 0
-
-    def inc_execute_count(self):
-        self.execute_count += 1
 
     def set_call_step(self, layer, step):
         self.call_step[layer] = step
@@ -76,8 +75,8 @@ class WorkerDebugStat:
         self.set_call_step(layer, step)
 
     def print(self):
-        logger.info(f"[WORKER-DEBUG-STAT][pid={g_self_pid}] recv={self.recv_rpc}, execute={self.execute}, "
-                    f"sample={self.sample}, dummy={self.dummy}, take_draft={self.take_draft}, "
+        logger.info(f"[WORKER-DEBUG-STAT][pid={g_self_pid}] recv={self.recv_rpc}, resp={self.resp_rpc}, "
+                    f"execute={self.execute}, sample={self.sample}, dummy={self.dummy}, take_draft={self.take_draft}, "
                     f"call_step={self.call_step}, step_count={self.step_count}, "
                     f"all_reduce={self.reduce_count}, skip={self.skip_count}, skip_reason={self.skip_reason}")
 
@@ -90,7 +89,7 @@ def get_engine_debug_stat():
     return g_engine_debug_stat
 
 
-def get_vllm_debug_stat():
+def get_worker_debug_stat():
     return g_worker_debug_stat
 
 
