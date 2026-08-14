@@ -280,39 +280,41 @@ def compute_layer_kv_cache_shape_bytes(
     return (num_blocks, spec.num_heads, num_states, spec.state_content_size_bytes)
 
 
-def layer_kv_cache_strides(
+def compute_layout_strides(
     spec: KVCacheSpec,
     num_blocks: int,
     num_layers: int,
     layout: KVCacheLayout,
     block_size: int | None = None,
-) -> tuple[int, int]:
-    """Byte ``(layer_stride, block_stride)`` of a dense ``[L, B, H, N, C]``
-    allocation in ``layout`` order."""
+    packed_block_stride: int | None = None,
+) -> tuple[int, ...]:
+    """Byte strides in logical ``[L, B, H, N, C]`` axis order."""
     shape = (
         num_layers,
         *compute_layer_kv_cache_shape_bytes(spec, num_blocks, block_size),
     )
     stride_order = layout.stride_order
     physical_shape = tuple(shape[i] for i in stride_order)
-    dense = torch.empty(physical_shape, device="meta").stride()
     inv_order = [stride_order.index(i) for i in range(5)]
-    layer_stride = dense[inv_order[_DIM_L]]
-    block_stride = dense[inv_order[_DIM_B]]
 
-    if padded := getattr(spec, "page_size_padded", None):
+    padded = getattr(spec, "page_size_padded", None)
+    if padded is not None:
         assert block_size is None or block_size == spec.block_size, (
             "Padded KV pages do not support kernel block splitting."
         )
         assert {inv_order[_DIM_L], inv_order[_DIM_B]} == {0, 1}, (
             f"Padded KV pages need L and B outermost, got {layout.name}."
         )
-        # Padding widens every page, so the strides that step over whole
-        # pages scale with it.
-        page = prod(shape[2:])
-        layer_stride = layer_stride // page * padded
-        block_stride = block_stride // page * padded
-    return layer_stride, block_stride
+
+    logical_tail = prod(physical_shape[2:])
+    storage_tail = padded if padded is not None else logical_tail
+    physical = torch.empty((*physical_shape[:2], storage_tail), device="meta")
+    strides = list(
+        physical[..., :logical_tail].view(physical_shape).permute(*inv_order).stride()
+    )
+    if packed_block_stride is not None and inv_order[_DIM_B] < inv_order[_DIM_L]:
+        strides[_DIM_B] = packed_block_stride
+    return tuple(strides)
 
 
 def reshape_kv_cache(
@@ -338,21 +340,21 @@ def reshape_kv_cache(
     # e.g. BHLNC's head stride spans the layers it interleaves); the caller's
     # strides place the layers and blocks themselves.
     logical_shape = (num_layers, *shape_bytes)
-    stride_order = layout.stride_order
-    physical_shape = tuple(logical_shape[i] for i in stride_order)
-    inv_order = [stride_order.index(i) for i in range(5)]
-    strides = list(torch.empty(physical_shape, device="meta").stride())
-    strides[inv_order[_DIM_L]] = layer_stride
-    strides[inv_order[_DIM_B]] = block_stride
+    strides = list(
+        compute_layout_strides(
+            spec, num_blocks, num_layers, layout, block_size=block_size
+        )
+    )
+    strides[_DIM_L] = layer_stride
+    strides[_DIM_B] = block_stride
     dtype = getattr(spec, "dtype", None)
 
-    cache = torch.as_strided(
+    cache_logical_5d = torch.as_strided(
         raw,
-        size=physical_shape,
+        size=logical_shape,
         stride=tuple(strides),
         storage_offset=raw.storage_offset() + offset,
     )
-    cache_logical_5d = cache.permute(*inv_order)
 
     views = []
     for layer_idx in range(num_layers):

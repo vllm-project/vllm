@@ -214,12 +214,11 @@ def _validate_backend_supports_layout(
 def initialize_kv_cache_layout(
     backend: type[AttentionBackend], cache_config=None
 ) -> None:
-    """Resolve the layout once at backend selection and publish it.
+    """Resolve the backend-compatible layout and publish it on the worker.
 
-    Single writer for the resolved layout: stores it on
-    ``cache_config.kv_cache_layout`` (serialized with the config) and in a
-    process-local mirror for callers without a config handle. Priority is
-    main-parity: a backend-required layout silently corrects the env var.
+    Stores it on ``cache_config.kv_cache_layout`` and in a process-local mirror
+    for callers without a config handle. A backend-required layout silently
+    corrects the environment setting.
     """
     global _RESOLVED_KV_CACHE_LAYOUT, _RESOLVED_LAYOUT_REQUIRED_BY
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
@@ -271,7 +270,7 @@ def require_block_outer_kv_cache_layout(cache_config=None) -> KVCacheLayout:
     honored and raises.
     """
     global _RESOLVED_KV_CACHE_LAYOUT
-    layout = get_kv_cache_layout()
+    layout = get_kv_cache_layout(cache_config)
     if not layout.is_layer_compact:
         return layout
 
@@ -290,18 +289,18 @@ def require_block_outer_kv_cache_layout(cache_config=None) -> KVCacheLayout:
     return layout
 
 
-def get_kv_cache_layout() -> KVCacheLayout:
+def get_kv_cache_layout(cache_config=None) -> KVCacheLayout:
     """Return the resolved physical KV cache layout.
 
-    Read-only: prefers the test override, then the value published by
-    ``initialize_kv_cache_layout`` (via the process mirror or the current
-    vllm config), then falls back to env > connector > LBNHC for processes
-    where backend selection never runs (e.g. the engine core).
+    Read-only: prefers the test override, then an explicit or current config,
+    then the process-local value published by ``initialize_kv_cache_layout``.
+    Processes where backend selection never runs fall back to
+    env > connector > LBNHC.
     """
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         return _layout_from_name(_KV_CACHE_LAYOUT_OVERRIDE)
-    if _RESOLVED_KV_CACHE_LAYOUT is not None:
-        return _RESOLVED_KV_CACHE_LAYOUT
+    if cache_config is not None and cache_config.kv_cache_layout is not None:
+        return _layout_from_name(cache_config.kv_cache_layout)
 
     from vllm.config import get_current_vllm_config_or_none
 
@@ -312,6 +311,8 @@ def get_kv_cache_layout() -> KVCacheLayout:
         and vllm_config.cache_config.kv_cache_layout is not None
     ):
         return _layout_from_name(vllm_config.cache_config.kv_cache_layout)
+    if _RESOLVED_KV_CACHE_LAYOUT is not None:
+        return _RESOLVED_KV_CACHE_LAYOUT
 
     layout_name = envs.VLLM_KV_CACHE_LAYOUT
     if layout_name is None:

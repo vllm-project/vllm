@@ -99,6 +99,11 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
+    def get_kv_cache_layout(self) -> str | None:
+        """Return the worker's resolved KV cache layout."""
+        cache_config = getattr(self.vllm_config, "cache_config", None)
+        return getattr(cache_config, "kv_cache_layout", None)
+
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
 
@@ -322,9 +327,15 @@ class WorkerWrapperBase:
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
 
-    def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
+    def initialize_from_config(
+        self,
+        kv_cache_configs: list[Any],
+        kv_cache_layout: str | None = None,
+    ) -> None:
         kv_cache_config = kv_cache_configs[self.global_rank]
         assert self.vllm_config is not None
+        if kv_cache_layout is not None:
+            self.vllm_config.cache_config.kv_cache_layout = kv_cache_layout
         with set_current_vllm_config(self.vllm_config):
             self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 

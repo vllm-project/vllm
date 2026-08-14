@@ -68,10 +68,8 @@ class CacheConfig:
     kv_cache_layout: str | None = field(default=None, init=False)
     """Resolved physical KV cache layout name (a ``KVCacheLayout`` member).
 
-    Written exactly once by attention backend selection (priority:
-    test override > backend-required > VLLM_KV_CACHE_LAYOUT > connector
-    preference > LBNHC); every consumer reads it from here so allocation,
-    validation, and connectors can never disagree. Derived automatically."""
+    Resolved by attention backend selection and synchronized across engine and
+    worker processes before allocation. Derived automatically."""
     prefix_match_unit: int | None = Field(default=None, gt=0)
     """The finest token boundary (in tokens) a prefix-cache hit can land on.
 

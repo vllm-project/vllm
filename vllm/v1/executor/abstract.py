@@ -119,7 +119,10 @@ class Executor(ABC):
 
     def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
         """Initialize the KV caches on the underlying workers."""
-        self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
+        self.collective_rpc(
+            "initialize_from_config",
+            args=(kv_cache_configs, self.cache_config.kv_cache_layout),
+        )
 
     def compile_or_warm_up_model(self) -> None:
         """Compile/warm up the model and capture cudagraphs on workers."""
@@ -149,7 +152,14 @@ class Executor(ABC):
         return self.collective_rpc("determine_available_memory")
 
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
-        return self.collective_rpc("get_kv_cache_spec")
+        specs: list[dict[str, KVCacheSpec]] = self.collective_rpc("get_kv_cache_spec")
+        worker_layouts: list[str | None] = self.collective_rpc("get_kv_cache_layout")
+        layouts = {layout for layout in worker_layouts if layout is not None}
+        if len(layouts) > 1:
+            raise ValueError(f"Workers disagree on KV cache layout: {layouts}")
+        if layouts:
+            self.cache_config.kv_cache_layout = next(iter(layouts))
+        return specs
 
     @overload
     def collective_rpc(

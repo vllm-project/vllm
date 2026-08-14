@@ -38,7 +38,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
-    layer_kv_cache_strides,
+    compute_layout_strides,
     replace_as,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -1311,7 +1311,7 @@ def _resolve_layout_for_groups(
     cache_config=None,
 ) -> KVCacheLayout:
     """Resolve the layout this model's packing can be expressed in."""
-    layout = get_kv_cache_layout()
+    layout = get_kv_cache_layout(cache_config)
     page_sizes = {
         _get_per_layer_spec(group, layer_name).page_size_bytes
         for group in kv_cache_groups
@@ -1368,28 +1368,27 @@ def get_kv_cache_config_from_groups(
 
     layout = _resolve_layout_for_groups(kv_cache_groups, vllm_config.cache_config)
     kv_cache_tensors = []
-    dense = len(runs) == 1
     for byte_offset, layer_names, spec in runs:
-        page = spec.page_size_bytes
-        if dense:
-            layer_stride, block_stride = layer_kv_cache_strides(
-                spec, num_blocks, len(layer_names), layout
-            )
-        elif layout.is_layer_compact:
-            layer_stride, block_stride = page * num_blocks, page
-        else:
-            layer_stride, block_stride = page, packed_block_stride
+        strides = compute_layout_strides(
+            spec,
+            num_blocks,
+            len(layer_names),
+            layout,
+            packed_block_stride=packed_block_stride,
+        )
+        layer_stride, block_stride, _, _, _ = strides  # L, B, H, N, C
+        offset = (
+            byte_offset
+            * max(layer_stride, spec.page_size_bytes)
+            // spec.page_size_bytes
+        )
         kv_cache_tensors.append(
             KVCacheTensor(
                 size=size,
                 layers=layer_names,
                 layer_stride=layer_stride,
                 block_stride=block_stride,
-                # Layer-outermost layouts give each layer its own region, so
-                # a run starts past every preceding run's whole region.
-                offset=byte_offset * num_blocks
-                if layout.is_layer_compact
-                else byte_offset,
+                offset=offset,
             )
         )
 
