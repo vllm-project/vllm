@@ -122,6 +122,7 @@ class IrOpPriorityConfig:
 MoEBackend = Literal[
     "auto",
     "triton",
+    "batched_triton",
     "deep_gemm",
     "deep_gemm_mega_moe",
     "cutlass",
@@ -146,6 +147,7 @@ LinearBackend = Literal[
     "flashinfer_trtllm",
     "flashinfer_cudnn",
     "flashinfer_b12x",
+    "b12x",
     "marlin",
     "humming",
     "triton",
@@ -175,8 +177,14 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
+    # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
+    # to the shared JIT warmup infrastructure.
+    # https://github.com/vllm-project/vllm/pull/47451
     enable_cutedsl_warmup: bool = True
-    """If True, run CuTeDSL compile warmup during kernel warmup."""
+    """Deprecated: run legacy CuTeDSL warmup providers."""
+
+    enable_jit_warmup: bool = True
+    """If True, run JIT compile warmup during kernel warmup."""
 
     enable_bf16x3_router_gemm: bool = False
     """If True, use the experimental SM100 BF16x3 CuteDSL router GEMM."""
@@ -186,6 +194,8 @@ class KernelConfig:
 
     - "auto": Automatically select the best backend based on model and hardware
     - "triton": Use Triton-based fused MoE kernels
+    - "batched_triton": Use batched Triton experts (moe_mmk) on the batched
+      activation format ([E_local, max_num_tokens, K])
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
     - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
     - "cutlass": Use vLLM CUTLASS kernels
@@ -214,6 +224,7 @@ class KernelConfig:
     - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
     - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4 GEMM (SM120+)
+    - "b12x": Use native B12X FP8 and FP4 linear kernels on SM12x
     - "marlin": Use Marlin kernels
     - "triton": Use Triton-based kernels
     - "deep_gemm": Use DeepGEMM kernels
@@ -250,6 +261,7 @@ class KernelConfig:
         """
         ignored_factors = {
             "enable_cutedsl_warmup",
+            "enable_jit_warmup",
             "enable_flashinfer_autotune",
             "ir_op_priority",  # handled separately below
         }
@@ -260,6 +272,7 @@ class KernelConfig:
     @field_validator(
         "enable_flashinfer_autotune",
         "enable_cutedsl_warmup",
+        "enable_jit_warmup",
         mode="wrap",
     )
     @classmethod

@@ -82,7 +82,7 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: str | list[str] | list[dict]
+    prompt: str | list[str] | list[int] | list[dict]
     prompt_len: int
     expected_output_len: int = 0
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
@@ -167,8 +167,8 @@ class BenchmarkDataset(ABC):
         # TODO (jenniferzhao): add support for downloading data
         raise NotImplementedError("load_data must be implemented in subclasses.")
 
+    @staticmethod
     def get_random_lora_request(
-        self,
         max_loras: int | None = None,
         lora_path: str | None = None,
     ) -> LoRARequest | None:
@@ -200,8 +200,8 @@ class BenchmarkDataset(ABC):
         )
         return lora_request
 
+    @staticmethod
     def get_round_robin_lora_request(
-        self,
         index: int,
         max_loras: int | None = None,
         lora_path: str | None = None,
@@ -235,8 +235,8 @@ class BenchmarkDataset(ABC):
         )
         return lora_request
 
+    @staticmethod
     def get_lora_request(
-        self,
         index: int,
         max_loras: int | None = None,
         lora_path: str | None = None,
@@ -257,10 +257,12 @@ class BenchmarkDataset(ABC):
             (or `None` if not applicable).
         """
         if lora_assignment == "round-robin":
-            return self.get_round_robin_lora_request(
+            return BenchmarkDataset.get_round_robin_lora_request(
                 index=index, max_loras=max_loras, lora_path=lora_path
             )
-        return self.get_random_lora_request(max_loras=max_loras, lora_path=lora_path)
+        return BenchmarkDataset.get_random_lora_request(
+            max_loras=max_loras, lora_path=lora_path
+        )
 
     @abstractmethod
     def sample(
@@ -1573,7 +1575,6 @@ class TimedTrace(BenchmarkDataset):
             prompt_ids = self._expand_prompt(
                 entry.get(self.label_hash_ids, []), input_length, tokenizer
             )
-            prompt = tokenizer.decode(prompt_ids)
 
             # Get timestamp with proper error handling
             ts_value = entry.get(self.label_ts)
@@ -1589,7 +1590,7 @@ class TimedTrace(BenchmarkDataset):
 
             samples.append(
                 SampleRequest(
-                    prompt=prompt,
+                    prompt=prompt_ids,
                     prompt_len=prompt_len,
                     expected_output_len=new_output_len,
                     lora_request=None,
@@ -2094,7 +2095,12 @@ def _parse_range_ratio(value: str) -> RangeRatio:
         return json.loads(value)
 
 
-def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
+def get_samples(
+    args,
+    tokenizer: TokenizerLike | None,
+    *,
+    multimodal_backends: tuple[str, ...] = ("openai-chat", "openai-audio"),
+) -> list[SampleRequest]:
     if not hasattr(args, "request_id_prefix"):
         args.request_id_prefix = ""
 
@@ -2151,6 +2157,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
         )
 
     elif args.dataset_name == "sonnet":
+        assert tokenizer is not None, (
+            "Tokenizer must be initialized for the 'sonnet' dataset."
+        )
         sonnet_dataset = SonnetDataset(
             dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
         )
@@ -2310,16 +2319,21 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 "like to add support for additional dataset formats."
             )
 
-        if dataset_class.IS_MULTIMODAL and not (
-            args.backend in ("openai-chat", "openai-audio")
-            or "embeddings-" in args.backend
+        if (
+            dataset_class.IS_MULTIMODAL
+            and args.backend not in multimodal_backends
+            and "embeddings-" not in args.backend
         ):
-            # multi-modal benchmark is only available on OpenAI Chat
-            # endpoint-type.
+            # multi-modal benchmark is only available on chat-style backends;
+            # which ones are allowed is caller-controlled (serve uses the
+            # OpenAI endpoints, throughput uses vllm-chat).
             raise ValueError(
-                "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' backends."
+                f"Multi-modal content is not supported on backend "
+                f"{args.backend!r}; use one of {sorted(multimodal_backends)}."
             )
+        assert tokenizer is not None, (
+            "Tokenizer must be initialized for the 'hf' dataset."
+        )
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -2341,6 +2355,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
         )
 
     elif args.dataset_name == "timed_trace":
+        assert tokenizer is not None, (
+            "Tokenizer must be initialized for the 'timed_trace' dataset."
+        )
         dataloader = TimedTrace(**vars(args))
         input_requests = dataloader.sample(
             num_requests=args.num_prompts,
@@ -2350,6 +2367,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
     else:
         # For datasets that follow a similar structure, use a mapping.
+        assert tokenizer is not None, (
+            f"Tokenizer must be initialized for the '{args.dataset_name}' dataset."
+        )
         dataset_mapping = {
             "spec_bench": lambda: SpecBench(
                 dataset_path=args.dataset_path,
@@ -2465,10 +2485,13 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
         try:
             # Enforce endpoint compatibility for multimodal datasets.
-            if args.dataset_name == "random-mm" and args.backend not in ["openai-chat"]:
+            if (
+                args.dataset_name == "random-mm"
+                and args.backend not in multimodal_backends
+            ):
                 raise ValueError(
-                    "Multi-modal content (images) is only supported on "
-                    "'openai-chat' backend."
+                    f"Multi-modal content (images) is not supported on backend "
+                    f"{args.backend!r}; use one of {sorted(multimodal_backends)}."
                 )
             input_requests = dataset_mapping[args.dataset_name]()
         except KeyError as err:
@@ -2535,7 +2558,7 @@ class CustomDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2812,7 +2835,7 @@ class CustomImageDataset(CustomDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2910,7 +2933,7 @@ class CustomAudioDataset(CustomDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2932,7 +2955,9 @@ class CustomAudioDataset(CustomDataset):
             prompt = item.get("prompt", "")
             if tokenizer is None:
                 prompt_len = 1
-                new_output_len = output_len if output_len not in (None, -1) else 256
+                new_output_len = (
+                    output_len if (output_len is not None and output_len != -1) else 256
+                )
                 mm_content = None
             else:
                 use_chat_template = (
@@ -2982,6 +3007,7 @@ class CustomAudioDataset(CustomDataset):
                         )
                     new_output_len = int(item["output_tokens"])
                 else:
+                    assert output_len is not None
                     new_output_len = output_len
             sampled_requests.append(
                 SampleRequest(
@@ -3040,7 +3066,7 @@ class SpecBench(CustomDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,

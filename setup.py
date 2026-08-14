@@ -78,6 +78,10 @@ def has_precompiled_rust_extensions() -> bool:
     return not get_missing_precompiled_rust_extension_modules()
 
 
+def is_metadata_only_build() -> bool:
+    return bool({"egg_info", "dist_info"}.intersection(sys.argv[1:]))
+
+
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
     VLLM_TARGET_DEVICE = "cpu"
@@ -127,7 +131,7 @@ def should_bundle_tcmalloc() -> bool:
     return (
         VLLM_TARGET_DEVICE == "cpu"
         and sys.platform.startswith("linux")
-        and platform.machine() in ("aarch64", "x86_64")
+        and platform.machine() in ("aarch64", "x86_64", "s390x")
     )
 
 
@@ -503,20 +507,69 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def fetch_metadata_for_variant(
-        commit: str, variant: str | None
+        commit: str,
+        variant: str | None,
+        *,
+        rocm: bool = False,
     ) -> tuple[list[dict], str]:
         """
         Fetches metadata for a specific variant of the precompiled wheel.
+
+        For non-ROCm, fetches vllm metadata.
+
+        For ROCm, discovers all first-level packages and combines their
+        metadata into a single list.
         """
-        variant_dir = f"{variant}/" if variant is not None else ""
-        repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
-        meta_url = repo_url + "metadata.json"
-        print(f"Trying to fetch nightly build metadata from {meta_url}")
+        import json
+        from html.parser import HTMLParser
         from urllib.request import urlopen
 
-        with urlopen(meta_url) as resp:
-            # urlopen raises HTTPError on unexpected status code
-            wheels = json.loads(resp.read().decode("utf-8"))
+        variant_dir = f"{variant}/" if variant is not None else ""
+
+        if not rocm:
+            # Keep original behavior
+            repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
+            meta_url = repo_url + "metadata.json"
+            print(f"Trying to fetch nightly build metadata from {meta_url}")
+            with urlopen(meta_url) as resp:
+                wheels = json.loads(resp.read().decode("utf-8"))
+
+            return wheels, repo_url
+
+        # ROCm: discover all packages under the variant directory.
+        repo_url = f"https://wheels.vllm.ai/rocm/{commit}/{variant_dir}"
+
+        class LinkParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.links: list[str] = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "a":
+                    href = dict(attrs).get("href")
+                    if href:
+                        self.links.append(href)
+
+        with urlopen(repo_url) as resp:
+            parser = LinkParser()
+            parser.feed(resp.read().decode("utf-8"))
+
+        packages = [
+            href.rstrip("/")
+            for href in parser.links
+            if href.endswith("/")
+            and href not in ("../", "./", "/")
+            and "/" not in href.rstrip("/")
+        ]
+
+        wheels: list[dict] = []
+
+        for package in packages:
+            meta_url = f"{repo_url}{package}/metadata.json"
+            print(f"Trying to fetch nightly build metadata from {meta_url}")
+            with urlopen(meta_url) as resp:
+                package_wheels = json.loads(resp.read().decode("utf-8"))
+            wheels.extend(package_wheels)
         return wheels, repo_url
 
     @staticmethod
@@ -579,6 +632,141 @@ class precompiled_wheel_utils:
         return variant
 
     @staticmethod
+    def rocm_version_to_variant(rocm_version: str) -> str:
+        """Convert a ROCm version string to a wheel variant, e.g. 7.2.3 -> rocm723."""
+        return "rocm" + rocm_version.replace(".", "")
+
+    @staticmethod
+    def detect_system_rocm_variant() -> str | None:
+        """Auto-detect the ROCm wheel variant from the installed ROCm stack."""
+        rocm_version = get_rocm_version()
+        if not rocm_version:
+            try:
+                import torch
+
+                rocm_version = torch.version.hip
+            except Exception:
+                pass
+        if not rocm_version:
+            return None
+        variant = precompiled_wheel_utils.rocm_version_to_variant(rocm_version)
+        print(f"Detected ROCm {rocm_version}, using variant {variant}")
+        return variant
+
+    @staticmethod
+    def fetch_available_rocm_variants(commit: str) -> list[str]:
+        """List ROCm wheel variants published for a commit on wheels.vllm.ai."""
+        from urllib.request import urlopen
+
+        index_url = f"https://wheels.vllm.ai/rocm/{commit}/"
+        print(f"Fetching available ROCm variants from {index_url}")
+        try:
+            with urlopen(index_url) as resp:
+                html = resp.read().decode("utf-8")
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch ROCm variant index for commit %s: %s", commit, e
+            )
+            return []
+        variants = sorted(set(re.findall(r"rocm\d+", html)))
+        print(f"Available ROCm variants for commit {commit}: {variants}")
+        return variants
+
+    @staticmethod
+    def resolve_rocm_wheel_variant(
+        commit: str, variant_override: str | None
+    ) -> str | None:
+        """Resolve a ROCm wheel variant for a commit from wheels.vllm.ai."""
+        env_variant = precompiled_wheel_utils.detect_system_rocm_variant()
+        available = precompiled_wheel_utils.fetch_available_rocm_variants(commit)
+
+        if variant_override is not None:
+            if env_variant and variant_override != env_variant:
+                logger.warning(
+                    "VLLM_PRECOMPILED_WHEEL_VARIANT=%s does not match the "
+                    "detected environment ROCm variant %s; refusing to use a "
+                    "different ROCm patch wheel",
+                    variant_override,
+                    env_variant,
+                )
+                return None
+            if available and variant_override not in available:
+                logger.warning(
+                    "Requested ROCm variant %s is not available for commit %s "
+                    "(available: %s)",
+                    variant_override,
+                    commit,
+                    available,
+                )
+                return None
+            return variant_override
+
+        if env_variant is None:
+            if available:
+                print(
+                    "Could not detect ROCm version from the environment; "
+                    f"available variants for commit {commit}: {available}"
+                )
+            return None
+
+        if env_variant in available:
+            return env_variant
+
+        logger.warning(
+            "Environment ROCm variant %s is not available for commit %s "
+            "(available: %s). Precompiled wheels may not be compatible.",
+            env_variant,
+            commit,
+            available,
+        )
+        return None
+
+    @staticmethod
+    def warn_if_rocm_torch_version_mismatch(
+        wheels: list[dict], repo_url: str, arch: str
+    ) -> None:
+        """Warn if installed torch differs from the custom ROCm build on
+        wheels.vllm.ai and suggest the correct install command."""
+        try:
+            installed = torch.__version__
+        except Exception:
+            return
+
+        def _wheel_version(pkg: str) -> str | None:
+            for w in wheels:
+                if w.get("package_name") == pkg and arch in w.get("platform_tag", ""):
+                    v = w["version"]
+                    if w.get("variant") and "+" not in v:
+                        v = f"{v}+{w['variant']}"
+                    return v
+            return None
+
+        expected = _wheel_version("torch")
+        if expected is None or installed == expected:
+            return
+
+        pkgs = f"torch=={expected}"
+        triton_ver = _wheel_version("triton")
+        if triton_ver:
+            pkgs += f" triton=={triton_ver}"
+
+        logger.warning(
+            "Installed PyTorch %s does not match the custom build %s "
+            "shipped with vLLM ROCm wheels. The ABI may differ from "
+            "official releases. If you hit extension load errors, "
+            "reinstall from the vLLM index:\n"
+            "  pip install %s --extra-index-url %s\n"
+            "  uv pip install %s --extra-index-url %s "
+            "--index-strategy unsafe-best-match",
+            installed,
+            expected,
+            pkgs,
+            repo_url,
+            pkgs,
+            repo_url,
+        )
+
+    @staticmethod
     def find_local_rocm_wheel() -> str | None:
         """Search for a local vllm wheel in common locations."""
         import glob
@@ -635,6 +823,57 @@ class precompiled_wheel_utils:
             print(f"Found local ROCm wheel: {local_wheel}")
             return local_wheel, None
 
+        import platform
+
+        arch = platform.machine()
+        commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
+        if not commit or len(commit) != 40:
+            print(
+                f"VLLM_PRECOMPILED_WHEEL_COMMIT not valid: {commit}"
+                ", trying to fetch base commit in main branch"
+            )
+            commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+        variant = precompiled_wheel_utils.resolve_rocm_wheel_variant(
+            commit, os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", None)
+        )
+        print(f"Using precompiled ROCm wheel commit {commit} with variant {variant}")
+        wheels, repo_url = None, None
+        if variant is not None:
+            try:
+                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                    commit, variant, rocm=True
+                )
+                precompiled_wheel_utils.warn_if_rocm_torch_version_mismatch(
+                    wheels, repo_url, arch
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch ROCm wheel metadata for variant %s: %s",
+                    variant,
+                    e,
+                )
+        if wheels is not None and repo_url is not None:
+            from urllib.parse import urljoin
+
+            for wheel in wheels:
+                if wheel.get("package_name") == "vllm" and arch in wheel.get(
+                    "platform_tag", ""
+                ):
+                    print(f"Found precompiled wheel metadata: {wheel}")
+                    if "path" not in wheel:
+                        raise ValueError(f"Wheel metadata missing path: {wheel}")
+                    wheel_url = urljoin(f"{repo_url}vllm/", wheel["path"])
+                    download_filename = wheel.get("filename")
+                    print(f"Using precompiled wheel URL: {wheel_url}")
+                    return wheel_url, download_filename
+            logger.warning(
+                "No precompiled vllm wheel found for architecture %s "
+                "from repo %s. All available wheels: %s",
+                arch,
+                repo_url,
+                wheels,
+            )
+
         # Fall back to AMD's PyPI index
         index_url = os.getenv(
             "VLLM_ROCM_WHEEL_INDEX", "https://pypi.amd.com/vllm-rocm/simple"
@@ -665,8 +904,7 @@ class precompiled_wheel_utils:
             print(f"Using user-specified precompiled wheel location: {wheel_location}")
             return wheel_location, None
         else:
-            # ROCm: use local wheel or AMD's PyPI index
-            # TODO: When we have ROCm nightly wheels, we can update this logic.
+            # ROCm: resolve wheels from wheels.vllm.ai with environment-matched variant
             if precompiled_wheel_utils.is_rocm_system():
                 return precompiled_wheel_utils.determine_wheel_url_rocm()
 
@@ -783,6 +1021,7 @@ class precompiled_wheel_utils:
                             "vllm/_qutlass_C.abi3.so",
                             "vllm/_flashmla_C.abi3.so",
                             "vllm/_flashmla_extension_C.abi3.so",
+                            "vllm/_flashkda_C.abi3.so",
                             "vllm/_sparse_flashmla_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
@@ -1121,7 +1360,7 @@ if _is_cuda() or _is_hip():
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
-if sys.version_info >= (3, 11):
+if not _is_xpu() and sys.version_info >= (3, 11):
     ext_modules.append(CMakeExtension(name="vllm.spinloop"))
     ext_modules.append(CMakeExtension(name="vllm.fs_io_C"))
 
@@ -1150,6 +1389,10 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
+    if USE_PRECOMPILED_EXTENSIONS or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.0")
+    ):
+        ext_modules.append(CMakeExtension(name="vllm._flashkda_C", optional=True))
     if envs.VLLM_USE_PRECOMPILED or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
     ):
@@ -1213,8 +1456,8 @@ def add_vllm_package_data(filename: str) -> None:
         vllm_files.append(filename)
 
 
-# If using precompiled artifacts, extract and patch package_data in advance.
-if USE_PRECOMPILED_RUST_FRONTEND:
+# PEP 517 invokes setup.py for metadata before invoking the actual build.
+if USE_PRECOMPILED_RUST_FRONTEND and not is_metadata_only_build():
     wheel_url, download_filename = precompiled_wheel_utils.determine_wheel_url()
     patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
         wheel_url,
@@ -1264,11 +1507,11 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch==2.11.0.0"],
+        "zen": ["zentorch==2.13.0.0"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.3.2"],
-        "instanttensor": ["instanttensor >= 0.1.5"],
+        "fastsafetensors": ["fastsafetensors >= 0.3.3"],
+        "instanttensor": ["instanttensor >= 0.1.9"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
             "av",
@@ -1282,11 +1525,12 @@ setup(
         # only; also needs system GStreamer + libv4l (see docs).
         "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
         "flashinfer": [],  # Kept for backwards compatibility
+        "b12x": ["b12x==1.2.4"],
         # Optional deps for Helion kernel development
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
-        "helion": ["helion==1.1.0"],
+        "helion": ["helion==1.4.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing

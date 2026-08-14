@@ -5,7 +5,62 @@ use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
 
-use super::{Cli, Command};
+use super::{BenchCommand, Cli, Command};
+
+#[test]
+fn bench_serve_args_parse_without_managed_engine_repartition() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "bench",
+        "serve",
+        "--backend",
+        "openai-chat",
+        "--request-rate",
+        "inf",
+    ])
+    .unwrap();
+
+    let Command::Bench(BenchCommand::Serve(args)) = cli.command else {
+        panic!("expected bench serve args");
+    };
+    assert_eq!(args.backend, vllm_bench::BackendKind::OpenaiChat);
+    assert!(args.request_rate.is_infinite());
+}
+
+#[test]
+fn render_args_build_supported_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--port",
+        "8080",
+        "--max-model-len",
+        "32768",
+        "--served-model-name",
+        "qwen",
+        "--tokenizer-mode",
+        "deepseek_v32",
+        "--max-logprobs",
+        "-1",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
+    assert_eq!(config.host, "127.0.0.1");
+    assert_eq!(config.port, 8080);
+    assert_eq!(config.max_model_len, 32768);
+    assert_eq!(config.served_model_name, ["qwen"]);
+    assert_eq!(config.tool_call_parser, ParserSelection::Auto);
+    assert_eq!(config.reasoning_parser, ParserSelection::Auto);
+    assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
+    assert_eq!(config.max_logprobs, Some(-1));
+}
 
 #[test]
 fn serve_args_forward_python_flags_with_separator() {
@@ -38,15 +93,13 @@ fn serve_args_forward_python_flags_with_separator() {
                         reasoning_parser: Auto,
                         renderer: Auto,
                         language_model_only: false,
-                        max_model_len: Some(
-                            512,
-                        ),
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        limit_mm_per_prompt: {},
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -82,6 +135,9 @@ fn serve_args_forward_python_flags_with_separator() {
                         handshake_port: None,
                         data_parallel_size: 1,
                         data_parallel_size_local: None,
+                        max_model_len: Some(
+                            "512",
+                        ),
                         python_args: [
                             "--dtype",
                             "float16",
@@ -646,7 +702,7 @@ fn serve_args_reject_unknown_renderer_value() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling)
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling, kimi_k3)
 
         For more information, try '--help'.
     "#]]
@@ -729,6 +785,7 @@ fn frontend_args_accept_json() {
                     ),
                     engine_start_index: 0,
                     engine_count: 1,
+                    data_parallel_size: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 600,
@@ -736,13 +793,13 @@ fn frontend_args_accept_json() {
                         reasoning_parser: None,
                         renderer: Auto,
                         language_model_only: false,
-                        max_model_len: None,
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        limit_mm_per_prompt: {},
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -790,6 +847,8 @@ fn frontend_args_json_applies_defaults() {
         "ipc:///tmp/input.sock",
         "--output-address",
         "ipc:///tmp/output.sock",
+        "--engine-count",
+        "4",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
     ])
@@ -803,9 +862,31 @@ fn frontend_args_json_applies_defaults() {
     assert_eq!(args.runtime.tool_call_parser, ParserSelection::None);
     assert_eq!(args.runtime.reasoning_parser, ParserSelection::None);
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
-    assert_eq!(args.runtime.max_model_len, None);
     assert_eq!(args.runtime.max_logprobs, None);
     assert_eq!(args.runtime.shutdown_timeout, 0);
+    assert_eq!(args.into_config().data_parallel_size, 4);
+}
+
+#[test]
+fn frontend_args_json_ignores_engine_owned_max_model_len() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","max_model_len":-1}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
 }
 
 #[test]
@@ -820,7 +901,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_model_len":8192,"max_logprobs":-1,"shutdown_timeout":3}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -838,9 +919,36 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
     );
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
     assert!(args.runtime.language_model_only);
-    assert_eq!(args.runtime.max_model_len, Some(8192));
     assert_eq!(args.runtime.max_logprobs, Some(-1));
     assert_eq!(args.runtime.shutdown_timeout, 3);
+}
+
+#[test]
+fn serve_args_forward_auto_max_model_len_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--max-model-len",
+        "auto",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("auto"));
+
+    let config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--max-model-len",
+            "auto",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
 }
 
 #[test]
@@ -1045,6 +1153,24 @@ fn frontend_args_json_rejects_malformed_json() {
 
     expect![[r#"
         error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B"' for '--args-json <JSON>': invalid JSON arguments: EOF while parsing an object at line 1 column 30
+
+        For more information, try '--help'.
+    "#]].assert_eq(&error.to_string());
+}
+
+#[test]
+fn serve_args_reject_unsupported_modality_in_limit_mm_per_prompt() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--limit-mm-per-prompt",
+        r#"{"unsupported_modality": 1}"#,
+    ])
+    .unwrap_err();
+
+    expect![[r#"
+        error: invalid value '{"unsupported_modality": 1}' for '--limit-mm-per-prompt <JSON>': invalid JSON object: unknown variant `unsupported_modality`, expected one of `image`, `audio`, `video` at line 1 column 23
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());
@@ -1258,13 +1384,13 @@ fn serve_args_accept_handshake_aliases() {
                         reasoning_parser: Auto,
                         renderer: Auto,
                         language_model_only: false,
-                        max_model_len: None,
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        limit_mm_per_prompt: {},
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -1302,6 +1428,7 @@ fn serve_args_accept_handshake_aliases() {
                         ),
                         data_parallel_size: 4,
                         data_parallel_size_local: None,
+                        max_model_len: None,
                         python_args: [],
                     },
                 },
@@ -1394,6 +1521,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                     "<ipc output>",
                 ),
             },
+            data_parallel_size: 4,
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             served_model_name: [],
@@ -1407,6 +1535,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            limit_mm_per_prompt: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {
@@ -1478,6 +1607,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 local_input_address: None,
                 local_output_address: None,
             },
+            data_parallel_size: 4,
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             served_model_name: [],
@@ -1491,6 +1621,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            limit_mm_per_prompt: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {
@@ -1560,6 +1691,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
         "3",
         "--engine-count",
         "1",
+        "--data-parallel-size",
+        "4",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
     ])
@@ -1579,6 +1712,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 engine_count: 1,
                 ready_timeout: 600s,
             },
+            data_parallel_size: 4,
             coordinator_mode: External {
                 address: "tcp://127.0.0.1:7000",
             },
@@ -1593,6 +1727,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            limit_mm_per_prompt: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {

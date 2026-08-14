@@ -394,6 +394,17 @@ impl EngineCoreClient {
         self.engines.iter().map(|engine| &engine.ready_response).collect()
     }
 
+    /// Return the first engine's ready response.
+    ///
+    /// Per-engine fields such as `data_parallel_rank` should be read through
+    /// [`ready_responses`](Self::ready_responses).
+    pub fn ready_response(&self) -> &EngineCoreReadyResponse {
+        &self
+            .engines
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+    }
     /// Return the engine-reported effective model dtype.
     pub fn model_dtype(&self) -> ModelDtype {
         self.engines
@@ -440,15 +451,6 @@ impl EngineCoreClient {
             .world_size
     }
 
-    /// Return the data parallel size from the parallel config, if available.
-    pub fn data_parallel_size(&self) -> u64 {
-        self.engines
-            .first()
-            .expect("engine core client requires at least one engine")
-            .ready_response
-            .data_parallel_size
-    }
-
     /// Get the model name associated with this client used for metrics
     /// labeling.
     pub fn model_name(&self) -> &str {
@@ -458,6 +460,12 @@ impl EngineCoreClient {
     /// Return whether the client still considers the engine healthy.
     pub fn is_healthy(&self) -> bool {
         self.inner.is_healthy()
+    }
+
+    /// Subscribe to engine health changes. The current value is `true` while
+    /// the client is healthy and changes permanently to `false` on failure.
+    pub fn subscribe_health(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inner.subscribe_health()
     }
 
     /// Return the first persistent health error observed by the client, if any.
@@ -502,7 +510,7 @@ impl EngineCoreClient {
                 "registered request to engine"
             );
 
-            self.inner.send_to_engine(&engine_id, EngineCoreRequestType::Add, &req).await?;
+            self.inner.send_request_to_engine(&engine_id, req).await?;
             Ok(())
         }
         .await;
