@@ -64,16 +64,16 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation
   commands:
-    # Install fast path packages for testing against transformers
-    - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
-    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+    # The H200 test image prebuilds these exact CUDA extensions.
+    - python3 ../.buildkite/scripts/check-hybrid-test-deps.py
     # Shard the hybrid language model tests that are numerically stable on Hopper.
     - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 2
+  parallelism: 6
   mirror:
     amd:
       dind: false
       device: mi300_1
+      parallelism: 2
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
