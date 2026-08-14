@@ -160,6 +160,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 # it only sees the two weight tensors: padding and prepacking
                 # into the grouped-gemm layout (bias included), and capturing
                 # the router config that monolithic apply() cannot carry.
+                assert self.moe_kernel is not None
                 self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _init_moe_kernel(self, layer: "RoutedExperts") -> None:
