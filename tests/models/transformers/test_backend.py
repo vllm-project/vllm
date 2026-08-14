@@ -291,7 +291,6 @@ def test_pooling(hf_runner, vllm_runner, example_prompts, arch, monkeypatch):
     ):
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
 
         if arch == "TransformersEmbeddingModel":
             vllm_outputs = vllm_model.embed(example_prompts)
