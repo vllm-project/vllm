@@ -4,10 +4,41 @@
 
 import pytest
 
+import vllm.tool_parsers.qwen3xml_tool_parser as qwen3xml_tool_parser
 from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from vllm.tool_parsers.qwen3xml_tool_parser import StreamingXMLToolCallParser
+
+
+@pytest.mark.parametrize(
+    ("value", "param_type", "expected_warning"),
+    [
+        ("1/3", "float", "Parsed value '1/3' is not a float; falling back to string."),
+        (
+            "one",
+            "integer",
+            "Parsed value 'one' is not an integer; falling back to string.",
+        ),
+    ],
+)
+def test_invalid_numeric_argument_logs_clean_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    param_type: str,
+    expected_warning: str,
+) -> None:
+    warnings = []
+    monkeypatch.setattr(
+        qwen3xml_tool_parser.logger,
+        "warning",
+        lambda message, *args: warnings.append(message % args),
+    )
+    parser = StreamingXMLToolCallParser()
+
+    assert parser._convert_param_value(value, param_type) == value
+    assert warnings == [expected_warning]
 
 
 class TestQwen3xmlToolParser(ToolParserTests):
