@@ -246,6 +246,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
         assert isinstance(self.kv_cache_spec, MambaSpec)
+        self._check_block_table_width(m.block_table_tensor.shape[1])
         # Equivalent PyTorch "align" path:
         #   start = ((seq_lens - 1) // block_size).clamp_(min=0)
         #   offsets = torch.arange(1 + num_speculative_blocks, dtype=torch.int32)
@@ -484,6 +485,35 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
+
+    def _check_block_table_width(self, width: int) -> None:
+        """Fail at startup if the block table cannot hold the slot we index.
+
+        ``_get_aligned_state_indices_kernel`` reads column
+        ``(seq_lens - 1) // spec.block_size`` and its mask bounds only the row,
+        so a table narrower than ``max_num_blocks_per_req`` reads off the end of
+        the row and yields an arbitrary block id. That surfaces far away, either
+        as an index-out-of-bounds assert in whichever consumer touches the state
+        cache first or, when the stray id happens to be in range, as silently
+        wrong recurrent state. Neither names this as the cause, so check it once
+        where the contract is stated.
+        """
+        if getattr(self, "_block_table_width_checked", False):
+            return
+        self._block_table_width_checked = True
+        required = self.kv_cache_spec.max_num_blocks_per_req(
+            self.vllm_config, self.vllm_config.model_config.max_model_len
+        )
+        if width < required:
+            raise ValueError(
+                f"KDA block table is {width} columns but the state slot is "
+                f"indexed over {required} (max_model_len="
+                f"{self.vllm_config.model_config.max_model_len}, block_size="
+                f"{self.kv_cache_spec.block_size}). Mamba state is replicated "
+                f"across DCP ranks, so its block table must not be scaled by "
+                f"decode_context_parallel_size="
+                f"{self.vllm_config.parallel_config.decode_context_parallel_size}."
+            )
 
 
 class KimiK3KDAAttentionBackend(GDNAttentionBackend):
