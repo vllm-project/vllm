@@ -205,7 +205,8 @@ def _ref_fp8_fp4_paged_mqa_logits(
 @pytest.mark.skipif(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
-def test_deepgemm_fp8_fp4_paged_mqa_logits():
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
+def test_deepgemm_fp8_fp4_paged_mqa_logits(logits_dtype: torch.dtype):
     # NOTE: clean_logits=True is incompatible with the 2D context_lens
     # required by csrc/apis/attention.hpp; only the False path is exercised.
     clean_logits = False
@@ -280,6 +281,7 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits():
                     schedule_metadata,
                     max_model_len,
                     clean_logits=clean_logits,
+                    logits_dtype=logits_dtype,
                 )
 
                 ref_logits = _ref_fp8_fp4_paged_mqa_logits(
@@ -307,4 +309,5 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits():
                 logits = logits.masked_fill(~mask, 0)
                 ref_logits = ref_logits.masked_fill(~mask, 0)
                 diff = calc_diff(logits, ref_logits)
+                assert logits.dtype == logits_dtype
                 assert diff < 1e-3, f"{diff=}"

@@ -316,6 +316,8 @@ def sparse_attn_indexer(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    gvr_previous_topk: torch.Tensor | None = None,
+    gvr_state_valid: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -361,6 +363,8 @@ def sparse_attn_indexer(
             use_pcp,
             dense_mha_metadata_layer_name,
             use_fp4_cache,
+            gvr_previous_topk=gvr_previous_topk,
+            gvr_state_valid=gvr_state_valid,
         )
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
@@ -584,6 +588,13 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
+        gvr_available = (
+            gvr_previous_topk is not None
+            and gvr_state_valid is not None
+            and decode_metadata.request_indices is not None
+            and decode_metadata.global_seq_lens is None
+        )
+        use_fp16_logits = envs.VLLM_GVR_FP16_LOGITS and gvr_available
         if current_platform.is_xpu():
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
@@ -610,10 +621,10 @@ def sparse_attn_indexer(
                 max_model_len=max_model_len,
                 clean_logits=False,
                 indices=decode_metadata.indices,
+                logits_dtype=torch.float16 if use_fp16_logits else torch.float32,
             )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
-
         use_cooperative_topk = (
             current_platform.is_cuda()
             and topk_tokens in (512, 1024, 2048)
@@ -627,7 +638,27 @@ def sparse_attn_indexer(
             1024,
             2048,
         )
-        if use_cooperative_topk:
+        use_gvr_topk = gvr_available
+        if use_gvr_topk and not use_fp16_logits:
+            from vllm.models.deepseek_v32.nvidia.ops.gvr_topk import (
+                should_use_gvr_topk,
+            )
+
+            use_gvr_topk = should_use_gvr_topk(num_rows, logits.shape[1])
+
+        if use_gvr_topk:
+            from vllm.models.deepseek_v32.nvidia.ops.gvr_topk import gvr_topk
+
+            assert decode_metadata.request_indices is not None
+            gvr_topk(
+                logits,
+                seq_lens.reshape(-1),
+                decode_metadata.request_indices[:num_rows],
+                gvr_previous_topk,
+                gvr_state_valid,
+                topk_indices,
+            )
+        elif use_cooperative_topk:
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
@@ -665,6 +696,19 @@ def sparse_attn_indexer(
                 topk_tokens,
             )
 
+        if gvr_available and not use_gvr_topk:
+            from vllm.models.deepseek_v32.nvidia.ops.gvr_topk import (
+                store_decode_gvr_state,
+            )
+
+            assert decode_metadata.request_indices is not None
+            store_decode_gvr_state(
+                topk_indices,
+                decode_metadata.request_indices[:num_rows],
+                gvr_previous_topk,
+                gvr_state_valid,
+            )
+
         if decode_metadata.global_seq_lens is not None:
             _merge_dcp_topk_global(
                 logits,
@@ -685,6 +729,27 @@ def sparse_attn_indexer(
             topk_indices_buffer[: topk_indices.shape[0], : topk_indices.shape[-1]] = (
                 topk_indices
             )
+
+    if (
+        has_prefill
+        and gvr_previous_topk is not None
+        and gvr_state_valid is not None
+        and attn_metadata_narrowed.query_start_loc is not None
+        and attn_metadata_narrowed.request_indices is not None
+    ):
+        from vllm.models.deepseek_v32.nvidia.ops.gvr_topk import (
+            store_prefill_gvr_state,
+        )
+
+        store_prefill_gvr_state(
+            topk_indices_buffer,
+            attn_metadata_narrowed.query_start_loc,
+            attn_metadata_narrowed.request_indices,
+            gvr_previous_topk,
+            gvr_state_valid,
+            attn_metadata_narrowed.num_decodes,
+            attn_metadata_narrowed.num_prefills,
+        )
 
     return topk_indices_buffer
 
@@ -712,6 +777,8 @@ def sparse_attn_indexer_fake(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    gvr_previous_topk: torch.Tensor | None = None,
+    gvr_state_valid: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -719,7 +786,11 @@ def sparse_attn_indexer_fake(
 direct_register_custom_op(
     op_name="sparse_attn_indexer",
     op_func=sparse_attn_indexer,
-    mutates_args=["topk_indices_buffer"],
+    mutates_args=[
+        "topk_indices_buffer",
+        "gvr_previous_topk",
+        "gvr_state_valid",
+    ],
     fake_impl=sparse_attn_indexer_fake,
     dispatch_key=current_platform.dispatch_key,
 )
@@ -750,6 +821,8 @@ class SparseAttnIndexer(CustomOp):
         topk_indices_buffer: torch.Tensor,
         skip_k_cache_insert: bool = False,
         use_fp4_cache: bool = False,
+        gvr_previous_topk: torch.Tensor | None = None,
+        gvr_state_valid: torch.Tensor | None = None,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -762,6 +835,8 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        self.gvr_previous_topk = gvr_previous_topk
+        self.gvr_state_valid = gvr_state_valid
         self.dense_mha_metadata_layer_name = ""
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
@@ -829,6 +904,9 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
+            False,
+            self.gvr_previous_topk,
+            self.gvr_state_valid,
         )
 
     def forward_xpu(

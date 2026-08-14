@@ -58,6 +58,32 @@ else()
   message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
 endif()
 
+set(_deepgemm_fp16_patch
+  "${CMAKE_SOURCE_DIR}/cmake/patches/deepgemm_fp16_paged_mqa.patch")
+execute_process(
+  COMMAND git apply --check "${_deepgemm_fp16_patch}"
+  WORKING_DIRECTORY "${deepgemm_SOURCE_DIR}"
+  RESULT_VARIABLE _deepgemm_patch_check
+  OUTPUT_QUIET
+  ERROR_QUIET)
+if(_deepgemm_patch_check EQUAL 0)
+  execute_process(
+    COMMAND git apply "${_deepgemm_fp16_patch}"
+    WORKING_DIRECTORY "${deepgemm_SOURCE_DIR}"
+    COMMAND_ERROR_IS_FATAL ANY)
+else()
+  execute_process(
+    COMMAND git apply --reverse --check "${_deepgemm_fp16_patch}"
+    WORKING_DIRECTORY "${deepgemm_SOURCE_DIR}"
+    RESULT_VARIABLE _deepgemm_patch_applied
+    OUTPUT_QUIET
+    ERROR_QUIET)
+  if(NOT _deepgemm_patch_applied EQUAL 0)
+    message(FATAL_ERROR
+      "DeepGEMM FP16 paged-MQA patch does not apply to ${deepgemm_SOURCE_DIR}")
+  endif()
+endif()
+
 # DeepGEMM requires CUDA 12.3+ for SM90, 12.9+ for SM100 (official upstream),
 # and 12.8+ for SM120 / SM12x. CUDA 13+ can use the family-specific SM12x
 # arch; CUDA 12.x builds the arch-specific SM120/SM121 variants.
@@ -150,6 +176,7 @@ if(DEEPGEMM_ARCHS)
               "${deepgemm_SOURCE_DIR}" "${_dg_dir}" "${_pybin}"
       COMMAND "${CMAKE_COMMAND}" -E touch "${_dg_marker}"
       DEPENDS "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
+              "${_deepgemm_fp16_patch}"
               "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
               ${_dg_headers}
       COMMENT "Building DeepGEMM _C for ${_pybin}"

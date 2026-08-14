@@ -44,6 +44,7 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.sequence import IntermediateTensors
+from vllm.utils.import_utils import has_cutedsl
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
 
@@ -55,6 +56,8 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         prefix: str,
         config=None,
         topk_indices_buffer: torch.Tensor | None = None,
+        gvr_previous_topk: torch.Tensor | None = None,
+        gvr_state_valid: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
 
@@ -78,6 +81,8 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             config=config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            gvr_previous_topk=gvr_previous_topk,
+            gvr_state_valid=gvr_state_valid,
         )
 
         if (
@@ -180,6 +185,38 @@ class DeepseekV32Model(torch.nn.Module):
             dtype=torch.int32,
             device=self.device,
         )
+        gvr_previous_topk = None
+        gvr_state_valid = None
+        if envs.VLLM_USE_GVR_TOPK:
+            if not current_platform.is_device_capability_family(100):
+                raise NotImplementedError("GVR top-k requires an SM100-family GPU")
+            if not has_cutedsl():
+                raise RuntimeError("GVR top-k requires the CuTe DSL Python package")
+            if config.index_topk != 2048:
+                raise NotImplementedError("GVR top-k requires index_topk=2048")
+            if vllm_config.speculative_config is not None:
+                raise NotImplementedError("GVR top-k does not support spec decode")
+            if parallel_config.pipeline_parallel_size != 1:
+                raise NotImplementedError("GVR top-k does not support PP")
+            if parallel_config.decode_context_parallel_size != 1:
+                raise NotImplementedError("GVR top-k does not support DCP")
+            if parallel_config.prefill_context_parallel_size != 1:
+                raise NotImplementedError("GVR top-k does not support PCP")
+
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+            gvr_previous_topk = torch.empty(
+                config.num_hidden_layers,
+                max_num_seqs,
+                config.index_topk,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            gvr_state_valid = torch.zeros(
+                config.num_hidden_layers,
+                max_num_seqs,
+                dtype=torch.bool,
+                device=self.device,
+            )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -197,6 +234,12 @@ class DeepseekV32Model(torch.nn.Module):
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
+                gvr_previous_topk=gvr_previous_topk[int(prefix.rsplit(".", 1)[-1])]
+                if gvr_previous_topk is not None
+                else None,
+                gvr_state_valid=gvr_state_valid[int(prefix.rsplit(".", 1)[-1])]
+                if gvr_state_valid is not None
+                else None,
             ),
             prefix=f"{prefix}.layers",
         )

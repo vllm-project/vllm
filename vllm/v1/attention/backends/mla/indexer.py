@@ -425,6 +425,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     schedule_metadata: torch.Tensor
     global_seq_lens: torch.Tensor | None = None
     indices: torch.Tensor | None = None
+    request_indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -444,6 +445,8 @@ class DeepseekV32IndexerMetadata:
 
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
+    query_start_loc: torch.Tensor | None = None
+    request_indices: torch.Tensor | None = None
 
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
@@ -569,6 +572,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.decode_indices_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
+            device=self.device,
+        )
+        self.request_indices_buffer = torch.full(
+            (scheduler_config.max_num_seqs,),
+            -1,
+            dtype=torch.int64,
             device=self.device,
         )
         self.arange_buffer = torch.arange(
@@ -824,6 +833,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
+        request_indices = None
+        if common_attn_metadata.request_indices is not None:
+            num_request_indices = common_attn_metadata.request_indices.numel()
+            self.request_indices_buffer.fill_(-1)
+            self.request_indices_buffer[:num_request_indices].copy_(
+                common_attn_metadata.request_indices
+            )
+            request_indices = self.request_indices_buffer[:num_reqs]
+
         compressed_slot_mapping = slot_mapping
         compressed_seq_lens = seq_lens
         if self.compress_ratio > 1:
@@ -1008,12 +1026,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 schedule_metadata=self.scheduler_metadata_buffer,
                 indices=decode_indices,
                 global_seq_lens=global_seq_lens_for_decode,
+                request_indices=request_indices[:batch_size]
+                if request_indices is not None
+                else None,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
             seq_lens=common_attn_metadata.seq_lens,
             max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=compressed_slot_mapping,
+            query_start_loc=query_start_loc,
+            request_indices=request_indices,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,

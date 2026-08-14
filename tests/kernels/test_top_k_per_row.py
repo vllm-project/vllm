@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.torch_utils import set_random_seed
 
 # Test parameters
@@ -963,8 +964,11 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
 @torch.inference_mode()
-def test_workspace_topk_padded_stride(top_k: int, backend: str) -> None:
+def test_workspace_topk_padded_stride(
+    top_k: int, backend: str, logits_dtype: torch.dtype
+) -> None:
     """
     Test workspace top-k backends with padded logits (large stride, small seq_len)
     to simulate the e2e CUDAGraph scenario where fp8_paged_mqa_logits
@@ -981,11 +985,11 @@ def test_workspace_topk_padded_stride(top_k: int, backend: str) -> None:
     logits = torch.full(
         (batch_size, padded_stride),
         float("-inf"),
-        dtype=torch.float32,
+        dtype=logits_dtype,
         device="cuda",
     )
     for i, sl in enumerate(actual_seq_lens):
-        logits[i, :sl] = torch.randn(sl, dtype=torch.float32, device="cuda")
+        logits[i, :sl] = torch.randn(sl, dtype=logits_dtype, device="cuda")
 
     lengths = torch.tensor(actual_seq_lens, dtype=torch.int32, device="cuda")
     indices = torch.empty((batch_size, top_k), dtype=torch.int32, device="cuda")
@@ -1010,3 +1014,124 @@ def test_workspace_topk_padded_stride(top_k: int, backend: str) -> None:
                 f"Row {i}: {backend} with padded stride doesn't match. "
                 f"seq_len={sl}, stride={padded_stride}"
             )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_gvr_hints_follow_stable_request_indices() -> None:
+    """Temporal hints must follow requests when continuous batching reorders rows."""
+    from vllm.models.deepseek_v32.nvidia.ops.gvr_topk import (
+        prepare_gvr_hints,
+        store_decode_gvr_state,
+    )
+
+    num_requests = 8
+    top_k = 2048
+    previous = torch.arange(
+        num_requests * top_k, dtype=torch.int32, device="cuda"
+    ).view(num_requests, top_k)
+    valid = torch.ones(num_requests, dtype=torch.bool, device="cuda")
+    request_indices = torch.tensor([6, 2, -1, 5], dtype=torch.int64, device="cuda")
+    seq_lens = torch.full((4,), 4096, dtype=torch.int32, device="cuda")
+    hints = torch.empty((4, top_k), dtype=torch.int32, device="cuda")
+
+    prepared = prepare_gvr_hints(previous, valid, request_indices, seq_lens, hints)
+    torch.testing.assert_close(prepared[0], previous[6])
+    torch.testing.assert_close(prepared[1], previous[2])
+    torch.testing.assert_close(prepared[3], previous[5])
+
+    output = torch.arange(4 * top_k, dtype=torch.int32, device="cuda").view(4, top_k)
+    store_decode_gvr_state(output, request_indices, previous, valid)
+    torch.testing.assert_close(previous[6], output[0])
+    torch.testing.assert_close(previous[2], output[1])
+    torch.testing.assert_close(previous[5], output[3])
+
+
+def test_gvr_dispatch_starts_at_measured_crossover() -> None:
+    from vllm.models.deepseek_v32.nvidia.ops.gvr_topk import should_use_gvr_topk
+
+    assert not should_use_gvr_topk(31, 100032)
+    assert should_use_gvr_topk(32, 100032)
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and has_cutedsl()
+    ),
+    reason="GVR requires CuTe DSL on an SM100-family GPU",
+)
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
+@torch.inference_mode()
+def test_gvr_topk_cold_start_matches_torch(logits_dtype: torch.dtype) -> None:
+    """A request without a temporal hint must still get an exact top-k."""
+    from vllm.models.deepseek_v32.nvidia.ops.gvr_topk import gvr_topk
+
+    batch_size = 512
+    num_candidates = 65536
+    top_k = 2048
+    logits = torch.randn(batch_size, num_candidates, dtype=logits_dtype, device="cuda")
+    seq_lens = torch.full(
+        (batch_size,), num_candidates, dtype=torch.int32, device="cuda"
+    )
+    request_indices = torch.arange(
+        batch_size - 1, -1, -1, dtype=torch.int64, device="cuda"
+    )
+    previous = torch.empty(batch_size, top_k, dtype=torch.int32, device="cuda")
+    valid = torch.zeros(batch_size, dtype=torch.bool, device="cuda")
+    output = torch.empty_like(previous)
+
+    gvr_topk(
+        logits,
+        seq_lens,
+        request_indices,
+        previous,
+        valid,
+        output,
+    )
+    expected = torch.topk(logits, top_k, dim=1).indices
+    actual_values = torch.gather(logits, 1, output.long()).sort(dim=1).values
+    expected_values = torch.gather(logits, 1, expected).sort(dim=1).values
+    torch.testing.assert_close(actual_values, expected_values, rtol=0, atol=0)
+    torch.testing.assert_close(previous[request_indices], output, rtol=0, atol=0)
+    assert valid.all()
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and has_cutedsl()
+    ),
+    reason="GVR requires CuTe DSL on an SM100-family GPU",
+)
+@pytest.mark.parametrize("num_candidates", [50000, 100000, 200000])
+@torch.inference_mode()
+def test_gvr_adaptive_rungs_match_torch(num_candidates: int) -> None:
+    """Runtime rung selection must remain exact across its length bands."""
+    from vllm.models.deepseek_v32.nvidia.ops.gvr_topk import gvr_topk
+
+    batch_size = 8
+    top_k = 2048
+    logits = torch.randn(batch_size, num_candidates, device="cuda")
+    seq_lens = torch.full(
+        (batch_size,), num_candidates, dtype=torch.int32, device="cuda"
+    )
+    request_indices = torch.arange(
+        batch_size - 1, -1, -1, dtype=torch.int64, device="cuda"
+    )
+    previous = torch.randint(
+        num_candidates,
+        (batch_size, top_k),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    valid = torch.ones(batch_size, dtype=torch.bool, device="cuda")
+    output = torch.empty_like(previous)
+
+    gvr_topk(logits, seq_lens, request_indices, previous, valid, output)
+    expected = torch.topk(logits, top_k, dim=1).indices
+    actual_values = torch.gather(logits, 1, output.long()).sort(dim=1).values
+    expected_values = torch.gather(logits, 1, expected).sort(dim=1).values
+    torch.testing.assert_close(actual_values, expected_values, rtol=0, atol=0)

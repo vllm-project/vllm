@@ -48,6 +48,8 @@ class DeepseekV32Indexer(nn.Module):
         quant_config: QuantizationConfig | None,
         cache_config: CacheConfig | None,
         topk_indices_buffer: torch.Tensor | None,
+        gvr_previous_topk: torch.Tensor | None = None,
+        gvr_state_valid: torch.Tensor | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -104,6 +106,8 @@ class DeepseekV32Indexer(nn.Module):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
+            gvr_previous_topk=gvr_previous_topk,
+            gvr_state_valid=gvr_state_valid,
         )
 
     def forward(
@@ -167,6 +171,8 @@ class DeepseekV32Attention(MLAAttention):
         config: DeepseekV2Config | DeepseekV3Config,
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
+        gvr_previous_topk: torch.Tensor | None = None,
+        gvr_state_valid: torch.Tensor | None = None,
         attn_backend: "type | None" = None,
     ) -> None:
         quant_config = vllm_config.quant_config
@@ -233,6 +239,8 @@ class DeepseekV32Attention(MLAAttention):
                 quant_config,
                 cache_config,
                 topk_indices_buffer,
+                gvr_previous_topk,
+                gvr_state_valid,
                 prefix=f"{prefix}.indexer",
             )
 
@@ -488,6 +496,8 @@ class DeepseekV32Attention(MLAAttention):
                 use_fp4_cache=False,
                 # fused_norm_rope already cleared the topk buffer this forward.
                 skip_topk_buffer_clear=True,
+                gvr_previous_topk=self.indexer.indexer_op.gvr_previous_topk,
+                gvr_state_valid=self.indexer.indexer_op.gvr_state_valid,
             )
 
         attn_metadata_raw = get_forward_context().attn_metadata
