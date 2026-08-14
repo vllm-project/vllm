@@ -11,7 +11,7 @@ from argparse import Namespace
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from io import BytesIO
-from typing import IO, Any, TypeAlias
+from typing import IO, Any, TypeAlias, TypedDict
 from urllib.parse import urlparse
 
 import aiohttp
@@ -585,6 +585,14 @@ async def run_request(
 WrapperFn: TypeAlias = Callable[[Callable], Callable]
 
 
+class EndpointConfig(TypedDict):
+    """How a batch request URL is matched to the handler that serves it."""
+
+    url_matcher: Callable[[str], bool]
+    handler_getter: Callable[[], Callable | None]
+    wrapper_fn: WrapperFn | None
+
+
 def handle_endpoint_request(
     request: BatchRequestInput,
     tracker: BatchProgressTracker,
@@ -699,7 +707,7 @@ def make_transcription_wrapper(
 async def build_endpoint_registry(
     engine_client: EngineClient,
     args: Namespace,
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, EndpointConfig]:
     """
     Build the endpoint registry with all serving objects and handler configurations.
 
@@ -731,7 +739,7 @@ async def build_endpoint_registry(
     allowed_media_domains = getattr(args, "allowed_media_domains", None)
 
     # Registry of endpoint configurations
-    endpoint_registry: dict[str, dict[str, Any]] = {
+    endpoint_registry: dict[str, EndpointConfig] = {
         "completions": {
             "url_matcher": lambda url: url == "/v1/chat/completions",
             "handler_getter": lambda: (
@@ -822,7 +830,7 @@ def validate_run_batch_args(args):
 
 async def run_one_request(
     request_json: str,
-    endpoint_registry: dict[str, Any],
+    endpoint_registry: dict[str, EndpointConfig],
     tracker: BatchProgressTracker,
 ) -> BatchRequestOutput:
     """Route a single line of the batch to its endpoint handler."""
@@ -859,7 +867,7 @@ async def run_one_request(
 async def dispatch_batch(
     input_path: str,
     output_file: IO[str],
-    endpoint_registry: dict[str, Any],
+    endpoint_registry: dict[str, EndpointConfig],
     tracker: BatchProgressTracker,
     max_inflight: int,
 ) -> None:
