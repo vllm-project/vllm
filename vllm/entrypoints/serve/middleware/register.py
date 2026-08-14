@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 def init_entrypoints_middleware(
     args: Namespace,
     app: FastAPI,
-    supported_tasks: tuple["SupportedTask", ...] | None = None,
+    supported_tasks: tuple["SupportedTask", ...],
 ):
     app.add_middleware(
         CORSMiddleware,

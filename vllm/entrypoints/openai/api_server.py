@@ -180,7 +180,7 @@ async def build_async_engine_client_from_engine_args(
 def register_api_routers(
     args: Namespace,
     app: FastAPI,
-    supported_tasks: tuple["SupportedTask", ...] | None = None,
+    supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ):
 

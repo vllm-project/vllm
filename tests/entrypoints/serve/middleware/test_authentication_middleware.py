@@ -60,10 +60,11 @@ def _create_app_with_mock_routes(routes: list[tuple[str, list[str]]]) -> FastAPI
 
 
 # ---------------------------------------------------------------------------
-# Explicit endpoint lists (from documentation)
+# Documented endpoint lists (must be kept in sync with official docs)
+# These lists are used for explicit testing and documentation coverage.
 # ---------------------------------------------------------------------------
 
-PROTECTED_ENDPOINTS: list[tuple[str, list[str]]] = [
+DOCUMENTED_PROTECTED_ENDPOINTS: list[tuple[str, list[str]]] = [
     ("/v1/models", ["GET"]),
     ("/v1/chat/completions", ["POST"]),
     ("/v1/chat/completions/batch", ["POST"]),
@@ -89,7 +90,7 @@ PROTECTED_ENDPOINTS: list[tuple[str, list[str]]] = [
     ("/v2/rerank", ["POST"]),
 ]
 
-UNPROTECTED_ENDPOINTS: list[tuple[str, list[str]]] = [
+DOCUMENTED_UNPROTECTED_ENDPOINTS: list[tuple[str, list[str]]] = [
     ("/invocations", ["POST"]),
     ("/generative_scoring", ["POST"]),
     ("/pooling", ["POST"]),
@@ -124,7 +125,10 @@ UNPROTECTED_ENDPOINTS: list[tuple[str, list[str]]] = [
     ("/stop_profile", ["POST"]),
 ]
 
-missing_explicit_endpoints = {
+# Endpoints that are documented but intentionally not auto-discovered
+# (e.g., they are only registered in development mode or are internal).
+# These are excluded from coverage checks to avoid false positives.
+missing_documented_endpoints = {
     "/redoc",
     "/weight_info",
     "/start_draft_weight_update",
@@ -136,6 +140,10 @@ missing_explicit_endpoints = {
     "/start_weight_update",
     "/metrics",
 }
+
+# Auto-discovered endpoints that are not in the documented lists,
+# but are known to be legitimate (e.g., they are task-specific or legacy).
+# These are excluded from the "extra endpoints" check.
 missing_auto_discovered_endpoints = {
     "/score",
     "/v1/load_lora_adapter",
@@ -238,52 +246,53 @@ def test_auto_discovered_unprotected_routes_no_auth(task_routes):
 
 
 # ---------------------------------------------------------------------------
-# Tests for explicit endpoint lists
+# Tests for documented endpoint lists
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path_template,methods", PROTECTED_ENDPOINTS)
-def test_explicit_protected_endpoints_require_auth(path_template, methods):
-    app = _create_app_with_mock_routes([(path_template, methods)])
-    client = TestClient(app)
-    test_path = generate_test_path(path_template)
-    test_method = methods[0] if methods else "GET"
+def test_documented_protected_endpoints_require_auth():
+    app = _create_app_with_mock_routes(DOCUMENTED_PROTECTED_ENDPOINTS)
+    for path_template, methods in DOCUMENTED_PROTECTED_ENDPOINTS:
+        client = TestClient(app)
+        test_path = generate_test_path(path_template)
+        test_method = methods[0] if methods else "GET"
 
-    resp = client.request(test_method, test_path)
-    assert resp.status_code == 401, (
-        f"{test_method} {test_path} should reject missing token"
-    )
+        resp = client.request(test_method, test_path)
+        assert resp.status_code == 401, (
+            f"{test_method} {test_path} should reject missing token"
+        )
 
-    resp = client.request(
-        test_method, test_path, headers={"Authorization": "Bearer wrong"}
-    )
-    assert resp.status_code == 401, (
-        f"{test_method} {test_path} should reject invalid token"
-    )
+        resp = client.request(
+            test_method, test_path, headers={"Authorization": "Bearer wrong"}
+        )
+        assert resp.status_code == 401, (
+            f"{test_method} {test_path} should reject invalid token"
+        )
 
-    resp = client.request(
-        test_method, test_path, headers={"Authorization": "Bearer valid-token"}
-    )
-    assert resp.status_code == 200, (
-        f"{test_method} {test_path} should accept valid token"
-    )
+        resp = client.request(
+            test_method, test_path, headers={"Authorization": "Bearer valid-token"}
+        )
+        assert resp.status_code == 200, (
+            f"{test_method} {test_path} should accept valid token"
+        )
 
 
-@pytest.mark.parametrize("path_template,methods", UNPROTECTED_ENDPOINTS)
-def test_explicit_unprotected_endpoints_no_auth(path_template, methods):
-    app = _create_app_with_mock_routes([(path_template, methods)])
-    client = TestClient(app)
-    test_path = generate_test_path(path_template)
-    test_method = methods[0] if methods else "GET"
+def test_documented_unprotected_endpoints_no_auth():
+    app = _create_app_with_mock_routes(DOCUMENTED_UNPROTECTED_ENDPOINTS)
 
-    resp = client.request(test_method, test_path)
-    assert resp.status_code == 200, (
-        f"{test_method} {test_path} should be accessible without token"
-    )
+    for path_template, methods in DOCUMENTED_UNPROTECTED_ENDPOINTS:
+        client = TestClient(app)
+        test_path = generate_test_path(path_template)
+        test_method = methods[0] if methods else "GET"
+
+        resp = client.request(test_method, test_path)
+        assert resp.status_code == 200, (
+            f"{test_method} {test_path} should be accessible without token"
+        )
 
 
 # ---------------------------------------------------------------------------
-# Coverage comparison: explicit vs. auto-discovered (across all tasks)
+# Coverage comparison: documented vs. auto-discovered (across all tasks)
 # ---------------------------------------------------------------------------
 
 
@@ -302,11 +311,14 @@ def _collect_all_auto_routes(monkeypatch) -> set[str]:
     return all_paths
 
 
-def test_no_missing_explicit_endpoints(monkeypatch):
-    """Verify that every explicitly documented endpoint is registered by at
+def test_no_missing_documented_endpoints(monkeypatch):
+    """Verify that every documented endpoint is registered by at
     least one SupportedTask under development mode."""
     auto_paths = _collect_all_auto_routes(monkeypatch)
-    documented = {path for path, _ in PROTECTED_ENDPOINTS + UNPROTECTED_ENDPOINTS}
+    documented = {
+        path
+        for path, _ in DOCUMENTED_PROTECTED_ENDPOINTS + DOCUMENTED_UNPROTECTED_ENDPOINTS
+    }
 
     missing = documented - auto_paths - missing_auto_discovered_endpoints
     assert not missing, (
@@ -318,18 +330,25 @@ def test_no_missing_explicit_endpoints(monkeypatch):
 def test_report_extra_auto_discovered_endpoints(monkeypatch):
     """
     Report (and fail if any) auto-discovered endpoints that are not present
-    in the explicit lists. This helps keep documentation up-to-date.
+    in the documented lists. This helps keep documentation up-to-date.
     """
     auto_paths = _collect_all_auto_routes(monkeypatch)
-    documented = {path for path, _ in PROTECTED_ENDPOINTS + UNPROTECTED_ENDPOINTS}
+    documented = {
+        path
+        for path, _ in DOCUMENTED_PROTECTED_ENDPOINTS + DOCUMENTED_UNPROTECTED_ENDPOINTS
+    }
 
-    extra = auto_paths - documented - missing_explicit_endpoints
+    extra = auto_paths - documented - missing_documented_endpoints
     if extra:
-        print("\nExtra auto-discovered endpoints not in explicit lists:")
+        print("\nExtra auto-discovered endpoints not in documented lists:")
         for path in sorted(extra):
             print(f"  {path}")
 
     # Make the test fail if there are extra endpoints, forcing documentation update.
     assert not extra, (
-        f"Auto-discovered routes not covered by explicit lists: {sorted(extra)}"
+        f"Auto-discovered routes not covered by documented lists. "
+        f"Please update the documentation at "
+        f"'docs/serving/online_serving/README.md' and refer to "
+        f"'https://github.com/vllm-project/vllm/blob/main/docs/usage/security.md#api-key-authentication-limitations' "  # noqa: E501
+        f"to maintain consistency. Extra endpoints: {sorted(extra)}"
     )
